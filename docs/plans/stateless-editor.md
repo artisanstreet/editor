@@ -1,0 +1,125 @@
+# Stateless Editor, single host connection, and connection holds
+
+- Status: approved 2026-09-25; implementation in progress
+- Scope: where Editor state may live, how the Editor connects to exactly one Forge, and how
+  in-flight work keeps that connection open until it resolves
+
+## Outcome
+
+The Editor is a stateless, functional client. Every piece of domain and user-work state lives in
+the Forge; the Editor renders a projection of Forge-delivered data plus ephemeral view state. The
+machine selector chooses the one Forge the Editor is connected to: switching seals the current
+connection, waits for its in-flight work, discards all host-scoped state, and connects to the new
+host. Editor-only customization (for example the FPS limit) persists beside the Editor
+installation in its own storage pool.
+
+## 1. Storage pools
+
+| Pool | Location | Holds | Rule |
+| --- | --- | --- | --- |
+| Editor pool | `<install root>/editor/settings.json` (beside `versions/`, survives updates and rollback; dev and release roots are separate) | Device/window-local presentation: FPS limit, FPS overlay, and future theme, font size, layout, keybindings, window geometry, motion, desktop notification behaviour; the "reopen last host" hint | Would be wrong to follow the user to another machine, or is needed before any Forge connection exists |
+| Forge pool | Forge database | Drafts and attachments, sends and outbox, default model, project order, last route and last thread, favorites, engine settings, account profile, every business decision | Everything else. When in doubt it belongs to the Forge |
+
+Connection bootstrap material (host invitations, TLS pins, reconnect capabilities, install
+manifests) is neither pool. It stays in the credentials module with its own permissions.
+
+### Editor pool contract
+
+- One typed `EditorSettings` value, schema-versioned, every field defaulted.
+- Loaded once at startup into a GPUI global. Values are immutable: `update(|settings| ...)`
+  produces a new value that is applied, then persisted.
+- Atomic persistence: write a temporary sibling file, then rename.
+- Unknown keys are preserved on write so older and newer Editor builds can share the file.
+- Only the settings module may write it. An architecture test fails if Editor code writes files
+  outside the settings module and the credentials module.
+- Migration: `ui/frame-rate-limit`, `ui/fps-overlay` and `ui/last-used-host` are imported once and
+  then removed.
+
+## 2. Connection holds
+
+`ConnectionHolds` is an async counting lock. Any number of holds exist independently and release
+in any order. The aggregate status is decided only by the live count: `Busy(n)` while `n > 0`,
+`Idle` at zero. Nobody waits on an individual hold.
+
+```rust
+pub struct ConnectionHolds { state: watch::Sender<HoldState> }
+pub struct HoldState { pub count: usize, pub sealed: bool }
+pub struct Hold { /* Drop releases */ }
+
+impl ConnectionHolds {
+    pub fn try_hold(self: &Arc<Self>, kind: HoldKind) -> Option<Hold>; // None once sealed
+    pub fn status(&self) -> HoldState;                                  // synchronous, for UI
+    pub fn subscribe(&self) -> watch::Receiver<HoldState>;              // async observers
+    pub async fn idle(&self);                                           // resolves at count == 0
+    pub fn seal(&self);                                                 // refuse new holds
+    pub fn unseal(&self);                                               // cancelled switch
+}
+```
+
+- Release is `Drop`: impossible to forget, safe on panic and cancellation, no double release.
+- A hold is acquired when a mutating command is admitted (before it enters the command queue),
+  moves into the in-flight record keyed by request id, and drops when that request's reply arrives
+  or when it fails definitively (timeout or connection loss). Every hold is bounded by its request
+  timeout, so `idle()` always resolves.
+- `HoldKind` labels holds for the UI ("Saving draft and 2 messages"); only the count decides
+  status.
+- Holding commands: `QueueFirstMessage`, `QueueMessage`, mutating `ComposerState`, `StopRun`,
+  `RespondApproval`, `RespondQuestion`, `CreateTask`, `BeginProjectIntake`/`At`/`Retry`,
+  `SetThreadEngineConfig`, `SetModelFavorite`, `SaveComposerDraft`. Reads, subscriptions and
+  acknowledgements never hold.
+- Drafts: each keystroke advances the thread's draft revision. At most one save is in flight per
+  thread; newer text replaces the unsent body (latest wins). The thread's hold drops only when the
+  acknowledged revision equals the latest sent revision.
+
+## 3. Single host connection
+
+The Editor owns exactly one connection. `NativeWorkspace` with one `NativeApplication` per host is
+removed. Host-scoped fields of `NativeApplication` move into one `HostState` value that is dropped
+and rebuilt on a switch.
+
+Switch sequence:
+
+1. Sealing: `seal()`, composer read-only, the machine menu shows what is still saving.
+2. Drained: `idle()` resolved; unsubscribe, session shutdown, reconnect-lease publish.
+3. Reset: drop `HostState`.
+4. Connecting, then Ready on the new host.
+
+Re-selecting the current host while sealing unseals and cancels the switch. Quitting the Editor
+uses the same seal and drain.
+
+## 4. State that moves to the Forge
+
+| Editor state today | Forge replacement |
+| --- | --- |
+| Composer drafts and undo history (`native_composer.rs`, `composer_draft_session_policy.rs`) | `composer_drafts` table per thread (revision, body, attachment refs), `SaveComposerDraft` / read with the thread snapshot |
+| Attachment bytes held until send (`native_composer.rs`) and per-engine image policy | Upload to a Forge attachment store on attach; Forge owns image policy |
+| `optimistic_messages`, `message_retry`, `pending_account_send`, `pending_failed_recovery` | Forge accepts a submission immediately, emits a pending transcript row, holds it until the engine is ready, retries by request id, `RecoverFailedMessageToNewThread` |
+| Queue echo matching (`taken_up`, `retired_echoes`, `echo_watches`) and 5 s polling | Queue row state field pushed by subscription |
+| `last-used-model` file | Per-user default engine configuration |
+| Deferred model choice | Persist on selection |
+| `project-orders` files, last thread per project, current route | Per-user navigation record |
+| Process-global host catalog | Derived from the credential store on demand |
+| `readiness/model-catalog.json` side channel | Catalog request over the protocol |
+| Request ids minted from process counters and wall clock | Random UUIDv7 recorded with the Forge-side outbox or draft |
+| Profile name from `USERNAME`/`COMPUTERNAME` | Account identity from the Forge |
+
+Decisions that move to the Forge and arrive as data: send admission (typed refusals from one
+`SubmitMessage`), account readiness, catalog readiness overlay, engine-config validation, context
+compaction thresholds, thread title refinement, attachment image policy, failure-row pruning.
+
+## 5. Forge resilience prerequisites
+
+- A single failing request must not end the Forge serve loop; fail that connection only.
+- The Forge prints the complete error source chain on exit.
+- Importing a newer invitation for the same host identity removes superseded registrations.
+
+## 6. Delivery order
+
+0. Editor settings pool (independent).
+1. Forge resilience prerequisites (independent).
+2. `ConnectionHolds` and holds on every mutating command.
+3. Single-connection workspace with `HostState` and the switch sequence.
+4. Drafts and attachments on the Forge.
+5. Forge-accepted submissions; remove optimistic, retry, pending-send and recovery state.
+6. Business decisions to the Forge.
+7. Preferences and navigation to the Forge; remove the last Editor-side domain files.
