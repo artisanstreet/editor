@@ -1,6 +1,6 @@
 # Stateless Editor, single host connection, and connection holds
 
-- Status: approved 2026-09-25; implementation in progress (steps 0, 2, 3 and 4 implemented)
+- Status: approved 2026-09-25; implementation in progress (steps 0, 2, 3, 4 and 5 implemented)
 - Scope: where Editor state may live, how the Editor connects to exactly one Forge, and how
   in-flight work keeps that connection open until it resolves
 
@@ -187,6 +187,46 @@ Implemented (step 4), drafts and attachments:
   is a recovery handshake rather than draft storage and moves with step 5. Known limit: two Editors
   on one thread each keep showing their own text; the last save to arrive is the stored draft,
   and the other Editor sees it on its next read.
+
+Implemented (step 5), Forge-accepted submissions:
+
+- Request ids: `RequestId::mint(label)` in `artisan_domain` mints `<label>-<UUIDv7>` (workspace
+  `uuid` with `v7`) for every Editor-minted id (messages, saves, answers, model favourites,
+  withdrawals, retries, recoveries), so ids stay unique across restarts and processes.
+- Forge: an accepted message is a queued row with a Forge-owned delivery state
+  (`QueuedMessageState::Queued | Dispatching`, the dispatcher's reason as `last_error`, and the
+  engine of its accepted configuration snapshot). Deviation: the pending rows are delivered as a
+  per-thread `MessageOutbox` event (queued listing + failed listing) on the existing subscription
+  instead of as transcript patches, because the transcript ledger only holds delivered items and
+  a message leaves the outbox in the same commit that projects it. The delivery driver pushes the
+  outbox after the patches of every activation and wake, gated by a cheap fingerprint query, so an
+  unchanged outbox is never resent; the dispatcher, retry, withdrawal and recovery wake it. The 5 s
+  queue/failed polling is gone.
+- Failed rows are decided by the Forge: a failure is offered until a later message of the thread
+  is running or completed (this replaces the Editor's `hide_failures_before` pruning) or until it
+  is recovered; `retryable` is true only when the message never reached the transcript.
+- Retry: `RetryFailedMessage { target }` (thread, message id, original request id) re-queues the
+  stored payload as a fresh send (lease, error and steer target cleared) and answers `Requeued` or
+  `NotRetryable`; no payload crosses the wire. Recovery: one command, named `RecoverFailedMessage` rather than the plan's
+  `RecoverFailedMessageToNewThread`; it creates a thread in the same project with the failed
+  message's engine configuration, stores the payload as that thread's Forge draft (never sent),
+  records the recovery (migration `m20260926_000016_failed_message_recoveries`) and answers the new
+  thread id; a replay answers the same thread. Queue edit is `WithdrawQueuedMessage` with
+  `recall_to_draft`: the Forge moves the withdrawn payload into the thread's draft and the Editor
+  re-reads its draft, replacing `ReadRecalledMessage` and the `restore_candidate` handshake.
+- Editor: removed `optimistic_messages`, `message_retry` (payload copy, `draft_matches`),
+  `pending_account_send`, `pending_failed_recovery`, echo watches, `taken_up`, retired echoes,
+  restore candidates and queue/failed refresh tokens. The message flight keeps only thread,
+  request id and composer token under its connection hold. The transcript tail renders exactly the
+  outbox rows ("Queued", "Waiting: <reason>", "Starting…"); the send entrance animation is view
+  state keyed by the first appearance of a row's message id. A delivered turn's engine label comes
+  from the engine on its outbox row. The composer stays locked while an edit recall is pending.
+- A request the Forge never answered (transport failure) keeps its draft; pressing Send again is
+  a new request with a new id. Known limit: if the Forge accepted the lost request, the message
+  can be queued twice.
+- Left for step 6: the readiness verdict in `first_send_config` (catalog admission) still refuses
+  an unrunnable first send in the Editor; it no longer holds the send. Run usage is still polled
+  while a run is live.
 
 Decisions that move to the Forge and arrive as data: send admission (typed refusals from one
 `SubmitMessage`), account readiness, catalog readiness overlay, engine-config validation, context
