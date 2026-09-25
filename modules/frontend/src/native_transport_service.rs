@@ -181,11 +181,11 @@ pub enum NativeTransportCommand {
     },
     /// Load the certified engine profile catalogue.
     ListRegisteredProfiles,
-    /// Read one engine's provider-account usage, fenced by the profile-menu
-    /// connection generation and a per-engine request sequence. The service
-    /// fans out per engine so each snapshot `fetched_at` represents that
-    /// provider; the application owns freshness, pending rows, and
-    /// stale-response pairing.
+    /// Read one engine's provider-account usage on the user's explicit
+    /// refresh, fenced by the profile-menu connection generation and a
+    /// per-engine request sequence. Every other change arrives pushed by
+    /// the Forge; the application owns pending rows and stale-response
+    /// pairing.
     ///
     /// Each read executes on the one serial service loop through the existing
     /// bounded `runtime.request` path (existing request deadline, admission

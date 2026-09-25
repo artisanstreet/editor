@@ -344,3 +344,7 @@ fn periodic_catalog_refresh_recovers_missing_conversation_scope(cx: &mut TestApp
 // The Forge's preferences build on the Forge catalog fixtures above.
 #[path = "forge_preferences.rs"]
 mod forge_preferences;
+
+// Pushed usage and titles build on the same fixtures.
+#[path = "host_state_push.rs"]
+mod host_state_push;

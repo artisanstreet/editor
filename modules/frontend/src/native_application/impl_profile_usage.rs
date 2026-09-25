@@ -1,5 +1,6 @@
-//! Account-usage refresh flights for [`NativeApplication`]; each report
-//! carries the Forge's readiness verdict for its engine.
+//! Account usage for [`NativeApplication`]; each report carries the Forge's
+//! readiness verdict for its engine. The Forge pushes every change; the
+//! only reads the Editor makes are the user's explicit refreshes.
 //!
 //! Extracted verbatim from `native_application.rs` during the phase-4 module
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
@@ -184,6 +185,28 @@ impl NativeApplication {
         }
         self.refresh_settings_engine_snapshot(cx);
         cx.notify();
+    }
+
+    /// Applies one engine's usage the Forge pushed. It replaces an older
+    /// reading exactly like an explicit refresh's answer; a changed verdict
+    /// is picked up by reading the catalog again, as the Forge applies
+    /// readiness to the catalogs it serves.
+    pub(super) fn apply_pushed_usage(
+        &mut self,
+        snapshot: &artisan_domain::EngineUsageSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = crate::native_profile_usage::usage_entry(snapshot) else {
+            return;
+        };
+        let engine_id = entry.engine_id.clone();
+        let previous = engine_readiness(&self.profile_usage, &engine_id);
+        self.profile_usage.accept(entry);
+        if engine_readiness(&self.profile_usage, &engine_id) != previous {
+            self.refresh_model_catalog(cx);
+        }
+        self.sync_profile_actions();
+        self.refresh_settings_engine_snapshot(cx);
     }
 
     pub(super) fn handle_account_usage_failed(

@@ -27,7 +27,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 pub(super) struct UsagePush {
     notifier: OnceLock<ConversationCommitNotifier>,
-    published: Mutex<Option<EngineUsageSnapshot>>,
+    published: Mutex<Vec<EngineUsageSnapshot>>,
     attempted: Mutex<HashMap<String, Instant>>,
     /// The last report served per engine with its observation time; the
     /// source for engines no read has cached (a failure, a missing sign-in).
@@ -64,17 +64,17 @@ impl AccountUsageService {
         self.push.refresh.notify_one();
     }
 
-    /// Every engine the service has observed, as it would serve it now: the
-    /// last-good report (marked with a later refresh failure) with its
-    /// readiness verdict judged against the freshness window as it stands.
-    /// `None` before the first observation.
+    /// Every engine the service has observed, as it would serve it now, one
+    /// narrowed snapshot per engine in roster order (so each keeps its own
+    /// observation time): the last-good report (marked with a later refresh
+    /// failure) with its readiness verdict judged against the freshness
+    /// window as it stands. Empty before the first observation.
     #[must_use]
-    pub fn current_snapshot(&self) -> Option<EngineUsageSnapshot> {
+    pub fn current_snapshots(&self) -> Vec<EngineUsageSnapshot> {
         let failures = lock(&self.failures).clone();
         let served = lock(&self.push.served).clone();
         let cache = lock(&self.cache);
-        let mut reports = Vec::new();
-        let mut fetched_at = String::new();
+        let mut snapshots = Vec::new();
         for reader in &self.readers {
             let engine = reader.engine_id();
             let (report, observed_at, fresh) = match (cache.get(engine), served.get(engine)) {
@@ -99,26 +99,21 @@ impl AccountUsageService {
                 fresh,
                 None,
             );
-            if observed_at > fetched_at {
-                fetched_at = observed_at;
-            }
-            reports.push(report.with_readiness(readiness));
+            snapshots.extend(
+                EngineUsageSnapshot::new(vec![report.with_readiness(readiness)], observed_at).ok(),
+            );
         }
-        drop(cache);
-        if reports.is_empty() {
-            return None;
-        }
-        EngineUsageSnapshot::new(reports, fetched_at).ok()
+        snapshots
     }
 
     /// Bumps the host state when what the service would serve changed.
     pub(super) fn publish_if_changed(&self) {
-        let snapshot = self.current_snapshot();
+        let snapshots = self.current_snapshots();
         let mut published = lock(&self.push.published);
-        if *published == snapshot {
+        if *published == snapshots {
             return;
         }
-        *published = snapshot;
+        *published = snapshots;
         drop(published);
         if let Some(notifier) = self.push.notifier.get() {
             notifier.publish_host_state();
@@ -243,16 +238,16 @@ mod tests {
             ACCOUNT_USAGE_PER_ENGINE_TIMEOUT,
         )
         .with_host_state_notifier(notifier.clone());
-        assert_eq!(service.current_snapshot(), None);
+        assert!(service.current_snapshots().is_empty());
         let before = wake.host_revision();
 
         service
             .read(&ReadAccountUsage::new(None, false).expect("query"))
             .await;
-        let snapshot = service.current_snapshot().expect("both engines observed");
-        let verdicts: Vec<_> = snapshot
-            .engines()
+        let verdicts: Vec<_> = service
+            .current_snapshots()
             .iter()
+            .flat_map(EngineUsageSnapshot::engines)
             .map(|report| (report.engine_id().to_owned(), report.readiness().is_ready()))
             .collect();
         assert_eq!(

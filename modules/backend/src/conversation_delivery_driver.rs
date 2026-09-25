@@ -62,7 +62,8 @@ pub(crate) struct ConversationDeliveryDriver {
 struct DeliveredHostState {
     revision: Option<u64>,
     preferences: Option<UserPreferences>,
-    usage: Option<EngineUsageSnapshot>,
+    /// The usage snapshot last pushed per engine.
+    usage: BTreeMap<String, EngineUsageSnapshot>,
 }
 
 /// One subscription's last pushed outbox and the fingerprint it was read at.
@@ -236,10 +237,11 @@ impl ConversationDeliveryDriver {
     }
 
     /// Pushes the connection-scoped host state when its revision moved since
-    /// the last push; each value crosses the wire only when changed. Every
-    /// engine's usage with its readiness is pushed from the connection's
-    /// first request on; the user's preferences only when they change (an
-    /// Editor reads them as it connects).
+    /// the last push; each value crosses the wire only when changed. Each
+    /// engine's usage with its readiness is pushed as its own narrowed
+    /// snapshot from the connection's first request on; the user's
+    /// preferences only when they change (an Editor reads them as it
+    /// connects).
     async fn deliver_host_state<F>(
         &mut self,
         stamp: &mut F,
@@ -273,13 +275,19 @@ impl ConversationDeliveryDriver {
         let usage = self
             .context
             .account_usage()
-            .and_then(crate::account_usage_service::AccountUsageService::current_snapshot);
-        if let Some(usage) = usage
-            && self.host.usage.as_ref() != Some(&usage)
-        {
-            let event = Event::AccountUsage(usage.clone());
+            .map(crate::account_usage_service::AccountUsageService::current_snapshots)
+            .unwrap_or_default();
+        for snapshot in usage {
+            let Some(engine) = snapshot.engines().first().map(|report| report.engine_id()) else {
+                continue;
+            };
+            if self.host.usage.get(engine) == Some(&snapshot) {
+                continue;
+            }
+            let engine = engine.to_owned();
+            let event = Event::AccountUsage(snapshot.clone());
             self.send_state_event(event, stamp, limit, cancel).await?;
-            self.host.usage = Some(usage);
+            self.host.usage.insert(engine, snapshot);
         }
         self.host.revision = Some(revision);
         Ok(())

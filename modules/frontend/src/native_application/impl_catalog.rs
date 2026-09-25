@@ -272,7 +272,6 @@ impl NativeApplication {
         });
         self.discover_composer_catalog(thread_id, profile_id, cx);
         self.sync_composer_model_policy(cx);
-        self.ensure_profile_usage(false, None, cx);
     }
 
     pub(super) fn sync_composer_catalog_status(&mut self, cx: &mut Context<Self>) {

@@ -43,14 +43,14 @@ fn settings_rail_lists_real_engines_without_a_thread(cx: &mut TestAppContext) {
                 !ids.iter().any(|id| id == "fixture-engine"),
                 "rail must not list fixture identities: {ids:?}"
             );
-            // Entering Settings requested the global readiness refresh
-            // even with no thread selected.
+            // Readiness arrives pushed by the Forge: entering Settings
+            // schedules no usage read.
             assert!(
-                commands.borrow().iter().any(|command| matches!(
+                !commands.borrow().iter().any(|command| matches!(
                     command,
                     NativeTransportCommand::ReadAccountUsage { .. }
                 )),
-                "settings entry must refresh account readiness"
+                "settings entry must not poll account readiness"
             );
         });
     });

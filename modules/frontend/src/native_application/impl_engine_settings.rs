@@ -14,11 +14,8 @@ impl NativeApplication {
         let Some(thread_id) = self.selected_thread.clone() else {
             return;
         };
-        // Thread selection owns the readiness refresh alongside the settings
-        // and registry reads: the composer gate below evaluates the probed
-        // verdict, so selection must request it rather than inheriting
-        // whatever the profile popover last loaded.
-        self.ensure_profile_usage(false, None, cx);
+        // Readiness verdicts arrive pushed by the Forge; selection only reads
+        // the thread's settings and the registry.
         if self.engine_settings.needs_registry_load() {
             self.submit_registry_load();
         }

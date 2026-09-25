@@ -298,15 +298,9 @@ impl NativeApplication {
         self.route_history.current()
     }
 
-    /// Navigates to `route`, retaining history, and rerenders.
-    ///
-    /// Entering Settings also requests fresh provider-account reads, so the
-    /// engine pages observe true readiness instead of a stale row; the
-    /// profile popover keeps its own open-time refresh.
+    /// Navigates to `route`, retaining history, and rerenders. Readiness
+    /// verdicts the engine pages show arrive pushed by the Forge.
     pub(super) fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
-        if matches!(route, NativeRoute::Settings { .. }) {
-            self.ensure_profile_usage(false, None, cx);
-        }
         self.route_history.navigate(route);
         self.sync_composer_availability(cx);
         cx.notify();

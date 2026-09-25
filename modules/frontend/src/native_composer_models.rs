@@ -12,7 +12,6 @@ impl NativeApplication {
     ) {
         match event {
             NativeModelSelectorEvent::RefreshCatalog => {
-                self.ensure_profile_usage(false, None, cx);
                 if let Some(scope) = self.catalog_controller.refresh_catalog() {
                     self.submit_composer_catalog_reads(&scope, cx);
                 } else if self.catalog_controller.scope().is_none() {
@@ -20,10 +19,8 @@ impl NativeApplication {
                 }
             }
             NativeModelSelectorEvent::Retry => {
-                // The retry behind every composer error refreshes the Forge's
-                // account verdict first, so a recovered sign-in or repaired
-                // binary is observed instead of re-failing on a stale row.
-                self.ensure_profile_usage(false, None, cx);
+                // Account verdicts arrive pushed by the Forge, which re-reads
+                // a failing engine on its own cadence.
                 if let Some(pending) = self.catalog_controller.pending_favorite().cloned() {
                     if !pending.admitted {
                         self.submit_pending_model_favorite(&pending, cx);

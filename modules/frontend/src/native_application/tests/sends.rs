@@ -199,9 +199,9 @@ fn a_choice_the_forge_refuses_keeps_the_draft_and_shows_its_reason(cx: &mut Test
             .map(|selection| selection.model_id.as_str()),
         Some("codex-sol")
     );
-    // A readiness refusal asks for a fresh verdict.
+    // A recovered account arrives as a pushed verdict; nothing is polled.
     assert!(
-        commands
+        !commands
             .iter()
             .any(|command| matches!(command, NativeTransportCommand::ReadAccountUsage { .. }))
     );

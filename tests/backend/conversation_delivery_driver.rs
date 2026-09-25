@@ -1865,3 +1865,113 @@ async fn preferences_and_refined_titles_are_pushed_when_they_change() -> Result<
     app.shutdown().await?;
     Ok(())
 }
+
+/// One signed-in engine for the usage push test.
+#[derive(Debug)]
+struct SignedInReader;
+
+impl artisan_backend::account_usage_service::AccountUsageReader for SignedInReader {
+    fn engine_id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn read(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        artisan_native_engine::account_usage::ProviderUsage,
+                        artisan_backend::account_usage_service::ReaderFailure,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async {
+            Ok(artisan_native_engine::account_usage::ProviderUsage::authenticated(Vec::new()))
+        })
+    }
+}
+
+/// A connection receives every engine's usage with its readiness verdict
+/// from its first request on, without asking for it.
+#[tokio::test]
+async fn account_usage_is_pushed_from_the_first_request() -> Result<(), Box<dyn Error>> {
+    use artisan_backend::account_usage_service::{
+        ACCOUNT_USAGE_FRESHNESS, ACCOUNT_USAGE_PER_ENGINE_TIMEOUT, AccountUsageService,
+    };
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let usage = std::sync::Arc::new(
+        AccountUsageService::with_readers(
+            vec![std::sync::Arc::new(SignedInReader)],
+            ACCOUNT_USAGE_FRESHNESS,
+            ACCOUNT_USAGE_PER_ENGINE_TIMEOUT,
+        )
+        .with_host_state_notifier(notifier.clone()),
+    );
+    usage
+        .read(&artisan_domain::ReadAccountUsage::new(None, false)?)
+        .await;
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone())
+        .with_shared_account_usage_service(usage);
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, seeded.thread_id.clone()).await?;
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the usage event".into());
+        };
+        let Event::AccountUsage(snapshot) = event.event else {
+            return Err("expected account usage".into());
+        };
+        let [report] = snapshot.engines() else {
+            return Err("expected one narrowed report".into());
+        };
+        assert_eq!(report.engine_id(), "codex");
+        assert!(report.readiness().is_ready());
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery usage test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
