@@ -48,17 +48,6 @@ pub(super) struct NativeMessageFlight {
     pub(super) token: SubmissionToken,
 }
 
-/// Outcome of first-send admission for a thread without a persisted engine
-/// configuration.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FirstSendAdmission {
-    /// The thread is already configured; continue the send.
-    Proceed,
-    /// The send was held for a save, adopted, blocked, or suppressed; the
-    /// gate already synced and notified.
-    Held,
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct NativeMessageFailure {
     pub(super) failure: ServiceFailure,

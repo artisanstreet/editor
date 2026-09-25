@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use artisan_domain::{
-    ComposerDraftRevision, ComposerDraftSubmitted, DraftSubmissionOutcome, SteerTarget,
+    ComposerDraftRevision, ComposerDraftSubmitted, DraftSubmissionOutcome, EngineConfigRevision,
     SubmitComposerDraft,
 };
 
@@ -17,12 +17,9 @@ pub fn encode_submit_composer_draft_request(
 ) {
     builder.set_thread_id(value.thread_id.as_str());
     builder.set_draft_revision(value.draft_revision.get());
-    builder.set_steer_run_id(
-        value
-            .steer_target
-            .as_ref()
-            .map_or("", |target| target.run_id().as_str()),
-    );
+    if let Some(selection) = &value.selection {
+        encode_catalog_selection(builder.init_selection(), selection);
+    }
 }
 
 /// Decodes one draft submission using the parent envelope id.
@@ -30,12 +27,18 @@ pub fn decode_submit_composer_draft_request(
     value: composer_state_capnp::submit_composer_draft_request::Reader<'_>,
     request_id: RequestId,
 ) -> Result<SubmitComposerDraft, ComposerStateCodecError> {
+    // The Forge decides steering; the retired field must stay empty.
     let field = "request.submitComposerDraft.steerRunId";
-    let steer = read_text(value.get_steer_run_id(), field)?;
-    let steer_target = if steer.is_empty() {
-        None
+    if !read_text(value.get_steer_run_id(), field)?.is_empty() {
+        return Err(ComposerStateCodecError::StateValue { field });
+    }
+    let selection = if value.has_selection() {
+        Some(decode_catalog_selection(
+            value.get_selection()?,
+            "request.submitComposerDraft.selection",
+        )?)
     } else {
-        Some(SteerTarget::new(parse_run_id(steer, field)?))
+        None
     };
     Ok(SubmitComposerDraft {
         request_id,
@@ -50,7 +53,7 @@ pub fn decode_submit_composer_draft_request(
             value.get_draft_revision(),
             "request.submitComposerDraft.draftRevision",
         )?,
-        steer_target,
+        selection,
     })
 }
 
@@ -73,14 +76,19 @@ pub fn encode_composer_draft_submitted(
             message_id,
             disposition,
             cleared_revision,
+            engine_config_revision,
         } => {
             let mut queued = builder.init_queued();
             queued.set_message_id(message_id.as_str());
             queued.set_disposition(encode_disposition(*disposition));
             queued.set_cleared_revision(cleared_revision.get());
+            queued.set_engine_config_revision(engine_config_revision.get());
         }
         DraftSubmissionOutcome::Stale { current_revision } => {
             builder.set_stale(current_revision.map_or(0, ComposerDraftRevision::get));
+        }
+        DraftSubmissionOutcome::Refused(refusal) => {
+            encode_submission_refusal(builder.init_refused(), refusal);
         }
     }
     Ok(())
@@ -119,7 +127,19 @@ pub fn decode_composer_draft_submitted(
                     queued.get_cleared_revision(),
                     "response.composerDraftSubmitted.clearedRevision",
                 )?,
+                engine_config_revision: EngineConfigRevision::new(
+                    queued.get_engine_config_revision(),
+                )
+                .map_err(|_| ComposerStateCodecError::StateValue {
+                    field: "response.composerDraftSubmitted.engineConfigRevision",
+                })?,
             }
+        }
+        composer_state_capnp::composer_draft_submitted::Which::Refused(refusal) => {
+            DraftSubmissionOutcome::Refused(decode_submission_refusal(
+                refusal?,
+                "response.composerDraftSubmitted.refused",
+            )?)
         }
         composer_state_capnp::composer_draft_submitted::Which::Stale(current) => {
             DraftSubmissionOutcome::Stale {

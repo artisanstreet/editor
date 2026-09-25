@@ -83,6 +83,8 @@ pub enum ResponsePayload {
     ComposerCatalog(ComposerCatalogResult),
     /// Scope-free host catalog with the Forge's readiness applied.
     HostCatalog(CatalogSnapshotWire),
+    /// A model selection resolved into a configuration, or refused.
+    ModelSelectionResolved(artisan_domain::ModelSelectionResolution),
     /// Complete durable model-favorites projection.
     ModelFavorites(ModelFavoritesSnapshot),
     /// Correlated favorite mutation receipt with complete post-state.

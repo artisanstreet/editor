@@ -337,29 +337,18 @@ fn install_listed_title(
 }
 
 /// Drives the engine-settings controller to a persisted configuration
-/// built from the offline `codex-sol` policy, so send-admission tests
-/// exercise the configured first-send flow instead of the unconfigured
-/// block. Uses only controller-local transitions; no transport.
+/// the Forge resolved for the offline `codex-sol` policy, so send tests
+/// exercise a configured thread. Uses only controller-local transitions; no
+/// transport.
 fn install_configured_engine_settings(
     application: &mut NativeApplication,
-    cx: &mut Context<NativeApplication>,
+    _cx: &mut Context<NativeApplication>,
 ) {
     let thread_id = application
         .selected_thread
         .clone()
         .expect("selected settings thread");
-    let catalog = application
-        .model_selector
-        .read(cx)
-        .state()
-        .snapshot()
-        .clone();
-    let mut policy = catalog
-        .selection_policy_for_model("codex-sol")
-        .expect("default selection policy");
-    policy.profile_id = Some("default".to_owned());
-    let config = crate::composer_model_config::config_for_policy(&catalog, &policy, None)
-        .expect("default policy builds a run configuration");
+    let config = forge_codex_config(None);
     application.engine_settings.select_thread(Some(&thread_id));
     let generation = application
         .engine_settings
@@ -444,8 +433,9 @@ fn install_admitted_first_send(
         &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy),
         cx,
     );
-    // The selection auto-saves through the shared direct typed-save
-    // path; the sink records the exact command production would send.
+    // The Forge resolves the selection; its configuration saves through the
+    // shared direct typed-save path the sink records.
+    answer_resolution(application, cx, forge_codex_config(None));
     let (pending_thread, retained) = application
         .engine_settings
         .pending_save()
@@ -1067,7 +1057,10 @@ fn seed_failed_entry(application: &mut NativeApplication, thread: &ThreadId, gen
 mod draft_send;
 #[path = "tests/forge_catalog.rs"]
 mod forge_catalog;
-use forge_catalog::{reported_usage_entry_with_auth, serve_catalog_with_runnable};
+use forge_catalog::{
+    answer_resolution, forge_codex_config, refuse_send, reported_usage_entry_with_auth,
+    serve_catalog_with_runnable,
+};
 #[path = "tests/forge_drafts.rs"]
 mod forge_drafts;
 #[path = "tests/lifecycle.rs"]

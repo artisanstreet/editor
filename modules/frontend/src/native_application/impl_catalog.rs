@@ -49,7 +49,35 @@ impl NativeApplication {
         event: crate::native_transport_service::ForgeDecisionEvent,
         cx: &mut Context<Self>,
     ) {
-        let crate::native_transport_service::ForgeDecisionEvent::HostCatalog(result) = event;
+        use crate::native_transport_service::ForgeDecisionEvent;
+        let result = match event {
+            ForgeDecisionEvent::HostCatalog(result) => result,
+            ForgeDecisionEvent::ModelSelectionResolved {
+                thread_id,
+                selection,
+                result,
+            } => return self.receive_selection_resolution(thread_id, selection, result, cx),
+            ForgeDecisionEvent::SendRefused {
+                thread_id,
+                request_id,
+                refusal,
+            } => return self.handle_message_refused(&thread_id, &request_id, &refusal, cx),
+            ForgeDecisionEvent::SendAdmitted {
+                thread_id,
+                engine_config_revision,
+            } => {
+                // The send saved the selection it carried: read the thread's
+                // configuration again.
+                if self.selected_thread.as_ref() == Some(&thread_id)
+                    && self
+                        .engine_settings
+                        .on_revision_moved(engine_config_revision)
+                {
+                    self.request_engine_settings_for_selected(cx);
+                }
+                return;
+            }
+        };
         // A failed read keeps the catalog already shown; the next refresh
         // asks again.
         let Ok(catalog) = result else {
@@ -239,7 +267,7 @@ impl NativeApplication {
                 _ => None,
             });
         let profile_id = profile.unwrap_or_else(|| {
-            EngineProfileId::parse(crate::composer_model_config::NATIVE_DEFAULT_PROFILE_ID)
+            EngineProfileId::parse(crate::picker_selection::NATIVE_DEFAULT_PROFILE_ID)
                 .expect("native default profile is valid")
         });
         self.discover_composer_catalog(thread_id, profile_id, cx);

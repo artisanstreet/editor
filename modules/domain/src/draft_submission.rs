@@ -6,9 +6,15 @@
 //! transaction. Submitting the same revision again answers the message the
 //! first submission queued (a duplicate) and changes nothing, so a send whose
 //! answer was lost can be repeated safely under any request id.
+//!
+//! The send carries the user's model selection, not a configuration: the
+//! Forge resolves it, saves it when it changes the thread's configuration,
+//! decides whether the message steers the thread's live run, and refuses a
+//! send it cannot admit with a typed, presentation-ready reason.
 
 use crate::{
-    ComposerDraftRevision, MessageId, ReceiptDisposition, RequestId, SteerTarget, ThreadId,
+    CatalogSelection, ComposerDraftRevision, EngineConfigRevision, MessageId, ReceiptDisposition,
+    RequestId, SubmissionRefusal, ThreadId,
 };
 
 /// Queues a thread's composer draft at exactly `draft_revision`.
@@ -23,8 +29,9 @@ pub struct SubmitComposerDraft {
     pub thread_id: ThreadId,
     /// The draft revision the sender last saved.
     pub draft_revision: ComposerDraftRevision,
-    /// Observed live run the message must steer into, if named.
-    pub steer_target: Option<SteerTarget>,
+    /// The model the user selected for this send; `None` sends with the
+    /// thread's saved configuration.
+    pub selection: Option<CatalogSelection>,
 }
 
 /// What the Forge did with a submitted draft.
@@ -40,6 +47,9 @@ pub enum DraftSubmissionOutcome {
         disposition: ReceiptDisposition,
         /// Revision of the emptied draft.
         cleared_revision: ComposerDraftRevision,
+        /// Revision of the thread's engine configuration after admission,
+        /// so a sender can tell whether the send saved a new one.
+        engine_config_revision: EngineConfigRevision,
     },
     /// The stored draft is at another revision (`None`: the thread has no
     /// draft); nothing was queued. The sender saves its draft again and
@@ -48,6 +58,9 @@ pub enum DraftSubmissionOutcome {
         /// The thread's current draft revision.
         current_revision: Option<ComposerDraftRevision>,
     },
+    /// The Forge refused the send; nothing was queued and the draft is
+    /// unchanged.
+    Refused(SubmissionRefusal),
 }
 
 /// Answer to [`SubmitComposerDraft`].

@@ -32,37 +32,6 @@ impl RunControlsState {
         self.stop = None;
         self.poll = None;
     }
-
-    /// Returns the observed live run eligible for steer naming on the
-    /// selected thread: a `Running`/`Waiting` run (never a `Queued`
-    /// starting run) with its observed engine. The caller additionally
-    /// requires the selected engine to match. Scope-fenced on the observed
-    /// thread; never validates liveness beyond the last read.
-    pub(super) fn steer_candidate(
-        &self,
-        selected_thread: Option<&ThreadId>,
-    ) -> Option<(RunId, artisan_domain::EngineId)> {
-        if self.thread.as_ref() != selected_thread {
-            return None;
-        }
-        if !matches!(
-            self.status,
-            Some(RunLiveStatus::Running | RunLiveStatus::Waiting)
-        ) {
-            return None;
-        }
-        Some((self.active.clone()?, self.engine?))
-    }
-
-    /// Whether the observed run on the selected thread is still starting.
-    ///
-    /// Reference (`commands.ts:158-165`): sends never enter a starting
-    /// run's queue from this UI. Scope-fenced like [`Self::steer_candidate`].
-    pub(super) fn starting_guard_active(&self, selected_thread: Option<&ThreadId>) -> bool {
-        self.thread.as_ref() == selected_thread
-            && self.active.is_some()
-            && matches!(self.status, Some(RunLiveStatus::Queued))
-    }
 }
 
 impl NativeApplication {

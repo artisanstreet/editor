@@ -1,9 +1,96 @@
-//! Catalogs and account readiness as the Forge serves them: the Forge
-//! applies each engine's readiness verdict to the runnable harnesses of the
-//! catalogs it serves, and the Editor reads the catalog again when a verdict
-//! changes.
+//! Catalogs, readiness, and model selections as the Forge serves them: the
+//! Forge applies each engine's readiness verdict to the runnable harnesses
+//! of the catalogs it serves (the Editor reads the catalog again when a
+//! verdict changes), and it resolves the Editor's model selections into the
+//! configurations it runs.
 
 use super::*;
+
+/// The Codex configuration the Forge resolves for the fixture's `codex-sol`
+/// defaults, with an optional context-window override.
+pub(super) fn forge_codex_config(window: Option<u64>) -> artisan_domain::EngineRunConfig {
+    use artisan_domain::{
+        ApprovalMode, ByteLimit, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
+        CodexServiceTier, CountLimit, EngineAgentId, EngineModelId, EnginePermissionPolicy,
+        EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+        EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, PermissionId,
+        WebSearchAccess,
+    };
+    let millis = |value| FiniteMillis::new(value).expect("budget");
+    let bytes = |value| ByteLimit::new(value).expect("capacity");
+    let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
+        attempt_budget: millis(3_660_000),
+        readiness_budget: millis(15_000),
+        health_budget: millis(5_000),
+        prompt_budget: millis(30_000),
+        stream_budget: millis(3_600_000),
+        close_budget: millis(10_000),
+        max_json_body_bytes: bytes(24 * 1024 * 1024),
+        max_sse_line_bytes: bytes(64 * 1024),
+        max_sse_event_bytes: bytes(1024 * 1024),
+        max_readiness_line_bytes: bytes(8192),
+        max_header_count: CountLimit::new(64).expect("count"),
+        max_http_buffer_bytes: bytes(64 * 1024),
+        max_stderr_bytes: bytes(64 * 1024),
+        observation_capacity: CountLimit::new(256).expect("count"),
+    })
+    .expect("runtime");
+    let selection = CodexSelection::new(
+        EngineProfileId::parse("default").expect("profile"),
+        Some(EngineModelId::parse("gpt-5.6-sol").expect("model")),
+        EnginePermissionPolicy::new(
+            PermissionId::parse("autonomous").expect("permission"),
+            EngineAgentId::parse("artisan-v1-codex-autonomous-offline-no-web").expect("agent"),
+            ApprovalMode::OnRequest,
+            FilesystemAccess::Workspace,
+            NetworkAccess::Disabled,
+            WebSearchAccess::Disabled,
+        ),
+        Some(CodexReasoningEffort::parse("low").expect("effort")),
+        Some(CodexServiceTier::parse("standard").expect("tier")),
+        window.map(|window| CodexModelContextWindow::new(window).expect("window")),
+    )
+    .expect("codex selection");
+    EngineRunConfig::new(EngineSelection::Codex(selection), runtime)
+}
+
+/// Answers the pending selection resolution as the Forge would, with
+/// `config`, through the real resolution handler.
+pub(super) fn answer_resolution(
+    application: &mut NativeApplication,
+    cx: &mut Context<NativeApplication>,
+    config: artisan_domain::EngineRunConfig,
+) {
+    let (thread_id, selection) = application
+        .pending_resolution
+        .clone()
+        .expect("a selection resolution was requested");
+    application.receive_selection_resolution(thread_id, selection, Ok(Ok(Box::new(config))), cx);
+}
+
+/// Delivers the Forge's typed refusal of the current send.
+pub(super) fn refuse_send(
+    application: &mut NativeApplication,
+    cx: &mut Context<NativeApplication>,
+    kind: artisan_domain::SubmissionRefusalKind,
+    message: &str,
+) {
+    let flight = application
+        .message_flight
+        .as_ref()
+        .expect("a send in flight");
+    let (thread_id, request_id) = (flight.thread_id.clone(), flight.request_id.clone());
+    application.handle_service_event(
+        NativeTransportEvent::ForgeDecision(
+            crate::native_transport_service::ForgeDecisionEvent::SendRefused {
+                thread_id,
+                request_id,
+                refusal: artisan_domain::SubmissionRefusal::new(kind, message).expect("refusal"),
+            },
+        ),
+        cx,
+    );
+}
 
 /// The verdict the Forge serves with a report of this authentication.
 pub(super) fn forge_readiness(

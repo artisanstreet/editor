@@ -1,5 +1,4 @@
 use super::*;
-use crate::native_model_catalog::NativeOptionValue;
 use crate::native_model_selector::{
     NativeModelSelectorEvent, NativeModelSelectorStatus, SetFavorite,
 };
@@ -21,10 +20,9 @@ impl NativeApplication {
                 }
             }
             NativeModelSelectorEvent::Retry => {
-                // The retry behind every composer error refreshes the
-                // backend-probed account verdict first, so a recovered
-                // sign-in or repaired binary is observed instead of
-                // re-failing on a stale row.
+                // The retry behind every composer error refreshes the Forge's
+                // account verdict first, so a recovered sign-in or repaired
+                // binary is observed instead of re-failing on a stale row.
                 self.ensure_profile_usage(false, None, cx);
                 if let Some(pending) = self.catalog_controller.pending_favorite().cloned() {
                     if !pending.admitted {
@@ -32,8 +30,8 @@ impl NativeApplication {
                     }
                 } else if self.engine_settings.can_save() {
                     self.save_engine_settings(cx);
-                } else if !self.retry_native_policy_save(cx) {
-                    self.refresh_composer_block_reason(cx);
+                } else if !self.retry_policy_save(cx) {
+                    self.composer_model_run_error = None;
                     self.retry_composer_catalog(cx);
                     self.retry_composer_favorites(cx);
                 }
@@ -53,13 +51,9 @@ impl NativeApplication {
         policy: &crate::native_model_selector::SelectPolicy,
         cx: &mut Context<Self>,
     ) {
-        // Native choices without an explicit profile persist under the
-        // supported default profile, so the stored choice, the save, and the
-        // send-time check all observe the same durable identity.
-        let policy = crate::composer_model_config::with_default_native_profile(policy);
         // Every committed choice refreshes the last-used preference, so new
         // threads without saved config start from this model.
-        if let Some(stored) = crate::native_last_used::save_model_policy(&policy) {
+        if let Some(stored) = crate::native_last_used::save_model_policy(policy) {
             self.last_used_model = Some(stored);
         }
         self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
@@ -69,64 +63,91 @@ impl NativeApplication {
             return;
         };
         if self.engine_settings.pending_save_request_id().is_some() {
-            self.deferred_composer_policy = Some((thread, policy));
+            self.deferred_composer_policy = Some((thread, policy.clone()));
             return;
         }
         self.deferred_composer_policy = None;
-        let catalog = self.served_catalog(cx);
-        let outcome = crate::composer_model_config::config_for_policy(
-            &catalog,
-            &policy,
-            self.engine_settings.authoritative_config(),
+        self.request_selection_resolution(thread, policy);
+        self.sync_composer_model_policy(cx);
+    }
+
+    /// Asks the Forge to resolve the displayed choice into the configuration
+    /// it would run; the answer is saved through the shared direct save.
+    pub(super) fn request_selection_resolution(
+        &mut self,
+        thread_id: ThreadId,
+        policy: &crate::native_model_selector::SelectPolicy,
+    ) {
+        let Some(selection) = crate::picker_selection::selection_for_policy(policy) else {
+            return;
+        };
+        self.pending_resolution = Some((thread_id.clone(), selection.clone()));
+        let command = NativeTransportCommand::ForgeDecision(
+            crate::native_transport_service::ForgeDecisionCommand::ResolveModelSelection(
+                artisan_domain::ResolveModelSelection {
+                    thread_id,
+                    selection,
+                },
+            ),
         );
-        match outcome {
-            Ok(config) => {
-                if self.engine_settings.authoritative_config() == Some(&config) {
-                    self.sync_composer_model_policy(cx);
-                    return;
-                }
-                if matches!(
-                    config.selection(),
-                    artisan_domain::EngineSelection::OpenCode2(_)
-                ) {
-                    *self.engine_settings.draft_mut() =
-                        crate::engine_settings::EngineSettingsDraft::from_config(&config);
-                    if self.engine_settings.can_save() {
-                        self.save_engine_settings(cx);
-                    }
-                } else if let Some(thread_id) = self.selected_thread.clone() {
-                    // Native selections share the direct typed-save path with
-                    // first sends (compare-and-swap `Unconfigured`/`Exact`
-                    // from the controller) instead of the `OpenCode` 2-shaped
-                    // draft, so a later model/effort/profile change on a
-                    // configured thread saves exactly like the first one.
-                    if !self.submit_direct_save(thread_id, config) {
-                        self.composer_model_run_error = Some(
-                            "Engine settings could not be saved. Your draft is preserved; retry the model selection."
-                                .to_owned(),
-                        );
-                    }
-                }
-                self.sync_composer_model_policy(cx);
-            }
-            // The choice stays local until its engine can persist a run config.
-            // Report configuration failure only if the user tries to send.
-            Err(_) => {
-                self.sync_composer_model_policy(cx);
-            }
+        if self.submit_command(command).is_err() {
+            self.pending_resolution = None;
+            self.composer_model_run_error = Some(SELECTION_SAVE_FAILED.to_owned());
         }
     }
 
-    /// Retries a native model/effort/profile choice through the shared direct
-    /// typed-save path.
-    ///
-    /// Returns whether a native save was attempted: the displayed choice for
-    /// the selected thread rebuilds against the readiness-overlaid catalog
-    /// and submits with the controller-derived precondition, so the retry
-    /// behind a composer error recovers a stranded selection exactly like
-    /// the original one. `OpenCode` 2 choices stay on the draft path and
-    /// report `false`.
-    fn retry_native_policy_save(&mut self, cx: &mut Context<Self>) -> bool {
+    /// Applies the Forge's resolution of the latest selection: the resolved
+    /// configuration is saved unless it is already the thread's; a refusal
+    /// is shown as the Forge worded it.
+    pub(super) fn receive_selection_resolution(
+        &mut self,
+        thread_id: ThreadId,
+        selection: artisan_domain::CatalogSelection,
+        result: Result<
+            Result<Box<artisan_domain::EngineRunConfig>, artisan_domain::SubmissionRefusal>,
+            ServiceFailure,
+        >,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_resolution.as_ref() != Some(&(thread_id.clone(), selection)) {
+            return;
+        }
+        self.pending_resolution = None;
+        if self.selected_thread.as_ref() != Some(&thread_id) {
+            return;
+        }
+        match result {
+            Ok(Ok(config)) => {
+                if self.engine_settings.pending_save_request_id().is_some() {
+                    // A save began meanwhile; its acknowledgement resolves
+                    // the latest choice again.
+                    self.deferred_composer_policy = self
+                        .composer_model_choice
+                        .as_ref()
+                        .filter(|(thread, _)| thread.as_ref() == Some(&thread_id))
+                        .map(|(_, choice)| (thread_id.clone(), choice.clone()));
+                } else if self.engine_settings.authoritative_config() != Some(&*config)
+                    && !self.submit_direct_save(thread_id, *config)
+                {
+                    self.composer_model_run_error = Some(SELECTION_SAVE_FAILED.to_owned());
+                }
+            }
+            Ok(Err(refusal)) => {
+                self.composer_model_run_error = Some(refusal.message().to_owned());
+            }
+            Err(_) => self.composer_model_run_error = Some(SELECTION_SAVE_FAILED.to_owned()),
+        }
+        self.sync_composer_model_policy(cx);
+        self.sync_composer_controls(cx);
+        self.refresh_settings_engine_snapshot(cx);
+        cx.notify();
+    }
+
+    /// Retries the displayed choice for the selected thread through the Forge
+    /// resolution and the shared direct save, so the retry behind a composer
+    /// error recovers a stranded selection exactly like the original one.
+    /// Returns whether a resolution was requested.
+    fn retry_policy_save(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(thread_id) = self.selected_thread.clone() else {
             return false;
         };
@@ -139,54 +160,11 @@ impl NativeApplication {
         if choice_thread != self.selected_thread {
             return false;
         }
-        let catalog = self.served_catalog(cx);
-        let Ok(config) = crate::composer_model_config::config_for_policy(
-            &catalog,
-            &choice,
-            self.engine_settings.authoritative_config(),
-        ) else {
-            return false;
-        };
-        if matches!(
-            config.selection(),
-            artisan_domain::EngineSelection::OpenCode2(_)
-        ) {
-            return false;
-        }
-        if !self.submit_direct_save(thread_id, config) {
-            self.composer_model_run_error = Some(
-                "Engine settings could not be saved. Your draft is preserved; retry the model selection."
-                    .to_owned(),
-            );
-        }
+        self.composer_model_run_error = None;
+        self.request_selection_resolution(thread_id, &choice);
         self.sync_composer_model_policy(cx);
         cx.notify();
         true
-    }
-
-    /// Refreshes the composer block message from the current probed account
-    /// verdict.
-    ///
-    /// Used when the model retry finds no pending favorite, draft, or native
-    /// save to submit: the message names the latest readiness state (which
-    /// the same retry just asked to refresh) instead of stranding the stale
-    /// send-time copy. Configured threads and in-flight saves keep their
-    /// owning flows' messages.
-    fn refresh_composer_block_reason(&mut self, cx: &mut Context<Self>) {
-        if self.engine_settings.authoritative_config().is_some()
-            || self.engine_settings.pending_save_request_id().is_some()
-        {
-            return;
-        }
-        let displayed = match &self.composer_model_choice {
-            Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
-            _ => self.model_selector.read(cx).state().policy().cloned(),
-        };
-        let Some(policy) = displayed else {
-            return;
-        };
-        self.composer_model_run_error = Some(self.readiness_block_reason(&policy.engine_id));
-        self.sync_composer_controls(cx);
     }
 
     fn handle_composer_favorite(&mut self, intent: &SetFavorite, cx: &mut Context<Self>) {
@@ -338,10 +316,6 @@ impl NativeApplication {
         crate::native_last_used::restore_policy(snapshot, stored)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one policy sync resolves the per-thread choice, saved config, last-used fallback, rebase, authority, and selector status in display order"
-    )]
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
         if self
             .composer_model_choice
@@ -351,51 +325,13 @@ impl NativeApplication {
             self.composer_model_choice = None;
             self.composer_model_run_error = None;
         }
-        // Admission and matching observe the readiness-overlaid catalog, so a
-        // probed ambient account reads as authoritative without a managed
-        // registry while a signed-out engine never does.
+        // The saved configuration displays as the catalog row and options
+        // that carry it; the Editor never rebuilds a configuration.
         let snapshot = self.served_catalog(cx);
-        let policy = self
+        let saved_policy = self
             .engine_settings
             .authoritative_config()
-            .and_then(|config| {
-                // A saved native selection projects back through the shared
-                // config boundary, so a reloaded or switched-back thread
-                // displays its saved model/effort/profile/permission instead
-                // of drifting to no selection. Only an exact round-trip is
-                // accepted; anything else falls back to no saved policy.
-                let artisan_domain::EngineSelection::OpenCode2(native) = config.selection() else {
-                    return crate::composer_model_config::policy_for_selection(&snapshot, config)
-                        .ok();
-                };
-                if snapshot.scope.as_ref()?.profile_id != native.profile_id().as_str() {
-                    return None;
-                }
-                let model = snapshot.manifest.models.iter().find(|model| {
-                    model.native_selection.as_ref().is_some_and(|selection| {
-                        selection.model_id == native.model_id().as_str()
-                            && selection.provider_route_id == native.route_id().as_str()
-                            && selection.variant_id.as_deref()
-                                == native
-                                    .variant_id()
-                                    .map(artisan_domain::EngineVariantId::as_str)
-                    })
-                })?;
-                let mut policy = snapshot.preview_policy_for_model(&model.id).ok()?;
-                let option = snapshot
-                    .manifest
-                    .harness(&policy.engine_id)?
-                    .permissions
-                    .options
-                    .iter()
-                    .find(|option| option.id == native.permission().permission_id().as_str())?;
-                policy.permission = Some(NativeOptionValue {
-                    id: option.id.clone(),
-                    native_value: option.native_value.clone(),
-                });
-                Some(policy)
-            });
-        let saved_policy = policy;
+            .and_then(|config| crate::picker_selection::saved_config_policy(&snapshot, config));
         if let Some((thread, choice)) = self.deferred_composer_policy.as_mut()
             && Some(&*thread) == self.selected_thread.as_ref()
             && let Some(rebased) = snapshot.rebase_policy(choice)
@@ -415,32 +351,12 @@ impl NativeApplication {
             .and_then(|(_, choice)| snapshot.rebase_policy(choice))
             .or_else(|| saved_policy.clone())
             .or_else(|| self.last_used_display_policy(&snapshot));
-        // The saved-policy projection above stays `OpenCode` 2-shaped;
-        // another engine contributes no saved policy yet. For a native
-        // authoritative configuration the displayed choice is authoritative
-        // exactly when it rebuilds to the saved run configuration — the
-        // same equality the send gate enforces — so a saved Codex/Claude
-        // selection reads as saved instead of permanently drifting.
-        let authoritative = match (&policy, &saved_policy) {
-            (Some(displayed), Some(saved)) => displayed == saved,
-            (Some(displayed), None) => {
-                self.engine_settings
-                    .authoritative_config()
-                    .is_some_and(|saved| {
-                        crate::composer_model_config::config_for_policy(
-                            &snapshot,
-                            displayed,
-                            Some(saved),
-                        )
-                        .ok()
-                        .as_ref()
-                            == Some(saved)
-                    })
-            }
-            _ => false,
-        };
+        // The displayed choice is authoritative exactly when it is the saved
+        // configuration's own display.
+        let authoritative = policy.is_some() && policy == saved_policy;
         let pending_save = self.engine_settings.pending_save_request_id().is_some();
         let saving = pending_save
+            || self.pending_resolution.is_some()
             || self.catalog_controller.catalog_loading()
             || self
                 .catalog_controller
@@ -472,6 +388,9 @@ impl NativeApplication {
         });
     }
 }
+
+const SELECTION_SAVE_FAILED: &str =
+    "Engine settings could not be saved. Your draft is preserved; retry the model selection.";
 
 fn create_model_favorite_request_id() -> Result<RequestId, ServiceFailure> {
     mint_request_id("native-model-favorite")

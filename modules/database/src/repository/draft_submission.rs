@@ -36,7 +36,7 @@ pub struct SubmitComposerDraftInput {
     /// Identity for the message, used only when this is the first
     /// submission of the revision.
     pub message_id: MessageId,
-    /// Observed live run the message must steer into, if named.
+    /// Live run the Forge decided the message steers into, if any.
     pub steer_run_id: Option<RunId>,
     /// Authoritative acceptance time.
     pub submitted_at: UnixMillis,
@@ -76,6 +76,22 @@ pub enum DraftSubmissionError {
 }
 
 impl Repository {
+    /// Whether this revision of the thread's draft was already submitted, so
+    /// a repeat answers the first submission instead of being admitted anew.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database or corrupt-data error.
+    pub async fn composer_draft_submitted(
+        &self,
+        thread_id: &ThreadId,
+        draft_revision: ComposerDraftRevision,
+    ) -> Result<bool, RepositoryError> {
+        Ok(submission(&self.database, thread_id, draft_revision)
+            .await?
+            .is_some())
+    }
+
     /// Sends a thread's composer draft at exactly `input.draft_revision`.
     ///
     /// # Errors

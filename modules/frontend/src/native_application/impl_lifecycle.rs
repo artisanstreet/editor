@@ -147,6 +147,7 @@ impl NativeApplication {
             deferred_composer_policy: None,
             last_used_model: crate::native_last_used::load_stored_model(),
             composer_model_run_error: None,
+            pending_resolution: None,
             catalog_controller: NativeCatalogController::new(),
             host_model_catalog: None,
             connection_retry_pending: false,

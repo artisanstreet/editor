@@ -500,12 +500,20 @@ pub(super) async fn submit_composer_draft(
             message_id,
             disposition,
             cleared_revision,
+            engine_config_revision,
         } => {
             publish(
                 events,
                 NativeTransportEvent::ComposerDraft(ComposerDraftEvent::Revision {
                     scope,
                     revision: cleared_revision,
+                }),
+            )?;
+            publish(
+                events,
+                NativeTransportEvent::ForgeDecision(ForgeDecisionEvent::SendAdmitted {
+                    thread_id: thread_id.clone(),
+                    engine_config_revision,
                 }),
             )?;
             publish(
@@ -525,6 +533,14 @@ pub(super) async fn submit_composer_draft(
                 request_id,
                 current_revision,
             },
+        ),
+        artisan_domain::DraftSubmissionOutcome::Refused(refusal) => publish(
+            events,
+            NativeTransportEvent::ForgeDecision(ForgeDecisionEvent::SendRefused {
+                thread_id,
+                request_id,
+                refusal,
+            }),
         ),
     }
 }

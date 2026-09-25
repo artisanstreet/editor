@@ -355,6 +355,7 @@ fn draft_submission_response_family_requires_exact_request_and_thread() {
             message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
             disposition: ReceiptDisposition::Accepted,
             cleared_revision: artisan_domain::ComposerDraftRevision::new(4).expect("revision"),
+            engine_config_revision: artisan_domain::EngineConfigRevision::new(1).expect("revision"),
         },
     };
     let expected = ExpectedResponse::DraftSubmitted {
@@ -445,7 +446,7 @@ fn draft_submission_retry_keeps_its_wire_bytes_and_names_no_body() {
         request_id: request_id.clone(),
         thread_id: thread_id.clone(),
         draft_revision: artisan_domain::ComposerDraftRevision::new(7).expect("revision"),
-        steer_target: None,
+        selection: None,
     };
     let mutation = draft_submission_mutation(command.clone()).expect("stable mutation");
     let (first, first_id) = mutation.envelope(ProtocolVersion::V1).expect("first");

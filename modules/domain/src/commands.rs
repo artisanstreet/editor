@@ -20,6 +20,7 @@ use crate::{
     UploadComposerAttachment, WithdrawQueuedMessageCommand,
 };
 
+pub use crate::catalog_selection::ResolveModelSelection;
 pub use crate::composer_catalog::{
     ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, SetModelFavorite,
 };
@@ -464,6 +465,8 @@ pub enum Query {
     ReadModelFavorites(ReadModelFavorites),
     /// See [`ReadHostCatalog`].
     ReadHostCatalog(ReadHostCatalog),
+    /// See [`ResolveModelSelection`].
+    ResolveModelSelection(ResolveModelSelection),
     ListQueuedMessages(ListQueuedMessages),
     /// Terminally failed dispatches for one thread, newest first.
     ListFailedMessages(ListFailedMessages),

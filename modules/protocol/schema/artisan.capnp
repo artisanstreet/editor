@@ -863,6 +863,11 @@ struct Request {
     # readiness applied) for surfaces without a thread. Fresh ordinal,
     # existing ordinals frozen.
     readHostCatalog @40 :Void;
+
+    # Resolves a model selection into the engine configuration the Forge
+    # would run for the thread, without saving it. Fresh ordinal, existing
+    # ordinals frozen.
+    resolveModelSelection @41 :ResolveModelSelectionRequest;
   }
 }
 
@@ -956,6 +961,9 @@ struct Response {
 
     # Answer to readHostCatalog. Fresh ordinal, existing ordinals frozen.
     hostCatalog @39 :HostCatalogResult;
+
+    # Answer to resolveModelSelection. Fresh ordinal, existing ordinals frozen.
+    modelSelectionResolved @40 :ModelSelectionResolution;
   }
 }
 
@@ -2537,4 +2545,19 @@ struct EngineReadiness {
 # like ComposerCatalogResult.snapshotData.
 struct HostCatalogResult {
   snapshotData @0 :Data;
+}
+
+struct ResolveModelSelectionRequest {
+  threadId @0 :Text;
+  selection @1 :ComposerState.CatalogSelection;
+}
+
+# The selection echoes the request so a late answer can be matched.
+struct ModelSelectionResolution {
+  threadId @0 :Text;
+  selection @1 :ComposerState.CatalogSelection;
+  union {
+    resolved @2 :EngineRunConfig;
+    refused @3 :ComposerState.SubmissionRefusal;
+  }
 }

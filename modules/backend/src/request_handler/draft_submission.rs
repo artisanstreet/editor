@@ -1,10 +1,13 @@
 //! Sending a thread's composer draft as a message.
 //!
-//! The repository queues the draft at exactly the named revision, records
+//! The Forge first admits the send (see [`super::model_selection`]): it may
+//! refuse it with a typed reason, save the configuration the send's
+//! selection resolves to, and decide whether it steers the live run. The
+//! repository then queues the draft at exactly the named revision, records
 //! the submission, and empties the draft in one transaction; a repeated
-//! submission of the revision answers the first one's message. Named steers
-//! then settle exactly like a queued message's: a first submission routes
-//! into the live run, and a repeat settles from the durable delivery state.
+//! submission of the revision answers the first one's message. Steers settle
+//! exactly like a queued message's: a first submission routes into the live
+//! run, and a repeat settles from the durable delivery state.
 
 use artisan_database::{DraftSubmission, DraftSubmissionError, SubmitComposerDraftInput};
 use artisan_domain::{
@@ -17,6 +20,7 @@ use artisan_protocol::{
 
 use super::composer_drafts::draft_failure;
 use super::failures::{outcome, repository_failure, typed_failure};
+use super::model_selection::SubmissionAdmission;
 use super::{
     RequestHandler, forged_identity_failure, origin_clock_failure, origin_entropy_failure,
 };
@@ -29,6 +33,16 @@ impl RequestHandler {
         request_id: &RequestId,
         submit: &SubmitComposerDraft,
     ) -> Result<ServerResponse, ProtocolFailure> {
+        let steer_run_id = match self.admit_submission(request_id, submit).await? {
+            SubmissionAdmission::Admitted { steer_run_id } => steer_run_id,
+            SubmissionAdmission::Refused(refusal) => {
+                return Ok(submitted(
+                    request_id,
+                    submit,
+                    DraftSubmissionOutcome::Refused(refusal),
+                ));
+            }
+        };
         let identity = self
             .origin
             .mint_identity()
@@ -46,10 +60,7 @@ impl RequestHandler {
                 thread_id: submit.thread_id.clone(),
                 draft_revision: submit.draft_revision,
                 message_id,
-                steer_run_id: submit
-                    .steer_target
-                    .as_ref()
-                    .map(|target| target.run_id().clone()),
+                steer_run_id,
                 submitted_at,
             })
             .await
@@ -105,6 +116,18 @@ impl RequestHandler {
         if !matches!(settled.payload, ResponsePayload::MessageQueued(_)) {
             return Ok(settled);
         }
+        // Admission leaves the thread configured, so its revision exists.
+        let Some(engine_config_revision) = self
+            .engine_config_revision(request_id, &submit.thread_id)
+            .await?
+        else {
+            return Err(typed_failure(
+                ErrorCode::Internal,
+                "an admitted submission's thread has no engine configuration",
+                false,
+                request_id,
+            ));
+        };
         Ok(submitted(
             request_id,
             submit,
@@ -112,6 +135,7 @@ impl RequestHandler {
                 message_id: result.message_id,
                 disposition,
                 cleared_revision,
+                engine_config_revision,
             },
         ))
     }

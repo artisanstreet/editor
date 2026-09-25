@@ -243,11 +243,10 @@ use profile_motion::{
 #[cfg(test)]
 use state::NativeTestCommandSink;
 use state::{
-    FirstSendAdmission, NativeMessageFailure, NativeMessageFlight, NativeViewState, PickerRoute,
-    ThreadSwitchFlight, ThreadSwitchPhase, command_failure, create_message_request_id,
-    create_save_request_id, empty_thread_listing, intake_command, invalid_service_failure,
-    mint_request_id, picker_route, project_options_from_listing, ready_membership_is_valid,
-    submission_blocked_failure,
+    NativeMessageFailure, NativeMessageFlight, NativeViewState, PickerRoute, ThreadSwitchFlight,
+    ThreadSwitchPhase, command_failure, create_message_request_id, create_save_request_id,
+    empty_thread_listing, intake_command, invalid_service_failure, mint_request_id, picker_route,
+    project_options_from_listing, ready_membership_is_valid, submission_blocked_failure,
 };
 
 #[cfg(test)]
@@ -335,6 +334,9 @@ pub struct NativeApplication {
     /// Last-used model preference backing new threads without saved config.
     last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
     composer_model_run_error: Option<String>,
+    /// The selection whose Forge resolution is awaited; a later selection
+    /// replaces it so only the latest answer is applied.
+    pending_resolution: Option<(ThreadId, artisan_domain::CatalogSelection)>,
     catalog_controller: NativeCatalogController,
     host_model_catalog: Option<NativeModelCatalog>,
     connection_retry_pending: bool,

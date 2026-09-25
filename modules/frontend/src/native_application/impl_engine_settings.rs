@@ -209,9 +209,7 @@ impl NativeApplication {
     /// Returns the displayed model policy for one engine, if the composer
     /// choice or the selector policy names it.
     ///
-    /// The explicit choice wins over the selector default; the returned
-    /// policy carries the default native profile so Settings saves observe
-    /// the same durable identity as composer saves.
+    /// The explicit choice wins over the selector default.
     pub(super) fn displayed_policy_for_engine(
         &self,
         engine_id: &str,
@@ -224,9 +222,7 @@ impl NativeApplication {
             return Some(choice.clone());
         }
         let policy = self.model_selector.read(cx).state().policy().cloned()?;
-        (policy.engine_id == engine_id).then_some(
-            crate::composer_model_config::with_default_native_profile(&policy),
-        )
+        (policy.engine_id == engine_id).then_some(policy)
     }
 
     /// Builds the live engine snapshot for one engine settings page.
@@ -290,7 +286,7 @@ impl NativeApplication {
             if config.selection().engine_id().as_str() != engine_id {
                 return None;
             }
-            crate::composer_model_config::policy_for_selection(&effective, config).ok()
+            crate::picker_selection::saved_config_policy(&effective, config)
         });
         let saved_model = saved_policy
             .as_ref()
@@ -313,25 +309,16 @@ impl NativeApplication {
         });
         let displayed = self.displayed_policy_for_engine(engine_id, cx);
         let displayed_model = displayed.as_ref().map(|policy| policy.model_id.clone());
-        let displayed_authoritative = match (&displayed, authoritative) {
-            (Some(displayed), Some(saved)) => {
-                crate::composer_model_config::config_for_policy(&effective, displayed, Some(saved))
-                    .ok()
-                    .as_ref()
-                    == Some(saved)
-            }
-            _ => false,
-        };
+        let displayed_authoritative = displayed.is_some() && displayed == saved_policy;
         let pending_save = self.engine_settings.pending_save_request_id().is_some();
         let save_failed =
             self.engine_settings.failure_operation() == Some(EngineSettingsFailureOperation::Save);
+        // The Forge resolves and validates the choice when it is saved.
         let can_save_displayed = selected_thread.is_some()
             && !pending_save
+            && self.pending_resolution.is_none()
             && !displayed_authoritative
-            && displayed.as_ref().is_some_and(|policy| {
-                crate::composer_model_config::config_for_policy(&effective, policy, authoritative)
-                    .is_ok_and(|config| Some(&config) != authoritative)
-            });
+            && displayed.is_some();
         // An explicit choice held without a save names its honest blocker:
         // no thread, or the live admission reason. Saved, saving, and
         // failed states read out their own rows instead.
@@ -361,6 +348,8 @@ impl NativeApplication {
                         })
                     && effective.admit_policy(policy).is_err() =>
             {
+                // The served catalog does not admit it; show the Forge's
+                // readiness reason for the engine.
                 Some(self.readiness_block_reason(&policy.engine_id))
             }
             _ => None,
@@ -439,15 +428,11 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) {
         let catalog = self.served_catalog(cx);
-        let Ok(raw) = catalog.selection_policy_for_model(model_id) else {
+        let Ok(policy) = catalog.selection_policy_for_model(model_id) else {
             return;
         };
-        if raw.engine_id != engine_id {
+        if policy.engine_id != engine_id {
             return;
-        }
-        let policy = crate::composer_model_config::with_default_native_profile(&raw);
-        if catalog.admit_policy(&policy).is_err() {
-            self.composer_model_run_error = Some(self.readiness_block_reason(&policy.engine_id));
         }
         self.handle_composer_model_event(
             &crate::native_model_selector::NativeModelSelectorEvent::SelectPolicy(policy),
@@ -471,25 +456,9 @@ impl NativeApplication {
         let Some(policy) = self.displayed_policy_for_engine(engine_id, cx) else {
             return;
         };
-        let catalog = self.served_catalog(cx);
-        let Ok(config) = crate::composer_model_config::config_for_policy(
-            &catalog,
-            &policy,
-            self.engine_settings.authoritative_config(),
-        ) else {
-            self.composer_model_run_error = Some(self.readiness_block_reason(&policy.engine_id));
-            self.sync_composer_controls(cx);
-            return;
-        };
-        if Some(&config) == self.engine_settings.authoritative_config() {
-            return;
-        }
-        if !self.submit_direct_save(thread_id, config) {
-            self.composer_model_run_error = Some(
-                "Engine settings could not be saved. Your draft is preserved; retry the model selection."
-                    .to_owned(),
-            );
-        }
+        // The Forge resolves the choice; its answer is saved or its refusal
+        // shown (`receive_selection_resolution`).
+        self.request_selection_resolution(thread_id, &policy);
         self.sync_composer_model_policy(cx);
         cx.notify();
     }

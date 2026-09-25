@@ -2,8 +2,9 @@
 //!
 //! The Editor never sends a message body. Send makes sure the Forge has
 //! stored the composer's current body, then names the revision it was given
-//! (`SubmitComposerDraft`); the Forge queues exactly that draft once and
-//! empties it. Repeating a send whose answer was lost names the same
+//! (`SubmitComposerDraft`) with the model the composer shows; the Forge
+//! admits the send (or refuses it as data), queues exactly that draft once,
+//! and empties it. Repeating a send whose answer was lost names the same
 //! revision, so the Forge answers the message it already queued instead of
 //! queueing another. The request id only correlates the answer.
 
@@ -49,7 +50,7 @@ impl NativeApplication {
             request_id: flight.request_id.clone(),
             thread_id: flight.thread_id.clone(),
             draft_revision,
-            steer_target: self.observed_steer_target(),
+            selection: self.displayed_selection(cx),
         };
         let sent = self.submit_command(NativeTransportCommand::SubmitComposerDraft(Box::new(
             command,

@@ -96,10 +96,15 @@ pub(crate) async fn read_composer_catalog(
     request_id: &RequestId,
     query: &ReadComposerCatalog,
 ) -> Result<ServerResponse, ProtocolFailure> {
-    let catalog = current_catalog(service, repository, query.thread_id(), query.profile_id())
-        .await
-        .map_err(|error| protocol_failure(error, request_id))?;
-    let catalog = crate::account_readiness::catalog_with_account_readiness(catalog, usage);
+    let catalog = served_catalog(
+        service,
+        usage,
+        repository,
+        query.thread_id(),
+        query.profile_id(),
+    )
+    .await
+    .map_err(|error| protocol_failure(error, request_id))?;
     let result = catalog_response(
         query.thread_id().clone(),
         query.profile_id().clone(),
@@ -109,6 +114,21 @@ pub(crate) async fn read_composer_catalog(
     Ok(outcome(
         request_id,
         ResponsePayload::ComposerCatalog(result),
+    ))
+}
+
+/// The thread-scoped catalog as the Forge serves it: discovery merged with
+/// durable favorites, with the Forge's account readiness applied.
+pub(crate) async fn served_catalog(
+    service: Option<&ComposerCatalogService>,
+    usage: Option<&AccountUsageService>,
+    repository: &Repository,
+    thread: &ThreadId,
+    profile: &EngineProfileId,
+) -> Result<artisan_catalog::NativeModelCatalog, ComposerCatalogHandlerError> {
+    let catalog = current_catalog(service, repository, thread, profile).await?;
+    Ok(crate::account_readiness::catalog_with_account_readiness(
+        catalog, usage,
     ))
 }
 

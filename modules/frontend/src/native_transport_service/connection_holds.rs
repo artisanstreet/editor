@@ -285,7 +285,10 @@ impl NativeTransportCommand {
             | Self::ComposerDraft(
                 ComposerDraftCommand::Read(_) | ComposerDraftCommand::ReadAttachment { .. },
             )
-            | Self::ForgeDecision(ForgeDecisionCommand::ReadHostCatalog)
+            | Self::ForgeDecision(
+                ForgeDecisionCommand::ReadHostCatalog
+                | ForgeDecisionCommand::ResolveModelSelection(_),
+            )
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)
             | Self::ReadSidebarThreads { .. }

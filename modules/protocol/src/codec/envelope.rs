@@ -254,7 +254,7 @@ pub(crate) fn encode_request(
         ) => {
             encode_message_submission_request(builder, value)?;
         }
-        ClientRequest::Query(Query::ReadHostCatalog(_)) => {
+        ClientRequest::Query(Query::ReadHostCatalog(_) | Query::ResolveModelSelection(_)) => {
             encode_forge_decision_request(builder, value)?;
         }
         ClientRequest::ResolveRichLink(request) => {
@@ -336,7 +336,9 @@ pub(crate) fn encode_response_payload(
         | ResponsePayload::ComposerDraftSubmitted(_) => {
             encode_message_submission_response(builder, payload, outer_request_id)?;
         }
-        ResponsePayload::HostCatalog(_) => encode_forge_decision_response(builder, payload)?,
+        ResponsePayload::HostCatalog(_) | ResponsePayload::ModelSelectionResolved(_) => {
+            encode_forge_decision_response(builder, payload)?;
+        }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
         }
@@ -495,12 +497,7 @@ pub(crate) fn encode_response_payload(
             )?;
         }
         ResponsePayload::RichLink(result) => {
-            result.validate()?;
-            let mut encoded = builder.reborrow().init_rich_link();
-            encoded.set_requested_url(&result.requested_url);
-            encoded.set_page_name(&result.page_name);
-            encoded.set_favicon(&result.favicon);
-            encoded.set_cache_expires_at_ms(result.cache_expires_at_ms);
+            encode_rich_link_page_metadata(builder.reborrow().init_rich_link(), result)?;
         }
         ResponsePayload::ProjectRepository(result) => {
             encode_project_repository_query_result(
@@ -796,7 +793,9 @@ pub(crate) fn decode_request(
         | request::Which::SubmitComposerDraft(_) => {
             decode_message_submission_request(value, request_id)
         }
-        request::Which::ReadHostCatalog(()) => decode_forge_decision_request(value),
+        request::Which::ReadHostCatalog(()) | request::Which::ResolveModelSelection(_) => {
+            decode_forge_decision_request(value)
+        }
     }
 }
 
@@ -946,7 +945,9 @@ pub(crate) fn decode_response(
         | response::Which::ComposerDraftSubmitted(_) => {
             decode_message_submission_response(value, &request_id)?
         }
-        response::Which::HostCatalog(_) => decode_forge_decision_response(value)?,
+        response::Which::HostCatalog(_) | response::Which::ModelSelectionResolved(_) => {
+            decode_forge_decision_response(value)?
+        }
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?
         }

@@ -4,12 +4,14 @@
 //! draft.
 
 use artisan_domain::{
-    AuthoredText, Command, ComposerDraftRevision, ComposerDraftSubmitted, DispatchError,
-    DraftSubmissionOutcome, EngineId, Event, FailedMessageListing, FailedMessageRecovered,
-    FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageSummary, FailedMessageTarget,
-    MessageId, MessageOutbox, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageState,
+    AuthoredText, CatalogOptionId, CatalogSelection, Command, ComposerDraftRevision,
+    ComposerDraftSubmitted, DispatchError, DraftSubmissionOutcome, EngineConfigRevision, EngineId,
+    EngineProfileId, Event, FailedMessageListing, FailedMessageRecovered, FailedMessageRetried,
+    FailedMessageRetryOutcome, FailedMessageSummary, FailedMessageTarget, MessageId, MessageOutbox,
+    ModelFavoriteId, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageState,
     QueuedMessageSummary, ReceiptDisposition, RecoverFailedMessage, RequestId, RetryFailedMessage,
-    RunId, SteerTarget, SubmitComposerDraft, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
+    SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft, ThreadId, UnixMillis,
+    WithdrawQueuedMessageCommand,
 };
 use artisan_protocol::{
     ClientRequest, EventCursor, FrameId, ProtocolVersion, ResponsePayload, ServerEvent,
@@ -236,17 +238,22 @@ fn edit_withdrawal_recalls_into_the_draft_on_the_wire() {
 }
 
 #[test]
-fn draft_submission_names_only_the_thread_and_revision() {
-    for steer_target in [
-        None,
-        Some(SteerTarget::new(RunId::parse("live-run").unwrap())),
-    ] {
+fn draft_submission_names_the_revision_and_the_users_selection() {
+    let selection = CatalogSelection {
+        model_id: ModelFavoriteId::parse("codex-sol").unwrap(),
+        profile_id: Some(EngineProfileId::parse("default").unwrap()),
+        reasoning_effort: Some(CatalogOptionId::parse("low").unwrap()),
+        speed: None,
+        context_window: Some(CatalogOptionId::parse("standard").unwrap()),
+        permission: Some(CatalogOptionId::parse("autonomous").unwrap()),
+    };
+    for selection in [None, Some(selection)] {
         round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
             Command::SubmitComposerDraft(SubmitComposerDraft {
                 request_id: request_id(),
                 thread_id: thread(),
                 draft_revision: ComposerDraftRevision::new(4).unwrap(),
-                steer_target,
+                selection,
             }),
         )));
     }
@@ -271,7 +278,22 @@ fn draft_submission_answers_round_trip_and_correlate() {
                 message_id: MessageId::parse("queued-message").unwrap(),
                 disposition,
                 cleared_revision: ComposerDraftRevision::new(5).unwrap(),
+                engine_config_revision: EngineConfigRevision::new(3).unwrap(),
             },
+        ));
+    }
+    for kind in [
+        SubmissionRefusalKind::InvalidSelection,
+        SubmissionRefusalKind::NoSelection,
+        SubmissionRefusalKind::EngineNotReady,
+        SubmissionRefusalKind::RunStarting,
+        SubmissionRefusalKind::AttachmentRejected,
+    ] {
+        round_trip(answer(
+            request_id(),
+            DraftSubmissionOutcome::Refused(
+                SubmissionRefusal::new(kind, "Codex account sign-in is required.").unwrap(),
+            ),
         ));
     }
     for current_revision in [None, Some(ComposerDraftRevision::new(9).unwrap())] {

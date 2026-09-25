@@ -174,6 +174,13 @@ pub use run_interaction::{
 
 pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;
 
+pub mod catalog_selection;
+pub use catalog_selection::{
+    CATALOG_OPTION_ID_MAX_BYTES, CatalogOptionId, CatalogSelection, CatalogSelectionError,
+    ModelSelectionResolution, ResolveModelSelection, SUBMISSION_REFUSAL_MESSAGE_MAX_BYTES,
+    SubmissionRefusal, SubmissionRefusalKind,
+};
+
 pub mod composer_catalog;
 pub use composer_catalog::{
     CATALOG_REVISION_MAX_BYTES, CatalogRevision, CatalogRevisionError, ReadComposerCatalog,

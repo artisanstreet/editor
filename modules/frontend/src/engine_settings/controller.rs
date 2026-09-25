@@ -372,6 +372,22 @@ impl EngineSettingsController {
         }
     }
 
+    /// Re-arms the authoritative settings read after the Forge reported a
+    /// configuration revision this controller does not hold (a send saved
+    /// the selection it carried). Returns whether a read is now needed; a
+    /// pending save settles through its own acknowledgement or conflict.
+    pub fn on_revision_moved(&mut self, revision: EngineConfigRevision) -> bool {
+        if self.selected_thread.is_none()
+            || self.pending_save.is_some()
+            || self.active_settings_generation.is_some()
+            || self.authoritative_revision == Some(revision)
+        {
+            return false;
+        }
+        self.settings_load.needed = true;
+        true
+    }
+
     /// Handles a successful registry result, preserving it for the application lifetime.
     pub fn on_registry_loaded(&mut self, result: RegisteredEngineProfilesResult) {
         self.registry = Some(result);
@@ -704,7 +720,7 @@ impl EngineSettingsController {
     /// engine configuration, bypassing the `OpenCode` 2-shaped draft.
     ///
     /// Caller must supply a fresh `RequestId` minted for this save and a
-    /// configuration built by [`crate::composer_model_config::config_for_policy`].
+    /// configuration the Forge resolved from the displayed selection.
     /// The compare-and-swap precondition is shared with
     /// [`Self::build_save_command`]: `Unconfigured` while no authoritative
     /// revision exists (first send), otherwise `Exact` on the authoritative

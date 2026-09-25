@@ -349,8 +349,12 @@ struct FailedMessageRecovered {
 struct SubmitComposerDraftRequest {
   threadId @0 :Text;
   draftRevision @1 :UInt64;
-  # Empty means a fresh send; otherwise the observed live run to steer into.
+  # Retired: the Forge decides whether a send steers the thread's live run.
+  # Always empty; a nonempty value is rejected.
   steerRunId @2 :Text;
+  # The model the user selected for this send; a null pointer sends with the
+  # thread's saved configuration. The Forge resolves, saves, and admits it.
+  selection @3 :CatalogSelection;
 }
 
 # The draft is the queued message messageId; the draft is empty at
@@ -359,6 +363,8 @@ struct DraftSubmissionQueued {
   messageId @0 :Text;
   disposition @1 :ReceiptDisposition;
   clearedRevision @2 :UInt64;
+  # The thread's engine configuration revision after admission.
+  engineConfigRevision @3 :UInt64;
 }
 
 # requestId must equal the parent Response.requestId.
@@ -371,5 +377,37 @@ struct ComposerDraftSubmitted {
     # The stored draft is at another revision; nothing was queued. Zero
     # means the thread has no draft.
     stale @4 :UInt64;
+    # The Forge refused the send; nothing was queued.
+    refused @5 :SubmissionRefusal;
   }
+}
+
+# ---------------------------------------------------------------------------
+# Stateless Editor step 6: the user's model selection as catalog identities
+# and the Forge's typed refusals. Appended so existing node identities stay
+# stable.
+# ---------------------------------------------------------------------------
+
+# A model selection named by catalog identities. Empty text means absent.
+struct CatalogSelection {
+  modelId @0 :Text;
+  profileId @1 :Text;
+  reasoningEffort @2 :Text;
+  speed @3 :Text;
+  contextWindow @4 :Text;
+  permission @5 :Text;
+}
+
+enum SubmissionRefusalKind {
+  invalidSelection @0;
+  noSelection @1;
+  engineNotReady @2;
+  runStarting @3;
+  attachmentRejected @4;
+}
+
+# A typed refusal; message is presentation-ready, at most 1024 UTF-8 bytes.
+struct SubmissionRefusal {
+  kind @0 :SubmissionRefusalKind;
+  message @1 :Text;
 }

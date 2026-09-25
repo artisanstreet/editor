@@ -447,7 +447,7 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
         request_id: request(request_id),
         thread_id: thread(),
         draft_revision,
-        steer_target: None,
+        selection: None,
     };
     let mut answers = Vec::new();
     // The first answer is lost; the Editor sends the same revision again
@@ -469,6 +469,7 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
             message_id: first,
             disposition: ReceiptDisposition::Accepted,
             cleared_revision,
+            ..
         },
         DraftSubmissionOutcome::Queued {
             message_id: second,
@@ -506,5 +507,85 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
         DraftSubmissionOutcome::Stale {
             current_revision: Some(*cleared_revision)
         }
+    );
+}
+
+#[tokio::test]
+async fn a_send_without_a_model_on_an_unconfigured_thread_is_refused_as_data() {
+    let (_temporary, storage) = storage("refused").await;
+    let repository = storage.repository();
+    seed(repository).await;
+    let unconfigured = ThreadId::parse("thread-unconfigured").unwrap();
+    repository
+        .create_thread(CreateThreadInput {
+            request_id: request("create-unconfigured"),
+            thread_id: unconfigured.clone(),
+            project_id: ProjectId::parse("project-failed").unwrap(),
+            title: ThreadTitle::parse("New thread").unwrap(),
+            created_at: UnixMillis::from_millis(600),
+            updated_at: UnixMillis::from_millis(600),
+        })
+        .await
+        .unwrap();
+    let handler = handler(&storage);
+    let save = SaveComposerDraft::new(
+        request("save-unconfigured"),
+        ComposerDraftScope::Thread(unconfigured.clone()),
+        AuthoredText::parse("which model?").unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let ResponsePayload::ComposerDraftSaved(saved) = handler
+        .save_composer_draft(save.request_id(), &save)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a save answer");
+    };
+    let submit = SubmitComposerDraft {
+        request_id: request("submit-unconfigured"),
+        thread_id: unconfigured.clone(),
+        draft_revision: saved.revision,
+        selection: None,
+    };
+    let ResponsePayload::ComposerDraftSubmitted(answer) = handler
+        .submit_composer_draft_outcome(&submit.request_id, &submit)
+        .await
+        .unwrap()
+        .payload
+    else {
+        panic!("expected a submission answer");
+    };
+    let DraftSubmissionOutcome::Refused(refusal) = answer.outcome else {
+        panic!("the send is refused as data, got {:?}", answer.outcome);
+    };
+    assert_eq!(
+        refusal.kind(),
+        artisan_domain::SubmissionRefusalKind::NoSelection
+    );
+    assert_eq!(
+        refusal.message(),
+        "Select a model before sending. Your draft is preserved."
+    );
+    // Nothing was queued and the draft is untouched, so the same revision
+    // can be sent again once a model is chosen.
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(
+                unconfigured.clone(),
+                QueuedMessageListOrder::OldestFirst,
+                32,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(queued.messages().is_empty());
+    assert!(
+        !repository
+            .composer_draft_submitted(&unconfigured, saved.revision)
+            .await
+            .unwrap()
     );
 }

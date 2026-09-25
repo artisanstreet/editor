@@ -184,7 +184,7 @@ pub mod native_model_catalog;
 pub mod native_model_selector;
 pub mod native_profile_usage;
 
-mod composer_model_config;
+mod picker_selection;
 
 pub mod native_transport;
 

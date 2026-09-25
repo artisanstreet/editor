@@ -1256,6 +1256,9 @@ mod draft_submission;
 #[path = "request_handler/engine_config.rs"]
 mod engine_config;
 
+#[path = "request_handler/model_selection.rs"]
+mod model_selection;
+
 #[path = "request_handler/attach_project.rs"]
 mod attach_project;
 

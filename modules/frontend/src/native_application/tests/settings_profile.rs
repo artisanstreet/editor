@@ -109,6 +109,8 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
     cx.run_until_parked();
     cx.update(|_, app| {
         view.update(app, |application, cx| {
+            // The Forge resolves the choice; its configuration is saved.
+            answer_resolution(application, cx, forge_codex_config(None));
             let save_request = admitted_save_request(application);
             let retained = application
                 .engine_settings

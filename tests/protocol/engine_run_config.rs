@@ -1237,3 +1237,54 @@ fn v2_frames_reject_unknown_mismatched_and_invalid_selections() {
         Err(ProtocolDecodeError::EngineConfig { .. })
     ));
 }
+
+fn catalog_selection() -> artisan_domain::CatalogSelection {
+    artisan_domain::CatalogSelection {
+        model_id: artisan_domain::ModelFavoriteId::parse("codex-sol").expect("model"),
+        profile_id: None,
+        reasoning_effort: Some(artisan_domain::CatalogOptionId::parse("low").expect("effort")),
+        speed: None,
+        context_window: None,
+        permission: Some(artisan_domain::CatalogOptionId::parse("autonomous").expect("permission")),
+    }
+}
+
+#[test]
+fn selection_resolution_round_trips_a_configuration_or_a_refusal() -> Result<(), Box<dyn Error>> {
+    let thread_id = ThreadId::parse("thread-resolution")?;
+    let query = WireEnvelope {
+        protocol_version: artisan_protocol::ProtocolVersion::V1,
+        frame_id: FrameId::parse("resolve-selection")?,
+        sent_at: UnixMillis::from_millis(7),
+        body: WireEnvelopeBody::Request(ProtocolClientRequest::Query(
+            artisan_domain::Query::ResolveModelSelection(artisan_domain::ResolveModelSelection {
+                thread_id: thread_id.clone(),
+                selection: catalog_selection(),
+            }),
+        )),
+    };
+    assert!(decode_envelope(&encode_envelope(&query)?)? == query);
+    let refusal = artisan_domain::SubmissionRefusal::new(
+        artisan_domain::SubmissionRefusalKind::InvalidSelection,
+        "This model is not in the host model catalog. Your draft is preserved; choose the model again or pick another.",
+    )?;
+    for outcome in [Ok(config(true)), Err(refusal)] {
+        let answer = WireEnvelope {
+            protocol_version: artisan_protocol::ProtocolVersion::V1,
+            frame_id: FrameId::parse("selection-resolved")?,
+            sent_at: UnixMillis::from_millis(8),
+            body: WireEnvelopeBody::Response(ServerResponse {
+                request_id: RequestId::parse("resolve-selection")?,
+                payload: ResponsePayload::ModelSelectionResolved(
+                    artisan_domain::ModelSelectionResolution {
+                        thread_id: thread_id.clone(),
+                        selection: catalog_selection(),
+                        outcome,
+                    },
+                ),
+            }),
+        };
+        assert!(decode_envelope(&encode_envelope(&answer)?)? == answer);
+    }
+    Ok(())
+}
