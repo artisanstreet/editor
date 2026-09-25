@@ -54,10 +54,10 @@ pkgs.writeShellApplication {
     }
     # Flakes see tracked files only; a new source file that is not yet
     # tracked would silently be missing from the build.
-    untracked="$(git -C "$checkout" ls-files --others --exclude-standard -- '*.rs' '*.toml' '*.nix' | head -5)"
+    untracked="$(git -C "$checkout" ls-files --others --exclude-standard -- '*.rs' '*.toml' '*.nix' | head -5 | sed 's/^/  /')"
     if [ -n "$untracked" ]; then
       echo "artisan-dev: these files are untracked, so Nix cannot see them:" >&2
-      echo "$untracked" | sed 's/^/  /' >&2
+      echo "$untracked" >&2
       echo "artisan-dev: track them with 'git add -N <path>' and rerun" >&2
       exit 2
     fi
