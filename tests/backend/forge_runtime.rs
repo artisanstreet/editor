@@ -21,7 +21,7 @@ use std::{
 
 use artisan_backend::{
     CommandOriginClockError, ForgeApp, ForgeConfig, ForgeLaunchConfigInput, ForgeProcessCustody,
-    ListenerLimits, NativeRunDispatcherConfig, NativeRunDispatcherConfigInput,
+    ListenerError, ListenerLimits, NativeRunDispatcherConfig, NativeRunDispatcherConfigInput,
     conversation_commit_notifier::ConversationCommitNotifier,
     forge_runtime::{self, ForgeConfigError, ForgeLaunchConfig, ForgeRuntimeError},
     startup_reconciliation_sweep::StartupReconciliationSweepError,
@@ -1666,6 +1666,8 @@ fn accepted_service_failure_maps_to_72_and_keeps_listener_error() {
         runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, connection.closed()).await });
     let _ = runtime.block_on(async { tokio::time::timeout(FUTURE_WAIT, client.wait_idle()).await });
 
+    // The failed connection alone is closed; with its single lifetime
+    // admission consumed, the loop then ends on terminal exhaustion.
     let error = join_within(
         worker
             .take()
@@ -1678,11 +1680,18 @@ fn accepted_service_failure_maps_to_72_and_keeps_listener_error() {
         ForgeRuntimeError::Service(listener_error) => {
             assert!(listener_error.is_service_failure());
             assert!(listener_error.service_cause().is_some());
-            assert!(listener_error.as_request_error().is_some());
+            assert!(matches!(
+                listener_error.as_listener_error(),
+                Some(ListenerError::AdmissionCapacityExhausted)
+            ));
             assert!(listener_error.drain_error().is_none());
         }
         other => panic!("expected the complete accepted service error, got {other:?}"),
     }
+    assert_eq!(
+        artisan_backend::error_chain::ErrorChain(&error).to_string(),
+        "Forge service failed: forge listener service failure: admission capacity was exhausted"
+    );
 }
 
 #[test]

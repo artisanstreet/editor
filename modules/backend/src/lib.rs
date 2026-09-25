@@ -25,6 +25,7 @@ pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
 pub mod engine_owner;
+pub mod error_chain;
 pub mod file_identity_policy;
 pub mod forge_runtime;
 pub mod git_remote_url_policy;
@@ -129,7 +130,7 @@ pub fn run() -> ExitCode {
     let config = match forge_runtime::parse_args(std::env::args_os().skip(1), Arc::clone(&cancel)) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("{}", error_chain::ErrorChain(&error));
             return ExitCode::from(forge_runtime::EXIT_CODE_CONFIGURATION);
         }
     };
@@ -138,7 +139,15 @@ pub fn run() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!("{}", error_chain::ErrorChain(&error));
+            // The source chain follows only the primary failure; every
+            // retained cleanup failure is reported on its own line.
+            for failure in error.cleanup_failures() {
+                eprintln!(
+                    "Forge cleanup failure: {}",
+                    error_chain::ErrorChain(failure)
+                );
+            }
             ExitCode::from(error.exit_code())
         }
     }

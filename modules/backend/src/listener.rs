@@ -39,15 +39,18 @@
 //! second runtime. Cancellation is checked before each admission: on
 //! cancellation the owned endpoint is closed and awaited via [`Self::drain`].
 //! An idle [`OperationKind::Connect`] timeout is nonterminal and continues
-//! with the same endpoint without consuming admission capacity. A
-//! connection-local authentication failure after the accepted guard closes the
-//! peer is nonterminal. After a ready connection ends, only the exact native
-//! client idle application close observed while accepting the next request is
-//! nonterminal; every other pre-ready exhaustion, metadata, and non-timeout
-//! admission failure, plus every other request-stage failure, is terminal
-//! service failure. A terminal primary remains classified as a service
-//! failure even when the best-effort drain also fails; both typed causes are
-//! preserved.
+//! with the same endpoint without consuming admission capacity. An
+//! authentication failure or handshake timeout that leaves the credential
+//! authority still expecting a credential (for example a peer that never sends
+//! Hello) closes only that peer, as does a peer's failed QUIC/TLS
+//! establishment. After a
+//! ready connection ends, its request-stage failure is nonterminal: that
+//! connection alone is failed and closed. Only an unrepresentable request
+//! limit or a closed process-wide commit notifier is terminal there. Every
+//! other pre-ready exhaustion, metadata, endpoint-closed admission, and
+//! non-retryable authentication failure is terminal service failure. A
+//! terminal primary remains classified as a service failure even when the
+//! best-effort drain also fails; both typed causes are preserved.
 //!
 //! [`Drop`] remains the synchronous local-close proof; [`Self::drain`] is the
 //! awaited idle proof.
@@ -74,10 +77,11 @@ use thiserror::Error;
 
 use crate::command_admission::{CommandOrigin, CommandOriginClockError, CommandOriginEntropyError};
 use crate::connection::{
-    AuthenticationStageError, ConnectionLimits, ForgeConnection, RequestStageError,
-    ServerFrameStamp, WelcomeMetadata, is_orderly_peer_disconnect,
+    AuthenticationStageError, ConnectionLimits, DeliveryStageError, ForgeConnection,
+    RequestStageError, ServerFrameStamp, WelcomeMetadata, is_orderly_peer_disconnect,
 };
-use crate::credential_authority::{CredentialAuthenticationError, CredentialAuthority};
+use crate::credential_authority::CredentialAuthority;
+use crate::error_chain::ErrorChain;
 use crate::lifecycle_control::LifecycleController;
 use crate::request_handler::RequestHandler;
 
@@ -176,9 +180,10 @@ pub enum ListenerError {
         source: MetadataError,
     },
 
-    /// Any authentication failure after admission. Conservatively terminal:
-    /// the authority state is never probed, reused, or rolled back, and
-    /// returning this error drops the listener.
+    /// Any authentication failure after admission. Returning this error
+    /// drops the listener; the long-lived loop retries only failures that
+    /// left the authority still expecting a credential, and never rolls the
+    /// authority back.
     #[error("authenticating the accepted connection failed")]
     Authentication {
         /// Typed handshake-stage failure preserved verbatim.
@@ -280,7 +285,8 @@ pub enum ServiceCause {
     #[error(transparent)]
     Listener(#[from] ListenerError),
 
-    /// A non-cancellation request-stage failure that is terminal.
+    /// A process-wide request-stage failure (unrepresentable request limit or
+    /// closed commit notifier); connection-local ones never end the loop.
     #[error(transparent)]
     Request(#[from] DeadlineError<RequestStageError>),
 }
@@ -480,18 +486,19 @@ impl ForgeListener {
     /// on cancellation the owned endpoint is closed and drained. An idle
     /// [`OperationKind::Connect`] timeout with no peer is nonterminal and
     /// continues with the same endpoint without consuming admission capacity.
-    /// Authentication recoverability is fenced exactly: only
-    /// `DeadlineError::Peer` containing `Accept` or `Handshake`, or
-    /// `Credential(FamilyMismatch|Rejected)`, is retryable; every other
-    /// authentication failure — `AwaitingRotation`, timeout, invalid limit,
-    /// entropy, rotation, finish, and all other variants — is a terminal
-    /// service failure because mutation may have occurred or recoverability is
-    /// unproven. Admission-capacity exhaustion, local metadata/origin failure,
-    /// non-timeout admission transport failure, and non-cancellation
-    /// request-stage failure other than the exact native idle disconnect are
-    /// terminal service failures; a terminal primary remains a service failure
-    /// even when the best-effort drain also fails. Cancellation with a drain
-    /// failure is the cleanup-only error.
+    /// Authentication recoverability is fenced by the authority's own state:
+    /// a peer failure or handshake timeout while the authority still expects
+    /// a credential (nothing consumed, e.g. no Hello ever arrived) fails that
+    /// connection only; once a credential was consumed with its rotation
+    /// pending, and for an invalid limit, it is a terminal service failure.
+    /// A peer's failed QUIC/TLS establishment and every
+    /// non-cancellation request-stage failure of a ready connection fail that
+    /// connection only, except an unrepresentable request limit or a closed
+    /// process-wide commit notifier. Admission-capacity exhaustion, local
+    /// metadata/origin failure, a closed endpoint, and those two process-wide
+    /// request failures are terminal service failures; a terminal primary
+    /// remains a service failure even when the best-effort drain also fails.
+    /// Cancellation with a drain failure is the cleanup-only error.
     ///
     /// Preserves lifetime admission counting and per-connection request
     /// capacity exactly; idle timeouts neither consume nor refund an
@@ -529,20 +536,24 @@ impl ForgeListener {
                                 Err(drain) => Err(ServeUntilCancelError::drain(drain)),
                             };
                         }
-                        if is_orderly_peer_disconnect(&source) {
-                            // `serve_attempt` has already run the connection
-                            // failure cleanup before returning this report:
-                            // delivery subscriptions are cleared, unfinished
-                            // output is reset, and the owned connection drops.
-                            // The listener's lifetime admission remains
-                            // consumed; only endpoint custody continues.
-                            continue;
+                        if is_request_failure_process_wide(&source) {
+                            let cause = ServiceCause::Request(source);
+                            return match listener.drain().await {
+                                Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
+                                Err(drain) => {
+                                    Err(ServeUntilCancelError::service(cause, Some(drain)))
+                                }
+                            };
                         }
-                        let cause = ServiceCause::Request(source);
-                        return match listener.drain().await {
-                            Ok(()) => Err(ServeUntilCancelError::service(cause, None)),
-                            Err(drain) => Err(ServeUntilCancelError::service(cause, Some(drain))),
-                        };
+                        // `serve_attempt` has already run the connection
+                        // failure cleanup before returning this report:
+                        // delivery subscriptions are cleared, unfinished
+                        // output is reset, and the owned connection drops.
+                        // The listener's lifetime admission remains
+                        // consumed; only endpoint custody continues.
+                        if !is_orderly_peer_disconnect(&source) {
+                            eprintln!("Forge connection failed: {}", ErrorChain(&source));
+                        }
                     }
                 },
                 Err(error) => {
@@ -577,8 +588,25 @@ impl ForgeListener {
                     }
 
                     if let ListenerError::Authentication { source } = &error
-                        && is_authentication_retryable(source)
+                        && is_authentication_retryable(
+                            source,
+                            listener.authority.expects_credential(),
+                        )
                     {
+                        continue;
+                    }
+
+                    // A peer that fails its own QUIC/TLS establishment never
+                    // consumed admission capacity or touched the authority.
+                    if let ListenerError::Admission {
+                        source:
+                            DeadlineError::Peer {
+                                error: AdmissionCause::Tls { .. },
+                                ..
+                            },
+                    } = &error
+                    {
+                        eprintln!("Forge connection failed: {}", ErrorChain(&error));
                         continue;
                     }
 
@@ -716,30 +744,45 @@ impl Drop for ForgeListener {
     }
 }
 
-/// Returns whether an authentication `DeadlineError` is retryable without
-/// risking a fail-closed `CredentialAuthority`.
+/// Returns whether an authentication `DeadlineError` fails only its own
+/// connection without risking a fail-closed `CredentialAuthority`.
 ///
-/// Only `Peer` containing `Accept`, `Handshake`, or
-/// `Credential(FamilyMismatch|Rejected)` is retryable per the
-/// `ForgeConnection::authenticate` contract; every other variant — including
-/// `AwaitingRotation`, timeout, invalid limit, entropy, rotation, finish, and
-/// all other failures — may have consumed the credential and left rotation
-/// pending, so it is terminal.
-fn is_authentication_retryable(source: &DeadlineError<AuthenticationStageError>) -> bool {
-    match source {
-        DeadlineError::Peer { error, .. } => match error {
-            AuthenticationStageError::Accept { .. } | AuthenticationStageError::Handshake(_) => {
-                true
+/// The authentication stage is read from the authority itself rather than
+/// from the error: `credential_expected` is
+/// [`CredentialAuthority::expects_credential`] after the attempt. While it
+/// still expects a credential, nothing was consumed or reserved — the peer
+/// failed or stalled before `authenticate` matched a credential (no Hello,
+/// a malformed Hello, a wrong family or value), or after a committed
+/// rotation — so a `Peer` failure or `Timeout` is connection-local. Once a
+/// credential was consumed and its rotation is pending, every failure is
+/// terminal. `InvalidLimit` would fail every attempt and is always terminal.
+fn is_authentication_retryable(
+    source: &DeadlineError<AuthenticationStageError>,
+    credential_expected: bool,
+) -> bool {
+    credential_expected
+        && matches!(
+            source,
+            DeadlineError::Timeout { .. } | DeadlineError::Peer { .. }
+        )
+}
+
+/// Returns whether a non-cancellation request-stage failure makes further
+/// service impossible rather than belonging to its one connection.
+///
+/// Only an unrepresentable request limit (it would fail every request) and a
+/// closed process-wide commit notifier (every delivery would fail) qualify.
+/// Peer disconnects, idle timeouts, request deadlines, malformed requests,
+/// and per-connection delivery failures end that connection only.
+fn is_request_failure_process_wide(source: &DeadlineError<RequestStageError>) -> bool {
+    matches!(
+        source,
+        DeadlineError::InvalidLimit { .. }
+            | DeadlineError::Peer {
+                error: RequestStageError::Delivery(DeliveryStageError::NotifierClosed),
+                ..
             }
-            AuthenticationStageError::Credential(inner) => matches!(
-                *inner,
-                CredentialAuthenticationError::FamilyMismatch { .. }
-                    | CredentialAuthenticationError::Rejected { .. }
-            ),
-            _ => false,
-        },
-        _ => false,
-    }
+    )
 }
 
 /// Applies exactly the three approved pending-peer bounds to the supplied
@@ -835,8 +878,16 @@ fn welcome_metadata(origin: &dyn CommandOrigin) -> Result<WelcomeMetadata, Metad
 #[cfg(test)]
 mod auth_retry_tests {
     use super::*;
-    use artisan_transport::{DeadlineError, OperationKind};
+    use crate::credential_authority::{
+        CredentialAuthenticationError, CredentialKind, ReconnectRotationError,
+    };
+    use artisan_transport::{DeadlineError, HandshakeError, HandshakeMessageKind, OperationKind};
     use quinn::ConnectionError;
+
+    /// The authority still expects a credential: nothing was consumed.
+    const EXPECTED: bool = true;
+    /// A credential was consumed and its rotation is pending.
+    const CONSUMED: bool = false;
 
     fn peer_error(error: AuthenticationStageError) -> DeadlineError<AuthenticationStageError> {
         DeadlineError::Peer {
@@ -845,80 +896,72 @@ mod auth_retry_tests {
         }
     }
 
-    #[test]
-    fn accept_and_handshake_are_retryable() {
-        let accept: DeadlineError<AuthenticationStageError> =
-            peer_error(AuthenticationStageError::Accept {
-                source: ConnectionError::VersionMismatch,
-            });
-        assert!(is_authentication_retryable(&accept));
-
-        let handshake: DeadlineError<AuthenticationStageError> =
-            peer_error(AuthenticationStageError::Handshake(
-                artisan_transport::HandshakeError::UnexpectedMessage {
-                    expected: artisan_transport::HandshakeMessageKind::Hello,
-                    received: artisan_transport::HandshakeMessageKind::Welcome,
-                },
-            ));
-        assert!(is_authentication_retryable(&handshake));
-    }
-
-    #[test]
-    fn family_mismatch_and_rejected_are_retryable() {
-        let family = peer_error(AuthenticationStageError::Credential(
-            CredentialAuthenticationError::FamilyMismatch {
-                expected: crate::credential_authority::CredentialKind::Initial,
-                presented: crate::credential_authority::CredentialKind::Reconnect,
-            },
-        ));
-        assert!(is_authentication_retryable(&family));
-
-        let rejected = peer_error(AuthenticationStageError::Credential(
-            CredentialAuthenticationError::Rejected {
-                kind: crate::credential_authority::CredentialKind::Initial,
-            },
-        ));
-        assert!(is_authentication_retryable(&rejected));
-    }
-
-    #[test]
-    fn awaiting_rotation_is_terminal() {
-        let awaiting = peer_error(AuthenticationStageError::Credential(
-            CredentialAuthenticationError::AwaitingRotation,
-        ));
-        assert!(!is_authentication_retryable(&awaiting));
-    }
-
-    #[test]
-    fn timeout_is_terminal() {
-        let timeout: DeadlineError<AuthenticationStageError> = DeadlineError::Timeout {
+    fn timeout() -> DeadlineError<AuthenticationStageError> {
+        DeadlineError::Timeout {
             operation: OperationKind::Handshake,
             limit: Duration::from_millis(10),
-        };
-        assert!(!is_authentication_retryable(&timeout));
+        }
+    }
+
+    fn unexpected_welcome() -> AuthenticationStageError {
+        AuthenticationStageError::Handshake(HandshakeError::UnexpectedMessage {
+            expected: HandshakeMessageKind::Hello,
+            received: HandshakeMessageKind::Welcome,
+        })
     }
 
     #[test]
-    fn invalid_limit_is_terminal() {
+    fn peer_failures_before_credential_consumption_are_retryable() {
+        let failures = [
+            AuthenticationStageError::Accept {
+                source: ConnectionError::VersionMismatch,
+            },
+            unexpected_welcome(),
+            AuthenticationStageError::Credential(CredentialAuthenticationError::FamilyMismatch {
+                expected: CredentialKind::Initial,
+                presented: CredentialKind::Reconnect,
+            }),
+            AuthenticationStageError::Credential(CredentialAuthenticationError::Rejected {
+                kind: CredentialKind::Initial,
+            }),
+        ];
+        for failure in failures {
+            assert!(is_authentication_retryable(&peer_error(failure), EXPECTED));
+        }
+    }
+
+    #[test]
+    fn peer_failures_after_credential_consumption_are_terminal() {
+        let failures = [
+            AuthenticationStageError::Credential(CredentialAuthenticationError::AwaitingRotation),
+            AuthenticationStageError::Rotation(ReconnectRotationError::AlreadyTaken),
+            unexpected_welcome(),
+        ];
+        for failure in failures {
+            assert!(!is_authentication_retryable(&peer_error(failure), CONSUMED));
+        }
+    }
+
+    #[test]
+    fn timeout_before_credential_consumption_is_retryable() {
+        assert!(is_authentication_retryable(&timeout(), EXPECTED));
+    }
+
+    #[test]
+    fn timeout_after_credential_consumption_is_terminal() {
+        assert!(!is_authentication_retryable(&timeout(), CONSUMED));
+    }
+
+    #[test]
+    fn invalid_limit_and_cancellation_are_never_retryable() {
         let invalid: DeadlineError<AuthenticationStageError> = DeadlineError::InvalidLimit {
             operation: OperationKind::Handshake,
         };
-        assert!(!is_authentication_retryable(&invalid));
-    }
-
-    #[test]
-    fn rotation_is_terminal() {
-        let rotation = peer_error(AuthenticationStageError::Rotation(
-            crate::credential_authority::ReconnectRotationError::AlreadyTaken,
-        ));
-        assert!(!is_authentication_retryable(&rotation));
-    }
-
-    #[test]
-    fn cancelled_is_not_retryable_via_helper() {
         let cancelled: DeadlineError<AuthenticationStageError> = DeadlineError::Cancelled {
             operation: OperationKind::Handshake,
         };
-        assert!(!is_authentication_retryable(&cancelled));
+        for source in [invalid, cancelled] {
+            assert!(!is_authentication_retryable(&source, EXPECTED));
+        }
     }
 }
