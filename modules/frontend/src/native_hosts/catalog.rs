@@ -1,4 +1,7 @@
 //! Public host summaries only. Credential custody and scanning stay on worker threads.
+//!
+//! The cache is a presentation memo for the machine menu, replaced wholesale
+//! from the credential store on every refresh; it never outlives the store.
 use super::*;
 use std::{
     collections::HashMap,
@@ -79,17 +82,19 @@ pub(crate) fn refresh(selected: Option<&Path>) {
             );
         }
     }
+    // A presentation memo of the credential store: the Editor holds exactly
+    // one connection, so no older invitation incarnation is retained beyond
+    // the connected host, which `selected` keeps in this refresh.
     let mut cache = catalog().write().unwrap();
     cache.entries = entries;
-    // Keep identities for retained sessions using older invitation incarnations.
-    cache.details.extend(details);
+    cache.details = details;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn cached_identity_survives_incarnation_changes_without_files() {
+    fn invitation_incarnations_of_one_identity_are_the_same_host() {
         let old = PathBuf::from("/test/catalog-old");
         let new = PathBuf::from("/test/catalog-new");
         {

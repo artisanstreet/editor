@@ -6,7 +6,7 @@ use artisan_domain::{
     PatchSequence, RequestId, ThreadId, UnixMillis,
 };
 use artisan_frontend::native_transport_service::{
-    CommandSendError, NativeTransportCommand, NativeTransportEvent, ServiceFailure,
+    CommandSendError, NativeTransportCommand, NativeTransportEvent, QueuedCommand, ServiceFailure,
     ServiceFailureCategory, ServiceFailureStage, SubscriptionCustody,
     SubscriptionFailureDisposition, SubscriptionRequestKind, subscription_failure_disposition,
     try_send_command, validate_started_correlation, validate_uni_envelope,
@@ -314,8 +314,8 @@ fn delivery_loss_reconnect_leaves_one_subscribe_to_the_mounted_host() {
     let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::channel(2);
     try_send_command(&recovery_tx, recovery_command.clone()).expect("one recovery subscribe");
     assert_eq!(
-        recovery_rx.try_recv().expect("recovery command"),
-        recovery_command
+        recovery_rx.try_recv().expect("recovery command").command(),
+        &recovery_command
     );
     assert!(matches!(
         recovery_rx.try_recv(),
@@ -493,7 +493,7 @@ async fn patch_reception_bounded_64_while_idle_via_production_channel() {
     let got = rx.recv().await.expect("recv");
     assert_eq!(got.thread_id(), b.thread_id());
     // Backpressure: fill to 64 then try_send should be busy via production helper
-    let (tx2, _rx2) = tokio::sync::mpsc::channel::<NativeTransportCommand>(64);
+    let (tx2, _rx2) = tokio::sync::mpsc::channel::<QueuedCommand>(64);
     for _ in 0..64 {
         try_send_command(&tx2, NativeTransportCommand::Shutdown).expect("fill");
     }
@@ -503,7 +503,7 @@ async fn patch_reception_bounded_64_while_idle_via_production_channel() {
 
 #[test]
 fn busy_stopped_nonblocking_via_production_helper() {
-    let (tx, rx) = tokio::sync::mpsc::channel::<NativeTransportCommand>(1);
+    let (tx, rx) = tokio::sync::mpsc::channel::<QueuedCommand>(1);
     try_send_command(&tx, NativeTransportCommand::Shutdown).expect("first");
     let err = try_send_command(&tx, NativeTransportCommand::Shutdown).unwrap_err();
     assert_eq!(err, CommandSendError::Busy);

@@ -609,50 +609,12 @@ pub enum NativeTransportEvent {
 /// One cloneable application-side handle to the native service.
 #[derive(Clone)]
 pub struct NativeTransportService {
-    commands: tokio::sync::mpsc::Sender<NativeTransportCommand>,
+    commands: tokio::sync::mpsc::Sender<QueuedCommand>,
     events: Arc<Mutex<Receiver<NativeTransportEvent>>>,
     finished: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
+    holds: Arc<ConnectionHolds>,
     join: Arc<Mutex<Option<JoinHandle<()>>>>,
-}
-
-/// One private retry plan for a project intake. Stable mutations retain their
-/// complete command identity; reads and the picker are intentionally retried
-/// with fresh frames.
-enum IntakeRetry {
-    Validate(String),
-    Pick,
-    Attach(StableMutation),
-    RefreshProjects {
-        attached: ProjectSummary,
-    },
-    Create(StableMutation),
-    RefreshThreads {
-        project_id: ProjectId,
-        created: ThreadSummary,
-    },
-}
-
-struct IntakeState {
-    selected_directory: Option<DirectoryId>,
-    projects: Option<ProjectListing>,
-    retry: Option<IntakeRetry>,
-}
-
-impl IntakeState {
-    fn new() -> Self {
-        Self {
-            selected_directory: None,
-            projects: None,
-            retry: None,
-        }
-    }
-
-    fn reset(&mut self) {
-        self.selected_directory = None;
-        self.projects = None;
-        self.retry = None;
-    }
 }
 
 struct ServiceRuntime {
@@ -696,6 +658,10 @@ pub(crate) use composer_state_operations::{ComposerStateCommand, ComposerStateEv
 
 #[path = "native_profile_usage_transport.rs"]
 mod profile_usage_operations;
+
+#[path = "native_transport_service/connection_holds.rs"]
+mod connection_holds;
+pub use connection_holds::{ConnectionHolds, Hold, HoldKind, HoldState, QueuedCommand};
 
 #[path = "native_transport_service/diagnostics.rs"]
 mod diagnostics;
@@ -772,9 +738,12 @@ mod project_intake;
 
 #[cfg(test)]
 use project_intake::{
-    attach_retry_allowed, contains_exact_project, contains_exact_thread, create_command_values,
+    IntakeRetry, attach_retry_allowed, contains_exact_project, contains_exact_thread,
+    create_command_values,
 };
-use project_intake::{begin_project_intake, create_task_in_project, retry_project_intake};
+use project_intake::{
+    IntakeState, begin_project_intake, create_task_in_project, retry_project_intake,
+};
 
 #[path = "native_transport_service/handlers.rs"]
 mod handlers;
@@ -793,3 +762,7 @@ use handlers::{
 #[cfg(test)]
 #[path = "native_transport_service/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_transport_service/command_loop_tests.rs"]
+mod command_loop_tests;
