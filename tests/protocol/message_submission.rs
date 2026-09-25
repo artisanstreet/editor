@@ -1,13 +1,15 @@
-//! Wire coverage for Forge-owned submissions: the pushed message outbox,
-//! failed-message retry and recovery by identity, and the edit withdrawal
-//! that recalls a payload into the Forge draft.
+//! Wire coverage for Forge-owned submissions: sending a composer draft by
+//! revision, the pushed message outbox, failed-message retry and recovery by
+//! identity, and the edit withdrawal that recalls a payload into the Forge
+//! draft.
 
 use artisan_domain::{
-    AuthoredText, Command, DispatchError, EngineId, Event, FailedMessageListing,
-    FailedMessageRecovered, FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageSummary,
-    FailedMessageTarget, MessageId, MessageOutbox, QueuedMessageListOrder, QueuedMessageListing,
-    QueuedMessageState, QueuedMessageSummary, ReceiptDisposition, RecoverFailedMessage, RequestId,
-    RetryFailedMessage, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
+    AuthoredText, Command, ComposerDraftRevision, ComposerDraftSubmitted, DispatchError,
+    DraftSubmissionOutcome, EngineId, Event, FailedMessageListing, FailedMessageRecovered,
+    FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageSummary, FailedMessageTarget,
+    MessageId, MessageOutbox, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageState,
+    QueuedMessageSummary, ReceiptDisposition, RecoverFailedMessage, RequestId, RetryFailedMessage,
+    RunId, SteerTarget, SubmitComposerDraft, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
 };
 use artisan_protocol::{
     ClientRequest, EventCursor, FrameId, ProtocolVersion, ResponsePayload, ServerEvent,
@@ -231,4 +233,56 @@ fn edit_withdrawal_recalls_into_the_draft_on_the_wire() {
             Command::WithdrawQueuedMessage(command),
         )));
     }
+}
+
+#[test]
+fn draft_submission_names_only_the_thread_and_revision() {
+    for steer_target in [
+        None,
+        Some(SteerTarget::new(RunId::parse("live-run").unwrap())),
+    ] {
+        round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
+            Command::SubmitComposerDraft(SubmitComposerDraft {
+                request_id: request_id(),
+                thread_id: thread(),
+                draft_revision: ComposerDraftRevision::new(4).unwrap(),
+                steer_target,
+            }),
+        )));
+    }
+}
+
+#[test]
+fn draft_submission_answers_round_trip_and_correlate() {
+    let answer = |request_id, outcome| {
+        response(ResponsePayload::ComposerDraftSubmitted(
+            ComposerDraftSubmitted {
+                request_id,
+                thread_id: thread(),
+                draft_revision: ComposerDraftRevision::new(4).unwrap(),
+                outcome,
+            },
+        ))
+    };
+    for disposition in [ReceiptDisposition::Accepted, ReceiptDisposition::Duplicate] {
+        round_trip(answer(
+            request_id(),
+            DraftSubmissionOutcome::Queued {
+                message_id: MessageId::parse("queued-message").unwrap(),
+                disposition,
+                cleared_revision: ComposerDraftRevision::new(5).unwrap(),
+            },
+        ));
+    }
+    for current_revision in [None, Some(ComposerDraftRevision::new(9).unwrap())] {
+        round_trip(answer(
+            request_id(),
+            DraftSubmissionOutcome::Stale { current_revision },
+        ));
+    }
+    let other = RequestId::parse("another-request").unwrap();
+    let outcome = DraftSubmissionOutcome::Stale {
+        current_revision: None,
+    };
+    assert!(encode_envelope(&envelope(answer(other, outcome))).is_err());
 }

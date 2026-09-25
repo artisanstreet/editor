@@ -63,7 +63,8 @@ pub use repository::{
 
 pub use repository::{
     COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
-    ComposerDraftSaveOutcome, SaveComposerDraftInput,
+    ComposerDraftSaveOutcome, DraftSubmission, DraftSubmissionError, SaveComposerDraftInput,
+    SubmitComposerDraftInput,
 };
 
 pub use repository::{

@@ -1,6 +1,7 @@
-//! Private handler tests for Forge-owned submissions: retrying a failed
-//! message by identity, moving it into a new thread, and the edit
-//! withdrawal that recalls a queued payload into the Forge draft.
+//! Private handler tests for Forge-owned submissions: sending a composer
+//! draft by revision, retrying a failed message by identity, moving it into
+//! a new thread, and the edit withdrawal that recalls a queued payload into
+//! the Forge draft.
 //!
 //! Path-linked from `request_handler.rs` so the tests call the handler
 //! methods directly.
@@ -15,15 +16,16 @@ use artisan_database::{
     SetThreadEngineConfigInput, SqliteConfig,
 };
 use artisan_domain::{
-    ApprovalMode, AuthoredText, ByteLimit, ComposerDraftScope, CountLimit, DirectoryId,
-    DisplayName, EngineAgentId, EngineConfigUpdatePrecondition, EngineModelId,
-    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, FailedMessageRecovered, FailedMessageRetryOutcome,
-    FailedMessageTarget, FilesystemAccess, FiniteMillis, ImageAttachment, ListFailedMessages,
-    ListQueuedMessages, MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
-    QueueMessagePayload, QueuedMessageListOrder, ReceiptDisposition, RecoverFailedMessage,
-    RequestId, RetryFailedMessage, RootPath, ThreadId, ThreadTitle, UnixMillis, WebSearchAccess,
-    WithdrawQueuedMessageCommand,
+    ApprovalMode, AuthoredText, ByteLimit, ComposerDraftRevision, ComposerDraftScope, CountLimit,
+    DirectoryId, DisplayName, DraftSubmissionOutcome, EngineAgentId,
+    EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, FailedMessageRecovered, FailedMessageRetryOutcome, FailedMessageTarget,
+    FilesystemAccess, FiniteMillis, ImageAttachment, ListFailedMessages, ListQueuedMessages,
+    MessageId, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, QueueMessagePayload,
+    QueuedMessageListOrder, ReceiptDisposition, RecoverFailedMessage, RequestId,
+    RetryFailedMessage, RootPath, SaveComposerDraft, SubmitComposerDraft, ThreadId, ThreadTitle,
+    UnixMillis, WebSearchAccess, WithdrawQueuedMessageCommand,
 };
 use artisan_protocol::{ResponsePayload, ServerResponse};
 
@@ -417,5 +419,92 @@ async fn discard_withdrawal_leaves_the_draft_alone() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
+    let (_temporary, storage) = storage("submit").await;
+    let repository = storage.repository();
+    seed(repository).await;
+    let handler = handler(&storage);
+    let save = SaveComposerDraft::new(
+        request("save-draft"),
+        ComposerDraftScope::Thread(thread()),
+        AuthoredText::parse("send me once").unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let saved = handler
+        .save_composer_draft(save.request_id(), &save)
+        .await
+        .unwrap();
+    let ResponsePayload::ComposerDraftSaved(saved) = saved.payload else {
+        panic!("expected a save answer");
+    };
+
+    let submit = |request_id: &str, draft_revision| SubmitComposerDraft {
+        request_id: request(request_id),
+        thread_id: thread(),
+        draft_revision,
+        steer_target: None,
+    };
+    let mut answers = Vec::new();
+    // The first answer is lost; the Editor sends the same revision again
+    // under a new request id after reconnecting.
+    for request_id in ["submit-1", "submit-2"] {
+        let command = submit(request_id, saved.revision);
+        let response = handler
+            .submit_composer_draft_outcome(&command.request_id, &command)
+            .await
+            .unwrap();
+        let ResponsePayload::ComposerDraftSubmitted(answer) = response.payload else {
+            panic!("expected a submission answer");
+        };
+        assert_eq!(answer.request_id, command.request_id);
+        answers.push(answer.outcome);
+    }
+    let [
+        DraftSubmissionOutcome::Queued {
+            message_id: first,
+            disposition: ReceiptDisposition::Accepted,
+            cleared_revision,
+        },
+        DraftSubmissionOutcome::Queued {
+            message_id: second,
+            disposition: ReceiptDisposition::Duplicate,
+            ..
+        },
+    ] = answers.as_slice()
+    else {
+        panic!("one accepted submission and one duplicate: {answers:?}");
+    };
+    assert_eq!(first, second);
+    let queued = repository
+        .read_queued_messages(
+            ListQueuedMessages::new(thread(), QueuedMessageListOrder::OldestFirst, 32).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        queued.messages().len(),
+        2,
+        "the seeded message and one send"
+    );
+
+    // A revision the Forge never gave the draft is refused with the current one.
+    let stale = submit("submit-3", ComposerDraftRevision::new(7).unwrap());
+    let response = handler
+        .submit_composer_draft_outcome(&stale.request_id, &stale)
+        .await
+        .unwrap();
+    let ResponsePayload::ComposerDraftSubmitted(answer) = response.payload else {
+        panic!("expected a submission answer");
+    };
+    assert_eq!(
+        answer.outcome,
+        DraftSubmissionOutcome::Stale {
+            current_revision: Some(*cleared_revision)
+        }
     );
 }

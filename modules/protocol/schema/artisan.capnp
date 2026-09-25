@@ -854,6 +854,10 @@ struct Request {
     # ordinals, existing ordinals frozen.
     retryFailedMessage @37 :ComposerState.FailedMessageTarget;
     recoverFailedMessage @38 :ComposerState.FailedMessageTarget;
+
+    # Sends the thread's composer draft at one revision; idempotent on the
+    # thread and revision. Fresh ordinal, existing ordinals frozen.
+    submitComposerDraft @39 :ComposerState.SubmitComposerDraftRequest;
   }
 }
 
@@ -941,6 +945,9 @@ struct Response {
     # fresh ordinals, existing ordinals frozen.
     failedMessageRetried @36 :ComposerState.FailedMessageRetried;
     failedMessageRecovered @37 :ComposerState.FailedMessageRecovered;
+
+    # Answer to submitComposerDraft. Fresh ordinal, existing ordinals frozen.
+    composerDraftSubmitted @38 :ComposerState.ComposerDraftSubmitted;
   }
 }
 

@@ -232,7 +232,8 @@ fn approval_command_for(
         | Command::UploadComposerAttachment(_)
         | Command::QueueStoredMessage(_)
         | Command::RetryFailedMessage(_)
-        | Command::RecoverFailedMessage(_) => {
+        | Command::RecoverFailedMessage(_)
+        | Command::SubmitComposerDraft(_) => {
             panic!("approval gesture must build an approval command")
         }
     }
@@ -264,7 +265,8 @@ fn question_command_for(
         | Command::UploadComposerAttachment(_)
         | Command::QueueStoredMessage(_)
         | Command::RetryFailedMessage(_)
-        | Command::RecoverFailedMessage(_) => {
+        | Command::RecoverFailedMessage(_)
+        | Command::SubmitComposerDraft(_) => {
             panic!("question gesture must build a question command")
         }
     }

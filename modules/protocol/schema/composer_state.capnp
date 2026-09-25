@@ -333,3 +333,39 @@ struct FailedMessageRecovered {
   newThreadId @2 :Text;
   disposition @3 :ReceiptDisposition;
 }
+
+# ---------------------------------------------------------------------------
+# Draft submission. The parent Request union carries submitComposerDraft @39;
+# the parent Response union carries composerDraftSubmitted @38.
+# ---------------------------------------------------------------------------
+
+# Queues the thread's composer draft at exactly draftRevision. The parent
+# request id only correlates the answer; the submission's identity is the
+# thread and draft revision.
+struct SubmitComposerDraftRequest {
+  threadId @0 :Text;
+  draftRevision @1 :UInt64;
+  # Empty means a fresh send; otherwise the observed live run to steer into.
+  steerRunId @2 :Text;
+}
+
+# The draft is the queued message messageId; the draft is empty at
+# clearedRevision.
+struct DraftSubmissionQueued {
+  messageId @0 :Text;
+  disposition @1 :ReceiptDisposition;
+  clearedRevision @2 :UInt64;
+}
+
+# requestId must equal the parent Response.requestId.
+struct ComposerDraftSubmitted {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  draftRevision @2 :UInt64;
+  union {
+    queued @3 :DraftSubmissionQueued;
+    # The stored draft is at another revision; nothing was queued. Zero
+    # means the thread has no draft.
+    stale @4 :UInt64;
+  }
+}

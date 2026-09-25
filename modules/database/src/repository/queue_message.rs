@@ -4,8 +4,8 @@ use std::fmt;
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter, QueryOrder,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter,
+    QueryOrder,
 };
 use sha2::{Digest, Sha256};
 
@@ -17,7 +17,11 @@ use artisan_domain::{
 use crate::entities::{self, CommandKind, DispatchState};
 
 use super::thread_engine_config::settings_from_thread;
+
+#[path = "queue_message/admission.rs"]
+mod admission;
 use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
+pub(crate) use admission::{Admission, admit_queue_message};
 
 /// Storage input after Forge mints the accepted message identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,67 +148,29 @@ impl Repository {
             .begin_write()
             .await
             .map_err(|source| database_error("begin queue-message transaction", source))?;
-        let thread = thread_row_by_id(&transaction, &input.thread_id)
-            .await?
-            .ok_or_else(|| RepositoryError::ThreadNotFound {
-                thread_id: input.thread_id.clone(),
-            })?;
-        if millis(input.accepted_at) < thread.created_at_ms {
-            return Err(RepositoryError::InvalidChronology {
-                earlier_field: "thread.created_at",
-                later_field: "message.accepted_at",
-            });
-        }
-        // Authoritative settings are captured with the accepted command so
-        // a queued send can never run on a later-selected engine. Absence
-        // refuses the command here (fail-closed at admission) instead of
-        // queueing into the dispatcher's eternal requeue.
-        let settings = settings_from_thread(thread.clone())?.ok_or_else(|| {
-            RepositoryError::ThreadEngineNotConfigured {
-                thread_id: input.thread_id.clone(),
+        match admit_queue_message(&transaction, &input).await? {
+            Admission::Admitted => {}
+            Admission::MessageConflict => {
+                return classify_message_conflict(transaction, input).await;
             }
-        })?;
-
-        let ordinal = next_message_ordinal(&transaction, &input.thread_id).await?;
-        let inserted_message = insert_message(&transaction, &input, ordinal).await?;
-        if inserted_message == 0 {
-            return classify_message_conflict(transaction, input).await;
+            Admission::DispatchConflict => {
+                let request_id = input.request_id;
+                let error = RepositoryError::IdempotencyConflict { request_id };
+                return rollback_with_error(transaction, error).await;
+            }
+            Admission::ReceiptConflict => {
+                let result = lookup_queue_receipt(
+                    &transaction,
+                    &input.request_id,
+                    &input.thread_id,
+                    &input.payload,
+                    input.steer_run_id.as_ref(),
+                    ReceiptDisposition::Duplicate,
+                )
+                .await;
+                return rollback_with_lookup(transaction, result).await;
+            }
         }
-
-        insert_image_attachments(&transaction, &input).await?;
-        let inserted_dispatch = insert_queued_dispatch(&transaction, &input).await?;
-        if inserted_dispatch == 0 {
-            return rollback_with_error(
-                transaction,
-                RepositoryError::IdempotencyConflict {
-                    request_id: input.request_id,
-                },
-            )
-            .await;
-        }
-
-        let inserted_receipt = insert_queue_receipt(&transaction, &input, &settings).await?;
-        if inserted_receipt == 0 {
-            let result = lookup_queue_receipt(
-                &transaction,
-                &input.request_id,
-                &input.thread_id,
-                &input.payload,
-                input.steer_run_id.as_ref(),
-                ReceiptDisposition::Duplicate,
-            )
-            .await;
-            return rollback_with_lookup(transaction, result).await;
-        }
-
-        let updated_at_ms = thread.updated_at_ms.max(millis(input.accepted_at));
-        let mut updated_thread = entities::thread::ActiveModel::from(thread);
-        updated_thread.updated_at_ms = Set(updated_at_ms);
-        updated_thread
-            .update(&transaction)
-            .await
-            .map_err(|source| database_error("update thread recency", source))?;
-
         transaction
             .commit()
             .await
@@ -743,7 +709,10 @@ async fn dispatch_row_by_message_id(
         .map_err(|source| database_error("find message dispatch by message id", source))
 }
 
-fn queue_result(input: &QueueMessageInput, disposition: ReceiptDisposition) -> QueueMessageResult {
+pub(crate) fn queue_result(
+    input: &QueueMessageInput,
+    disposition: ReceiptDisposition,
+) -> QueueMessageResult {
     QueueMessageResult {
         receipt: CommandReceipt {
             request_id: input.request_id.clone(),

@@ -34,6 +34,7 @@ impl RequestHandler {
         let saved = self
             .repository
             .save_composer_draft(SaveComposerDraftInput {
+                request_id: save.request_id().clone(),
                 scope: save.scope().clone(),
                 text: save.text().clone(),
                 attachments: save.attachments().to_vec(),
@@ -130,6 +131,7 @@ impl RequestHandler {
         }
         self.repository
             .save_composer_draft(SaveComposerDraftInput {
+                request_id: request_id.clone(),
                 scope: ComposerDraftScope::Thread(thread_id.clone()),
                 text: payload.text().cloned().unwrap_or_else(AuthoredText::empty),
                 attachments,
@@ -186,7 +188,10 @@ impl RequestHandler {
     }
 }
 
-fn draft_failure(error: &ComposerDraftRepositoryError, request_id: &RequestId) -> ProtocolFailure {
+pub(super) fn draft_failure(
+    error: &ComposerDraftRepositoryError,
+    request_id: &RequestId,
+) -> ProtocolFailure {
     let (code, detail, retryable) = match error {
         ComposerDraftRepositoryError::ScopeNotFound { kind, .. } => (
             if *kind == "thread" {

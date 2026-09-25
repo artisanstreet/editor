@@ -108,6 +108,8 @@ pub enum ResponsePayload {
     FailedMessageRetried(artisan_domain::FailedMessageRetried),
     /// Correlated answer to a failed-message recovery into a new thread.
     FailedMessageRecovered(artisan_domain::FailedMessageRecovered),
+    /// Correlated answer to a draft submission.
+    ComposerDraftSubmitted(artisan_domain::ComposerDraftSubmitted),
 }
 
 /// Successful response correlated to a client request frame.
@@ -382,6 +384,12 @@ impl WireEnvelope {
                 request_id,
                 payload: ResponsePayload::FailedMessageRecovered(recovered),
             }) if request_id != &recovered.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::ComposerDraftSubmitted(submitted),
+            }) if request_id != &submitted.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }
             _ => Ok(()),

@@ -194,9 +194,11 @@ pub use composer_state::{
 };
 
 pub mod composer_draft;
+mod draft_submission;
 pub use composer_draft::{
     ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
     ComposerAttachmentUploaded, ComposerDraft, ComposerDraftError, ComposerDraftResult,
     ComposerDraftRevision, ComposerDraftSaved, ComposerDraftScope, QueueStoredMessage,
     ReadComposerAttachment, ReadComposerDraft, SaveComposerDraft, UploadComposerAttachment,
 };
+pub use draft_submission::{ComposerDraftSubmitted, DraftSubmissionOutcome, SubmitComposerDraft};

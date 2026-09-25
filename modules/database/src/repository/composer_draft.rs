@@ -1,9 +1,13 @@
 //! Forge-owned composer drafts and the content-addressed attachment store.
 //!
 //! Every draft save applies: the last save to arrive wins, and the Forge
-//! assigns it the next revision of its scope. Attachment bytes are stored once per SHA-256 digest and pinned
-//! by every draft that references them. Unreferenced attachments are pruned
-//! after a grace period, long enough for a send that names them to resolve.
+//! assigns it the next revision of its scope. A save request that arrives
+//! again (a retransmission) answers the revision it was first given and
+//! writes nothing, so it cannot bring back a draft that was since sent.
+//! Attachment bytes are stored once per SHA-256 digest and pinned by every
+//! draft that references them. Unreferenced attachments and save receipts
+//! are pruned after a grace period, long enough for a send that names them
+//! to resolve.
 
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, Statement, Value};
 use sha2::{Digest, Sha256};
@@ -12,7 +16,7 @@ use thiserror::Error;
 use artisan_domain::{
     AuthoredText, ComposerAttachmentDigest, ComposerAttachmentRef, ComposerAttachmentResult,
     ComposerDraft, ComposerDraftRevision, ComposerDraftScope, ImageAttachment, ImageMimeType,
-    UnixMillis,
+    RequestId, UnixMillis,
 };
 
 use super::{Repository, RepositoryFailure, corrupt_data, database_error};
@@ -31,6 +35,8 @@ const ATTACHMENT_SELECT: &str =
 /// Input for one draft save.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveComposerDraftInput {
+    /// Save request identity; a repeated request answers its first revision.
+    pub request_id: RequestId,
     /// Draft scope.
     pub scope: ComposerDraftScope,
     /// Authored text.
@@ -204,30 +210,7 @@ impl Repository {
         &self,
         digest: &ComposerAttachmentDigest,
     ) -> DraftResult<Option<ComposerAttachmentResult>> {
-        let row = self
-            .database
-            .query_one_raw(Statement::from_sql_and_values(
-                DbBackend::Sqlite,
-                ATTACHMENT_SELECT,
-                [Value::Bytes(Some(digest.as_bytes().to_vec()))],
-            ))
-            .await
-            .map_err(|source| database_error("read composer attachment", source))?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let mime_type = parse_mime(
-            &row.try_get_by_index::<String>(0)
-                .map_err(|source| corrupt_data("composer_attachments", "mime_type", source))?,
-        )?;
-        let bytes = row
-            .try_get_by_index::<Vec<u8>>(1)
-            .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?;
-        Ok(Some(ComposerAttachmentResult {
-            digest: *digest,
-            mime_type,
-            bytes,
-        }))
+        read_attachment(&self.database, digest).await
     }
 
     /// Resolves stored references into owned images in authored order, for a
@@ -242,28 +225,97 @@ impl Repository {
         &self,
         references: &[ComposerAttachmentRef],
     ) -> DraftResult<Vec<ImageAttachment>> {
-        let mut images = Vec::with_capacity(references.len());
-        for reference in references {
-            let stored = self
-                .read_composer_attachment(reference.digest())
-                .await?
-                .ok_or(ComposerDraftRepositoryError::AttachmentNotStored {
-                    digest: *reference.digest(),
-                })?;
-            let size_matches =
-                u32::try_from(stored.bytes.len()).is_ok_and(|size| size == reference.size_bytes());
-            if stored.mime_type != reference.mime_type() || !size_matches {
-                return Err(ComposerDraftRepositoryError::AttachmentMismatch {
-                    digest: *reference.digest(),
-                });
-            }
-            images.push(
-                ImageAttachment::new(stored.mime_type.as_str(), stored.bytes, reference.name())
-                    .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?,
-            );
-        }
-        Ok(images)
+        resolve_attachments(&self.database, references).await
     }
+}
+
+/// Resolves stored references into owned images in authored order.
+pub(super) async fn resolve_attachments(
+    database: &impl ConnectionTrait,
+    references: &[ComposerAttachmentRef],
+) -> DraftResult<Vec<ImageAttachment>> {
+    let mut images = Vec::with_capacity(references.len());
+    for reference in references {
+        let stored = read_attachment(database, reference.digest()).await?.ok_or(
+            ComposerDraftRepositoryError::AttachmentNotStored {
+                digest: *reference.digest(),
+            },
+        )?;
+        let size_matches =
+            u32::try_from(stored.bytes.len()).is_ok_and(|size| size == reference.size_bytes());
+        if stored.mime_type != reference.mime_type() || !size_matches {
+            return Err(ComposerDraftRepositoryError::AttachmentMismatch {
+                digest: *reference.digest(),
+            });
+        }
+        images.push(
+            ImageAttachment::new(stored.mime_type.as_str(), stored.bytes, reference.name())
+                .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?,
+        );
+    }
+    Ok(images)
+}
+
+async fn read_attachment(
+    database: &impl ConnectionTrait,
+    digest: &ComposerAttachmentDigest,
+) -> DraftResult<Option<ComposerAttachmentResult>> {
+    let row = database
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            ATTACHMENT_SELECT,
+            [Value::Bytes(Some(digest.as_bytes().to_vec()))],
+        ))
+        .await
+        .map_err(|source| database_error("read composer attachment", source))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mime_type = parse_mime(
+        &row.try_get_by_index::<String>(0)
+            .map_err(|source| corrupt_data("composer_attachments", "mime_type", source))?,
+    )?;
+    let bytes = row
+        .try_get_by_index::<Vec<u8>>(1)
+        .map_err(|source| corrupt_data("composer_attachments", "bytes", source))?;
+    Ok(Some(ComposerAttachmentResult {
+        digest: *digest,
+        mime_type,
+        bytes,
+    }))
+}
+
+/// Empties a draft inside `transaction` and gives it the revision after
+/// `current`; the row stays, so its revisions never restart.
+pub(super) async fn clear_draft(
+    transaction: &DatabaseTransaction,
+    scope: &ComposerDraftScope,
+    current: ComposerDraftRevision,
+    cleared_at: UnixMillis,
+) -> DraftResult<ComposerDraftRevision> {
+    let revision = current
+        .next()
+        .ok_or(ComposerDraftRepositoryError::RevisionExhausted)?;
+    execute(
+        transaction,
+        "UPDATE composer_drafts SET revision = ?, body = '', updated_at_ms = ? WHERE scope_kind = ? AND scope_id = ?",
+        [
+            Value::BigInt(Some(revision.as_i64())),
+            Value::BigInt(Some(cleared_at.as_millis())),
+        ]
+        .into_iter()
+        .chain(scope_values(scope)),
+        "clear submitted composer draft",
+    )
+    .await?;
+    execute(
+        transaction,
+        "DELETE FROM composer_draft_attachments WHERE scope_kind = ? AND scope_id = ?",
+        scope_values(scope),
+        "clear submitted composer draft attachments",
+    )
+    .await?;
+    Ok(revision)
 }
 
 async fn apply_save(
@@ -271,6 +323,9 @@ async fn apply_save(
     input: &SaveComposerDraftInput,
 ) -> DraftResult<ComposerDraftSaveOutcome> {
     ensure_scope_exists(transaction, &input.scope).await?;
+    if let Some(revision) = save_receipt(transaction, &input.request_id).await? {
+        return Ok(ComposerDraftSaveOutcome { revision });
+    }
     let revision = read_revision(transaction, &input.scope)
         .await?
         .unwrap_or_default()
@@ -327,7 +382,60 @@ async fn apply_save(
         "prune unreferenced composer attachments",
     )
     .await?;
+    record_save_receipt(transaction, input, revision).await?;
     Ok(ComposerDraftSaveOutcome { revision })
+}
+
+async fn save_receipt(
+    database: &impl ConnectionTrait,
+    request_id: &RequestId,
+) -> DraftResult<Option<ComposerDraftRevision>> {
+    let row = database
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT revision FROM composer_draft_save_receipts WHERE request_id = ?",
+            [Value::String(Some(request_id.as_str().to_owned()))],
+        ))
+        .await
+        .map_err(|source| database_error("read composer draft save receipt", source))?;
+    row.map(|row| {
+        parse_revision(
+            row.try_get_by_index::<i64>(0).map_err(|source| {
+                corrupt_data("composer_draft_save_receipts", "revision", source)
+            })?,
+        )
+    })
+    .transpose()
+}
+
+async fn record_save_receipt(
+    transaction: &DatabaseTransaction,
+    input: &SaveComposerDraftInput,
+    revision: ComposerDraftRevision,
+) -> DraftResult<()> {
+    let saved_at = input.saved_at.as_millis();
+    execute(
+        transaction,
+        "INSERT INTO composer_draft_save_receipts (request_id, scope_kind, scope_id, revision, saved_at_ms) VALUES (?, ?, ?, ?, ?)",
+        [Value::String(Some(input.request_id.as_str().to_owned()))]
+            .into_iter()
+            .chain(scope_values(&input.scope))
+            .chain([
+                Value::BigInt(Some(revision.as_i64())),
+                Value::BigInt(Some(saved_at)),
+            ]),
+        "record composer draft save receipt",
+    )
+    .await?;
+    execute(
+        transaction,
+        "DELETE FROM composer_draft_save_receipts WHERE saved_at_ms < ?",
+        [Value::BigInt(Some(saved_at.saturating_sub(
+            COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS,
+        )))],
+        "prune composer draft save receipts",
+    )
+    .await
 }
 
 async fn execute(
@@ -354,7 +462,7 @@ fn scope_values(scope: &ComposerDraftScope) -> [Value; 2] {
     ]
 }
 
-async fn ensure_scope_exists(
+pub(super) async fn ensure_scope_exists(
     database: &impl ConnectionTrait,
     scope: &ComposerDraftScope,
 ) -> DraftResult<()> {
@@ -428,7 +536,7 @@ async fn verify_reference(
     Ok(())
 }
 
-async fn read_draft(
+pub(super) async fn read_draft(
     database: &impl ConnectionTrait,
     scope: &ComposerDraftScope,
 ) -> DraftResult<Option<ComposerDraft>> {

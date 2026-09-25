@@ -5,6 +5,7 @@ mod composer_draft;
 mod conversation_patch_replay;
 mod conversation_projection;
 mod dispatch_payload;
+mod draft_submission;
 mod first_message;
 mod message_dispatch;
 mod observation_ledger;
@@ -39,6 +40,7 @@ pub use composer_draft::{
 };
 pub use conversation_patch_replay::ConversationPatchReplay;
 pub use dispatch_payload::{MessageDispatchPayload, QueueMessageDispatchPayload};
+pub use draft_submission::{DraftSubmission, DraftSubmissionError, SubmitComposerDraftInput};
 pub use first_message::{QueueFirstMessageInput, QueueFirstMessageResult};
 pub use message_dispatch::{
     ClaimMessageDispatch, ClaimedMessageDispatch, CompleteMessageDispatch, DispatchFailureReason,

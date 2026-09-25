@@ -1021,6 +1021,9 @@ impl RequestHandler {
                 self.recover_failed_message_outcome(request_id, recover)
                     .await
             }
+            Command::SubmitComposerDraft(submit) => {
+                self.submit_composer_draft_outcome(request_id, submit).await
+            }
         };
         if response.is_ok() {
             self.wake_message_outbox(command);
@@ -1246,6 +1249,9 @@ mod composer_drafts;
 
 #[path = "request_handler/failed_messages.rs"]
 mod failed_messages;
+
+#[path = "request_handler/draft_submission.rs"]
+mod draft_submission;
 
 #[path = "request_handler/engine_config.rs"]
 mod engine_config;

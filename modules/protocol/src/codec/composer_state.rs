@@ -18,6 +18,8 @@
 
 #[path = "composer_state/attachments.rs"]
 mod attachments;
+#[path = "composer_state/draft_submission.rs"]
+mod draft_submission;
 #[path = "composer_state/drafts.rs"]
 mod drafts;
 #[path = "composer_state/helpers.rs"]
@@ -33,6 +35,7 @@ mod submissions;
 #[path = "composer_state/usage.rs"]
 mod usage;
 
+pub use self::draft_submission::*;
 pub use self::drafts::*;
 pub use self::helpers::validate_withdrawal_response_correlation;
 pub use self::listings::*;
