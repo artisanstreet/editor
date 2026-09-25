@@ -104,6 +104,8 @@ impl SettingsLoadGeneration {
 #[derive(Clone, Eq, PartialEq)]
 pub enum NativeTransportCommand {
     ComposerState(ComposerStateCommand),
+    /// Forge-owned composer draft and stored-attachment work.
+    ComposerDraft(ComposerDraftCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -238,6 +240,7 @@ impl std::fmt::Debug for NativeTransportCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let variant = match self {
             Self::ComposerState(_) => "ComposerState",
+            Self::ComposerDraft(_) => "ComposerDraft",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",
             Self::RespondApproval(_) => "RespondApproval",
@@ -278,6 +281,7 @@ impl std::fmt::Debug for NativeTransportCommand {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NativeTransportEvent {
     ComposerState(ComposerStateEvent),
+    ComposerDraft(ComposerDraftEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -630,6 +634,8 @@ struct ServiceRuntime {
     cancel: CancelHandle,
     shutdown_grace: Duration,
     known_threads: HashSet<ThreadId>,
+    /// Attachments this connection uploaded or read back from the Forge store.
+    stored_attachments: HashSet<artisan_domain::ComposerAttachmentDigest>,
     intake: IntakeState,
     custody: SubscriptionCustody,
     delivery_cancel: Option<Arc<CancelHandle>>,
@@ -655,6 +661,10 @@ mod composer_operations;
 #[path = "native_composer_state_transport.rs"]
 mod composer_state_operations;
 pub(crate) use composer_state_operations::{ComposerStateCommand, ComposerStateEvent};
+
+#[path = "native_composer_draft_transport.rs"]
+mod composer_draft_operations;
+pub(crate) use composer_draft_operations::{ComposerDraftCommand, ComposerDraftEvent};
 
 #[path = "native_profile_usage_transport.rs"]
 mod profile_usage_operations;

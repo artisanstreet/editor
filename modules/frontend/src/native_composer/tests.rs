@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use super::native_composer_attachments::ComposerAttachment;
 use super::{
@@ -27,9 +27,8 @@ use gpui::{
     Bounds, Entity, EntityInputHandler as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
     Subscription, Task, TestAppContext, VisualTestContext, point, px, size,
 };
-use std::sync::Arc;
 
-fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
+pub(super) fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
     let bytes = Arc::new(bytes.to_vec());
     ComposerAttachment {
         id: id.to_owned(),
@@ -37,7 +36,7 @@ fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
         format: Some(gpui::ImageFormat::Png),
         mime_type: ImageMediaType::Png.as_mime_type().to_owned(),
         bytes: Some(bytes.clone()),
-        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+        stored: None,
         thumbnail: Some(Arc::new(gpui::RenderImage::new(Vec::<image::Frame>::new()))),
         source_digest: "source-digest".to_owned(),
         encoded_digest: "encoded-digest".to_owned(),
@@ -46,7 +45,7 @@ fn ready_attachment(id: &str, bytes: &[u8]) -> ComposerAttachment {
     }
 }
 
-const RECALL_PRIMARY_PNG: &[u8] = &[
+pub(super) const RECALL_PRIMARY_PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
     0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
@@ -479,83 +478,6 @@ fn completed_attachment_task_handles_are_pruned_without_touching_live_work(
             assert_eq!(composer.attachment_tasks.len(), 1);
             assert!(!composer.attachment_tasks[0].is_ready());
         });
-    });
-}
-
-#[gpui::test]
-fn thread_drafts_restore_without_cross_thread_undo(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
-    cx.update(|_, app| {
-        view.update(app, |composer, cx| {
-            composer.switch_thread("one", false, cx);
-            composer.replace_range(0..0, "first draft", None, cx);
-            composer.switch_thread("two", false, cx);
-            assert_eq!(composer.state.draft(), "");
-            assert!(composer.undo.is_empty());
-            composer.replace_range(0..0, "second draft", None, cx);
-            composer.switch_thread("one", false, cx);
-            assert_eq!(composer.state.draft(), "first draft");
-            composer.switch_thread("two", false, cx);
-            assert_eq!(composer.state.draft(), "second draft");
-        });
-    });
-}
-
-#[gpui::test]
-fn carrying_a_draft_moves_text_and_images_out_of_its_source(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
-    cx.update(|_, app| {
-        view.update(app, |composer, cx| {
-            for index in 0..5 {
-                composer.switch_thread(&format!("dormant-{index}"), false, cx);
-                composer.set_draft(format!("Saved draft {index}"));
-            }
-            composer.switch_thread("source", false, cx);
-            composer.replace_range(0..0, "Move this draft", None, cx);
-            composer
-                .attachments
-                .push(ready_attachment("image", &[1, 2]));
-            assert!(composer.has_unsent_draft());
-            composer.switch_thread("destination", true, cx);
-            assert_eq!(composer.state.draft(), "Move this draft");
-            assert_eq!(composer.attachments.len(), 1);
-            assert!(!composer.draft_store.contains("source"));
-            assert!(composer.draft_store.contains("destination"));
-            assert_eq!(composer.draft_store.len(), 6);
-            for index in 0..5 {
-                assert!(composer.draft_store.contains(&format!("dormant-{index}")));
-            }
-            composer.switch_thread("source", false, cx);
-            assert!(composer.state.draft().is_empty());
-            assert!(composer.attachments.is_empty());
-            assert!(!composer.has_unsent_draft());
-        });
-    });
-}
-
-#[gpui::test]
-fn moving_a_draft_keeps_images_that_are_still_preparing(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
-    let payload = recalled_image_payload(Some(AuthoredText::parse("Moving images").unwrap()));
-    cx.update(|_, app| {
-        view.update(app, |composer, cx| {
-            composer.switch_thread("pending-source", false, cx);
-            let target = composer.capture_recall_target().unwrap();
-            composer.restore_recalled_payload(&target, payload.clone(), cx).unwrap();
-            assert!(composer.attachments.iter().all(|image| !image.is_ready()));
-            composer.switch_thread("pending-destination", true, cx);
-            assert_eq!(composer.attachments.len(), 2);
-            assert!(!composer.attachment_tasks.is_empty());
-        });
-    });
-    cx.run_until_parked();
-    cx.update(|_, app| {
-        let composer = view.read(app);
-        assert_eq!(composer.draft_thread.as_deref(), Some("pending-destination"));
-        assert!(composer.draft_matches_payload(&payload));
-        assert!(composer.attachments.iter().all(ComposerAttachment::is_ready));
-        assert!(!composer.draft_store.contains("pending-source"));
-        assert!(composer.draft_store.contains("pending-destination"));
     });
 }
 

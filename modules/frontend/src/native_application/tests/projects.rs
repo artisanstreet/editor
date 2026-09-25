@@ -262,10 +262,14 @@ fn switching_projects_with_an_empty_composer_restores_threads_and_dormant_drafts
                 application.selected_thread.as_ref().map(ThreadId::as_str),
                 Some("alpha-first")
             );
+            // The composer shows each thread's draft as its Forge returns it.
+            assert_eq!(application.composer.read(cx).draft(), "");
+            application.reply_forge_draft("Unsent Alpha work", cx);
             assert_eq!(application.composer.read(cx).draft(), "Unsent Alpha work");
             application.composer.update(cx, |composer, cx| {
                 composer.switch_thread("beta-dormant", false, cx);
             });
+            application.reply_forge_draft("Unsent Beta work", cx);
             assert_eq!(application.composer.read(cx).draft(), "Unsent Beta work");
             assert!(
                 !commands
@@ -328,6 +332,7 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
             application.handle_threads(&alpha, &listing, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.selected_thread, Some(source));
+            application.reply_forge_draft("Alpha message awaiting receipt", cx);
             assert_eq!(
                 application.composer.read(cx).draft(),
                 "Alpha message awaiting receipt"

@@ -260,6 +260,7 @@ pub(super) fn first_message_stable_mutation(
 
 pub(super) fn message_stable_mutation(
     command: QueueMessage,
+    stored_attachments: &HashSet<artisan_domain::ComposerAttachmentDigest>,
 ) -> Result<StableMutation, ServiceFailure> {
     let request_id = command.request_id.clone();
     let frame_id = FrameId::parse(request_id.as_str().to_owned())
@@ -275,7 +276,7 @@ pub(super) fn message_stable_mutation(
     Ok(StableMutation {
         frame_id,
         sent_at,
-        command: Command::QueueMessage(command),
+        command: super::composer_draft_operations::message_command(command, stored_attachments),
     })
 }
 

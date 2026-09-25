@@ -204,6 +204,7 @@ impl NativeApplication {
             sidebar_hover_surface_bounds: Rc::new(RefCell::new(None)),
             message_flight: None,
             message_flight_hold: None,
+            composer_drafts: super::composer_drafts::ComposerDrafts::default(),
             optimistic_messages: Vec::new(),
             message_retry: None,
             message_receipt: None,

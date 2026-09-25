@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::{ComposerStateCommand, NativeTransportCommand};
+use super::{ComposerDraftCommand, ComposerStateCommand, NativeTransportCommand};
 
 /// What an in-flight hold is keeping open, for progress copy only.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -35,11 +35,13 @@ pub enum HoldKind {
     EngineSettings,
     /// A model favorite change.
     ModelFavorite,
+    /// A composer draft save or attachment upload.
+    Draft,
 }
 
 impl HoldKind {
     /// Every kind in presentation order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Message,
         Self::QueueChange,
         Self::StopRequest,
@@ -48,6 +50,7 @@ impl HoldKind {
         Self::ProjectIntake,
         Self::EngineSettings,
         Self::ModelFavorite,
+        Self::Draft,
     ];
 
     const fn index(self) -> usize {
@@ -66,6 +69,7 @@ impl HoldKind {
             Self::ProjectIntake => ("project", "projects"),
             Self::EngineSettings => ("model setting", "model settings"),
             Self::ModelFavorite => ("favorite", "favorites"),
+            Self::Draft => ("draft", "drafts"),
         };
         if count == 1 { one } else { many }
     }
@@ -189,6 +193,24 @@ impl Hold {
     pub const fn kind(&self) -> HoldKind {
         self.kind
     }
+
+    /// Takes one more hold of this kind, even on a sealed connection.
+    ///
+    /// A live hold keeps the count above zero, so `idle()` cannot have
+    /// resolved: extending it lets work already admitted under this hold (a
+    /// draft's next coalesced save) finish, and never reopens a drained
+    /// connection.
+    pub fn extend(&self) -> Self {
+        let index = self.kind.index();
+        self.holds.state.send_modify(|state| {
+            state.count += 1;
+            state.kinds[index] += 1;
+        });
+        Self {
+            holds: Arc::clone(&self.holds),
+            kind: self.kind,
+        }
+    }
 }
 
 impl Drop for Hold {
@@ -250,12 +272,18 @@ impl NativeTransportCommand {
             }
             Self::SetThreadEngineConfig(_) => Some(HoldKind::EngineSettings),
             Self::SetModelFavorite(_) => Some(HoldKind::ModelFavorite),
+            Self::ComposerDraft(
+                ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
+            ) => Some(HoldKind::Draft),
             Self::ComposerState(
                 ComposerStateCommand::ReadFooterUsage { .. }
                 | ComposerStateCommand::ListQueuedMessages { .. }
                 | ComposerStateCommand::ListFailedMessages { .. }
                 | ComposerStateCommand::ReadRecalledMessage { .. }
                 | ComposerStateCommand::ReadRunUsage { .. },
+            )
+            | Self::ComposerDraft(
+                ComposerDraftCommand::Read(_) | ComposerDraftCommand::ReadAttachment { .. },
             )
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)

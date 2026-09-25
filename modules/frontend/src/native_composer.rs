@@ -33,9 +33,6 @@ use gpui::{
 use std::time::Duration;
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
-use crate::composer_draft_session_policy::{
-    ComposerDraftDocument, ComposerDraftSession, ComposerDraftToken, InMemoryComposerDraftStore,
-};
 use crate::native_composer_controls::NativeComposerControls;
 use crate::native_composer_material::{
     GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
@@ -54,9 +51,8 @@ use self::native_composer_attachments::{
     ClipboardImageCandidate, ClipboardInput, ComposerAttachment, MAXIMUM_ATTACHMENT_COUNT,
     MAXIMUM_ATTACHMENT_TOTAL_BYTES, MAXIMUM_RAW_ATTACHMENT_BYTES,
     MAXIMUM_RAW_ATTACHMENT_TOTAL_BYTES, NativeComposerAttachmentSnapshot,
-    PreparedComposerAttachment, RecalledAttachmentInput, RestoredAttachmentInput,
-    display_file_name, prepare_clipboard_batch, prepare_file_batch, prepare_recalled_batch,
-    prepare_restored_batch, render_full_preview,
+    PreparedComposerAttachment, RecalledAttachmentInput, display_file_name,
+    prepare_clipboard_batch, prepare_file_batch, prepare_recalled_batch, render_full_preview,
 };
 
 actions!(
@@ -161,13 +157,20 @@ pub(crate) struct NativeComposer {
     draft_generation: u64,
     draft_revision: u64,
     selection_revision: u64,
-    draft_tokens: Vec<ComposerDraftToken>,
+    /// Advances on every authored change the Forge draft must receive.
+    draft_change: u64,
+    /// Set by a thread switch until the Forge draft is applied or the user
+    /// edits first.
+    awaiting_forge_draft: bool,
+    /// The scope a carried draft moved away from; its Forge draft is cleared.
+    released_scope: Option<String>,
+    /// The draft of the scope an ordinary switch just left, as it was.
+    outgoing_draft: Option<forge_draft::OutgoingDraft>,
     active_attachment_submission: Option<NativeComposerAttachmentSnapshot>,
     active_submission_draft_revision: Option<u64>,
     attachment_tasks: Vec<Task<()>>,
     attachment_work_generation: u64,
     next_attachment_id: u64,
-    draft_store: InMemoryComposerDraftStore,
     draft_thread: Option<String>,
     undo: Vec<(String, Range<usize>)>,
     redo: Vec<(String, Range<usize>)>,
@@ -227,13 +230,15 @@ impl NativeComposer {
             draft_generation: 0,
             draft_revision: 0,
             selection_revision: 0,
-            draft_tokens: Vec::new(),
+            draft_change: 0,
+            awaiting_forge_draft: false,
+            released_scope: None,
+            outgoing_draft: None,
             active_attachment_submission: None,
             active_submission_draft_revision: None,
             attachment_tasks: Vec::new(),
             attachment_work_generation: 0,
             next_attachment_id: 0,
-            draft_store: InMemoryComposerDraftStore::new(),
             draft_thread: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -469,7 +474,6 @@ impl NativeComposer {
         self.viewed_attachment = None;
         self.clear_attachment_preview();
         self.attachment_error = None;
-        self.draft_tokens.clear();
         self.undo.clear();
         self.redo.clear();
         self.active_attachment_submission = None;
@@ -482,7 +486,7 @@ impl NativeComposer {
         self.marked_range = None;
         self.layout = None;
         self.painted_bounds = None;
-        self.persist_current_draft();
+        self.note_draft_change();
         if !work.is_empty() {
             self.spawn_attachment_work(AttachmentWork::Recalled { items: work }, cx);
         }
@@ -499,6 +503,12 @@ impl NativeComposer {
         cx.notify();
     }
 
+    /// Moves the composer to another draft scope.
+    ///
+    /// An ordinary switch clears the view and waits for the scope's Forge
+    /// draft (see [`Self::apply_forge_draft`]). A carried draft (the prompt of
+    /// a first message moving into its new thread) keeps its text and image
+    /// work, becomes the new scope's draft, and releases the old scope's.
     pub(crate) fn switch_thread(
         &mut self,
         thread: &str,
@@ -508,15 +518,8 @@ impl NativeComposer {
         if self.draft_thread.as_deref() == Some(thread) || self.state.is_submitting() {
             return;
         }
-
-        let previous_thread = self.draft_thread.clone();
-        self.persist_current_draft();
+        let previous_thread = self.draft_thread.replace(thread.to_owned());
         self.draft_generation = self.draft_generation.saturating_add(1);
-        self.draft_thread = Some(thread.to_owned());
-        if !carry_draft {
-            self.attachment_tasks.clear();
-            self.attachment_work_generation = self.attachment_work_generation.saturating_add(1);
-        }
         self.selection_dragging = false;
         self.selection_anchor = None;
         self.clear_vertical_goal();
@@ -524,96 +527,38 @@ impl NativeComposer {
         self.active_submission_draft_revision = None;
         self.viewed_attachment = None;
         self.clear_attachment_preview();
-
         if carry_draft {
-            // The same prompt owns its in-progress image preparation even
-            // after it moves. Ordinary thread changes cancel that work above.
-            if let Some(previous_thread) = previous_thread {
-                ComposerDraftSession::for_key(previous_thread).clear(&mut self.draft_store);
-            }
-            self.persist_current_draft();
+            self.released_scope = previous_thread;
+            self.note_draft_change();
         } else {
+            self.outgoing_draft = previous_thread.and_then(|key| self.capture_draft(&key));
+            self.attachment_tasks.clear();
+            self.attachment_work_generation = self.attachment_work_generation.saturating_add(1);
             self.attachments.clear();
-            self.viewed_attachment = None;
             self.attachment_error = None;
-
-            let mut session = ComposerDraftSession::for_key(thread.to_owned());
-            let restoration = session.restore(&mut self.draft_store, true).restored;
-            let (text, tokens, restored_attachments) = restoration.map_or_else(
-                || (String::new(), Vec::new(), Vec::new()),
-                |restoration| {
-                    (
-                        restoration.document.text,
-                        restoration.document.tokens,
-                        restoration.attachments,
-                    )
-                },
-            );
-            self.state.set_draft(text);
-            self.authored_text_present = true;
-            self.draft_revision = self.draft_revision.saturating_add(1);
-            self.advance_selection_revision();
-            self.draft_tokens = tokens;
-            self.selection = self.state.draft().len()..self.state.draft().len();
-            self.selection_reversed = false;
-            self.selection_anchor = None;
-            self.clear_vertical_goal();
-            self.selection_dragging = false;
-            self.marked_range = None;
-            self.undo.clear();
-            self.redo.clear();
-            self.layout = None;
-            self.painted_bounds = None;
-
-            let mut inputs = Vec::new();
-            for attachment in restored_attachments {
-                let id = attachment.id.clone();
-                let format = ImageFormat::from_mime_type(&attachment.mime_type);
-                self.attachments.push(ComposerAttachment::pending(
-                    id.clone(),
-                    attachment.name.clone(),
-                    format,
-                    attachment.mime_type.clone(),
-                    attachment.size_bytes,
-                ));
-                inputs.push(RestoredAttachmentInput {
-                    id,
-                    name: attachment.name,
-                    mime_type: attachment.mime_type,
-                    content_base64: attachment.content_base64,
-                    size_bytes: attachment.size_bytes,
-                    source_digest: attachment.source_digest,
-                    source_size_bytes: attachment.source_size_bytes,
-                });
-            }
-            if !inputs.is_empty() {
-                self.spawn_attachment_work(AttachmentWork::Restored { items: inputs }, cx);
-            }
+            self.replace_draft_text(String::new());
+            self.awaiting_forge_draft = true;
         }
         cx.notify();
     }
 
-    fn current_draft_document(&self) -> ComposerDraftDocument {
-        ComposerDraftDocument::new(self.state.draft().to_owned(), self.draft_tokens.clone())
-    }
-
-    fn current_draft_attachments(
-        &self,
-    ) -> Vec<crate::composer_draft_session_policy::ComposerImageAttachment> {
-        self.attachments
-            .iter()
-            .map(ComposerAttachment::draft_value)
-            .collect()
-    }
-
-    fn persist_current_draft(&mut self) {
-        let Some(thread) = self.draft_thread.clone() else {
-            return;
-        };
-        let session = ComposerDraftSession::for_key(thread);
-        let document = self.current_draft_document();
-        let attachments = self.current_draft_attachments();
-        let _ = session.persist(&mut self.draft_store, &document, &attachments);
+    /// Replaces the whole authored text as a fresh document: the caret moves
+    /// to the end and local undo history starts over.
+    fn replace_draft_text(&mut self, text: String) {
+        self.state.set_draft(text);
+        self.authored_text_present = true;
+        self.draft_revision = self.draft_revision.saturating_add(1);
+        self.advance_selection_revision();
+        self.selection = self.state.draft().len()..self.state.draft().len();
+        self.selection_reversed = false;
+        self.selection_anchor = None;
+        self.clear_vertical_goal();
+        self.selection_dragging = false;
+        self.marked_range = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.layout = None;
+        self.painted_bounds = None;
     }
 
     pub(crate) fn set_surface(
@@ -807,7 +752,9 @@ impl NativeComposer {
             }
             self.active_attachment_submission = None;
             self.active_submission_draft_revision = None;
-            self.persist_current_draft();
+            if disposition == DraftDisposition::Accepted {
+                self.note_draft_change();
+            }
             self.layout = None;
             self.painted_bounds = None;
             let end = self.selection.end.min(self.state.draft().len());
@@ -1036,6 +983,10 @@ fn logical_vertical_target(text: &str, cursor: usize, direction: i32, goal_colum
 #[path = "native_composer/tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "native_composer/forge_draft_tests.rs"]
+mod forge_draft_tests;
+
 #[path = "native_composer/attachments.rs"]
 mod attachments;
 
@@ -1044,3 +995,6 @@ mod editing;
 
 #[path = "native_composer/render.rs"]
 mod render;
+
+#[path = "native_composer/forge_draft.rs"]
+mod forge_draft;

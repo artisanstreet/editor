@@ -148,6 +148,8 @@ mod presentation;
 // Phase-2 split submodules (see native_application/).
 
 mod host_switch;
+
+mod composer_drafts;
 #[path = "native_application/impl_lifecycle.rs"]
 mod impl_lifecycle;
 mod impl_machines;
@@ -390,6 +392,8 @@ pub struct NativeApplication {
     message_flight: Option<NativeMessageFlight>,
     /// Keeps the connection open until the message flight's reply arrives.
     message_flight_hold: Option<crate::native_transport_service::Hold>,
+    /// Forge draft save chains and uploads of this connection.
+    composer_drafts: composer_drafts::ComposerDrafts,
     optimistic_messages: Vec<optimistic_messages::LocalSend>,
     message_retry: Option<NativeMessageRetry>,
     message_receipt: Option<QueueMessageReceipt>,
