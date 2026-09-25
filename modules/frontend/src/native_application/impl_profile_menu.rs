@@ -597,6 +597,19 @@ impl NativeApplication {
             ));
         }
         block = block.child(title);
+        if !refreshing
+            && let Some(failure) = engine_refresh_failure(&self.profile_usage, &engine_id)
+        {
+            let failure_selector = format!("artisan-profile-usage-failure-{engine_id}");
+            block = block.child(
+                div()
+                    .debug_selector(move || failure_selector.clone())
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.secondary)
+                    .child(failure),
+            );
+        }
         for (group_index, group) in group_usage_windows(&report.windows).iter().enumerate() {
             let mut group_view = div().flex().flex_col().gap(px(6.0));
             if group_index > 0 {

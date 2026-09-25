@@ -156,9 +156,13 @@ impl NativeApplication {
             model_selector,
             composer_model_choice: None,
             deferred_composer_policy: None,
+            last_used_model: crate::native_last_used::load_stored_model(),
             composer_model_run_error: None,
+            pending_account_send: None,
             pending_failed_recovery: None,
             catalog_controller: NativeCatalogController::new(),
+            host_model_catalog: None,
+            connection_retry_pending: false,
             _composer_controls_subscription: composer_controls_subscription,
             _composer_model_subscription: composer_model_subscription,
             _composer_subscription: composer_subscription,
@@ -207,6 +211,9 @@ impl NativeApplication {
             picker_subscription: None,
             home_picker: None,
             home_picker_subscription: None,
+            sidebar_project_picker: None,
+            sidebar_project_picker_subscription: None,
+            project_navigation: impl_projects::ProjectNavigation::new(cx),
             project_options: Vec::new(),
             selected_project: None,
             titlebar_repository: None,
@@ -289,6 +296,25 @@ impl NativeApplication {
                         cx.notify();
                     }
                 });
+            }
+        })
+        .detach();
+        #[cfg(not(test))]
+        cx.spawn(async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(300))
+                    .await;
+                let catalog = cx
+                    .background_executor()
+                    .spawn(async { scope_free_catalog_snapshot() })
+                    .await;
+                if view
+                    .update(cx, |app, cx| app.refresh_model_catalog(catalog, cx))
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();

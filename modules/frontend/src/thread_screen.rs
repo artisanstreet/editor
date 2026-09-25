@@ -759,8 +759,10 @@ mod tests {
         });
         cx.update(|_, app| {
             surface.update(app, |surface, cx| {
-                surface
-                    .set_pending_messages(vec![("last line\n".repeat(40), "Sending…".into())], cx);
+                surface.set_pending_messages(
+                    vec![("last line\n".repeat(40), "Sending…".into(), Vec::new())],
+                    cx,
+                );
             })
         });
         for (width, height) in [(500.0, 400.0), (900.0, 700.0), (500.0, 450.0)] {
@@ -902,5 +904,41 @@ mod tests {
             card_height <= REFERENCE_ENV_CARD_PX + 8.0,
             "single-row card {card_height}px must stay near the 44px reference, not the 72px compact mismatch"
         );
+    }
+    #[gpui::test]
+    fn jump_circle_stays_centered_above_composer_after_resize(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("jump-circle-proof", EXPANDED_WIDE_CONTENT, cx)
+        });
+        let surface = cx.update(|_, app| {
+            view.read(app)
+                .screen
+                .read(app)
+                .host
+                .read(app)
+                .surface()
+                .clone()
+        });
+        cx.update(|_, app| {
+            surface.update(app, |surface, cx| {
+                surface.set_jump_to_latest_visible(true, cx)
+            })
+        });
+        for (width, height) in [(500.0, 400.0), (900.0, 700.0)] {
+            cx.simulate_resize(gpui::size(px(width), px(height)));
+            cx.run_until_parked();
+            let card = cx
+                .debug_bounds(THREAD_SCREEN_COMPOSER_CARD_SELECTOR)
+                .expect("composer");
+            let button = cx
+                .debug_bounds(crate::conversation_surface::JUMP_TO_LATEST_SELECTOR)
+                .expect("jump button");
+            assert_eq!(button.size, gpui::size(px(32.0), px(32.0)));
+            assert!((button.center().x - card.center().x).abs() < px(1.0));
+            assert!(
+                (card.top() - button.bottom() - px(8.0)).abs() < px(1.0),
+                "button {button:?} must clear composer {card:?} by 8px"
+            );
+        }
     }
 }

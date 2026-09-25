@@ -13,7 +13,15 @@ pub(crate) fn selected_home() -> Option<PathBuf> {
             return Some(args.next().map(PathBuf::from).unwrap_or_default());
         }
     }
-    None
+    // An explicit CLI host always wins; otherwise reopen the last-used host
+    // when its credentials still decode, else fall back to local.
+    match crate::native_last_used::load_host() {
+        None => None,
+        Some(home) => hosts::read_private(&home, "host.json")
+            .and_then(|bytes| hosts::HostInvitation::decode(&bytes))
+            .map(|_| home)
+            .ok(),
+    }
 }
 
 mod catalog;

@@ -78,6 +78,49 @@ impl NativeWorkspace {
             self.selected = index;
             let view = self.sessions[index].view.clone();
             view.update(cx, |view, cx| {
+                if view.connection_retry_pending {
+                    return;
+                }
+                if matches!(view.state, NativeViewState::Failure(_))
+                    && let Some(service) = view
+                        .service
+                        .as_ref()
+                        .filter(|service| !service.is_finished())
+                        .cloned()
+                {
+                    // Shutdown admission is nonblocking. Wait off the UI thread
+                    // for custody release before creating the replacement client.
+                    if service.request_shutdown().is_err() {
+                        view.set_failure(command_failure(CommandSendError::Busy), cx);
+                        return;
+                    }
+                    view.connection_retry_pending = true;
+                    view.state = NativeViewState::Loading;
+                    let home = home.clone();
+                    cx.spawn(async move |view, cx| {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(45);
+                        while !service.is_finished() && std::time::Instant::now() < deadline {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(50))
+                                .await;
+                        }
+                        let _ = view.update(cx, |view, cx| {
+                            view.connection_retry_pending = false;
+                            if view.shutdown_prepared {
+                                return;
+                            }
+                            if service.is_finished() {
+                                cx.emit(SelectMachine(home));
+                            } else {
+                                view.set_failure(command_failure(CommandSendError::Busy), cx);
+                            }
+                        });
+                    })
+                    .detach();
+                    cx.notify();
+                    return;
+                }
                 // A stopped service has already released its reconnect custody. Keep the
                 // editor state, and refresh the invitation when explicitly selecting it again.
                 if view
@@ -120,6 +163,11 @@ impl NativeWorkspace {
                 view.profile_focus.focus(window, cx);
             });
         }
+        // Every explicit host switch refreshes the last-used preference so a
+        // fresh launch reopens the selected machine instead of the local one.
+        // Sessions retain older invitation incarnations under one identity,
+        // so the effective session home (not the requested path) is stored.
+        crate::native_last_used::save_host(self.sessions[self.selected].home.as_deref());
         cx.notify();
     }
 

@@ -505,6 +505,14 @@ impl ConversationHost {
                         }),
                         cx,
                     ),
+                ConversationSurfaceAction::ViewportExtentChanged => self.route_controller_event(
+                    ConversationStateEvent::Viewport(ViewportEvent::ExtentChanged),
+                    cx,
+                ),
+                ConversationSurfaceAction::BottomScrollInterrupted => self.route_controller_event(
+                    ConversationStateEvent::Viewport(ViewportEvent::UserInterruptedScroll),
+                    cx,
+                ),
                 ConversationSurfaceAction::JumpToLatestRequested => self.route_controller_event(
                     ConversationStateEvent::Viewport(ViewportEvent::JumpToBottomRequested),
                     cx,

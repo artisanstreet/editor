@@ -131,6 +131,7 @@ pub(super) struct ThreadSwitchFlight {
     pub(super) source_thread: ThreadId,
     pub(super) target_thread: Option<ThreadId>,
     pub(super) generation: u64,
+    pub(super) carry_draft: bool,
     pub(super) phase: ThreadSwitchPhase,
 }
 

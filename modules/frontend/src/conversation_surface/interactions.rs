@@ -33,7 +33,7 @@ impl ConversationSurface {
 
     pub(crate) fn set_pending_messages(
         &mut self,
-        rows: Vec<(String, String)>,
+        rows: Vec<(String, String, Vec<artisan_domain::ImageAttachmentRef>)>,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.pending_messages != rows {
@@ -52,6 +52,7 @@ impl ConversationSurface {
         let mut surface = Self {
             composer_clearance: HashMap::new(),
             pending_messages: Vec::new(),
+            send_entrance: None,
             scene,
             navigator_markers,
             transcript_window: RefCell::new(TranscriptWindowState::default()),
@@ -67,12 +68,16 @@ impl ConversationSurface {
             jump_to_latest_focus: cx.focus_handle().tab_index(2).tab_stop(true),
             answer_focus: cx.focus_handle().tab_index(3).tab_stop(true),
             jump_to_latest_visible: false,
+            smooth_bottom_pending: false,
+            smooth_bottom_active: false,
             last_viewport_observation: Some(ViewportObservation {
                 first_visible: None,
                 last_visible: None,
                 at_bottom: true,
             }),
             pending_viewport_observation: None,
+            pending_viewport_extent_change: false,
+            follow_bottom_pending: false,
             last_viewport_geometry: None,
             viewport_observation_scheduled: false,
             viewport_next_frame_scheduled: false,
@@ -202,9 +207,49 @@ impl ConversationSurface {
     ///
     /// Completion is intentionally not synthesized here. The next physical
     /// viewport observation is the controller's completion signal.
+    pub fn smooth_scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        if cx.reduce_motion() {
+            self.scroll_to_bottom(cx);
+        } else {
+            self.smooth_bottom_pending = true;
+            cx.notify();
+        }
+    }
+
+    /// Follow streaming growth after layout, once reserved anchor space is
+    /// exhausted. Explicit jumps still use the unconditional bottom path.
+    pub fn follow_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.follow_bottom_pending = true;
+        cx.notify();
+    }
+
+    /// Immediately follows the tail for automatic viewport updates.
     pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
+        self.smooth_bottom_pending = false;
+        self.smooth_bottom_active = false;
+        self.transcript_scroll.cancel_to(
+            f32::from(self.scroll_handle.offset().y),
+            f32::from(self.scroll_handle.max_offset().y),
+        );
         self.scroll_handle.scroll_to_bottom();
         cx.notify();
+    }
+
+    pub(crate) fn begin_send_entrance(&mut self, request: String, cx: &mut Context<Self>) {
+        self.send_entrance = (!cx.reduce_motion()).then(|| SendEntrance {
+            started: Instant::now(),
+            request,
+            target: None,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn bind_send_entrance(&mut self, request: &str, item_id: &str) {
+        if let Some(entrance) = &mut self.send_entrance
+            && entrance.request == request
+        {
+            entrance.target = SceneId::parse(item_id.to_owned()).ok();
+        }
     }
 
     /// Replaces the accepted scene. Disclosure state is not changed locally;
@@ -342,6 +387,12 @@ impl ConversationSurface {
     }
 
     /// Records one failed rich-link resolution; the authored label stays.
+    pub fn set_rich_link_favicon(&mut self, url: &str, bytes: &[u8], cx: &mut Context<Self>) {
+        self.rich_link_titles.resolve_icon(url, bytes);
+        cx.notify();
+    }
+
+    /// Records a failed metadata lookup.
     pub fn set_rich_link_failure(&mut self, requested_url: &str, cx: &mut Context<Self>) {
         self.rich_link_titles.fail(requested_url);
         cx.notify();
@@ -770,6 +821,35 @@ impl ConversationSurface {
         if self.pending_scroll_targets.len() >= CONVERSATION_SURFACE_MAX_SCROLL_TARGETS {
             return false;
         }
+        // Explicit navigation to a tool row reveals its local chain. The
+        // default remains closed for every chain the reader has not targeted.
+        for turn in self.scene.turn_scenes() {
+            for block in turn.blocks() {
+                let TurnBlock::WorkGroup(group) = block else {
+                    continue;
+                };
+                let mut chain = None;
+                for (_, row) in ordered_detail_rows(group) {
+                    if !matches!(row, DetailRow::Activity { .. }) {
+                        chain = None;
+                        continue;
+                    }
+                    let id = row.scene_id();
+                    let key = chain.get_or_insert_with(|| id.as_str().to_owned());
+                    let matches = match &target {
+                        ConversationSurfaceTarget::Scene(target) => target == id,
+                        ConversationSurfaceTarget::Item(target) => {
+                            item_id_for_scene_id(id).as_ref() == Some(target)
+                        }
+                    };
+                    if matches {
+                        self.trace_groups_open
+                            .borrow_mut()
+                            .insert(key.clone(), true);
+                    }
+                }
+            }
+        }
         self.pending_scroll_targets.push(target);
         cx.notify();
         true
@@ -796,15 +876,45 @@ impl ConversationSurface {
         let offset = self.scroll_handle.offset();
         let current = f32::from(offset.y);
         let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
+        if self.smooth_bottom_active || self.smooth_bottom_pending {
+            self.enqueue_action(ConversationSurfaceAction::BottomScrollInterrupted);
+            self.smooth_bottom_active = false;
+            self.smooth_bottom_pending = false;
+            self.transcript_scroll.cancel_to(current, maximum);
+        }
         if event.delta.precise() || cx.reduce_motion() {
             let next = (current + delta).clamp(-maximum, 0.0);
             self.scroll_handle.set_offset(point(offset.x, px(next)));
             self.transcript_scroll.cancel_to(next, maximum);
+            self.observe_wheel_destination(next, maximum, cx);
             cx.notify();
             return;
         }
         self.transcript_scroll.push(current, delta, maximum);
+        self.observe_wheel_destination(self.transcript_scroll.target(), maximum, cx);
         self.schedule_transcript_scroll_frame(window, cx);
+    }
+
+    pub(super) fn observe_wheel_destination(
+        &mut self,
+        target: f32,
+        maximum: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport_height = f64::from(self.scroll_handle.bounds().size.height);
+        let observation = ViewportObservation {
+            first_visible: None,
+            last_visible: None,
+            at_bottom: conversation_is_following(
+                -f64::from(target),
+                viewport_height + f64::from(maximum),
+                viewport_height,
+            ),
+        };
+        if !observation.at_bottom {
+            self.follow_bottom_pending = false;
+        }
+        self.observe_viewport(observation, cx);
     }
 
     /// Schedules one transcript smoothing frame while a target is outstanding.
@@ -831,9 +941,20 @@ impl ConversationSurface {
         self.transcript_scroll_frame_scheduled = false;
         let offset = self.scroll_handle.offset();
         let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
+        if self.smooth_bottom_active {
+            // Follow updated measured extent while virtualized rows settle.
+            self.transcript_scroll.push(
+                f32::from(offset.y),
+                -maximum - self.transcript_scroll.target(),
+                maximum,
+            );
+        }
         if let Some(next) = self.transcript_scroll.step(f32::from(offset.y), maximum) {
             self.scroll_handle.set_offset(point(offset.x, px(next)));
             cx.notify();
+        }
+        if !self.transcript_scroll.active() {
+            self.smooth_bottom_active = false;
         }
         self.schedule_transcript_scroll_frame(window, cx);
     }
@@ -1065,6 +1186,12 @@ impl ConversationSurface {
     /// full. This is `pub(crate)` so the host can retry after draining its
     /// downstream effect queue without inventing another surface action.
     pub(crate) fn retry_pending_viewport_observation(&mut self, cx: &mut Context<Self>) {
+        if self.pending_viewport_extent_change
+            && self.enqueue_action(ConversationSurfaceAction::ViewportExtentChanged)
+        {
+            self.pending_viewport_extent_change = false;
+            cx.notify();
+        }
         let Some(observation) = self.pending_viewport_observation.take() else {
             return;
         };
@@ -1108,7 +1235,27 @@ impl ConversationSurface {
             return;
         }
 
+        let first_measurement = self.last_viewport_geometry.is_none();
+        let extent_changed = self.last_viewport_geometry.is_some_and(|previous| {
+            previous.scroll_height != scroll_height || previous.viewport_height != viewport_height
+        });
         self.last_viewport_geometry = Some(geometry);
+        if first_measurement {
+            // Initial placement is owned by the host's first scene delivery.
+            return;
+        }
+        if extent_changed {
+            // Electron's ResizeObserver requests a follow correction; it does
+            // not reinterpret growing content as the reader scrolling away.
+            self.pending_viewport_extent_change = true;
+            self.retry_pending_viewport_observation(cx);
+            return;
+        }
+        if self.transcript_scroll.active() && !self.smooth_bottom_active {
+            // Wheel intent already reports its destination. Intermediate
+            // smoothing frames must not re-arm following within the leeway.
+            return;
+        }
         let observation = ViewportObservation {
             first_visible: None,
             last_visible: None,

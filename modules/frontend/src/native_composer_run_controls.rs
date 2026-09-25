@@ -187,6 +187,43 @@ impl NativeApplication {
             }
             _ => self.run_controls.available = false,
         }
+        if let (Some(host), Some(run_id), Some(engine)) = (
+            self.conversation_host.clone(),
+            self.run_controls.active.clone(),
+            self.run_controls.engine,
+        ) {
+            let turns: Vec<_> = host
+                .read(cx)
+                .canonical_snapshot()
+                .map(|snapshot| {
+                    snapshot
+                        .items()
+                        .iter()
+                        .filter_map(|item| {
+                            if let ConversationItem::AssistantMessage(message) = item {
+                                (message.run_id == run_id).then(|| message.turn_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for turn_id in turns {
+                let _ = host.update(cx, |host, cx| {
+                    host.dispatch(
+                        ConversationStateEvent::SetTurnEngineLabel {
+                            turn_id,
+                            engine_label: Some(
+                                profile_usage_display_name(engine.as_str()).to_owned(),
+                            ),
+                        },
+                        cx,
+                    )
+                });
+            }
+            self.pump_host_boundary(&host, cx);
+        }
         self.sync_composer_controls(cx);
         self.schedule_composer_queue(false, cx);
         if was_active && self.run_controls.active.is_none() {

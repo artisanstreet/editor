@@ -483,6 +483,8 @@ pub enum NativeTransportEvent {
     },
     /// One resolved rich-link page title.
     RichLinkResolved {
+        /// Optional bounded favicon image.
+        favicon: Vec<u8>,
         /// Canonical URL the resolution answers.
         requested_url: String,
         /// Resolved display title.

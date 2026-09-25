@@ -174,6 +174,15 @@ impl NativeApplication {
         project_id: ProjectId,
         cx: &mut Context<Self>,
     ) {
+        self.select_project(project_id, true, cx);
+    }
+
+    pub(super) fn select_project(
+        &mut self,
+        project_id: ProjectId,
+        promote: bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self
             .project_options
             .iter()
@@ -182,21 +191,72 @@ impl NativeApplication {
         {
             return;
         }
+        if promote {
+            self.promote_project(&project_id);
+        }
+        if self.selected_project.as_ref() == Some(&project_id) {
+            self.sync_project_pickers(cx);
+            return;
+        }
+        if let (Some(project), Some(thread)) = (&self.selected_project, &self.selected_thread) {
+            self.project_navigation
+                .last_threads
+                .insert(project.clone(), thread.clone());
+        }
+        if (self.selected_thread_is_draft() || self.composer.read(cx).has_unsent_draft())
+            && self.command_submission_is_available()
+            && !self.composer.read(cx).is_submitting()
+            && self.message_flight.is_none()
+        {
+            // The unsent prompt follows the workspace into a fresh task,
+            // without replacing a destination conversation's saved draft.
+            self.selected_project = Some(project_id.clone());
+            self.intake_failure_operation = None;
+            self.intake_retry_available = false;
+            self.intake_restore_state = None;
+            self.thread_listing = None;
+            self.pending_thread = None;
+            self.pending_snapshot = None;
+            self.retained_switch_listings.clear();
+            self.sync_project_pickers(cx);
+            self.install_thread_picker(empty_thread_listing(), None, cx);
+            self.navigate(
+                NativeRoute::NewThread {
+                    project: Some(project_id),
+                },
+                cx,
+            );
+            self.begin_new_task(cx);
+            self.request_project_repository(cx);
+            return;
+        }
         self.retain_message_flight(cx);
         self.clear_message_presentation();
+        self.project_navigation.restore_draft = true;
+        self.composer.update(cx, |composer, cx| {
+            composer.switch_thread(&format!("project:{}", project_id.as_str()), false, cx);
+        });
         self.intake_stage = None;
         self.intake_failure_operation = None;
         self.intake_retry_available = false;
         self.intake_restore_state = None;
         self.pending_thread = None;
         self.pending_snapshot = None;
+        self.project_navigation.awaiting_threads = true;
         if self.selected_project.as_ref() != Some(&project_id) {
-            self.retire_host(cx);
+            if self.conversation_host.is_some() && self.selected_thread.is_some() {
+                // Keep the source subscription until its stop receipt. The
+                // destination listing supplies this transition's target.
+                self.begin_thread_retirement(cx);
+            } else {
+                self.retire_host(cx);
+            }
             self.thread_listing = None;
             self.retained_switch_listings.clear();
             self.install_thread_picker(empty_thread_listing(), None, cx);
         }
         self.selected_project = Some(project_id.clone());
+        self.sync_project_pickers(cx);
         self.navigate(
             NativeRoute::NewThread {
                 project: Some(project_id.clone()),

@@ -122,3 +122,35 @@ region is validated before rendering so requests raised during rendering
 survive to the next frame. Throttled retries use one timer instead of polling.
 
 Nix provides `nix run .#performance` for the performance-profile staged application and `nix develop .#performance` for pinned profiling tools. Supply an absolute `ARTISAN_FRAME_CAPTURE` path outside the store. See the [development runbook](runbooks/native-dev.md#desktop-and-performance-tools) for the launch and host requirements.
+
+## Scroll following and tool-chain defaults
+
+The historical Electron/Svelte source was inspected at
+`733eed518bee9b3d9b17c7f1f2b5cbb99d5fed26`, immediately before the web code was
+removed. The relevant files are `modules/frontend/src/routes/components/thread-workspace.svelte`,
+`conversation-trace.svelte` in the same directory, and
+`modules/frontend/src/lib/conversation/scroll-position.ts`.
+
+Tool chains use `open_groups[id] ?? false` there. Native tool chains now also
+start closed, including live and failed work. Explicit toggles persist, and
+navigation to a particular tool row reveals its chain. The enclosing work
+session retains its own disclosure policy.
+
+The native follow tolerance already matches Electron: distance from the bottom
+must be strictly less than `max(64 px, viewport height × 0.06)`. Native measured
+size changes now emit an extent event, equivalent to Electron's ResizeObserver,
+rather than impersonating a user scroll. Streaming, image loading and disclosure
+layout can therefore request a bottom correction without turning following off.
+Wheel intent uses its destination to apply the tolerance; intermediate smoothing
+positions cannot re-enable following after the reader has scrolled away.
+
+Automatic corrections pin directly after layout and yield to reserved turn
+space above its 192 px floor (or the composer clearance when larger). This avoids
+fighting the space that absorbs answer growth below an anchored sent turn.
+Explicit jump-to-latest keeps its existing smooth motion and interruption path.
+The historical renderer also applied a separate visual-only glide capped at
+56 px; that CSS transform is not part of this native follow-policy change.
+
+Regression coverage includes live/failed chains staying closed, explicit tool
+navigation, streaming resize without detachment, wheel leeway before smoothing,
+reserved turn space, and the existing host/controller and tolerance tests.

@@ -5,6 +5,13 @@
 
 use super::*;
 
+pub(super) struct PendingAccountSend {
+    thread: Option<ThreadId>,
+    connection: ProfileUsageGeneration,
+    draft: (u64, u64),
+    policy: crate::native_model_selector::SelectPolicy,
+}
+
 impl NativeApplication {
     pub(super) fn message_submission_is_admissible(&self, cx: &App) -> bool {
         matches!(self.route(), NativeRoute::Thread { project, thread }
@@ -50,10 +57,19 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_controls(&mut self, cx: &mut Context<Self>) {
+        if self.pending_account_send.as_ref().is_some_and(|send| {
+            send.thread != self.selected_thread
+                || send.connection != self.profile_usage_generation
+                || send.draft != self.composer.read(cx).send_draft_identity()
+                || self.displayed_send_policy(cx).as_ref() != Some(&send.policy)
+        }) {
+            self.pending_account_send = None;
+        }
         self.sync_local_sends(cx);
         let mut snapshot = self.composer_controls.read(cx).snapshot().clone();
-        snapshot.send_ready =
-            self.message_submission_is_admissible(cx) && self.composer.read(cx).send_ready();
+        snapshot.send_ready = self.pending_account_send.is_none()
+            && self.message_submission_is_admissible(cx)
+            && self.composer.read(cx).send_ready();
         snapshot.disabled = self.service_stopped;
         self.project_run_controls(&mut snapshot);
         crate::native_composer_queue::project_controls_snapshot(
@@ -62,6 +78,34 @@ impl NativeApplication {
             !self.service_stopped
                 && self.command_submission_is_available()
                 && self.composer.read(cx).capture_recall_target().is_some(),
+        );
+        // A failed attempt must not outlive a newer accepted user message.
+        let latest_user = self.conversation_host.as_ref().and_then(|host| {
+            host.read(cx).canonical_snapshot().and_then(|snapshot| {
+                snapshot
+                    .items()
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::UserMessage(message) => Some(message.created_at),
+                        ConversationItem::MultimodalUserMessage(message) => {
+                            Some(message.created_at)
+                        }
+                        _ => None,
+                    })
+                    .max()
+            })
+        });
+        snapshot.failed_dispatches.retain(|row| {
+            self.message_flight.is_none()
+                && self.message_receipt.as_ref().is_none_or(|receipt| {
+                    Some(&receipt.thread_id) != self.selected_thread.as_ref()
+                        || row.command_id() == receipt.request_id.as_str()
+                })
+        });
+        crate::native_composer_queue::hide_failures_before(
+            &self.composer_queue.state,
+            &mut snapshot,
+            latest_user,
         );
         snapshot.pending_steering.clear();
         // Reference behavior (thread-composer.svelte:381-382, audit D4/C5):
@@ -283,17 +327,57 @@ impl NativeApplication {
 
     /// Captures the validated routed engine display label at send time.
     ///
-    /// Resolved from the *authoritative* config only â€” never from the
-    /// picker/choice, which may change after the send. `None` (unconfigured
-    /// thread) renders the generic Waiting fallback. Provider-owned roster
-    /// names with id fallback, matching the existing user-facing copy.
+    /// Capture the configuration already submitted on the ordered command
+    /// stream, including a first-send save whose acknowledgement is pending.
+    /// The picker can change later without relabeling this send.
     pub(super) fn send_engine_label(&self) -> Option<String> {
-        let engine = self
+        let config = self
             .engine_settings
-            .authoritative_config()?
-            .selection()
-            .engine_id();
-        Some(profile_usage_display_name(engine.as_str()).to_owned())
+            .pending_save()
+            .map(|(_, config)| config)
+            .or_else(|| self.engine_settings.authoritative_config())?;
+        Some(profile_usage_display_name(config.selection().engine_id().as_str()).to_owned())
+    }
+
+    fn displayed_send_policy(
+        &self,
+        cx: &App,
+    ) -> Option<crate::native_model_selector::SelectPolicy> {
+        match &self.composer_model_choice {
+            Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
+            _ => self.model_selector.read(cx).state().policy().cloned(),
+        }
+    }
+
+    pub(super) fn resume_account_send(&mut self, engine: &str, cx: &mut Context<Self>) {
+        if !self
+            .pending_account_send
+            .as_ref()
+            .is_some_and(|send| send.policy.engine_id == engine)
+        {
+            return;
+        }
+        let send = self
+            .pending_account_send
+            .take()
+            .expect("matched pending send");
+        if send.thread != self.selected_thread
+            || send.connection != self.profile_usage_generation
+            || send.draft != self.composer.read(cx).send_draft_identity()
+            || self.displayed_send_policy(cx).as_ref() != Some(&send.policy)
+        {
+            self.sync_composer_controls(cx);
+            return;
+        }
+        if engine_readiness(&self.profile_usage, engine, profile_usage_now_ms())
+            == EngineReadiness::Ready
+        {
+            self.begin_message_submission(cx);
+        } else {
+            self.composer_model_run_error = Some(self.readiness_block_reason(engine));
+            self.sync_composer_controls(cx);
+            cx.notify();
+        }
     }
 
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
@@ -319,6 +403,27 @@ impl NativeApplication {
             cx.notify();
             return;
         }
+        if let Some(policy) = self.displayed_send_policy(cx) {
+            self.ensure_profile_usage(false, Some(&policy.engine_id), cx);
+            if engine_readiness(
+                &self.profile_usage,
+                &policy.engine_id,
+                profile_usage_now_ms(),
+            ) == EngineReadiness::Checking
+            {
+                self.pending_account_send = Some(PendingAccountSend {
+                    thread: self.selected_thread.clone(),
+                    connection: self.profile_usage_generation,
+                    draft: self.composer.read(cx).send_draft_identity(),
+                    policy,
+                });
+                self.composer_model_run_error = None;
+                self.sync_composer_controls(cx);
+                cx.notify();
+                return;
+            }
+        }
+        self.pending_account_send = None;
         // The choice-versus-saved check is only meaningful once a thread
         // carries a persisted configuration. On an unconfigured thread it
         // would always fail and strand explicit selections; admission below
@@ -393,7 +498,7 @@ impl NativeApplication {
                     engine_label,
                     token,
                 });
-                self.stage_local_send();
+                self.stage_local_send(cx);
             }
             Err(error) => {
                 self.reject_message_submission(token, command_failure(error), cx);
@@ -516,7 +621,7 @@ impl NativeApplication {
                     engine_label: retry_label,
                     token,
                 });
-                self.stage_local_send();
+                self.stage_local_send(cx);
             }
             Err(CommandSendError::Busy) => {
                 self.finish_composer_submission(token, DraftDisposition::Retained, cx);

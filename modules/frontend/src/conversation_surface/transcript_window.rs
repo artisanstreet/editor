@@ -570,6 +570,7 @@ impl ConversationSurface {
             });
             if changed {
                 cx.notify();
+                window.defer(cx, |window, _| window.refresh());
             }
         }
 
@@ -590,6 +591,10 @@ impl ConversationSurface {
         });
         if active_changed {
             cx.notify();
+            // A prepaint notification alone can be consumed by this frame.
+            // Paint the new marker even when following stays inside its leeway
+            // and emits no separate viewport action to trigger another draw.
+            window.defer(cx, |window, _| window.refresh());
         }
 
         let mut newly_painted = false;

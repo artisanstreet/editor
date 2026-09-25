@@ -326,7 +326,6 @@ pub(crate) struct PickerScrollState {
 impl PickerScrollState {
     /// Returns the currently requested content offset.
     #[must_use]
-    #[cfg(test)]
     pub(crate) const fn target(self) -> f32 {
         self.target
     }

@@ -54,7 +54,12 @@ fn group_detail_rows_paint_in_durable_order(cx: &mut TestAppContext) {
     )
     .expect("conversation scene is valid");
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
-        ConversationSurface::new(detail_scene, ThemeMode::Dark, surface_cx)
+        let mut surface = ConversationSurface::new(detail_scene, ThemeMode::Dark, surface_cx);
+        surface
+            .trace_groups_open
+            .get_mut()
+            .insert("work-a".to_owned(), true);
+        surface
     });
     cx.simulate_resize(size(px(720.0), px(480.0)));
     settle(cx);
@@ -70,7 +75,11 @@ fn group_detail_rows_paint_in_durable_order(cx: &mut TestAppContext) {
         surface.update(app, |surface, _| {
             for action in surface.take_actions() {
                 assert!(
-                    matches!(action, ConversationSurfaceAction::ViewportObserved(_)),
+                    matches!(
+                        action,
+                        ConversationSurfaceAction::ViewportObserved(_)
+                            | ConversationSurfaceAction::ViewportExtentChanged
+                    ),
                     "only legitimate viewport observations may precede assertions, got {action:?}"
                 );
             }
@@ -125,16 +134,18 @@ fn settled_activity_chain_starts_closed_and_toggles_open(cx: &mut TestAppContext
     cx.update(|_, app| {
         let actions = surface.read(app).pending_actions().to_vec();
         assert!(
-            actions
-                .iter()
-                .all(|action| matches!(action, ConversationSurfaceAction::ViewportObserved(_))),
+            actions.iter().all(|action| matches!(
+                action,
+                ConversationSurfaceAction::ViewportObserved(_)
+                    | ConversationSurfaceAction::ViewportExtentChanged
+            )),
             "the chain toggle stays surface-local, got {actions:?}"
         );
     });
 }
 
 #[gpui::test]
-fn live_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
+fn live_activity_chain_starts_closed(cx: &mut TestAppContext) {
     const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0";
     let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(
@@ -150,13 +161,13 @@ fn live_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(720.0), px(480.0)));
     settle(cx);
     assert!(
-        cx.debug_bounds(DETAIL).is_some(),
-        "a live chain opens itself"
+        cx.debug_bounds(DETAIL).is_none(),
+        "a live chain starts closed"
     );
 }
 
 #[gpui::test]
-fn failed_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
+fn failed_activity_chain_starts_closed(cx: &mut TestAppContext) {
     const DETAIL: &str = "artisan-conversation-surface-turn-turn_a-block-work-work-a-detail-0";
     let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(
@@ -172,8 +183,8 @@ fn failed_activity_chain_paints_open_without_a_toggle(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(720.0), px(480.0)));
     settle(cx);
     assert!(
-        cx.debug_bounds(DETAIL).is_some(),
-        "a failed chain opens itself"
+        cx.debug_bounds(DETAIL).is_none(),
+        "a failed chain starts closed"
     );
 }
 
@@ -214,7 +225,12 @@ fn session_activity_chain_carries_kind_and_detail(cx: &mut TestAppContext) {
     )
     .expect("session activity scene is valid");
     let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
-        ConversationSurface::new(session_scene, ThemeMode::Dark, surface_cx)
+        let mut surface = ConversationSurface::new(session_scene, ThemeMode::Dark, surface_cx);
+        surface
+            .trace_groups_open
+            .get_mut()
+            .insert("work-a".to_owned(), true);
+        surface
     });
     cx.simulate_resize(size(px(720.0), px(480.0)));
     settle(cx);
@@ -375,6 +391,7 @@ fn group_disclosure_toggle_emits_typed_action(cx: &mut TestAppContext) {
                 matches!(
                     action,
                     ConversationSurfaceAction::ViewportObserved(_)
+                        | ConversationSurfaceAction::ViewportExtentChanged
                         | ConversationSurfaceAction::DisclosureToggleRequested { .. }
                 ),
                 "only viewport observations and the toggle may be pending, got {action:?}"
@@ -538,6 +555,95 @@ fn collapse_flight_animates_then_settles_unmounted(cx: &mut TestAppContext) {
         cx.debug_bounds(CONTENT).is_none(),
         "a settled collapse unmounts its rows"
     );
+}
+
+#[gpui::test]
+fn closing_history_never_reexpands_when_late_tool_rows_arrive(cx: &mut TestAppContext) {
+    const PANEL: &str =
+        "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-panel";
+    const CONTENT: &str =
+        "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-content";
+    fn updated_scene(rows: u64, disclosure: SceneDisclosure) -> ConversationScene {
+        ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Active,
+            )],
+            (0..rows)
+                .map(|index| {
+                    let id = if index == 0 {
+                        "work-a".to_owned()
+                    } else {
+                        format!("work-{index}")
+                    };
+                    item(
+                        &id,
+                        index + 1,
+                        SceneItemKind::Activity {
+                            body: format!("Command {index}"),
+                            kind: Some("terminal_activity".to_owned()),
+                            detail: Some("cargo check --locked".to_owned()),
+                        },
+                        Some(disclosure),
+                    )
+                })
+                .collect(),
+            vec![TurnNarrationEntry::new(
+                turn_id("turn_a"),
+                TurnNarration::Working,
+            )],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        let mut surface = ConversationSurface::new(
+            updated_scene(1, SceneDisclosure::Open),
+            ThemeMode::Dark,
+            surface_cx,
+        );
+        surface
+            .trace_groups_open
+            .get_mut()
+            .insert("work-a".to_owned(), true);
+        surface
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    let mut previous_height = f32::from(cx.debug_bounds(PANEL).unwrap().size.height);
+    assert!(previous_height > 0.0);
+    for frame in 0..12 {
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(
+                    updated_scene(if frame % 2 == 0 { 1 } else { 16 }, SceneDisclosure::Closed),
+                    surface_cx,
+                );
+            });
+        });
+        pump_animation_frame_after(cx, Duration::from_millis(8));
+        let height = f32::from(cx.debug_bounds(PANEL).unwrap().size.height);
+        assert!(
+            height <= previous_height + 0.5,
+            "closing history expanded on frame {frame}: {previous_height} -> {height}"
+        );
+        previous_height = height;
+    }
+    pump_animation_frame_after(cx, Duration::from_millis(300));
+    for _ in 0..20 {
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                surface.replace_scene(updated_scene(16, SceneDisclosure::Closed), surface_cx);
+            });
+        });
+        settle(cx);
+        assert_eq!(cx.debug_bounds(PANEL).unwrap().size.height, px(0.0));
+        assert!(
+            cx.debug_bounds(CONTENT).is_none(),
+            "settled history must not remount or flash"
+        );
+    }
 }
 
 #[gpui::test]

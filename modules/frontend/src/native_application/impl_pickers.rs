@@ -10,8 +10,16 @@ impl NativeApplication {
         if self.thread_switch_flight.is_some() {
             return;
         }
-        let options = project_options_from_listing(listing);
-        let selected_project = options.first().map(|project| project.id.clone());
+        let initial_project = listing
+            .projects()
+            .first()
+            .map(|project| project.project_id.clone());
+        let options = self.ordered_project_options(listing);
+        let selected_project = self
+            .selected_project
+            .clone()
+            .filter(|id| options.iter().any(|project| &project.id == id))
+            .or_else(|| options.first().map(|project| project.id.clone()));
         if self.selected_project != selected_project || selected_project.is_none() {
             self.retire_host(cx);
             self.pending_thread = None;
@@ -30,6 +38,14 @@ impl NativeApplication {
             self.state = NativeViewState::LoadingThreads;
         }
         self.sync_command_menu_groups(cx);
+        // Initial transport discovery also reads its first project. A restored
+        // selection needs its own read; stale initial replies are ignored.
+        if self.selected_project != initial_project
+            && let Some(project) = self.selected_project.clone()
+            && let Err(error) = self.submit_command(NativeTransportCommand::SelectProject(project))
+        {
+            self.set_failure(command_failure(error), cx);
+        }
         self.request_project_repository(cx);
         cx.notify();
     }
@@ -40,6 +56,7 @@ impl NativeApplication {
         current: Option<ProjectId>,
         cx: &mut Context<Self>,
     ) {
+        self.install_sidebar_project_picker(options.clone(), current.clone(), cx);
         let picker = cx
             .new(|picker_cx| ProjectPickerView::new(options, current, ThemeMode::Dark, picker_cx));
         let subscription = cx.observe(&picker, |application, picker, cx| {
@@ -97,6 +114,9 @@ impl NativeApplication {
                 picker.set_disabled(disabled, picker_cx);
             });
         }
+        if let Some(picker) = self.sidebar_project_picker.clone() {
+            picker.update(cx, |picker, cx| picker.set_disabled(disabled, cx));
+        }
         if let Some(home_picker) = self.home_picker.clone() {
             home_picker.update(cx, |picker, picker_cx| {
                 picker.set_disabled(disabled, picker_cx);
@@ -153,11 +173,25 @@ impl NativeApplication {
         listing: &ThreadListing,
         cx: &mut Context<Self>,
     ) {
-        let listing_is_valid = self.selected_project.as_ref() == Some(project_id)
-            && listing
-                .threads()
-                .iter()
-                .all(|thread| &thread.project_id == project_id);
+        if self.selected_project.as_ref() != Some(project_id) {
+            return;
+        }
+        let listing_is_valid = listing
+            .threads()
+            .iter()
+            .all(|thread| &thread.project_id == project_id);
+        if listing_is_valid && self.project_navigation.awaiting_threads {
+            self.project_navigation.awaiting_threads = false;
+            let target = self.remembered_project_thread(project_id, listing);
+            if let Some(flight) = self.thread_switch_flight.as_mut() {
+                // The source unsubscribe and destination read can finish in
+                // either order. Bind the target before the stop retires it.
+                flight.target_thread.clone_from(&target);
+                if let Some(target) = target {
+                    self.remember_switch_snapshot_thread(target);
+                }
+            }
+        }
         if self.thread_switch_flight.is_some() {
             self.handle_threads_during_switch(listing_is_valid, listing, cx);
             self.sync_command_menu_groups(cx);
@@ -211,7 +245,7 @@ impl NativeApplication {
     pub(super) fn handle_threads_without_switch(
         &mut self,
         listing_is_valid: bool,
-        _project_id: &ProjectId,
+        project_id: &ProjectId,
         listing: &ThreadListing,
         cx: &mut Context<Self>,
     ) {
@@ -289,10 +323,7 @@ impl NativeApplication {
                 }
             }
             (None, _) => {
-                self.pending_thread = listing
-                    .threads()
-                    .first()
-                    .map(|thread| thread.thread_id.clone());
+                self.pending_thread = self.remembered_project_thread(project_id, listing);
                 if self.pending_thread.is_none() {
                     self.state = NativeViewState::EmptyThreads;
                 } else {

@@ -328,9 +328,14 @@ pub struct NativeApplication {
         Option<ThreadId>,
         crate::native_model_catalog::NativeModelPolicy,
     )>,
+    /// Last-used model preference backing new threads without saved config.
+    last_used_model: Option<crate::native_last_used::StoredModelPolicy>,
     composer_model_run_error: Option<String>,
+    pending_account_send: Option<impl_message_flight::PendingAccountSend>,
     pending_failed_recovery: Option<PendingFailedRecovery>,
     catalog_controller: NativeCatalogController,
+    host_model_catalog: Option<NativeModelCatalog>,
+    connection_retry_pending: bool,
     _composer_controls_subscription: Subscription,
     _composer_model_subscription: Subscription,
     message_images: Entity<NativeMessageImages>,
@@ -391,6 +396,9 @@ pub struct NativeApplication {
     picker_subscription: Option<Subscription>,
     home_picker: Option<Entity<HomeProjectPickerView>>,
     home_picker_subscription: Option<Subscription>,
+    sidebar_project_picker: Option<Entity<HomeProjectPickerView>>,
+    sidebar_project_picker_subscription: Option<Subscription>,
+    project_navigation: impl_projects::ProjectNavigation,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
     /// Retained repository facts for the titlebar workspace header.
@@ -473,5 +481,7 @@ mod composer_queue_application;
 
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
+#[path = "native_application/impl_projects.rs"]
+mod impl_projects;
 
 mod optimistic_messages;

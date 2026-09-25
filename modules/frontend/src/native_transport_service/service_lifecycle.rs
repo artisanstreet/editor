@@ -13,6 +13,41 @@
 use super::*;
 
 impl NativeTransportService {
+    #[cfg(test)]
+    pub(crate) fn pending_for_test() -> (
+        Self,
+        tokio::sync::mpsc::Receiver<NativeTransportCommand>,
+        Arc<AtomicBool>,
+    ) {
+        let (commands, receiver) = tokio::sync::mpsc::channel(8);
+        let (_, events) = sync_channel(8);
+        let finished = Arc::new(AtomicBool::new(false));
+        (
+            Self {
+                commands,
+                events: Arc::new(Mutex::new(events)),
+                finished: finished.clone(),
+                shutdown_requested: Arc::new(AtomicBool::new(false)),
+                join: Arc::new(Mutex::new(None)),
+            },
+            receiver,
+            finished,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn completed_for_test(events: Vec<NativeTransportEvent>) -> Self {
+        let (mut service, _, finished) = Self::pending_for_test();
+        let (sender, receiver) = sync_channel(events.len().max(1));
+        for event in events {
+            sender.send(event).unwrap();
+        }
+        drop(sender);
+        service.events = Arc::new(Mutex::new(receiver));
+        finished.store(true, Ordering::Release);
+        service
+    }
+
     /// Starts the one service thread and its owned Tokio runtime.
     ///
     /// No application or GPUI value is captured by the service closure.

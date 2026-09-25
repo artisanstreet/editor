@@ -1,60 +1,38 @@
-//! Home-surface inline project switcher: the opening affordance of the native
-//! home route.
+//! Project picker with home-headline and compact sidebar triggers.
 //!
-//! This leaf pairs the proven [`ProjectPickerState`] interaction model
-//! (controlled open state, current-row initial highlight, wrap-around arrow
-//! movement, Home/End jumps, Enter activation with close-before-action
-//! emission, Escape/outside-press dismissal) with the home headline
-//! presentation: an inline dotted-style project name inside the centered
-//! heading, opening a floating dark rounded dropdown above the name with a
-//! live "Search projects" filter row, folder-icon rows, a selected check,
-//! scrolling, and the genuine "New project" intake row.
-//!
-//! Deliberate differences from [`ProjectPickerView`], all required by the
-//! home design:
-//!
-//! - the trigger is an inline underlined name span composed into the heading,
-//!   not a 280 px menu row;
-//! - rows carry the existing Artisan folder glyph instead of the picker's
-//!   identity dot;
-//! - printable keystrokes feed a real case-insensitive substring filter over
-//!   project names (Backspace shrinks it) rather than the picker's prefix
-//!   typeahead; an empty filter is exactly the legacy full-catalog behavior.
-//!   There is no caret or IME bridge (pinned-GPUI honesty, like the picker's
-//!   documented platform limits): while open, Space types a space and only
-//!   Enter activates; the closed trigger still opens on Space;
-//! - there is no projectless row: the wired application has no genuine
-//!   deselect operation, and this leaf emits no fake one.
-//!
-//! Placement and traversal reuse the audited [`ProjectPickerView`] pattern
-//! (`deferred` + window-mode `anchored()` against a probe-recorded trigger
-//! origin, height-bounded scroll body with one direct child per selectable
-//! row, native tab-stop trigger with focus restore, release-fence against
-//! the synthesized keyboard click).
+//! Both triggers share the controlled selection, focus, and typeahead policy
+//! from `ProjectPickerState`. Menus use the same glass material as the turn
+//! navigator. Project rows stay visible while typing jumps the highlight;
+//! Enter or Space selects, and Escape or an outside press dismisses.
 
 #![allow(clippy::module_name_repetitions)]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
+use crate::native_composer_material::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
+use artisan_ui::gradient::hover_fill_gradient;
 use artisan_ui::separator::{SeparatorAxis, separator};
-use artisan_ui::theme::DesktopTheme;
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{
-    Anchor, AnyElement, App, ClickEvent, Context, Div, FocusHandle, HighlightStyle,
-    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels, Point,
+    Anchor, AnyElement, App, Bounds, ClickEvent, Context, Div, FocusHandle, HighlightStyle,
+    InteractiveElement as _, KeyDownEvent, MouseDownEvent, ParentElement as _, Pixels,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, StyledText,
     UnderlineStyle, Window, anchored, canvas, deferred, div, point, prelude::FluentBuilder as _,
     prelude::IntoElement, px,
 };
 
+use crate::native_model_selector::{HoverRect, SlidingHoverState, render_picker_hover_pill};
 use crate::project_picker::{PickerRow, ProjectOption, ProjectPickerAction, ProjectPickerState};
 
 /// Accessible invitation label for the trigger with no project selected.
 pub const HOME_CHOOSE_PROJECT_LABEL: &str = "Choose a project";
-/// Visible filter placeholder painted in the dropdown's fixed filter row.
-pub const HOME_FILTER_PLACEHOLDER: &str = "Search projects";
 /// Label of the distinct final intake row, matching the picker leaf.
 const HOME_NEW_PROJECT_LABEL: &str = "New project";
 /// Preferred painted width of the open menu panel, matching the picker leaf.
@@ -67,18 +45,27 @@ const HOME_MENU_VIEWPORT_INSET_X_PX: f32 = 32.0;
 const HOME_MENU_VIEWPORT_INSET_Y_PX: f32 = 32.0;
 /// Gap between the trigger and the panel above it (legacy `sideOffset={10}`).
 const HOME_MENU_GAP_PX: f32 = 10.0;
+/// Shared radius for project triggers, cycle buttons, and menu rows.
+pub(crate) const PROJECT_CONTROL_RADIUS_PX: f32 = 6.0;
+const PROJECT_MENU_RADIUS_PX: f32 = 10.0;
 /// Debug selector painted on the inline trigger span.
 pub const HOME_TRIGGER_SELECTOR: &str = "artisan-home-project-trigger";
+/// Debug selector painted on the compact sidebar trigger.
+pub const SIDEBAR_PROJECT_TRIGGER_SELECTOR: &str = "artisan-sidebar-project-trigger";
 /// Debug selector painted on the open menu panel.
 pub const HOME_MENU_SELECTOR: &str = "artisan-home-project-menu";
-/// Debug selector painted on the filter row.
-pub const HOME_FILTER_SELECTOR: &str = "artisan-home-project-filter";
 /// Headline text size shared by the home heading and the inline trigger.
 pub const HOME_HEADLINE_TEXT_PX: f32 = 28.0;
 /// Muted emblem size above the home heading.
 pub const HOME_EMBLEM_SIZE_PX: f32 = 30.0;
 /// Prefix of the debug selectors painted on selectable rows.
 const HOME_ROW_SELECTOR_PREFIX: &str = "artisan-home-project-row";
+
+#[derive(Clone, Copy)]
+enum MenuPlacement {
+    Above,
+    Below,
+}
 
 /// Menu panel width for a viewport: the legacy `min(20rem, 100vw - 2rem)`
 /// clamp, floored at zero for degenerate windows.
@@ -108,9 +95,9 @@ pub struct HomeProjectPickerView {
     /// row keeps `scroll_to_item` indexes aligned with visible flat
     /// addresses.
     menu_scroll: gpui::ScrollHandle,
-    /// Painted window-space origin of the inline trigger, refreshed every
+    /// Painted window-space bounds of the trigger, refreshed every
     /// frame by an invisible probe element.
-    trigger_origin: Rc<RefCell<Option<Point<Pixels>>>>,
+    trigger_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Flat visible-row address waiting to be revealed once the fresh scroll
     /// handle has received real bounds (same pinned quirk as the picker).
     initial_reveal_flat: Rc<Cell<Option<usize>>>,
@@ -119,6 +106,10 @@ pub struct HomeProjectPickerView {
     suppress_trigger_release: bool,
     /// Last drained action, readable for the application router.
     last_action: Option<ProjectPickerAction>,
+    typeahead_clock: Instant,
+    menu_hover: Rc<RefCell<SlidingHoverState>>,
+    menu_hover_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    menu_hover_keyboard: bool,
 }
 
 impl HomeProjectPickerView {
@@ -135,10 +126,14 @@ impl HomeProjectPickerView {
             trigger_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             menu_focus: cx.focus_handle(),
             menu_scroll: gpui::ScrollHandle::new(),
-            trigger_origin: Rc::new(RefCell::new(None)),
+            trigger_bounds: Rc::new(RefCell::new(None)),
             initial_reveal_flat: Rc::new(Cell::new(None)),
             suppress_trigger_release: false,
             last_action: None,
+            typeahead_clock: Instant::now(),
+            menu_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
+            menu_hover_bounds: Rc::new(RefCell::new(None)),
+            menu_hover_keyboard: false,
         }
     }
 
@@ -148,16 +143,114 @@ impl HomeProjectPickerView {
         &self.state
     }
 
+    #[cfg(test)]
+    pub(crate) fn menu_hover_state(&self) -> std::cell::Ref<'_, SlidingHoverState> {
+        self.menu_hover.borrow()
+    }
+
+    fn menu_hover_id(&self, row: PickerRow) -> String {
+        match row {
+            PickerRow::Project(index) => {
+                format!("project:{}", self.state.projects()[index].id.as_str())
+            }
+            PickerRow::NewProject => "new-project".to_owned(),
+        }
+    }
+
+    fn clear_menu_hover(&mut self) {
+        self.menu_hover.borrow_mut().clear();
+        self.menu_hover_keyboard = false;
+    }
+
+    fn sync_menu_hover_from_keyboard(&mut self) {
+        if let Some(row) = self.state.highlighted_row() {
+            self.menu_hover_keyboard = true;
+            self.menu_hover
+                .borrow_mut()
+                .set_active(self.menu_hover_id(row));
+        } else {
+            self.clear_menu_hover();
+        }
+    }
+
+    fn hover_menu_row(&mut self, row: PickerRow, cx: &mut Context<Self>) {
+        if !self.state.is_open() {
+            return;
+        }
+        let id = self.menu_hover_id(row);
+        if !self.menu_hover_keyboard && self.menu_hover.borrow().active_id() == Some(id.as_str()) {
+            return;
+        }
+        self.menu_hover_keyboard = false;
+        self.state.highlight_row(row);
+        self.menu_hover.borrow_mut().set_active(id);
+        cx.notify();
+    }
+
+    // The panel is the coordinate origin so scrolling rows remeasure against
+    // its viewport, while the scroll list keeps one child per selectable row.
+    fn menu_hover_probe(&self, row: Option<PickerRow>) -> AnyElement {
+        let id = row.map(|row| self.menu_hover_id(row));
+        let hover = Rc::clone(&self.menu_hover);
+        let panel = Rc::clone(&self.menu_hover_bounds);
+        canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let changed = if let Some(id) = &id {
+                    let Some(panel) = *panel.borrow() else {
+                        return;
+                    };
+                    hover.borrow_mut().measure(
+                        id,
+                        HoverRect {
+                            left: f32::from(bounds.left() - panel.left()),
+                            top: f32::from(bounds.top() - panel.top()),
+                            width: f32::from(bounds.size.width),
+                            height: f32::from(bounds.size.height),
+                        },
+                    )
+                } else {
+                    let mut panel = panel.borrow_mut();
+                    let changed = *panel != Some(bounds);
+                    *panel = Some(bounds);
+                    changed
+                };
+                if changed {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
+
     /// The last action this view drained and applied, if any.
     #[must_use]
     pub fn last_action(&self) -> Option<ProjectPickerAction> {
         self.last_action.clone()
     }
 
+    /// Updates the displayed selection when the application changes projects.
+    pub fn set_current(
+        &mut self,
+        current: Option<artisan_domain::ProjectId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.current_id() != current.as_ref() {
+            self.state.set_current(current);
+            self.last_action = None;
+            cx.notify();
+        }
+    }
+
     /// Sets whether the trigger refuses interaction.
     pub fn set_disabled(&mut self, disabled: bool, cx: &mut Context<Self>) {
         self.state.set_disabled(disabled);
         if disabled {
+            self.clear_menu_hover();
             self.initial_reveal_flat.set(None);
         }
         cx.notify();
@@ -170,6 +263,7 @@ impl HomeProjectPickerView {
     /// which adds focus sync; tests drive this seam directly.
     pub fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         self.state.press_trigger();
+        self.sync_menu_hover_from_keyboard();
         if self.state.is_open() {
             let flat = self.state.flat_index_of(
                 self.state
@@ -191,6 +285,7 @@ impl HomeProjectPickerView {
     /// which adds trigger-focus restore; tests drive this seam directly.
     pub fn commit_row(&mut self, row: PickerRow, cx: &mut Context<Self>) {
         self.state.activate_row(row);
+        self.clear_menu_hover();
         self.drain_actions();
         cx.notify();
     }
@@ -217,7 +312,7 @@ impl HomeProjectPickerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let viewport = window.viewport_size();
-        let menu = self.render_menu(viewport, cx);
+        let menu = self.render_menu(viewport, MenuPlacement::Above, cx);
         let disabled = self.state.is_disabled();
         self.trigger_focus.clone().tab_stop(!disabled);
 
@@ -234,28 +329,6 @@ impl HomeProjectPickerView {
             },
         )]);
 
-        let probe_origin = Rc::clone(&self.trigger_origin);
-        let probe_reveal = Rc::clone(&self.initial_reveal_flat);
-        let probe_scroll = self.menu_scroll.clone();
-        let probe = canvas(move |_, _, _| {}, {
-            let probe_origin = Rc::clone(&probe_origin);
-            move |bounds, (), window, cx| {
-                let moved = *probe_origin.borrow_mut() != Some(bounds.origin);
-                *probe_origin.borrow_mut() = Some(bounds.origin);
-                if let Some(flat) = probe_reveal.take() {
-                    let scroll = probe_scroll.clone();
-                    window.defer(cx, move |window, _| {
-                        scroll.scroll_to_item(flat);
-                        window.refresh();
-                    });
-                } else if moved {
-                    window.defer(cx, |window, _| window.refresh());
-                }
-            }
-        })
-        .absolute()
-        .size_full();
-
         div()
             .id("home-project-trigger-root")
             .tab_group()
@@ -264,7 +337,7 @@ impl HomeProjectPickerView {
             .relative()
             .text_size(px(HOME_HEADLINE_TEXT_PX))
             .text_color(self.theme.foreground)
-            .child(probe)
+            .child(self.render_trigger_probe())
             .children(menu.map(deferred))
             .child(
                 div()
@@ -278,6 +351,113 @@ impl HomeProjectPickerView {
                     .child(underlined),
             )
             .into_any_element()
+    }
+
+    /// Renders the project picker as a compact glass sidebar control.
+    pub fn render_sidebar_trigger(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let disabled = self.state.is_disabled();
+        let material_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        self.trigger_focus.clone().tab_stop(!disabled);
+        let label = self
+            .state
+            .current_id()
+            .and_then(|current| {
+                self.state
+                    .projects()
+                    .iter()
+                    .find(|project| &project.id == current)
+            })
+            .map_or_else(
+                || SharedString::from("Choose project"),
+                |project| project.name.clone(),
+            );
+
+        div()
+            .id("sidebar-project-trigger-root")
+            .tab_group()
+            .on_mouse_down_out(cx.listener(Self::handle_outside_press))
+            .relative()
+            .flex_1()
+            .min_w(px(0.0))
+            .w_full()
+            .child(self.render_trigger_probe())
+            .children(
+                self.render_menu(window.viewport_size(), MenuPlacement::Below, cx)
+                    .map(deferred),
+            )
+            .child(
+                div()
+                    .id("sidebar-project-trigger")
+                    .debug_selector(|| SIDEBAR_PROJECT_TRIGGER_SELECTOR.to_owned())
+                    .track_focus(&self.trigger_focus)
+                    .on_key_down(cx.listener(Self::disarm_stale_release_fence))
+                    .when(!disabled, |trigger| {
+                        trigger
+                            .cursor_pointer()
+                            .hover(|style| style.bg(hover_fill_gradient(material_theme)))
+                            .on_click(cx.listener(Self::handle_trigger_click))
+                    })
+                    .when(disabled, |trigger| trigger.opacity(0.5))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .h(px(30.0))
+                    .w_full()
+                    .min_w(px(0.0))
+                    .px(px(8.0))
+                    .relative()
+                    .rounded(px(PROJECT_CONTROL_RADIUS_PX))
+                    .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+                    .bg(glass_foreground_base(&material_theme))
+                    .shadow(glass_card_shadows())
+                    .child(glass_material_layer(
+                        GlassStrength::Strong,
+                        px(PROJECT_CONTROL_RADIUS_PX),
+                    ))
+                    .child(glass_highlight_layer(
+                        GlassStrength::Strong,
+                        px(PROJECT_CONTROL_RADIUS_PX),
+                    ))
+                    .text_size(px(13.0))
+                    .text_color(self.theme.foreground)
+                    .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
+                    .child(
+                        asset_glyph(AssetId::TABLER_CHEVRON_DOWN)
+                            .size(px(14.0))
+                            .flex_shrink_0()
+                            .text_color(self.theme.secondary),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_trigger_probe(&self) -> AnyElement {
+        let probe_bounds = Rc::clone(&self.trigger_bounds);
+        let probe_reveal = Rc::clone(&self.initial_reveal_flat);
+        let probe_scroll = self.menu_scroll.clone();
+        canvas(
+            move |_, _, _| {},
+            move |bounds, (), window, cx| {
+                let moved = *probe_bounds.borrow() != Some(bounds);
+                *probe_bounds.borrow_mut() = Some(bounds);
+                if let Some(flat) = probe_reveal.take() {
+                    let scroll = probe_scroll.clone();
+                    window.defer(cx, move |window, _| {
+                        scroll.scroll_to_item(flat);
+                        window.refresh();
+                    });
+                } else if moved {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
     }
 
     fn handle_trigger_click(
@@ -329,7 +509,7 @@ impl HomeProjectPickerView {
                 self.state.move_last();
                 true
             }
-            "enter" => {
+            "enter" | "space" => {
                 self.commit_row_from_highlight(window, cx);
                 self.suppress_trigger_release = true;
                 true
@@ -338,19 +518,10 @@ impl HomeProjectPickerView {
                 self.dismiss_and_settle(window, cx);
                 true
             }
-            "backspace" => {
-                let mut filter = self.state.filter().to_owned();
-                filter.pop();
-                self.state.set_filter(filter);
-                true
-            }
             _ => false,
         };
 
-        // Printable keystrokes feed the live substring filter (the picker's
-        // prefix typeahead stays dormant on this surface). Space types a
-        // space while the menu is open — only Enter activates — and the
-        // closed trigger still opens on Space through keyboard activation.
+        // Typeahead moves the highlight without hiding any projects.
         let plain = !(keystroke.modifiers.control
             || keystroke.modifiers.alt
             || keystroke.modifiers.platform
@@ -363,13 +534,15 @@ impl HomeProjectPickerView {
                 .and_then(|text| text.chars().next())
                 .filter(|typed| !typed.is_control())
         {
-            let mut filter = self.state.filter().to_owned();
-            filter.push(typed);
-            self.state.set_filter(filter);
+            let now_ms =
+                u64::try_from(self.typeahead_clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.state.handle_typeahead(typed, now_ms);
             handled = true;
         }
 
         if handled {
+            cx.stop_propagation();
+            self.sync_menu_hover_from_keyboard();
             self.reveal_highlight();
             cx.notify();
         }
@@ -399,6 +572,7 @@ impl HomeProjectPickerView {
 
     fn dismiss_and_settle(&mut self, window: &mut Window, cx: &mut App) {
         self.state.dismiss();
+        self.clear_menu_hover();
         window.focus(&self.trigger_focus, cx);
     }
 
@@ -444,16 +618,28 @@ impl HomeProjectPickerView {
         }
     }
 
-    /// Renders the open menu panel: fixed filter row above a height-bounded
-    /// scroll body with one direct child per selectable row, anchored above
-    /// the trigger. Frames before the probe records an origin render
-    /// nothing.
-    fn render_menu(&self, viewport: gpui::Size<Pixels>, cx: &Context<Self>) -> Option<AnyElement> {
+    /// Renders the glass menu with one direct child per selectable row. Frames before
+    /// the probe records the trigger bounds render nothing.
+    fn render_menu(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        placement: MenuPlacement,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.state.is_open() {
             return None;
         }
-        let trigger_origin = self.trigger_origin.borrow().as_ref().copied()?;
+        let trigger_bounds = self.trigger_bounds.borrow().as_ref().copied()?;
+        let (anchor, position, gap) = match placement {
+            MenuPlacement::Above => (Anchor::BottomLeft, trigger_bounds.origin, -HOME_MENU_GAP_PX),
+            MenuPlacement::Below => (
+                Anchor::TopLeft,
+                trigger_bounds.bottom_left(),
+                HOME_MENU_GAP_PX,
+            ),
+        };
 
+        let material_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let mut body = div()
             .id("home-project-menu")
             .track_focus(&self.menu_focus)
@@ -462,11 +648,19 @@ impl HomeProjectPickerView {
             .flex()
             .flex_col()
             .w(menu_width_for_viewport(viewport))
-            .rounded(px(16.0))
-            .bg(self.theme.sidebar)
-            .border_1()
-            .border_color(self.theme.popover_line)
-            .child(self.render_filter_row());
+            .relative()
+            .rounded(px(PROJECT_MENU_RADIUS_PX))
+            .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(&material_theme))
+            .shadow(glass_card_shadows())
+            .child(glass_material_layer(
+                GlassStrength::Strong,
+                px(PROJECT_MENU_RADIUS_PX),
+            ))
+            .child(glass_highlight_layer(
+                GlassStrength::Strong,
+                px(PROJECT_MENU_RADIUS_PX),
+            ));
 
         let mut list = div()
             .id("home-project-menu-list")
@@ -475,7 +669,7 @@ impl HomeProjectPickerView {
             .overflow_y_scroll()
             .track_scroll(&self.menu_scroll)
             .max_h(menu_max_height_for_viewport(viewport))
-            .p(px(4.0));
+            .p(px(8.0));
         for catalog_index in self.state.visible_indexes() {
             list = list.child(self.render_project_row(catalog_index, cx));
         }
@@ -490,49 +684,32 @@ impl HomeProjectPickerView {
                 )
                 .child(self.render_new_project_row(cx)),
         );
-        body = body.child(list);
+        body = body
+            .overflow_hidden()
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if !*hovered && !view.menu_hover_keyboard {
+                    view.menu_hover.borrow_mut().hide();
+                    cx.notify();
+                }
+            }))
+            .child(self.menu_hover_probe(None))
+            .child(render_picker_hover_pill(
+                &material_theme,
+                &self.menu_hover,
+                "project-menu",
+                px(PROJECT_CONTROL_RADIUS_PX),
+                cx.reduce_motion() || self.menu_hover_keyboard,
+            ))
+            .child(list);
 
         Some(
             anchored()
-                .anchor(Anchor::BottomLeft)
-                .position(trigger_origin)
-                .offset(point(px(0.0), px(-HOME_MENU_GAP_PX)))
+                .anchor(anchor)
+                .position(position)
+                .offset(point(px(0.0), px(gap)))
                 .child(body)
                 .into_any_element(),
         )
-    }
-
-    /// Fixed filter row: the live filter text or the muted invitation copy.
-    fn render_filter_row(&self) -> Div {
-        let filter = self.state.filter();
-        let (text, muted) = if filter.is_empty() {
-            (HOME_FILTER_PLACEHOLDER, true)
-        } else {
-            (filter, false)
-        };
-        div()
-            .debug_selector(|| HOME_FILTER_SELECTOR.to_string())
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .px(px(8.0))
-            .py(px(8.0))
-            .child(
-                asset_glyph(AssetId::TABLER_SEARCH)
-                    .size(px(15.0))
-                    .text_color(self.theme.secondary),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(px(13.0))
-                    .text_color(if muted {
-                        self.theme.secondary
-                    } else {
-                        self.theme.foreground
-                    })
-                    .child(text.to_owned()),
-            )
     }
 
     /// One visible project row: folder glyph, one-line name, selected check.
@@ -542,7 +719,6 @@ impl HomeProjectPickerView {
             .state
             .current_id()
             .is_some_and(|current| current == &option.id);
-        let highlighted = self.state.highlighted_row() == Some(PickerRow::Project(catalog_index));
         let row_selector = format!("{HOME_ROW_SELECTOR_PREFIX}-{catalog_index}");
         div()
             .id(SharedString::from(format!(
@@ -560,8 +736,18 @@ impl HomeProjectPickerView {
             .gap(px(10.0))
             .px(px(8.0))
             .py(px(6.0))
-            .rounded(px(12.0))
-            .when(highlighted, |entry| entry.bg(self.theme.selected))
+            .relative()
+            .rounded(px(PROJECT_CONTROL_RADIUS_PX))
+            .cursor_pointer()
+            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                if *hovered {
+                    view.hover_menu_row(PickerRow::Project(catalog_index), cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(move |view, _, _, cx| {
+                view.hover_menu_row(PickerRow::Project(catalog_index), cx);
+            }))
+            .child(self.menu_hover_probe(Some(PickerRow::Project(catalog_index))))
             .child(
                 asset_glyph(AssetId::TABLER_FOLDER)
                     .size(px(16.0))
@@ -570,6 +756,8 @@ impl HomeProjectPickerView {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
                     .text_size(px(14.0))
                     .text_color(self.theme.foreground)
                     .child(option.name.clone()),
@@ -600,11 +788,18 @@ impl HomeProjectPickerView {
             .gap(px(10.0))
             .px(px(8.0))
             .py(px(6.0))
-            .rounded(px(12.0))
-            .when(
-                self.state.highlighted_row() == Some(PickerRow::NewProject),
-                |entry| entry.bg(self.theme.selected),
-            )
+            .relative()
+            .rounded(px(PROJECT_CONTROL_RADIUS_PX))
+            .cursor_pointer()
+            .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
+                if *hovered {
+                    view.hover_menu_row(PickerRow::NewProject, cx);
+                }
+            }))
+            .on_mouse_move(cx.listener(|view, _, _, cx| {
+                view.hover_menu_row(PickerRow::NewProject, cx);
+            }))
+            .child(self.menu_hover_probe(Some(PickerRow::NewProject)))
             .child(
                 div()
                     .w(px(16.0))
@@ -619,6 +814,8 @@ impl HomeProjectPickerView {
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
                     .text_size(px(14.0))
                     .text_color(self.theme.foreground)
                     .child(HOME_NEW_PROJECT_LABEL),

@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// Shared border paint for the work-history rule and footer punctuation.
+pub(super) fn transcript_separator_color(theme: &ArtisanTheme) -> gpui::Hsla {
+    theme.colors.border.to_paint()
+}
+
 /// One loaded user-message control in the turn navigator rail.
 pub(super) struct NavigatorMarker {
     /// Visible policy label; never crosses the action boundary.
@@ -168,28 +173,6 @@ pub fn present_shell_command(command: &str) -> String {
     }
 }
 
-/// Whether one lifecycle is a failure the trace must explain.
-pub(super) const fn lifecycle_is_failed(lifecycle: ConversationLifecycle) -> bool {
-    matches!(
-        lifecycle,
-        ConversationLifecycle::Failed
-            | ConversationLifecycle::Cancelled
-            | ConversationLifecycle::Interrupted
-    )
-}
-
-/// Whether one lifecycle is live work; the set the scene build treats as
-/// potentially still arriving.
-pub(super) const fn lifecycle_is_live(lifecycle: ConversationLifecycle) -> bool {
-    matches!(
-        lifecycle,
-        ConversationLifecycle::Pending
-            | ConversationLifecycle::Streaming
-            | ConversationLifecycle::Active
-            | ConversationLifecycle::Waiting
-    )
-}
-
 /// The muted row text for one activity: the normalized shell command for
 /// terminal details, the raw detail otherwise, else the presentation label.
 ///
@@ -281,36 +264,6 @@ pub(super) fn activity_chain_icon<'a>(kinds: impl Iterator<Item = &'a str>) -> A
         [only] => activity_category_icon(*only),
         _ => AssetId::TABLER_LIST_DETAILS,
     }
-}
-
-/// Resolves one activity chain's default disclosure state.
-///
-/// The reference defaults an activity group closed unless the chain failed or
-/// is live. Native signals are the member lifecycles plus the owning turn: a
-/// group that owns the turn's live Thinking/Working line counts as live while
-/// the turn is not terminal (the closest native analogue of the reference
-/// `work_active` flag), and a failed, cancelled, or interrupted turn opens
-/// its chain so the failure can explain itself. Unknown liveness never counts
-/// as live.
-#[must_use]
-pub(super) fn activity_chain_disclosure_state(
-    rows: &[(u64, DetailRow<'_>)],
-    live_header: bool,
-    turn_lifecycle: ConversationLifecycle,
-) -> (bool, bool) {
-    let mut live = live_header && !turn_lifecycle.is_terminal();
-    let mut failed = lifecycle_is_failed(turn_lifecycle);
-    for (_, row) in rows {
-        if let DetailRow::Activity {
-            lifecycle: Some(lifecycle),
-            ..
-        } = row
-        {
-            live |= lifecycle_is_live(*lifecycle);
-            failed |= lifecycle_is_failed(*lifecycle);
-        }
-    }
-    (live, failed)
 }
 
 /// Returns whether one work group paints actual visible trace content.

@@ -66,6 +66,25 @@ use super::{
     command_failure, profile_usage_now_ms, titlebar_context_tone,
 };
 
+// Most application tests exercise configured hosts; explicitly supply their
+// discovered fixture rather than relying on production's offline state.
+fn test_application(
+    window: &mut gpui::Window,
+    cx: &mut Context<NativeApplication>,
+) -> NativeApplication {
+    let mut application = NativeApplication::new(None, window, cx);
+    let catalog = crate::native_model_catalog::NativeModelCatalog::from_manifest_json(
+        include_str!("../../../../tests/fixtures/model_catalog.json"),
+    )
+    .unwrap();
+    application.host_model_catalog = Some(catalog.clone());
+    application.model_selector.update(cx, |selector, cx| {
+        selector.set_snapshot(catalog, cx);
+        selector.set_policy(None, cx);
+    });
+    application
+}
+
 fn project(id: &str, name: &str) -> ProjectSummary {
     ProjectSummary {
         project_id: ProjectId::parse(id).expect("project"),
@@ -1068,6 +1087,10 @@ mod lifecycle;
 
 #[path = "tests/navigation.rs"]
 mod navigation;
+#[path = "tests/projects.rs"]
+mod projects;
+#[path = "tests/project_draft_transition.rs"]
+mod project_draft_transition;
 
 #[path = "tests/retry.rs"]
 mod retry;
@@ -1077,3 +1100,6 @@ mod sends;
 
 #[path = "tests/settings_profile.rs"]
 mod settings_profile;
+
+#[path = "tests/profile_usage_refresh.rs"]
+mod profile_usage_refresh;

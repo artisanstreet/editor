@@ -373,6 +373,14 @@ impl ProjectPickerState {
         self.highlight
     }
 
+    /// Moves pointer navigation onto a visible row without activating it.
+    pub fn highlight_row(&mut self, row: PickerRow) {
+        if self.open && self.row_is_valid(row) {
+            self.highlight = Some(row);
+            self.typeahead.clear();
+        }
+    }
+
     /// Moves the highlight down one row, wrapping past the final row.
     pub fn move_next(&mut self) {
         self.advance(true);

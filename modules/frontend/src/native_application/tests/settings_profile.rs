@@ -2,7 +2,7 @@ use super::*;
 
 #[gpui::test]
 fn settings_rail_lists_real_engines_without_a_thread(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -81,7 +81,7 @@ fn settings_rail_lists_real_engines_without_a_thread(cx: &mut TestAppContext) {
 )]
 fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("settings-choice-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -216,7 +216,7 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
 #[gpui::test]
 fn signed_out_refresh_removes_admission_and_updates_settings(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("settings-signout-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -296,7 +296,7 @@ fn signed_out_refresh_removes_admission_and_updates_settings(cx: &mut TestAppCon
 
 #[gpui::test]
 fn sidebar_task_links_share_sliding_hover_surface(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.run_until_parked();
     let new_thread = cx
         .debug_bounds("artisan-workspace-navigation")
@@ -325,7 +325,7 @@ fn sidebar_task_links_share_sliding_hover_surface(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn sidebar_footer_shares_sliding_hover_and_thread_area_clears(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.run_until_parked();
     let trigger = cx
         .debug_bounds("artisan-desktop-profile-trigger")
@@ -387,7 +387,7 @@ fn sidebar_footer_shares_sliding_hover_and_thread_area_clears(cx: &mut TestAppCo
 
 #[gpui::test]
 fn profile_actions_share_sliding_hover_and_keyboard_syncs_pill(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|window, app| {
         view.update(app, |view, cx| {
@@ -509,7 +509,7 @@ fn profile_actions_share_sliding_hover_and_keyboard_syncs_pill(cx: &mut TestAppC
 
 #[gpui::test]
 fn profile_usage_small_content_keeps_natural_height(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|window, app| {
         view.update(app, |view, cx| {
@@ -553,7 +553,7 @@ fn profile_usage_small_content_keeps_natural_height(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_usage_tall_content_caps_with_viewport(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -654,7 +654,7 @@ fn profile_usage_tall_content_caps_with_viewport(cx: &mut TestAppContext) {
 )]
 fn profile_usage_wheel_scrolls_once_and_dismiss_cancels(cx: &mut TestAppContext) {
     cx.update(|app| app.set_reduce_motion(true));
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -769,7 +769,7 @@ fn profile_usage_wheel_scrolls_once_and_dismiss_cancels(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn profile_usage_hides_providers_without_data(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -835,7 +835,7 @@ fn profile_usage_hides_providers_without_data(cx: &mut TestAppContext) {
     reason = "one end-to-end scenario drives the full event chain; splitting it would hide the causal ordering the test asserts"
 )]
 fn profile_refresh_swap_interrupts_from_current_values(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -982,7 +982,7 @@ fn profile_refresh_swap_interrupts_from_current_values(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn profile_engine_blocks_share_consistent_spacing(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -1039,7 +1039,7 @@ fn profile_engine_blocks_share_consistent_spacing(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_tip_tween_runs_up_once_then_carries_across_rows(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -1100,7 +1100,7 @@ fn profile_tip_tween_runs_up_once_then_carries_across_rows(cx: &mut TestAppConte
 
 #[gpui::test]
 fn profile_refresh_spinner_keeps_control_width(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -1145,7 +1145,7 @@ fn profile_refresh_spinner_keeps_control_width(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_refresh_focus_enter_refreshes_once(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -1203,7 +1203,7 @@ fn profile_refresh_focus_enter_refreshes_once(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_menu_plays_shared_popup_motion(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.update(|window, app| {
         view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
     });
@@ -1259,7 +1259,7 @@ fn profile_menu_plays_shared_popup_motion(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_tip_clamps_into_a_narrow_viewport(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, _| {
@@ -1298,7 +1298,7 @@ fn profile_name_capitalizes_first_letter_only() {
 
 #[gpui::test]
 fn profile_menu_keyboard_opens_settings_and_closes(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.update(|window, app| {
         view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
     });
@@ -1336,7 +1336,7 @@ fn profile_menu_keyboard_opens_settings_and_closes(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn profile_menu_without_forge_omits_usage_and_never_invents_readings(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.update(|window, app| {
         view.update(app, |view, cx| window.focus(&view.profile_focus, cx));
     });
@@ -1366,8 +1366,7 @@ fn profile_menu_without_forge_omits_usage_and_never_invents_readings(cx: &mut Te
 
 #[gpui::test]
 fn command_shortcut_opens_palette_without_persistent_titlebar_search(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|_, app| super::bind_native_actions(app));
     cx.run_until_parked();
     // The titlebar no longer paints a persistent search input; the
@@ -1409,8 +1408,7 @@ fn command_shortcut_opens_palette_without_persistent_titlebar_search(cx: &mut Te
 
 #[gpui::test]
 fn command_activation_routes_settings_through_the_application(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|_, app| super::bind_native_actions(app));
     cx.simulate_keystrokes("ctrl-k");
     cx.run_until_parked();
@@ -1427,6 +1425,162 @@ fn command_activation_routes_settings_through_the_application(cx: &mut TestAppCo
                     engine: None,
                 }
             );
+        });
+    });
+}
+#[gpui::test]
+fn periodic_catalog_refresh_replaces_home_cache(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let mut catalog = application.host_model_catalog.clone().unwrap();
+            catalog.catalog_revision = "refreshed-models".to_owned();
+            catalog.manifest.models[0].name = "Newly discovered model".to_owned();
+            application.refresh_model_catalog(Some(catalog), cx);
+            application.reset_model_selector_offline(cx);
+            let snapshot = application.model_selector.read(cx).state().snapshot();
+            assert_eq!(snapshot.catalog_revision, "refreshed-models");
+            assert_eq!(snapshot.manifest.models[0].name, "Newly discovered model");
+            application.refresh_model_catalog(None, cx);
+            assert_eq!(
+                application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .catalog_revision,
+                "refreshed-models"
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn periodic_catalog_refresh_requests_active_scope_once(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([Ok(()), Ok(())]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let thread = ThreadId::parse("catalog-refresh-thread").unwrap();
+            install_ready_message_surface(application, cx, thread.clone(), "draft", sink);
+            let selection = application.catalog_controller.select_scope(
+                thread.clone(),
+                artisan_domain::EngineProfileId::parse("default").unwrap(),
+            ).unwrap();
+            let scope = selection.scope().clone();
+            assert!(application.catalog_controller.mark_catalog_admitted(&scope));
+            assert!(application.catalog_controller.on_catalog_loaded(&scope));
+            application.refresh_model_catalog(None, cx);
+            application.refresh_model_catalog(None, cx);
+            assert_eq!(commands.borrow().iter().filter(|command| matches!(
+                command,
+                NativeTransportCommand::ReadComposerCatalog { thread_id, .. } if *thread_id == thread
+            )).count(), 1);
+        });
+    });
+}
+
+#[gpui::test]
+fn conversation_reload_retains_opencode_models_without_scoped_admission(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let thread = ThreadId::parse("opencode-cache-thread").unwrap();
+            let profile = artisan_domain::EngineProfileId::parse("default").unwrap();
+            let selection = application
+                .catalog_controller
+                .select_scope(thread.clone(), profile.clone())
+                .unwrap();
+            let scope = selection.scope().clone();
+            assert!(application.catalog_controller.mark_catalog_admitted(&scope));
+            let mut catalog = application.host_model_catalog.clone().unwrap();
+            let mut model = catalog.manifest.models[0].clone();
+            model.harness = "opencode2".to_owned();
+            model.id = artisan_catalog::wire::opencode2_catalog_id(
+                &model.native_model_id,
+                &model.provider,
+                None,
+            )
+            .unwrap();
+            model.routing = artisan_catalog::NativeModelRouting::ProviderRoute {
+                provider_route_id: model.provider.clone(),
+            };
+            model.native_selection = Some(artisan_catalog::NativeModelSelection {
+                model_id: model.native_model_id.clone(),
+                provider_route_id: model.provider.clone(),
+                variant_id: None,
+            });
+            let model_id = model.id.clone();
+            catalog.routes.push(artisan_catalog::NativeModelRoute {
+                engine_id: "opencode2".to_owned(),
+                id: model.provider.clone(),
+                label: "OpenCode provider".to_owned(),
+                group: artisan_catalog::NativeModelRouteGroup {
+                    id: "opencode-provider".to_owned(),
+                    label: "OpenCode provider".to_owned(),
+                    order: 0,
+                    show_route_labels: false,
+                },
+                status: artisan_catalog::NativeModelRouteStatus::Available,
+                unavailable_reason: None,
+            });
+            catalog.manifest.models.push(model);
+            catalog.runnable_harness_ids.push("opencode2".to_owned());
+            catalog.scope = Some(artisan_catalog::NativeCatalogScope {
+                profile_id: profile.as_str().to_owned(),
+                working_directory: "/workspace".to_owned(),
+                workspace_trust: "safe".to_owned(),
+            });
+            let result = artisan_protocol::ComposerCatalogResult::new(
+                thread.clone(),
+                profile.clone(),
+                artisan_protocol::CatalogSnapshotWire::new(
+                    artisan_catalog::wire::encode_catalog(&catalog).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            application.handle_composer_catalog(thread, profile, scope.generation, &result, cx);
+            assert!(matches!(
+                application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .snapshot()
+                    .selectability(&model_id),
+                artisan_catalog::NativeModelSelectability::Available
+            ));
+
+            application.reset_composer_catalog(cx);
+            let cached = application.model_selector.read(cx).state().snapshot();
+            assert!(cached.scope.is_none());
+            assert_eq!(cached.models_for_engine("opencode2", "", None).len(), 1);
+            assert_eq!(cached.routes, catalog.routes);
+            assert!(matches!(
+                cached.selectability(&model_id),
+                artisan_catalog::NativeModelSelectability::Unavailable { .. }
+            ));
+            assert!(cached.default_model_id.is_none());
+            assert!(cached.model_defaults.is_empty());
+        });
+    });
+}
+
+#[gpui::test]
+fn periodic_catalog_refresh_recovers_missing_conversation_scope(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let thread = ThreadId::parse("catalog-recovery-thread").unwrap();
+            install_ready_message_surface(application, cx, thread.clone(), "draft", sink);
+            application.reset_composer_catalog(cx);
+            assert!(application.catalog_controller.scope().is_none());
+            application.refresh_model_catalog(None, cx);
+            application.refresh_model_catalog(None, cx);
+            assert_eq!(commands.borrow().iter().filter(|command| matches!(command,
+                NativeTransportCommand::ReadComposerCatalog { thread_id, .. } if *thread_id == thread
+            )).count(), 1);
         });
     });
 }

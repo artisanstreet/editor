@@ -133,6 +133,7 @@ pub(super) async fn resolve_rich_link(
         Ok(ResponsePayload::RichLink(result)) => publish(
             events,
             NativeTransportEvent::RichLinkResolved {
+                favicon: result.favicon,
                 requested_url: result.requested_url,
                 page_name: result.page_name,
                 expires_at_ms: result.cache_expires_at_ms,

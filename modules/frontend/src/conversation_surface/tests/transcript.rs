@@ -58,7 +58,11 @@ fn short_conversation_has_no_artificial_scroll_room(cx: &mut TestAppContext) {
         surface.update(app, |surface, _| {
             for action in surface.take_actions() {
                 assert!(
-                    matches!(action, ConversationSurfaceAction::ViewportObserved(_)),
+                    matches!(
+                        action,
+                        ConversationSurfaceAction::ViewportObserved(_)
+                            | ConversationSurfaceAction::ViewportExtentChanged
+                    ),
                     "only legitimate viewport observations may precede assertions, got {action:?}"
                 );
             }
@@ -132,7 +136,11 @@ fn user_body_drag_selects_and_copies_exact_bytes(cx: &mut TestAppContext) {
         surface.update(app, |surface, _| {
             for action in surface.take_actions() {
                 assert!(
-                    matches!(action, ConversationSurfaceAction::ViewportObserved(_)),
+                    matches!(
+                        action,
+                        ConversationSurfaceAction::ViewportObserved(_)
+                            | ConversationSurfaceAction::ViewportExtentChanged
+                    ),
                     "only legitimate viewport observations may precede assertions, got {action:?}"
                 );
             }
@@ -200,6 +208,90 @@ fn item_scroll_target_executes_against_rendered_work_item_root(cx: &mut TestAppC
     let after = offset(&surface, cx);
     assert!(after.y < before.y, "the rendered work item must be reached");
     cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+}
+
+#[gpui::test]
+fn navigator_click_reaches_user_messages_in_both_directions(cx: &mut TestAppContext) {
+    cx.update(|app| app.set_reduce_motion(true));
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    let rail = cx
+        .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+        .expect("navigator paints");
+    cx.simulate_mouse_move(rail.center(), None::<gpui::MouseButton>, Modifiers::none());
+    settle(cx);
+
+    for (control, target, message) in [
+        (
+            "artisan-conversation-surface-turn-navigator-control-nav-second",
+            "nav-second",
+            "artisan-conversation-surface-turn-turn_b-block-user-nav-second",
+        ),
+        (
+            "artisan-conversation-surface-turn-navigator-control-nav-first",
+            "nav-first",
+            "artisan-conversation-surface-turn-turn_a-block-user-nav-first",
+        ),
+    ] {
+        let before = offset(&surface, cx);
+        let row = cx
+            .debug_bounds(control)
+            .expect("expanded navigator row paints");
+        cx.simulate_click(row.center(), Modifiers::none());
+        // Apply the adapter's accepted target to the surface, then verify
+        // physical movement and message alignment rather than only its intent.
+        cx.update(|_, app| {
+            surface.update(app, |surface, surface_cx| {
+                let targets: Vec<_> = surface
+                    .take_actions()
+                    .into_iter()
+                    .filter_map(|action| {
+                        if let ConversationSurfaceAction::ScrollIntent { target } = action {
+                            Some(target)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    targets,
+                    vec![ConversationSurfaceTarget::Item(
+                        ItemId::parse(target).expect("user message id"),
+                    )]
+                );
+                for target in targets {
+                    assert!(surface.schedule_scroll_target(target, surface_cx));
+                }
+            });
+        });
+        settle(cx);
+        cx.update(|window, app| window.simulate_next_frame(app));
+        settle(cx);
+        let reached = cx
+            .debug_bounds(message)
+            .expect("target user message paints");
+        let viewport = cx
+            .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+            .expect("viewport paints");
+        assert!(
+            (reached.top() - viewport.top()).abs() <= px(1.0),
+            "{target} must align with the viewport top: target {reached:?}, viewport {viewport:?}",
+        );
+        if target == "nav-second" {
+            assert!(
+                offset(&surface, cx).y < before.y,
+                "second marker must scroll down"
+            );
+        } else {
+            assert!(
+                offset(&surface, cx).y > before.y,
+                "first marker must scroll back up"
+            );
+        }
+    }
 }
 
 #[gpui::test]
@@ -568,4 +660,215 @@ fn settled_toolbar_stays_in_the_message_column_and_short_chat_does_not_scroll(
     assert_eq!(footer.top() - body.bottom(), px(4.0));
     assert!(footer.bottom() <= turn.bottom());
     cx.update(|_, app| assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0)));
+}
+
+#[gpui::test]
+fn jump_to_latest_interpolates_and_reaches_the_bottom(cx: &mut TestAppContext) {
+    let body = "long transcript line\n".repeat(80);
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(vec![item(
+                "jump-body",
+                1,
+                SceneItemKind::UserMessage { body },
+                None,
+            )]),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(240.0)));
+    settle(cx);
+    let before = offset(&surface, cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.smooth_scroll_to_bottom(cx)));
+    assert_eq!(
+        offset(&surface, cx),
+        before,
+        "request must not synchronously jump"
+    );
+    cx.run_until_parked();
+    for frame in 0..80 {
+        std::thread::sleep(Duration::from_millis(16));
+        cx.update(|window, app| {
+            surface.update(app, |surface, cx| {
+                surface.advance_transcript_scroll(window, cx)
+            })
+        });
+        cx.run_until_parked();
+        let (position, maximum, active) = cx.update(|_, app| {
+            let value = surface.read(app);
+            (
+                value.scroll_handle.offset().y,
+                value.scroll_handle.max_offset().y,
+                value.smooth_bottom_active,
+            )
+        });
+        if frame == 0 {
+            assert!(position < before.y && position > -maximum);
+        }
+        if !active {
+            assert!((position + maximum).abs() < px(0.5));
+            return;
+        }
+    }
+    panic!("jump animation did not settle");
+}
+
+#[gpui::test]
+fn streaming_resize_requests_follow_without_detaching_the_reader(cx: &mut TestAppContext) {
+    fn transcript(paragraphs: usize) -> ConversationScene {
+        scene(vec![item(
+            "reply",
+            1,
+            SceneItemKind::AssistantMessage {
+                body: "Streaming paragraph.\n\n".repeat(paragraphs),
+                phase: AssistantPhase::Final,
+            },
+            None,
+        )])
+    }
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(transcript(30), ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            let _ = surface.take_actions();
+            surface.replace_scene(transcript(50), cx);
+        })
+    });
+    settle(cx);
+    let actions = cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()));
+    assert!(actions.contains(&ConversationSurfaceAction::ViewportExtentChanged));
+    assert!(
+        !actions.iter().any(|action| matches!(
+            action,
+            ConversationSurfaceAction::ViewportObserved(ViewportObservation {
+                at_bottom: false,
+                ..
+            })
+        )),
+        "content growth must not impersonate reader input: {actions:?}"
+    );
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.follow_to_bottom(cx)));
+    settle(cx);
+    cx.update(|_, app| {
+        let handle = surface.read(app).scroll_handle();
+        assert!((handle.offset().y + handle.max_offset().y).abs() < px(0.5));
+    });
+}
+
+#[gpui::test]
+fn wheel_destination_controls_follow_leeway_before_smoothing(cx: &mut TestAppContext) {
+    let long_scene = scene(vec![item(
+        "reply",
+        1,
+        SceneItemKind::AssistantMessage {
+            body: "Streaming paragraph.\n\n".repeat(40),
+            phase: AssistantPhase::Final,
+        },
+        None,
+    )]);
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(long_scene, ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    cx.update(|window, app| {
+        surface.update(app, |surface, cx| {
+            let _ = surface.take_actions();
+            let maximum = f32::from(surface.scroll_handle.max_offset().y);
+            surface.follow_to_bottom(cx);
+            surface.handle_transcript_wheel(
+                &ScrollWheelEvent {
+                    position: surface.scroll_handle.bounds().center(),
+                    delta: ScrollDelta::Lines(point(0.0, 6.0)),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                },
+                window,
+                cx,
+            );
+            assert!(maximum + surface.transcript_scroll.target() >= 64.0);
+            assert!(
+                !surface.follow_bottom_pending,
+                "reader intent cancels queued follow"
+            );
+            assert!(surface.pending_actions().iter().any(|action| matches!(
+                action,
+                ConversationSurfaceAction::ViewportObserved(ViewportObservation {
+                    at_bottom: false,
+                    ..
+                })
+            )));
+            // A tiny movement is still inside Electron's 64 px leeway.
+            surface.observe_wheel_destination(-maximum + 32.0, maximum, cx);
+            assert!(matches!(
+                surface.pending_actions().last(),
+                Some(ConversationSurfaceAction::ViewportObserved(
+                    ViewportObservation {
+                        at_bottom: true,
+                        ..
+                    }
+                ))
+            ));
+        })
+    });
+}
+
+#[gpui::test]
+fn automatic_follow_leaves_reserved_turn_space_in_control(cx: &mut TestAppContext) {
+    let reserved_scene = ConversationScene::build(
+        vec![
+            SceneTurn::new(turn_id("turn_a"), 0, ConversationLifecycle::Completed),
+            SceneTurn::new(turn_id("turn_b"), 1, ConversationLifecycle::Active),
+        ],
+        vec![
+            SceneItem::new(
+                scene_id("older"),
+                turn_id("turn_a"),
+                2,
+                SceneItemKind::UserMessage {
+                    body: body().repeat(10),
+                },
+                None,
+            )
+            .unwrap(),
+            SceneItem::new(
+                scene_id("latest"),
+                turn_id("turn_b"),
+                3,
+                SceneItemKind::UserMessage {
+                    body: "New turn".to_owned(),
+                },
+                None,
+            )
+            .unwrap(),
+        ],
+        Vec::new(),
+        Vec::new(),
+    )
+    .unwrap();
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(reserved_scene, ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    assert!(
+        cx.debug_bounds(TRANSCRIPT_END_SPACE_SELECTOR)
+            .unwrap()
+            .size
+            .height
+            > px(TRANSCRIPT_END_SPACE_PX)
+    );
+    let before = offset(&surface, cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.follow_to_bottom(cx)));
+    settle(cx);
+    assert_eq!(
+        offset(&surface, cx),
+        before,
+        "follow must not fight reserved reading space"
+    );
 }

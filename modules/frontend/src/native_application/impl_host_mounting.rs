@@ -208,8 +208,15 @@ impl NativeApplication {
         {
             self.pending_failed_recovery = None;
         }
+        let carry_draft = self
+            .thread_switch_flight
+            .as_ref()
+            .map_or(!self.project_navigation.restore_draft, |flight| {
+                flight.carry_draft
+            });
+        self.project_navigation.restore_draft = false;
         self.composer.update(cx, |composer, cx| {
-            composer.switch_thread(thread_id.as_str(), switch_generation.is_none(), cx);
+            composer.switch_thread(thread_id.as_str(), carry_draft, cx);
         });
         self.selected_thread = Some(thread_id.clone());
         if matches!(
@@ -509,8 +516,16 @@ impl NativeApplication {
                 };
                 if can_scroll {
                     let surface = host.read(cx).surface().clone();
+                    let smooth = matches!(
+                        host.read(cx).controller_view().viewport_state,
+                        ViewportState::Scrolling { .. }
+                    );
                     surface.update(cx, |surface, surface_cx| {
-                        surface.scroll_to_bottom(surface_cx);
+                        if smooth {
+                            surface.smooth_scroll_to_bottom(surface_cx);
+                        } else {
+                            surface.follow_to_bottom(surface_cx);
+                        }
                     });
                 }
             }

@@ -6,22 +6,24 @@
 use super::*;
 
 impl NativeApplication {
+    pub(super) fn selected_thread_is_draft(&self) -> bool {
+        self.selected_thread.as_ref().is_some_and(|selected| {
+            self.thread_listing.as_ref().is_some_and(|listing| {
+                listing.threads().iter().any(|row| {
+                    &row.thread_id == selected
+                        && !row.has_started_response
+                        && row.last_message_at.is_none()
+                        && !row.has_active_work
+                })
+            })
+        })
+    }
+
     pub(super) fn begin_new_task(&mut self, cx: &mut Context<Self>) {
         if !self.add_project_action_is_admissible() {
             return;
         }
-        if self.pending_failed_recovery.is_none()
-            && self.selected_thread.as_ref().is_some_and(|selected| {
-                self.thread_listing.as_ref().is_some_and(|listing| {
-                    listing.threads().iter().any(|row| {
-                        &row.thread_id == selected
-                            && !row.has_started_response
-                            && row.last_message_at.is_none()
-                            && !row.has_active_work
-                    })
-                })
-            })
-        {
+        if self.pending_failed_recovery.is_none() && self.selected_thread_is_draft() {
             self.navigate(
                 NativeRoute::NewThread {
                     project: self.selected_project.clone(),
@@ -47,6 +49,7 @@ impl NativeApplication {
         };
         match self.submit_command(NativeTransportCommand::CreateTask(project)) {
             Ok(()) => {
+                self.project_navigation.restore_draft = false;
                 self.handle_intake_progress(NativeProjectIntakeStage::CreatingThread, cx);
                 self.state = NativeViewState::Loading;
                 self.navigate(
@@ -284,7 +287,13 @@ impl NativeApplication {
     /// one is in flight. Any other thread never arms the pending recovery,
     /// so a later unrelated navigation cannot inherit it.
     pub(super) fn arm_failed_recovery(&mut self, thread_id: &ThreadId) {
-        if self.intake_stage != Some(NativeProjectIntakeStage::CreatingThread) {
+        if !matches!(
+            self.intake_stage,
+            Some(
+                NativeProjectIntakeStage::CreatingThread
+                    | NativeProjectIntakeStage::RefreshingThreads
+            )
+        ) {
             return;
         }
         let Some(recovery) = self.pending_failed_recovery.as_mut() else {

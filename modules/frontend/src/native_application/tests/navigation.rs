@@ -66,8 +66,7 @@ fn intake_bridge_refusals_stay_typed_and_redacted() {
 
 #[gpui::test]
 fn native_rail_add_project_has_stable_metadata_and_admission_policy(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink([Ok(())]);
 
     cx.update(|_, app| {
@@ -109,8 +108,7 @@ fn native_rail_add_project_has_stable_metadata_and_admission_policy(cx: &mut Tes
 
 #[gpui::test]
 fn home_project_choice_updates_app_selection_and_scope(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
     let beta = ProjectId::parse("home-beta").expect("fixture project");
 
@@ -159,9 +157,352 @@ fn home_project_choice_updates_app_selection_and_scope(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn sidebar_project_dropdown_precedes_detached_arrows_and_selects_a_real_project(
+    cx: &mut TestAppContext,
+) {
+    use crate::home_project_picker::{HOME_MENU_SELECTOR, SIDEBAR_PROJECT_TRIGGER_SELECTOR};
+    use gpui::px;
+
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, commands) = command_sink([Ok(())]);
+    let alpha = ProjectId::parse("sidebar-alpha").expect("fixture project");
+    let beta = ProjectId::parse("sidebar-beta").expect("fixture project");
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            application.selected_project = Some(alpha.clone());
+            application.project_options = vec![
+                ProjectOption {
+                    id: alpha,
+                    name: "artisanstreet/a-project-name-that-is-longer-than-the-sidebar".into(),
+                },
+                ProjectOption {
+                    id: beta.clone(),
+                    name: "Beta".into(),
+                },
+            ];
+            application.sync_project_pickers(cx);
+            cx.notify();
+        });
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+
+    let sidebar = cx
+        .debug_bounds(DESKTOP_SIDEBAR_SELECTOR)
+        .expect("sidebar paints");
+    let trigger = cx
+        .debug_bounds(SIDEBAR_PROJECT_TRIGGER_SELECTOR)
+        .expect("project trigger paints");
+    let previous = cx
+        .debug_bounds("sidebar-previous-project")
+        .expect("previous arrow paints");
+    let next = cx
+        .debug_bounds("sidebar-next-project")
+        .expect("next arrow paints");
+    assert_eq!(trigger.size.height, px(30.0));
+    assert!(trigger.size.width > px(30.0));
+    assert_eq!(previous.size, gpui::size(px(30.0), px(30.0)));
+    assert_eq!(next.size, previous.size);
+    assert_eq!(trigger.right() + px(6.0), previous.left());
+    assert_eq!(previous.right() + px(6.0), next.left());
+    assert!(next.right() <= sidebar.right());
+
+    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let menu = cx
+        .debug_bounds(HOME_MENU_SELECTOR)
+        .expect("project menu opens");
+    assert!(
+        menu.top() >= trigger.bottom(),
+        "sidebar menu opens below its trigger"
+    );
+    assert_eq!(menu.left(), trigger.left());
+
+    assert!(cx.debug_bounds("artisan-home-project-filter").is_none());
+    cx.simulate_keystrokes("b e t a");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("artisan-home-project-row-0").is_some());
+    cx.update(|_, app| {
+        let picker = view
+            .read(app)
+            .sidebar_project_picker
+            .as_ref()
+            .unwrap()
+            .read(app);
+        assert_eq!(
+            picker.state().highlighted_row(),
+            Some(PickerRow::Project(1))
+        );
+        assert!(picker.state().filter().is_empty());
+    });
+    assert!(cx.debug_bounds("artisan-home-project-row-1").is_some());
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(HOME_MENU_SELECTOR).is_none());
+    cx.update(|_, app| {
+        assert_eq!(view.read(app).selected_project.as_ref(), Some(&beta));
+    });
+    assert_eq!(
+        commands
+            .borrow()
+            .iter()
+            .filter(|command| {
+                matches!(command, NativeTransportCommand::SelectProject(id) if id == &beta)
+            })
+            .count(),
+        1,
+        "the painted dropdown submits the selected Forge project exactly once"
+    );
+
+    cx.simulate_resize(gpui::size(px(1000.0), px(200.0)));
+    cx.run_until_parked();
+    let sidebar = cx
+        .debug_bounds(DESKTOP_SIDEBAR_SELECTOR)
+        .expect("short sidebar paints");
+    let profile = cx
+        .debug_bounds("artisan-desktop-profile-trigger")
+        .expect("profile footer paints");
+    let navigation = cx
+        .debug_bounds("artisan-sidebar-navigation-scroll")
+        .expect("navigation scroll area paints");
+    assert!(profile.top() >= sidebar.top());
+    assert_eq!(profile.bottom(), sidebar.bottom() - px(10.0));
+    assert!(navigation.bottom() < profile.top());
+}
+
+#[gpui::test]
+fn sidebar_project_menu_shares_sliding_hover_with_keyboard_navigation(cx: &mut TestAppContext) {
+    use crate::home_project_picker::{HOME_MENU_SELECTOR, SIDEBAR_PROJECT_TRIGGER_SELECTOR};
+
+    cx.update(|app| app.set_reduce_motion(true));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, _) = command_sink([]);
+    let picker = cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            application.project_options = ["alpha", "beta"]
+                .map(|name| ProjectOption {
+                    id: ProjectId::parse(format!("hover-{name}")).expect("fixture project"),
+                    name: name.into(),
+                })
+                .to_vec();
+            application.selected_project = Some(application.project_options[0].id.clone());
+            application.sync_project_pickers(cx);
+            cx.notify();
+            application.sidebar_project_picker.clone().unwrap()
+        })
+    });
+    cx.run_until_parked();
+    let trigger = cx.debug_bounds(SIDEBAR_PROJECT_TRIGGER_SELECTOR).unwrap();
+    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = picker.read(app);
+        assert_eq!(
+            picker.state().highlighted_row(),
+            Some(PickerRow::Project(0))
+        );
+        assert_eq!(
+            picker.menu_hover_state().active_id(),
+            Some("project:hover-alpha")
+        );
+    });
+
+    let alpha = cx.debug_bounds("artisan-home-project-row-0").unwrap();
+    let beta = cx.debug_bounds("artisan-home-project-row-1").unwrap();
+    let new_project = cx.debug_bounds("artisan-home-project-row-new").unwrap();
+    cx.update(|_, app| app.set_reduce_motion(false));
+    cx.simulate_mouse_move(alpha.center(), None, gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_mouse_move(beta.center(), None, gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = picker.read(app);
+        let hover = picker.menu_hover_state();
+        assert_eq!(
+            picker.state().highlighted_row(),
+            Some(PickerRow::Project(1))
+        );
+        assert_eq!(hover.active_id(), Some("project:hover-beta"));
+        let transition = hover
+            .transition()
+            .expect("moving between rows slides the same pill");
+        assert!(transition.to.top > transition.from.top);
+    });
+
+    cx.simulate_mouse_move(new_project.center(), None, gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let picker = picker.read(app);
+        assert_eq!(
+            picker.state().highlighted_row(),
+            Some(PickerRow::NewProject)
+        );
+        assert_eq!(picker.menu_hover_state().active_id(), Some("new-project"));
+    });
+
+    // Keyboard navigation takes over while the pointer stays on New project.
+    for (key, row, hover_id) in [
+        ("up", PickerRow::Project(1), "project:hover-beta"),
+        ("up", PickerRow::Project(0), "project:hover-alpha"),
+        ("down", PickerRow::Project(1), "project:hover-beta"),
+    ] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            let picker = picker.read(app);
+            let hover = picker.menu_hover_state();
+            assert_eq!(picker.state().highlighted_row(), Some(row));
+            assert_eq!(hover.active_id(), Some(hover_id));
+            assert!(hover.visible());
+            assert!(
+                hover.transition().is_none(),
+                "keyboard highlighting is immediate"
+            );
+        });
+    }
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(HOME_MENU_SELECTOR).is_none());
+    cx.update(|_, app| {
+        let picker = picker.read(app);
+        let hover = picker.menu_hover_state();
+        assert!(!picker.state().is_open());
+        assert!(!hover.visible());
+        assert_eq!(hover.active_id(), None);
+        assert!(hover.transition().is_none());
+    });
+}
+
+#[gpui::test]
+fn sidebar_project_arrows_keyboard_activation_cycles_once(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, commands) = command_sink([]);
+    let projects = ["sidebar-a", "sidebar-b", "sidebar-c"]
+        .map(|id| ProjectId::parse(id).expect("fixture project"));
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            application.project_options = projects
+                .iter()
+                .map(|id| ProjectOption {
+                    id: id.clone(),
+                    name: id.as_str().to_owned().into(),
+                })
+                .collect();
+            application.selected_project = Some(projects[0].clone());
+            application.sync_project_pickers(cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+
+    for (selector, pointer_target, targets) in [
+        ("sidebar-next-project", 1, [2, 0]),
+        ("sidebar-previous-project", 2, [1, 0]),
+    ] {
+        let arrow = cx.debug_bounds(selector).expect("project arrow paints");
+        cx.simulate_click(arrow.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|_, app| {
+            assert_eq!(
+                view.read(app).selected_project.as_ref(),
+                Some(&projects[pointer_target])
+            );
+        });
+        for (key, target) in ["enter", "space"].into_iter().zip(targets) {
+            commands.borrow_mut().clear();
+            let before = cx.update(|_, app| view.read(app).selected_project.clone());
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                assert_eq!(
+                    view.read(app).selected_project,
+                    before,
+                    "key-down waits for release"
+                );
+            });
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).expect("activation key"),
+            });
+            cx.run_until_parked();
+            cx.update(|_, app| {
+                assert_eq!(
+                    view.read(app).selected_project.as_ref(),
+                    Some(&projects[target])
+                );
+            });
+            let selected = commands
+                .borrow()
+                .iter()
+                .filter_map(|command| match command {
+                    NativeTransportCommand::SelectProject(project) => Some(project.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                selected,
+                vec![projects[target].clone()],
+                "{selector} {key} cycles once"
+            );
+        }
+    }
+}
+
+#[gpui::test]
+fn sidebar_project_arrows_are_not_tab_stops_without_multiple_projects(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, _| {
+            application.test_command_sink = Some(sink)
+        });
+    });
+    for count in [0, 1] {
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                application.project_options = (0..count)
+                    .map(|_| ProjectOption {
+                        id: ProjectId::parse("only-project").expect("fixture project"),
+                        name: "Only project".into(),
+                    })
+                    .collect();
+                application.selected_project = application
+                    .project_options
+                    .first()
+                    .map(|project| project.id.clone());
+                application.sync_project_pickers(cx);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        for selector in ["sidebar-next-project", "sidebar-previous-project"] {
+            let arrow = cx.debug_bounds(selector).expect("disabled arrow paints");
+            cx.simulate_click(arrow.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            cx.update(|window, app| {
+                assert!(
+                    !window
+                        .focused(app)
+                        .expect("pointer focuses tracked handle")
+                        .tab_stop
+                );
+            });
+        }
+    }
+    assert!(
+        !commands
+            .borrow()
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::SelectProject(_)))
+    );
+}
+
+#[gpui::test]
 fn thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let project = ProjectId::parse("thread-focus-project").expect("fixture project");
     let thread = ThreadId::parse("thread-focus-thread").expect("fixture thread");
     let host = cx.update(|_, app| {
@@ -201,8 +542,7 @@ fn thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn thread_composer_click_focuses_for_typing_after_other_control(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let project = ProjectId::parse("thread-click-project").expect("fixture project");
     let thread = ThreadId::parse("thread-click-thread").expect("fixture thread");
     let host = cx.update(|_, app| {
@@ -252,8 +592,7 @@ fn thread_composer_click_focuses_for_typing_after_other_control(cx: &mut TestApp
 
 #[gpui::test]
 fn new_thread_composer_accepts_typed_draft_while_send_unready(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.run_until_parked();
     // Focus exactly as a pointer press does; the composer starts
     // enabled and no test bypass touches admission.
@@ -279,8 +618,7 @@ fn new_thread_composer_accepts_typed_draft_while_send_unready(cx: &mut TestAppCo
 
 #[gpui::test]
 fn home_project_intake_row_submits_real_intake_command(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
 
     cx.update(|_, app| {
@@ -324,8 +662,7 @@ fn home_project_intake_row_submits_real_intake_command(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn navigation_changes_the_mounted_route_identity(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
 
     // Fresh windows mount the default route.
     assert!(cx.debug_bounds("route-new-thread").is_some());
@@ -357,8 +694,7 @@ fn navigation_changes_the_mounted_route_identity(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn ready_without_host_mounts_surface_on_new_thread_route(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(DESKTOP_OFFLINE_SELECTOR).is_none());
     cx.update(|_, app| {
@@ -403,7 +739,7 @@ fn ready_without_host_mounts_surface_on_new_thread_route(cx: &mut TestAppContext
 
 #[gpui::test]
 fn wordmark_returns_to_start(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     cx.update(|_, app| {
         view.update(app, |view, cx| {
             view.navigate(
@@ -427,7 +763,7 @@ fn wordmark_returns_to_start(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -467,7 +803,7 @@ fn conversation_header_paints_summary_then_stored_title(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn conversation_header_refines_the_creation_placeholder(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -523,7 +859,7 @@ fn conversation_header_refines_the_creation_placeholder(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn new_thread_route_names_the_thread_being_created(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -574,8 +910,7 @@ fn new_thread_route_names_the_thread_being_created(cx: &mut TestAppContext) {
 fn titlebar_workspace_header_starts_inset_from_the_sidebar_edge_and_truncates_the_thread_name(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _commands) = command_sink([]);
     let thread_id = cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -709,8 +1044,7 @@ fn titlebar_workspace_header_starts_inset_from_the_sidebar_edge_and_truncates_th
 
 #[gpui::test]
 fn titlebar_workspace_header_names_the_repository_when_facts_exist(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -775,8 +1109,7 @@ fn titlebar_workspace_context_paints_muted_instead_of_foreground() {
 
 #[gpui::test]
 fn selecting_a_project_requests_repository_facts_and_clears_stale_ones(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -820,8 +1153,7 @@ fn selecting_a_project_requests_repository_facts_and_clears_stale_ones(cx: &mut 
 fn repository_observations_update_the_titlebar_seam_for_the_selected_project(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             let project = ProjectId::parse("varde").expect("project");
@@ -876,8 +1208,7 @@ fn repository_observations_update_the_titlebar_seam_for_the_selected_project(
 
 #[gpui::test]
 fn subject_less_routes_keep_the_bare_wordmark(cx: &mut TestAppContext) {
-    let (_view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (_view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.run_until_parked();
 
     assert!(
@@ -915,8 +1246,7 @@ fn thread_separator_is_darker_than_muted_foreground() {
 
 #[gpui::test]
 fn admitted_rail_activation_submits_once_and_retains_restore_state(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
 
     cx.update(|_, app| {
@@ -968,8 +1298,7 @@ fn admitted_rail_activation_submits_once_and_retains_restore_state(cx: &mut Test
 
 #[gpui::test]
 fn rail_busy_and_stopped_admission_preserve_typed_failures(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([
         Err(super::CommandSendError::Busy),
         Err(super::CommandSendError::Stopped),
@@ -1013,8 +1342,7 @@ fn rail_busy_and_stopped_admission_preserve_typed_failures(cx: &mut TestAppConte
 
 #[gpui::test]
 fn every_project_action_fence_disables_the_native_rail_action(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
 
     cx.update(|app| {
@@ -1038,6 +1366,7 @@ fn every_project_action_fence_disables_the_native_rail_action(cx: &mut TestAppCo
                 source_thread: ThreadId::parse("rail-source").expect("thread"),
                 target_thread: Some(ThreadId::parse("rail-target").expect("thread")),
                 generation: 1,
+                carry_draft: false,
                 phase: ThreadSwitchPhase::UnsubscribeAdmission {
                     retry_pending: false,
                     retry_used: false,
@@ -1095,8 +1424,7 @@ fn ready_membership_requires_the_exact_project_and_thread_rows() {
 #[gpui::test]
 fn picker_is_disabled_for_every_intake_progress_stage(cx: &mut TestAppContext) {
     let project_id = ProjectId::parse("forge-p1").expect("project");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.install_picker(
@@ -1132,8 +1460,7 @@ fn cancellation_restores_the_prior_catalog_and_host_and_clears_picker_action(
         id: project_id.clone(),
         name: "First".into(),
     }];
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.project_options = options.clone();
@@ -1179,8 +1506,7 @@ fn cancellation_restores_the_prior_catalog_and_host_and_clears_picker_action(
 #[gpui::test]
 fn retryable_intake_failure_keeps_a_picker_for_the_retry_command(cx: &mut TestAppContext) {
     let project_id = ProjectId::parse("forge-p1").expect("project");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.install_picker(

@@ -304,10 +304,10 @@ fn profile_usage_is_absent_without_forge_and_disappears_on_disconnect(cx: &mut T
         });
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("artisan-profile-usage-scroll").is_some());
+    assert!(cx.debug_bounds("artisan-profile-usage-scroll").is_none());
     assert!(
         cx.debug_bounds("artisan-desktop-profile-action-1")
-            .is_some()
+            .is_none()
     );
     cx.update(|_, cx| {
         view.update(cx, |view, cx| {
@@ -421,4 +421,64 @@ fn busy_connection_retry_keeps_the_same_host_view(cx: &mut TestAppContext) {
     cx.simulate_click(retry.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(selected(&workspace, cx), view);
+}
+
+#[gpui::test]
+fn retry_closes_a_failed_live_worker_before_replacing_it(cx: &mut TestAppContext) {
+    let (workspace, cx) =
+        cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
+    let view = selected(&workspace, cx);
+    let (service, mut commands, finished) = NativeTransportService::pending_for_test();
+    let service = Arc::new(service);
+    cx.update(|window, cx| {
+        view.update(cx, |view, cx| {
+            view.service = Some(service.clone());
+            view.set_failure(command_failure(CommandSendError::Stopped), cx);
+        });
+        workspace.update(cx, |workspace, cx| workspace.select(None, window, cx));
+    });
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(NativeTransportCommand::Shutdown)
+    ));
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert!(view.read(cx).connection_retry_pending);
+        assert!(Arc::ptr_eq(
+            view.read(cx).service.as_ref().unwrap(),
+            &service
+        ));
+    });
+    finished.store(true, std::sync::atomic::Ordering::Release);
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(selected(&workspace, cx), view);
+    cx.update(|_, cx| {
+        assert!(!view.read(cx).connection_retry_pending);
+        assert!(view.read(cx).service.is_none());
+    });
+}
+
+#[gpui::test]
+fn closed_worker_channel_preserves_its_final_authentication_failure(cx: &mut TestAppContext) {
+    let (workspace, cx) =
+        cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
+    let view = selected(&workspace, cx);
+    let failure = ServiceFailure {
+        stage: ServiceFailureStage::Credentials,
+        category: ServiceFailureCategory::Authentication,
+    };
+    let service = NativeTransportService::completed_for_test(vec![
+        NativeTransportEvent::Failed(failure),
+        NativeTransportEvent::Stopped(ServiceStopStatus::Failed),
+    ]);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.service = Some(Arc::new(service));
+            view.service_stopped = false;
+            assert!(!view.poll_service(cx));
+            assert!(matches!(&view.state, NativeViewState::Failure(actual) if *actual == failure));
+        })
+    });
 }

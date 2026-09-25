@@ -16,8 +16,7 @@ fn ready_mounts_the_exact_returned_project_and_thread_and_requests_its_snapshot(
     .expect("threads");
     let project_id = ProjectId::parse("forge-p2").expect("project");
     let thread_id = ThreadId::parse("forge-t2").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
 
     cx.update(|app| {
         view.update(app, |application, application_cx| {
@@ -30,8 +29,8 @@ fn ready_mounts_the_exact_returned_project_and_thread_and_requests_its_snapshot(
             );
             assert_eq!(application.selected_project.as_ref(), Some(&project_id));
             assert_eq!(application.selected_thread.as_ref(), Some(&thread_id));
-            assert_eq!(application.project_options[0].id.as_str(), "forge-p1");
-            assert_eq!(application.project_options[1].id.as_str(), "forge-p2");
+            assert_eq!(application.project_options[0].id.as_str(), "forge-p2");
+            assert_eq!(application.project_options[1].id.as_str(), "forge-p1");
             let host = application.conversation_host.as_ref().expect("host");
             assert_eq!(
                 host.read(application_cx)
@@ -63,8 +62,7 @@ fn mismatched_ready_does_not_replace_the_real_host_or_add_rows(cx: &mut TestAppC
         id: old_project_id.clone(),
         name: "First".into(),
     }];
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.project_options = options.clone();
@@ -138,8 +136,7 @@ fn real_thread_host_mount_retains_exact_initial_snapshot_request(cx: &mut TestAp
 
 #[gpui::test]
 fn viewport_effect_pumping_is_typed_and_rejects_stale_bottom_scroll(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let thread_id = ThreadId::parse("viewport-pump-thread").expect("thread");
     let host =
         cx.update(|_, app| ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host"));
@@ -194,8 +191,7 @@ fn viewport_effect_pumping_is_typed_and_rejects_stale_bottom_scroll(cx: &mut Tes
 
 #[gpui::test]
 fn scroll_intent_pumping_preserves_controller_view_without_completion(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let thread_id = ThreadId::parse("scroll-intent-thread").expect("thread");
     let host =
         cx.update(|_, app| ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host"));
@@ -230,8 +226,7 @@ fn scroll_intent_pumping_preserves_controller_view_without_completion(cx: &mut T
 
 #[gpui::test]
 fn scroll_intent_pumping_retains_fifo_head_when_surface_is_full(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let thread_id = ThreadId::parse("scroll-backpressure-thread").expect("thread");
     let host =
         cx.update(|_, app| ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host"));
@@ -272,8 +267,7 @@ fn scroll_intent_pumping_retains_fifo_head_when_surface_is_full(cx: &mut TestApp
 
 #[gpui::test]
 fn host_retirement_drops_pending_transient_scroll_target_with_surface(cx: &mut TestAppContext) {
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let thread_id = ThreadId::parse("scroll-retirement-thread").expect("thread");
     let host =
         cx.update(|_, app| ConversationHost::mount(thread_id, ThemeMode::Dark, app).expect("host"));
@@ -313,8 +307,7 @@ fn host_retirement_drops_pending_transient_scroll_target_with_surface(cx: &mut T
 #[gpui::test]
 fn ordinary_mount_boundary_retains_ready_host_without_replacement(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("forge-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let snapshot = ConversationSnapshot::new(
         thread_id.clone(),
         ConversationCursor::new(0),
@@ -359,8 +352,7 @@ fn ordinary_mount_boundary_retains_ready_host_without_replacement(cx: &mut TestA
 
 #[gpui::test]
 fn application_root_renders_without_a_service_thread(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.run_until_parked();
     cx.update(|app| {
         assert!(view.read(app).service.is_none());
@@ -371,8 +363,7 @@ fn application_root_renders_without_a_service_thread(cx: &mut TestAppContext) {
 #[gpui::test]
 fn exact_snapshot_received_event_is_dispatched_to_the_real_host(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("forge-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let snapshot = ConversationSnapshot::new(
         thread_id.clone(),
         ConversationCursor::new(0),
@@ -407,8 +398,7 @@ fn thread_switch_is_serial_and_rejects_old_generation_delivery(cx: &mut TestAppC
         thread("switch-thread-b", "switch-project", "B"),
     ])
     .expect("listing");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
 
     cx.update(|app| {
         view.update(app, |application, application_cx| {
@@ -456,8 +446,7 @@ fn thread_switch_busy_is_retried_once_without_duplicate_admission(cx: &mut TestA
         thread("busy-thread-b", "busy-project", "B"),
     ])
     .expect("listing");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             let source_host =
@@ -511,8 +500,7 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
         thread("stopped-thread-b", "stopped-project", "B"),
     ])
     .expect("listing");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             let source_host =
@@ -582,8 +570,7 @@ fn removed_switch_target_retires_without_subscribing_it(cx: &mut TestAppContext)
     .expect("listing");
     let remaining = ThreadListing::new(vec![thread("removed-thread-a", "removed-project", "A")])
         .expect("remaining listing");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             let source_host =
@@ -642,8 +629,7 @@ fn production_title_is_the_native_title() {
 fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
     cx: &mut TestAppContext,
 ) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     let run = RunId::parse("run-a").expect("run");
@@ -709,8 +695,7 @@ fn terminal_service_failure_clears_transient_state_keeps_draft_and_transcript(
 
 #[gpui::test]
 fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     let run = RunId::parse("run-a").expect("run");
@@ -768,8 +753,7 @@ fn service_stopped_clears_stale_run_and_refresh_keeps_draft(cx: &mut TestAppCont
 
 #[gpui::test]
 fn failed_recovery_creates_same_project_task_without_autosend(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let project_id = ProjectId::parse("forge-p1").expect("project");
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
@@ -818,8 +802,7 @@ fn failed_recovery_creates_same_project_task_without_autosend(cx: &mut TestAppCo
 
 #[gpui::test]
 fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let project_id = ProjectId::parse("forge-p1").expect("project");
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
@@ -856,6 +839,10 @@ fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut 
                 thread("forge-t2", "forge-p1", "New"),
             ])
             .expect("threads");
+            application.handle_intake_progress(
+                NativeProjectIntakeStage::RefreshingThreads,
+                application_cx,
+            );
             application.handle_intake_ready(
                 &projects,
                 project_id.clone(),
@@ -868,17 +855,20 @@ fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut 
                 .as_ref()
                 .expect("pending survives intake");
             assert_eq!(pending.new_thread.as_ref(), Some(&new_thread));
+            assert!(!pending.recalled, "source stop must precede recall");
+            assert_eq!(application.selected_thread.as_ref(), Some(&old_thread));
+            super::projects::finish_project_transition(application, application_cx);
+            let pending = application
+                .pending_failed_recovery
+                .as_ref()
+                .expect("pending survives intake");
+            assert_eq!(pending.new_thread.as_ref(), Some(&new_thread));
             assert!(pending.recalled, "mount recalls the exact failed payload");
             assert_eq!(
                 application.composer_model_choice,
                 Some((Some(new_thread.clone()), policy.clone())),
                 "the old thread policy seeds the new thread"
             );
-            let host = application
-                .conversation_host
-                .clone()
-                .expect("new thread host");
-            application.dispatch_snapshot(&host, snapshot_for(&new_thread, 0), application_cx);
             assert!(
                 matches!(application.state, NativeViewState::Ready),
                 "the real snapshot event readies the new thread before restore"
@@ -924,8 +914,7 @@ fn failed_recovery_full_chain_restores_prompt_model_and_project_unsent(cx: &mut 
 
 #[gpui::test]
 fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let project_id = ProjectId::parse("forge-p1").expect("project");
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
@@ -985,8 +974,7 @@ fn failed_recovery_event_routes_through_controls_subscription(cx: &mut TestAppCo
 
 #[gpui::test]
 fn failed_recovery_unknown_identity_is_a_noop(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     cx.update(|app| {
@@ -1005,8 +993,7 @@ fn failed_recovery_unknown_identity_is_a_noop(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn failed_recovery_busy_composer_refuses_with_notice(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     cx.update(|app| {
@@ -1040,8 +1027,7 @@ fn failed_recovery_busy_composer_refuses_with_notice(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn failed_recovery_accept_into_typed_composer_keeps_text(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (_sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     let new_thread = ThreadId::parse("forge-t2").expect("new thread");
@@ -1088,8 +1074,7 @@ fn failed_recovery_accept_into_typed_composer_keeps_text(cx: &mut TestAppContext
 
 #[gpui::test]
 fn failed_recovery_delayed_read_to_another_thread_drops_quietly(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (_sink, _commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     cx.update(|app| {
@@ -1117,8 +1102,7 @@ fn failed_recovery_delayed_read_to_another_thread_drops_quietly(cx: &mut TestApp
 
 #[gpui::test]
 fn failed_recovery_navigation_cancels_pending(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (_sink, _commands) = command_sink([]);
     cx.update(|app| {
         view.update(app, |application, application_cx| {
@@ -1134,6 +1118,7 @@ fn failed_recovery_navigation_cancels_pending(cx: &mut TestAppContext) {
             application.begin_thread_transition(
                 Some(ThreadId::parse("forge-t3").expect("other thread")),
                 ThreadId::parse("forge-t1").expect("old thread"),
+                false,
                 application_cx,
             );
             assert!(application.pending_failed_recovery.is_none());
@@ -1154,8 +1139,7 @@ fn failed_recovery_navigation_cancels_pending(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn failed_recovery_continue_waits_for_armed_mount(cx: &mut TestAppContext) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([]);
     let old_thread = ThreadId::parse("forge-t1").expect("old thread");
     let new_thread = ThreadId::parse("forge-t2").expect("new thread");
@@ -1189,6 +1173,66 @@ fn failed_recovery_continue_waits_for_armed_mount(cx: &mut TestAppContext) {
                 application.pending_failed_recovery.is_some(),
                 "unmounted recovery waits"
             );
+        });
+    });
+}
+
+#[gpui::test]
+fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(
+    cx: &mut TestAppContext,
+) {
+    let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            let projects = ProjectListing::new(vec![
+                project("empty-alpha", "Alpha"),
+                project("empty-beta", "Beta"),
+            ])
+            .unwrap();
+            let alpha = ProjectId::parse("empty-alpha").unwrap();
+            let beta = ProjectId::parse("empty-beta").unwrap();
+            let destination = ThreadId::parse("beta-transferred-draft").unwrap();
+            application.handle_projects(&projects, cx);
+            application.handle_empty_threads(&alpha, cx);
+            application
+                .composer
+                .update(cx, |composer, _| composer.set_draft("Alpha idea"));
+            application.select_project_from_sidebar(beta.clone(), cx);
+            assert_eq!(application.selected_project.as_ref(), Some(&beta));
+            assert!(commands.borrow().iter().any(|command| matches!(
+                command,
+                NativeTransportCommand::CreateTask(project) if project == &beta
+            )));
+            assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
+            let threads = ThreadListing::new(vec![thread(
+                destination.as_str(),
+                beta.as_str(),
+                "New task",
+            )])
+            .unwrap();
+            application.handle_intake_ready(&projects, beta, &threads, destination.clone(), cx);
+            application.handle_service_event(
+                fresh_start_event(&destination, "home-draft-start", 1),
+                cx,
+            );
+            assert_eq!(application.selected_thread.as_ref(), Some(&destination));
+            assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
+            assert!(matches!(application.state, NativeViewState::Ready));
+            assert!(application.project_picker_action_is_admissible());
+            application.composer.update(cx, |composer, cx| {
+                composer.switch_thread(&format!("project:{}", alpha.as_str()), false, cx);
+            });
+            assert_eq!(application.composer.read(cx).draft(), "");
+            application.composer.update(cx, |composer, cx| {
+                composer.switch_thread(destination.as_str(), false, cx);
+            });
+            assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
+            assert!(!commands.borrow().iter().any(|command| matches!(
+                command,
+                NativeTransportCommand::QueueMessage(_) | NativeTransportCommand::StopRun(_)
+            )));
         });
     });
 }

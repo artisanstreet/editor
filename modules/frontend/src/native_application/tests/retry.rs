@@ -3,8 +3,7 @@ use super::*;
 #[gpui::test]
 fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -78,8 +77,7 @@ fn correlated_failure_retains_exact_retry_identity_and_body(cx: &mut TestAppCont
 #[gpui::test]
 fn retry_button_is_labeled_focused_and_has_deterministic_tab_stop(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-button-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -175,8 +173,7 @@ fn pointer_enter_and_space_retry_activation_each_queue_once_with_stable_identity
     let thread_id = ThreadId::parse("retry-activation-thread").expect("thread");
     let request_id = request("retry-stable-request");
     let body = "retry activation body";
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -249,8 +246,7 @@ fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
 ) {
     let thread_id = ThreadId::parse("retry-receipt-thread").expect("thread");
     let stale_thread_id = ThreadId::parse("retry-stale-thread").expect("stale thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -342,8 +338,7 @@ fn retry_receipts_settle_only_matching_flights_and_stale_results_are_inert(
 fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-edited-thread").expect("thread");
     let original_request = request("retry-edited-request");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -413,8 +408,7 @@ fn edited_retry_is_suppressed_while_fresh_send_mints_a_new_request(cx: &mut Test
 fn busy_retry_admission_retains_identity_and_draft_without_a_flight(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-busy-thread").expect("thread");
     let request_id = request("retry-busy-request");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -461,8 +455,7 @@ fn busy_retry_admission_retains_identity_and_draft_without_a_flight(cx: &mut Tes
 #[gpui::test]
 fn stopped_retry_admission_fails_closed_and_removes_the_affordance(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-stopped-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -498,8 +491,7 @@ fn stopped_retry_admission_fails_closed_and_removes_the_affordance(cx: &mut Test
 #[gpui::test]
 fn service_stop_event_clears_retry_while_retaining_the_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-stop-event-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -543,8 +535,7 @@ fn thread_transition_clears_retry_while_retaining_the_draft(cx: &mut TestAppCont
         thread(target.as_str(), "retry-transition-project", "Target"),
     ])
     .expect("listing");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -581,8 +572,7 @@ fn project_transition_clears_retry_without_losing_draft(cx: &mut TestAppContext)
     let old_project = ProjectId::parse("retry-old-project").expect("old project");
     let new_project = ProjectId::parse("retry-new-project").expect("new project");
     let thread_id = ThreadId::parse("retry-project-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -614,8 +604,7 @@ fn project_transition_clears_retry_without_losing_draft(cx: &mut TestAppContext)
 #[gpui::test]
 fn host_retirement_clears_retry_without_losing_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-host-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -642,8 +631,7 @@ fn host_retirement_clears_retry_without_losing_draft(cx: &mut TestAppContext) {
 #[gpui::test]
 fn shutdown_clears_retry_while_preserving_the_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("retry-shutdown-thread").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink(Vec::<Result<(), super::CommandSendError>>::new());
     cx.update(|_, app| {
         view.update(app, |application, application_cx| {
@@ -687,8 +675,7 @@ fn message_failure_presentation_contains_only_redacted_stage_and_category() {
 fn busy_and_stopped_admission_retains_the_draft_without_an_application_flight(
     cx: &mut TestAppContext,
 ) {
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             for (error, draft) in [
@@ -725,8 +712,7 @@ fn busy_and_stopped_admission_retains_the_draft_without_an_application_flight(
 #[gpui::test]
 fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("forge-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
@@ -813,8 +799,7 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
 #[gpui::test]
 fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("forge-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
@@ -853,8 +838,7 @@ fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
 #[gpui::test]
 fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("forge-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(thread_id.clone());
@@ -926,8 +910,7 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
 #[gpui::test]
 fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mut TestAppContext) {
     let old_thread = ThreadId::parse("old-thread").expect("thread");
-    let (view, _) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, _) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     cx.update(|app| {
         view.update(app, |application, application_cx| {
             application.selected_thread = Some(old_thread.clone());

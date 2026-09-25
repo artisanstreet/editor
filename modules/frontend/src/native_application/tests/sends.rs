@@ -2,7 +2,7 @@ use super::*;
 
 #[gpui::test]
 fn tick_drains_queued_answer_into_submit_with_preserved_ids(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     let expected = cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -35,7 +35,7 @@ fn tick_drains_queued_answer_into_submit_with_preserved_ids(cx: &mut TestAppCont
 
 #[gpui::test]
 fn tick_busy_keeps_row_pending_with_retry_state(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -68,7 +68,7 @@ fn tick_busy_keeps_row_pending_with_retry_state(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn tick_stopped_reports_diagnostic_without_drop(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -92,7 +92,7 @@ fn tick_stopped_reports_diagnostic_without_drop(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn tick_empty_outbox_leaves_transport_untouched(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Err(super::CommandSendError::Busy)]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -105,7 +105,7 @@ fn tick_empty_outbox_leaves_transport_untouched(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn second_tick_does_not_resend_before_pairing(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -122,7 +122,7 @@ fn second_tick_does_not_resend_before_pairing(cx: &mut TestAppContext) {
 fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -195,7 +195,7 @@ fn picker_offline_choice_survives_sync_and_rejects_send_without_losing_draft(
 fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -234,13 +234,14 @@ fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
             assert!(application.message_flight.is_none());
             assert!(!application.composer.read(cx).is_submitting());
             assert_eq!(application.composer.read(cx).draft(), "keep my draft");
-            let error = application
-                .composer_model_run_error
-                .clone()
-                .expect("first-send configuration error");
+            assert!(application.composer_model_run_error.is_none());
+            assert!(application.pending_account_send.is_some());
+            admit_probed_codex_usage(application, cx);
+            application.resume_account_send("codex", cx);
+            assert!(application.pending_account_send.is_none());
             assert!(
-                error.contains("account status") && error.contains("Your draft is preserved"),
-                "unexpected error: {error}"
+                application.message_flight.is_some(),
+                "send resumes after the account check"
             );
         });
     });
@@ -249,7 +250,7 @@ fn unconfigured_first_send_with_displayed_policy_blocks_and_preserves_draft(
 #[gpui::test]
 fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("explicit-first-send-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -359,8 +360,7 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
 #[gpui::test]
 fn queued_rows_surface_in_timeline_with_dispatch_diagnostics(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("queued-unconfigured-task").expect("thread");
-    let (view, cx) =
-        cx.add_window_view(|window, view_cx| NativeApplication::new(None, window, view_cx));
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -434,7 +434,7 @@ fn queued_rows_surface_in_timeline_with_dispatch_diagnostics(cx: &mut TestAppCon
 #[gpui::test]
 fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("first-send-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     let (retained, save_request) = cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -508,7 +508,7 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
 #[gpui::test]
 fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("first-send-failed-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -548,7 +548,7 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
 fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("steer-task").expect("thread");
     let run_id = RunId::parse("run-live").expect("run");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -599,7 +599,7 @@ fn same_engine_live_run_names_the_send_as_a_steer(cx: &mut TestAppContext) {
 #[gpui::test]
 fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("cross-engine-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -639,7 +639,7 @@ fn cross_engine_selection_sends_unnamed(cx: &mut TestAppContext) {
 #[gpui::test]
 fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("starting-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -690,7 +690,7 @@ fn starting_run_refuses_the_send_with_its_reason(cx: &mut TestAppContext) {
 fn retry_replays_the_original_steer_target(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("steer-retry-task").expect("thread");
     let run_id = RunId::parse("run-retry").expect("run");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -778,7 +778,7 @@ fn retry_replays_the_original_steer_target(cx: &mut TestAppContext) {
 #[gpui::test]
 fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("label-capture-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -817,7 +817,7 @@ fn send_captures_routed_label_not_picker_or_stale_run(cx: &mut TestAppContext) {
 )]
 fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -971,7 +971,7 @@ fn echo_retires_lip_and_watch_exactly_once(cx: &mut TestAppContext) {
 #[gpui::test]
 fn legacy_echo_without_source_id_takes_no_take_up(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("legacy-echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1017,7 +1017,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
     cx.update(|app| {
         app.set_reduce_motion(true);
     });
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     // Stage 1: submit + receipt. Pending before ACK, accepted with the
     // send-time routed label staged for its echo.
@@ -1451,7 +1451,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
 #[gpui::test]
 fn failed_send_preserves_label_across_retry(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("label-retry-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1504,7 +1504,7 @@ fn failed_send_preserves_label_across_retry(cx: &mut TestAppContext) {
 #[gpui::test]
 fn send_label_ignores_changed_picker(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("picker-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1535,7 +1535,7 @@ fn send_label_ignores_changed_picker(cx: &mut TestAppContext) {
 )]
 fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("two-send-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(()), Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1656,7 +1656,7 @@ fn two_sends_retire_their_echoes_independently(cx: &mut TestAppContext) {
 #[gpui::test]
 fn echo_before_receipt_retires_from_canonical_scan(cx: &mut TestAppContext) {
     let thread_id = ThreadId::parse("early-echo-task").expect("thread");
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1710,7 +1710,7 @@ fn echo_before_receipt_retires_from_canonical_scan(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1742,7 +1742,7 @@ fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppC
 
 #[gpui::test]
 fn desktop_route_mismatch_cannot_send_to_previous_task(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1778,7 +1778,7 @@ fn desktop_route_mismatch_cannot_send_to_previous_task(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn desktop_busy_sidebar_navigation_keeps_visible_task_and_draft(cx: &mut TestAppContext) {
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1832,7 +1832,7 @@ fn each_new_message_submission_mints_a_fresh_request_id() {
 #[gpui::test]
 fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut TestAppContext) {
     let thread = ThreadId::parse("default-extended-window").unwrap();
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1855,6 +1855,17 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
             application.composer_model_choice = Some((Some(thread), policy));
             application.begin_message_submission(cx);
             assert!(application.message_flight.is_some(), "send should be eager");
+            assert!(application.engine_settings.authoritative_config().is_none());
+            assert_eq!(
+                application
+                    .message_flight
+                    .as_ref()
+                    .unwrap()
+                    .engine_label
+                    .as_deref(),
+                Some("Codex"),
+                "the first send captures the submitted config before its acknowledgement",
+            );
         })
     });
     let commands = commands.borrow();
@@ -1879,7 +1890,7 @@ fn first_send_persists_displayed_one_million_window_before_queueing(cx: &mut Tes
 #[gpui::test]
 fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
     let thread = ThreadId::parse("coalesced-context").unwrap();
-    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -1970,4 +1981,122 @@ fn context_change_during_save_is_persisted_after_ack(cx: &mut TestAppContext) {
             .count(),
         2
     );
+}
+
+#[gpui::test]
+fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(test_application);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let catalog = application.effective_catalog_snapshot(cx);
+            let policy = catalog.selection_policy_for_model("codex-luna").unwrap();
+            application.composer_model_choice = Some((None, policy));
+            let mut refreshed = catalog;
+            refreshed.catalog_revision = "host-new-revision".to_owned();
+            application
+                .model_selector
+                .update(cx, |selector, cx| selector.set_snapshot(refreshed, cx));
+            application.sync_composer_model_policy(cx);
+            let (_, choice) = application.composer_model_choice.as_ref().unwrap();
+            assert_eq!(choice.catalog_revision, "host-new-revision");
+            assert_eq!(choice.model_id, "codex-luna");
+            application
+                .effective_catalog_snapshot(cx)
+                .validate_policy(choice)
+                .unwrap();
+        })
+    });
+}
+
+#[gpui::test]
+fn unconnected_application_never_offers_bundled_models(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            assert!(
+                application
+                    .effective_catalog_snapshot(cx)
+                    .manifest
+                    .models
+                    .is_empty()
+            );
+            assert!(
+                application
+                    .model_selector
+                    .read(cx)
+                    .state()
+                    .policy()
+                    .is_none()
+            );
+        })
+    });
+}
+
+#[gpui::test]
+fn account_check_does_not_send_a_draft_edited_while_waiting(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(
+                application,
+                cx,
+                ThreadId::parse("pending-account-edited").unwrap(),
+                "original draft",
+                sink,
+            );
+            application.begin_message_submission(cx);
+            assert!(application.pending_account_send.is_some());
+            application.composer.update(cx, |composer, _| {
+                composer.set_draft("edited draft".to_owned());
+            });
+            admit_probed_codex_usage(application, cx);
+            application.resume_account_send("codex", cx);
+            assert!(application.pending_account_send.is_none());
+            assert!(application.message_flight.is_none());
+            assert_eq!(application.composer.read(cx).draft(), "edited draft");
+            assert!(
+                commands
+                    .borrow()
+                    .iter()
+                    .all(|command| !matches!(command, NativeTransportCommand::QueueMessage(_)))
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn local_send_leaves_detached_viewport_and_shows_bubble_before_receipt(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, _) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(
+                application,
+                cx,
+                ThreadId::parse("send-scroll").unwrap(),
+                "New message",
+                sink,
+            );
+            install_configured_engine_settings(application, cx);
+            admit_probed_codex_usage(application, cx);
+            let host = application.conversation_host.clone().unwrap();
+            host.update(cx, |host, cx| {
+                host.dispatch(
+                    crate::conversation_state_machine::ConversationStateEvent::Viewport(
+                        crate::conversation_view_machine::ViewportEvent::UserScrolled {
+                            at_bottom: false,
+                        },
+                    ),
+                    cx,
+                )
+            })
+            .unwrap();
+            assert!(host.read(cx).controller_view().viewport_state.is_detached());
+            application.begin_message_submission(cx);
+            assert!(application.message_flight.is_some());
+            assert!(host.read(cx).surface().read(cx).has_pending_messages());
+            assert!(!host.read(cx).controller_view().viewport_state.is_detached());
+        })
+    });
 }

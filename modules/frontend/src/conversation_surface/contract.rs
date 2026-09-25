@@ -144,8 +144,12 @@ pub enum ConversationSurfaceAction {
     },
     /// Report the visible identity bounds of the transcript viewport.
     ViewportObserved(ViewportObservation),
+    /// Measured content or viewport dimensions changed, without reader input.
+    ViewportExtentChanged,
     /// Ask the viewport controller to return to the latest transcript content.
     JumpToLatestRequested,
+    /// Direct wheel input interrupted the animated jump.
+    BottomScrollInterrupted,
     /// Ask the surrounding controller to move the viewport to a stable target.
     ScrollIntent {
         /// Stable scene or item target.

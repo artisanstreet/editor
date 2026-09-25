@@ -250,6 +250,75 @@ fn scroll_target_reaches_an_off_window_turn(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn message_scroll_targets_reach_off_window_turns(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(long_scene(120), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+
+    for (target, selector, turn, down) in [
+        (
+            "user-119",
+            "artisan-conversation-surface-turn-turn_119-block-user-user-119",
+            119,
+            true,
+        ),
+        (
+            "user-000",
+            "artisan-conversation-surface-turn-turn_000-block-user-user-000",
+            0,
+            false,
+        ),
+        (
+            "assistant-119",
+            "artisan-conversation-surface-turn-turn_119-block-assistant-assistant-119",
+            119,
+            true,
+        ),
+    ] {
+        let before = offset(&surface, cx);
+        cx.update(|_, app| {
+            assert!(
+                !surface
+                    .read(app)
+                    .transcript_window_report()
+                    .built_rows
+                    .contains(&turn),
+                "target turn must start outside the built window",
+            );
+            surface.update(app, |surface, surface_cx| {
+                assert!(surface.schedule_scroll_target(
+                    ConversationSurfaceTarget::Item(ItemId::parse(target).expect("message id")),
+                    surface_cx,
+                ));
+            });
+        });
+        settle(cx);
+        cx.update(|window, app| window.simulate_next_frame(app));
+        settle(cx);
+        let after = offset(&surface, cx);
+        assert!(
+            if down {
+                after.y < before.y
+            } else {
+                after.y > before.y
+            },
+            "{target} must move the viewport from {before:?} to {after:?}",
+        );
+        let message = cx.debug_bounds(selector).expect("target message is built");
+        let viewport = cx
+            .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+            .expect("viewport paints");
+        assert!(
+            message.bottom() > viewport.top() && message.top() < viewport.bottom(),
+            "{target} must be visible: message {message:?}, viewport {viewport:?}",
+        );
+        cx.update(|_, app| assert!(surface.read(app).pending_scroll_targets.is_empty()));
+    }
+}
+
+#[gpui::test]
 fn over_budget_bodies_skip_markdown_shaping(cx: &mut TestAppContext) {
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(scene(Vec::new()), ThemeMode::Dark, surface_cx)

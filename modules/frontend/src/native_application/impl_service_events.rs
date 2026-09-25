@@ -12,31 +12,33 @@ impl NativeApplication {
             return false;
         };
         let mut events = Vec::with_capacity(64);
+        let mut channel_closed = false;
         loop {
             match service.try_recv() {
                 Ok(Some(event)) => events.push(event),
                 Ok(None) => break,
                 Err(EventReceiveError::Stopped) => {
-                    self.retain_message_flight(cx);
-                    self.set_failure(
-                        ServiceFailure {
-                            stage: ServiceFailureStage::EventBridge,
-                            category: ServiceFailureCategory::ChannelClosed,
-                        },
-                        cx,
-                    );
-                    self.service_stopped = true;
-                    self.thread_switch_flight = None;
-                    self.ordinary_unsubscribe_thread = None;
-                    self.pending_thread = None;
-                    self.set_picker_disabled(true, cx);
-                    self.set_thread_picker_disabled(true, cx);
+                    channel_closed = true;
                     break;
                 }
             }
         }
         for event in events {
             self.handle_service_event(event, cx);
+        }
+        // Drain the final Failed/Stopped events before treating sender closure
+        // as a generic bridge error; otherwise the real failure is discarded.
+        if channel_closed && !self.service_stopped {
+            if !matches!(self.state, NativeViewState::Failure(_)) {
+                self.set_failure(
+                    ServiceFailure {
+                        stage: ServiceFailureStage::EventBridge,
+                        category: ServiceFailureCategory::ChannelClosed,
+                    },
+                    cx,
+                );
+            }
+            self.handle_service_stopped(ServiceStopStatus::Failed, cx);
         }
         self.refresh_sidebar_threads();
         self.retry_thread_switch_if_admitted(cx);
@@ -201,10 +203,17 @@ impl NativeApplication {
                 failure,
             } => self.handle_model_favorite_failed(thread_id, profile_id, request_id, failure, cx),
             NativeTransportEvent::RichLinkResolved {
+                favicon,
                 requested_url,
                 page_name,
                 expires_at_ms,
-            } => self.handle_rich_link_resolved(&requested_url, &page_name, expires_at_ms, cx),
+            } => self.handle_rich_link_resolved(
+                &requested_url,
+                &page_name,
+                expires_at_ms,
+                &favicon,
+                cx,
+            ),
             NativeTransportEvent::RichLinkFailed { requested_url, .. } => {
                 self.handle_rich_link_failed(&requested_url, cx);
             }
@@ -297,7 +306,6 @@ impl NativeApplication {
 
     pub(super) fn handle_empty_threads(&mut self, project_id: &ProjectId, cx: &mut Context<Self>) {
         if self.selected_project.as_ref() != Some(project_id) {
-            self.set_failure(invalid_service_failure(), cx);
             return;
         }
         self.clear_message_retry();
@@ -315,6 +323,9 @@ impl NativeApplication {
             self.begin_thread_retirement(cx);
         } else {
             self.selected_thread = None;
+            self.composer.update(cx, |composer, cx| {
+                composer.switch_thread(&format!("project:{}", project_id.as_str()), false, cx);
+            });
             self.state = NativeViewState::EmptyThreads;
             self.sync_thread_picker_selected(cx);
             self.engine_settings.select_thread(None);
@@ -1071,7 +1082,7 @@ impl NativeApplication {
             }
             self.thread_switch_flight = None;
             self.pending_thread = None;
-            self.begin_thread_transition(None, target_thread, cx);
+            self.begin_thread_transition(None, target_thread, false, cx);
             return;
         }
 
@@ -1199,7 +1210,7 @@ impl NativeApplication {
             self.set_failure(invalid_service_failure(), cx);
             return;
         }
-        self.begin_thread_transition(Some(target_thread), source_thread, cx);
+        self.begin_thread_transition(Some(target_thread), source_thread, false, cx);
     }
 
     pub(super) fn begin_thread_retirement(&mut self, cx: &mut Context<Self>) {
@@ -1214,19 +1225,29 @@ impl NativeApplication {
         let Some(source_thread) = self.selected_thread.clone() else {
             return;
         };
-        self.begin_thread_transition(None, source_thread, cx);
+        self.begin_thread_transition(None, source_thread, false, cx);
     }
 
     pub(super) fn begin_thread_transition(
         &mut self,
         target_thread: Option<ThreadId>,
         source_thread: ThreadId,
+        carry_draft: bool,
         cx: &mut Context<Self>,
     ) {
-        // Any explicit switch or retirement cancels a pending new-chat
-        // recovery: the recalled prompt must never land in a thread the user
-        // did not create for it.
-        self.pending_failed_recovery = None;
+        // Only the exact newly created recovery thread may keep its recall.
+        if !carry_draft
+            || self
+                .pending_failed_recovery
+                .as_ref()
+                .is_some_and(|recovery| {
+                    recovery.new_thread.is_none()
+                        || recovery.new_thread != target_thread
+                        || recovery.old_thread != source_thread
+                })
+        {
+            self.pending_failed_recovery = None;
+        }
         if self
             .conversation_host
             .as_ref()
@@ -1253,6 +1274,7 @@ impl NativeApplication {
             source_thread,
             target_thread,
             generation,
+            carry_draft,
             phase: ThreadSwitchPhase::UnsubscribeAdmission {
                 retry_pending: false,
                 retry_used: false,
@@ -1487,7 +1509,9 @@ impl NativeApplication {
         }
         self.thread_switch_flight = None;
         self.pending_thread = None;
-        self.state = if self.thread_listing.is_none() || self.project_options.is_empty() {
+        self.state = if self.project_navigation.awaiting_threads {
+            NativeViewState::LoadingThreads
+        } else if self.thread_listing.is_none() || self.project_options.is_empty() {
             NativeViewState::EmptyProjects
         } else {
             NativeViewState::EmptyThreads
@@ -1686,26 +1710,40 @@ impl NativeApplication {
             );
             return;
         }
-        let options = project_options_from_listing(projects);
+        let options = self.ordered_project_options(projects);
         let keep_mounted_thread = self.selected_project.as_ref() == Some(&project_id)
             && self.selected_thread.as_ref() == Some(&thread_id)
             && self.conversation_host.as_ref().is_some_and(|host| {
                 host.read(cx).controller_view().delivery.thread_id == thread_id
             });
         if self.selected_project.as_ref() != Some(&project_id) {
+            if let (Some(project), Some(thread)) = (&self.selected_project, &self.selected_thread) {
+                self.project_navigation
+                    .last_threads
+                    .insert(project.clone(), thread.clone());
+            }
             self.retained_switch_listings.clear();
         }
-        if !keep_mounted_thread {
-            self.retire_host(cx);
-        }
+        let source_thread = (!keep_mounted_thread)
+            .then(|| {
+                self.conversation_host
+                    .as_ref()
+                    .map(|host| host.read(cx).controller_view().delivery.thread_id)
+            })
+            .flatten();
+        let project_changed = self.selected_project.as_ref() != Some(&project_id);
         self.project_options.clone_from(&options);
+        if project_changed {
+            self.promote_project(&project_id);
+        }
+        let options = self.project_options.clone();
         self.selected_project = Some(project_id.clone());
         self.thread_listing = Some(threads.clone());
-        if keep_mounted_thread {
+        if keep_mounted_thread || source_thread.is_some() {
             self.pending_thread = None;
         } else {
             self.selected_thread = None;
-            self.pending_thread = Some(thread_id);
+            self.pending_thread = Some(thread_id.clone());
         }
         self.pending_snapshot = None;
         self.intake_stage = None;
@@ -1725,7 +1763,13 @@ impl NativeApplication {
         self.install_picker(options.clone(), Some(project_id.clone()), cx);
         self.install_home_picker(options, Some(project_id), cx);
         self.install_thread_picker(threads.clone(), self.selected_thread.clone(), cx);
-        self.try_mount_pending_thread(cx);
+        if let Some(source_thread) = source_thread {
+            // Retire on the stop receipt even if the old, hidden surface has
+            // scroll effects left to paint. The new thread receives the draft.
+            self.begin_thread_transition(Some(thread_id), source_thread, true, cx);
+        } else {
+            self.try_mount_pending_thread(cx);
+        }
         self.sync_command_menu_groups(cx);
         self.sync_composer_availability(cx);
         self.request_project_repository(cx);

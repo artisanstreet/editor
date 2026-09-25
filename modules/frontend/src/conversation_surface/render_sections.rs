@@ -7,7 +7,6 @@
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
 
 use super::*;
-use gpui::{AppContext as _, prelude::FluentBuilder as _};
 
 impl ConversationSurface {
     pub(super) fn render_compaction(
@@ -626,8 +625,7 @@ impl ConversationSurface {
         ) {
             return None;
         }
-        // Parity with the work-session status line: base-size muted copy on a
-        // half-rem vertical rhythm. The effective motion resolves the live
+        // Base-size muted copy. The effective motion resolves the live
         // window signal at render time (see `effective_status_motion`); the
         // shimmer animates only for live rows under `Full` and stays
         // immediate for settled history and reduced motion. A summary sweeps
@@ -673,7 +671,15 @@ impl ConversationSurface {
             .flex()
             .flex_row()
             .items_center()
-            .my(theme.spacing.steps(2.0))
+            // The turn already supplies 24 px between blocks. Following work
+            // history, use 12 px for the live line instead of adding another
+            // 8 px on top; the final reply uses the tighter 8 px seam.
+            .mt(if turn_has_work_group && live {
+                -theme.spacing.steps(3.0)
+            } else {
+                theme.spacing.steps(2.0)
+            })
+            .mb(theme.spacing.steps(2.0))
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(ProseTypography::BODY_LINE_PX))
             .font_weight(ProseTypography::BODY_WEIGHT)
@@ -844,27 +850,23 @@ impl ConversationSurface {
             );
         }
         if !relative_age.is_empty() {
-            footer = footer.child(
-                div()
-                    .id(format!("{time_selector}-throughput"))
-                    .debug_selector(move || time_selector.clone())
-                    .when(
-                        mirror.is_some_and(|mirror| mirror.token_speed.is_some()),
-                        |element| {
-                            let theme = *theme;
-                            element
-                                .tooltip(move |_, cx| cx.new(|_| FooterSpeedTooltip(theme)).into())
-                        },
-                    )
+            let mut throughput = div()
+                .id(format!("{time_selector}-throughput"))
+                .debug_selector(move || time_selector.clone())
+                .flex()
+                .items_center()
+                .gap(theme.spacing.steps(1.0))
+                .child(relative_age.trim_end_matches(" ago").to_owned());
+            if let Some(speed) = mirror.and_then(|mirror| mirror.token_speed.as_deref()) {
+                throughput = throughput
                     .child(
-                        match mirror.and_then(|mirror| mirror.token_speed.as_deref()) {
-                            Some(speed) => {
-                                format!("{} • {speed}", relative_age.trim_end_matches(" ago"))
-                            }
-                            None => relative_age.trim_end_matches(" ago").to_owned(),
-                        },
-                    ),
-            );
+                        div()
+                            .text_color(transcript_separator_color(theme))
+                            .child("∷"),
+                    )
+                    .child(speed.to_owned());
+            }
+            footer = footer.child(throughput);
         }
         Some(footer.into_any_element())
     }
@@ -918,16 +920,5 @@ impl ConversationSurface {
         let card = anchors.attach(card, Some(&id), item_id.as_ref());
         let card = card.debug_selector(move || selector.clone());
         card.child(collapsible).into_any_element()
-    }
-}
-
-struct FooterSpeedTooltip(ArtisanTheme);
-
-impl gpui::Render for FooterSpeedTooltip {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        artisan_ui::tooltip::tooltip_content(
-            artisan_ui::tooltip::TooltipStyle::resolve(self.0),
-            "Estimated visible-text streaming speed using the o200k reference tokenizer. Excludes startup and tool/reasoning gaps. Network buffering and tokenizer differences can affect this estimate.",
-        )
     }
 }

@@ -26,6 +26,9 @@ impl NativeApplication {
             .pb(px(24.0))
             .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
             .child(self.home_emblem());
+        if self.connection_retry_pending {
+            return root.child(self.home_heading("Reconnecting to Forge…"));
+        }
         if let NativeViewState::Failure(failure) = &self.state {
             let (heading, detail) = match failure.category {
                 ServiceFailureCategory::ConnectionBusy => (
@@ -34,7 +37,7 @@ impl NativeApplication {
                 ),
                 ServiceFailureCategory::Authentication => (
                     "Could not authenticate with Forge",
-                    "The host connection credentials could not be used. Retry, or add a fresh invitation from the host.",
+                    "The saved connection credential is no longer usable. Restart Forge on the host, then retry here, or add a fresh host invitation.",
                 ),
                 _ => (
                     "Forge is offline",
@@ -49,7 +52,13 @@ impl NativeApplication {
                         .max_w(px(440.0))
                         .text_size(px(15.0))
                         .text_color(self.desktop_theme.secondary)
-                        .child(detail),
+                        .child(detail)
+                        .child(
+                            div()
+                                .mt(px(8.0))
+                                .text_size(px(12.0))
+                                .child(format!("{} · {}", failure.stage, failure.category)),
+                        ),
                 )
                 .child(
                     div()
@@ -495,17 +504,32 @@ impl NativeApplication {
             ))
             .child(
                 div()
+                    .id("artisan-sidebar-navigation-scroll")
+                    .debug_selector(|| "artisan-sidebar-navigation-scroll".to_owned())
                     .w_full()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
-                    .child(nav)
-                    .child(marketplace),
+                    .gap(px(12.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(nav)
+                            .child(marketplace),
+                    )
+                    .child(self.desktop_project_switcher(window, cx).flex_shrink_0())
+                    .child(self.desktop_sidebar_threads(window, cx)),
             )
-            .child(self.desktop_sidebar_threads(window, cx))
             .child(
                 div()
                     .w_full()
+                    .flex_shrink_0()
                     .flex()
                     .flex_col()
                     .gap(px(10.0))

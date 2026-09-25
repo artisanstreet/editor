@@ -57,6 +57,11 @@ impl NativeApplication {
         // supported default profile, so the stored choice, the save, and the
         // send-time check all observe the same durable identity.
         let policy = crate::composer_model_config::with_default_native_profile(policy);
+        // Every committed choice refreshes the last-used preference, so new
+        // threads without saved config start from this model.
+        if let Some(stored) = crate::native_last_used::save_model_policy(&policy) {
+            self.last_used_model = Some(stored);
+        }
         self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
         self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
@@ -320,6 +325,23 @@ impl NativeApplication {
         });
     }
 
+    /// Seeds the displayed policy from the last-used preference.
+    ///
+    /// Only for threads with no per-thread choice and no saved
+    /// configuration: saved threads never reach this fallback, and the
+    /// result stays non-authoritative until the thread saves its own.
+    fn last_used_display_policy(
+        &self,
+        snapshot: &crate::native_model_catalog::NativeModelCatalog,
+    ) -> Option<crate::native_model_catalog::NativeModelPolicy> {
+        let stored = self.last_used_model.as_ref()?;
+        crate::native_last_used::restore_policy(snapshot, stored)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one policy sync resolves the per-thread choice, saved config, last-used fallback, rebase, authority, and selector status in display order"
+    )]
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
         if self
             .composer_model_choice
@@ -374,11 +396,25 @@ impl NativeApplication {
                 Some(policy)
             });
         let saved_policy = policy;
+        if let Some((thread, choice)) = self.deferred_composer_policy.as_mut()
+            && Some(&*thread) == self.selected_thread.as_ref()
+            && let Some(rebased) = snapshot.rebase_policy(choice)
+        {
+            *choice = rebased;
+        }
+
+        if let Some((_, choice)) = self.composer_model_choice.as_mut()
+            && let Some(rebased) = snapshot.rebase_policy(choice)
+        {
+            *choice = rebased;
+        }
+
         let policy = self
             .composer_model_choice
             .as_ref()
             .and_then(|(_, choice)| snapshot.rebase_policy(choice))
-            .or_else(|| saved_policy.clone());
+            .or_else(|| saved_policy.clone())
+            .or_else(|| self.last_used_display_policy(&snapshot));
         // The saved-policy projection above stays `OpenCode` 2-shaped;
         // another engine contributes no saved policy yet. For a native
         // authoritative configuration the displayed choice is authoritative

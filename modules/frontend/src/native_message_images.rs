@@ -29,6 +29,7 @@ use artisan_ui::{
     theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode},
 };
 use gpui::ColorExt;
+use gpui::prelude::FluentBuilder as _;
 use gpui::prelude::{
     InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _,
@@ -58,7 +59,7 @@ pub const MAX_DECODED_IMAGE_PIXELS: u64 = 16_000_000;
 /// The longest edge of an encoded thumbnail.
 pub const THUMBNAIL_EDGE: u32 = 256;
 /// The on-screen edge of a transcript thumbnail tile.
-pub const THUMBNAIL_TILE_EDGE: Pixels = px(128.0);
+pub const THUMBNAIL_TILE_EDGE: Pixels = px(96.0);
 
 /// Stable selector for the entity's optional overlay root.
 pub const NATIVE_MESSAGE_IMAGES_ROOT_SELECTOR: &str = "artisan-native-message-images";
@@ -692,6 +693,7 @@ impl NativeMessageImages {
                 media = media.child(
                     img(ImageSource::Render(thumbnail))
                         .size_full()
+                        .rounded(RadiusTokens::value(RadiusStep::Md))
                         .object_fit(ObjectFit::Cover),
                 );
             }
@@ -730,8 +732,7 @@ impl NativeMessageImages {
             .items_center()
             .gap(px(6.0))
             .text_size(theme.typography.label_text)
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .child(name);
+            .text_color(theme.colors.muted_foreground.to_paint());
 
         if status == ImageThumbnailStatus::Failed {
             let retry_entity = cx.entity();
@@ -770,7 +771,9 @@ impl NativeMessageImages {
             .flex_col()
             .gap(px(4.0))
             .child(media)
-            .child(footer)
+            .when(status == ImageThumbnailStatus::Failed, |tile| {
+                tile.child(footer)
+            })
     }
 
     /// Accepts one loaded image from the authenticated parent.

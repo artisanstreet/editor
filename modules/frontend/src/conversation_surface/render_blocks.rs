@@ -111,10 +111,10 @@ impl ConversationSurface {
         );
         let mut turn_element = turn_element.debug_selector(move || selector.clone());
 
+        let mut previous_was_work_group = false;
         for (block_index, block) in turn.blocks().iter().enumerate() {
             if let Some(element) = self.render_block(
                 &turn.turn_id,
-                turn.lifecycle,
                 block,
                 entity,
                 theme,
@@ -126,7 +126,21 @@ impl ConversationSurface {
                 live_owner,
                 cx,
             ) {
+                // The promoted reply follows the work history with the same
+                // 8 px gap as prose and tool chains inside that history.
+                // Offset only this seam against the turn's usual 24 px gap.
+                let element =
+                    if previous_was_work_group && matches!(block, TurnBlock::AssistantMessage(_)) {
+                        div()
+                            .w_full()
+                            .mt(-theme.spacing.steps(4.0))
+                            .child(element)
+                            .into_any_element()
+                    } else {
+                        element
+                    };
                 turn_element = turn_element.child(element);
+                previous_was_work_group = matches!(block, TurnBlock::WorkGroup(_));
             }
         }
 
@@ -144,7 +158,6 @@ impl ConversationSurface {
     pub(super) fn render_block(
         &self,
         turn_id: &TurnId,
-        turn_lifecycle: ConversationLifecycle,
         block: &TurnBlock,
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
@@ -159,7 +172,16 @@ impl ConversationSurface {
         let selector = block_selector(turn_id, block);
         match block {
             TurnBlock::UserMessage(block) => {
-                Some(self.render_user_message(block, selector, theme, cx))
+                let message = self.render_user_message(block, selector, theme, cx);
+                Some(
+                    anchors
+                        .attach(
+                            div().w_full().child(message),
+                            Some(&block.id),
+                            item_id_for_scene_id(&block.id).as_ref(),
+                        )
+                        .into_any_element(),
+                )
             }
             TurnBlock::AssistantMessage(block) => {
                 Some(self.render_assistant_message(block, selector, entity, theme, anchors))
@@ -185,7 +207,6 @@ impl ConversationSurface {
                 };
                 Some(self.render_work_group(
                     turn_id,
-                    turn_lifecycle,
                     block,
                     &selector,
                     entity,
@@ -323,6 +344,40 @@ impl ConversationSurface {
                     ),
             );
         }
+        // transitions-dev rise-and-fade tokens, evaluated against one clock so
+        // replacing the optimistic row with its durable echo never restarts it.
+        if !cx.reduce_motion()
+            && let Some(entrance) = &self.send_entrance
+        {
+            let elapsed = entrance.started.elapsed();
+            let pending = entrance.target.is_none()
+                && block.id.as_str().starts_with("local-send-")
+                && block.id.as_str()
+                    == format!(
+                        "local-send-{}",
+                        self.pending_messages.len().saturating_sub(1)
+                    );
+            if elapsed < Duration::from_millis(350)
+                && (pending || entrance.target.as_ref() == Some(&block.id))
+            {
+                let started = entrance.started;
+                return message
+                    .with_animation(
+                        ElementId::Name(format!("send-rise-{}", block.id.as_str()).into()),
+                        Animation::new(Duration::from_millis(350)),
+                        move |message, _| {
+                            let progress = navigator_smooth_out(
+                                (started.elapsed().as_secs_f32() / 0.35).min(1.0),
+                            );
+                            message
+                                .relative()
+                                .top(px(16.0 * (1.0 - progress)))
+                                .opacity(progress)
+                        },
+                    )
+                    .into_any_element();
+            }
+        }
         message.into_any_element()
     }
 
@@ -332,7 +387,7 @@ impl ConversationSurface {
         selector: String,
         _entity: &Entity<Self>,
         theme: &ArtisanTheme,
-        _anchors: &mut ScrollAnchorRegistry<'_>,
+        anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         // Parity with conversation-message.svelte assistant branch: chromeless
         // markdown at prose width, no card, no title. The reply body reads in
@@ -345,11 +400,16 @@ impl ConversationSurface {
             selector.clone(),
             MarkdownBodyTone::Foreground,
         );
-        div()
-            .w_full()
-            .max_w(px(672.0))
-            .debug_selector(move || selector.clone())
-            .child(rendered_body)
+        anchors
+            .attach(
+                div()
+                    .w_full()
+                    .max_w(px(672.0))
+                    .debug_selector(move || selector.clone())
+                    .child(rendered_body),
+                Some(&block.id),
+                item_id_for_scene_id(&block.id).as_ref(),
+            )
             .into_any_element()
     }
 
@@ -394,7 +454,6 @@ impl ConversationSurface {
     pub(super) fn render_work_group(
         &self,
         turn_id: &TurnId,
-        turn_lifecycle: ConversationLifecycle,
         block: &WorkGroupBlock,
         selector: &str,
         entity: &Entity<Self>,
@@ -417,7 +476,6 @@ impl ConversationSurface {
         // groups and the separate status row stand down, so the line paints
         // exactly once per turn.
         let terminal = work_group_header_copy(block.label);
-        let owns_live_header = live_header.is_some();
         let header = terminal.or(live_header);
         // Engine handoffs fold into the header far end, never as standalone
         // timeline rows while a session hosts them.
@@ -437,15 +495,19 @@ impl ConversationSurface {
             && block.disclosure.is_some()
             && work_group_has_visible_details(block);
         let open = !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
-        let items_mounted =
-            !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+        let items_mounted = open;
+        let frame = disclosure_frame(selector, open, status_motion, window, cx);
 
         let mut items = div()
             .w_full()
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(2.0));
-        let rows = ordered_detail_rows(block);
+        let rows = if frame.content_mounted() {
+            ordered_detail_rows(block)
+        } else {
+            Vec::new()
+        };
         // Consecutive activity rows form one collapsible trace chain, exactly
         // like the reference segmentation: anything else (assistant prose,
         // compaction, native fact) is a seam that ends the chain. Chains keep
@@ -464,14 +526,10 @@ impl ConversationSurface {
                     row_index += 1;
                 }
                 let chain_rows = &rows[start..row_index];
-                let (live, failed) =
-                    activity_chain_disclosure_state(chain_rows, owns_live_header, turn_lifecycle);
                 items = items.child(self.render_trace_chain(
                     selector,
                     chain_index,
                     chain_rows,
-                    live,
-                    failed,
                     status_motion,
                     entity,
                     theme,
@@ -528,7 +586,7 @@ impl ConversationSurface {
         let header_row = Self::work_group_header_row(
             header,
             transition,
-            open,
+            frame.fraction,
             controlled,
             selector,
             status_motion,
@@ -605,9 +663,8 @@ impl ConversationSurface {
             panel,
             items.into_any_element(),
             selector,
-            open,
+            frame,
             controlled,
-            status_motion,
             window,
             cx,
         );
@@ -622,7 +679,7 @@ impl ConversationSurface {
     /// the chevron; the rows indent under a 2 px rail inside the shared
     /// accordion panel. Disclosure is surface-local state keyed by the first
     /// activity's identity, exactly like the reference `open_groups`: an
-    /// unset chain re-evaluates its failed/live default every render, and a
+    /// unset chain starts closed, including live and failed chains. A
     /// user toggle pins the value for the surface's life.
     #[expect(
         clippy::too_many_arguments,
@@ -637,8 +694,6 @@ impl ConversationSurface {
         group_selector: &str,
         chain_index: usize,
         rows: &[(u64, DetailRow<'_>)],
-        live: bool,
-        failed: bool,
         motion: MotionPolicy,
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
@@ -657,7 +712,8 @@ impl ConversationSurface {
             .borrow()
             .get(&chain_key)
             .copied()
-            .unwrap_or(live || failed);
+            .unwrap_or(false);
+        let frame = disclosure_frame(&selector, open, motion, window, cx);
         let header_color = if open {
             theme.colors.foreground
         } else {
@@ -680,7 +736,7 @@ impl ConversationSurface {
             .flex()
             .flex_row()
             .items_center()
-            .gap(theme.spacing.steps(2.0))
+            .gap(theme.spacing.steps(1.0))
             .w_full()
             .min_w_0()
             .py(theme.spacing.steps(0.5))
@@ -717,9 +773,10 @@ impl ConversationSurface {
             .child(
                 div()
                     .min_w_0()
-                    .flex_1()
                     .truncate()
                     .text_size(px(ProseTypography::BODY_SIZE_PX))
+                    .font_weight(ProseTypography::BODY_WEIGHT)
+                    .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
                     .line_height(theme.spacing.steps(6.0))
                     .text_color(header_color.to_paint())
                     .child(clause),
@@ -728,14 +785,11 @@ impl ConversationSurface {
                 div()
                     .flex_shrink_0()
                     .text_color(header_color.to_paint())
-                    .child(
-                        asset_glyph(if open {
-                            AssetId::TABLER_CHEVRON_DOWN
-                        } else {
-                            AssetId::TABLER_CHEVRON_RIGHT
-                        })
-                        .size(px(14.0)),
-                    ),
+                    .child(Self::work_group_chevron(
+                        frame.fraction,
+                        14.0,
+                        header_color.to_paint(),
+                    )),
             );
 
         // The reference `pl-6` rail column: one 16 px absolute rail with a
@@ -772,7 +826,7 @@ impl ConversationSurface {
         // The absolute rail is the first child, so it takes the leading
         // identity slot and the rows line up one-to-one behind it.
         let mut row_identities: Vec<(Option<SceneId>, Option<ItemId>)> = vec![(None, None)];
-        for (ordinal, row) in rows {
+        for (ordinal, row) in rows.iter().filter(|_| frame.content_mounted()) {
             rows_column = rows_column.child(self.render_detail_row(
                 *row,
                 *ordinal,
@@ -817,9 +871,8 @@ impl ConversationSurface {
             panel,
             rows_column.into_any_element(),
             &selector,
-            open,
+            frame,
             true,
-            motion,
             window,
             cx,
         )
@@ -1024,13 +1077,18 @@ impl ConversationSurface {
     pub(super) fn work_group_header_row(
         label: Option<String>,
         transition: Option<String>,
-        open: bool,
+        fraction: f32,
         controlled: bool,
         selector: &str,
         motion: MotionPolicy,
         mounted_working: bool,
         theme: &ArtisanTheme,
     ) -> AnyElement {
+        // Positional tool chains have their own disclosure header. An empty
+        // session header must not leave a divider or padding above that chain.
+        if !controlled && label.is_none() && transition.is_none() {
+            return div().into_any_element();
+        }
         let near: AnyElement = match (controlled, label) {
             (true, Some(label)) => div()
                 .flex()
@@ -1040,7 +1098,11 @@ impl ConversationSurface {
                 .min_w_0()
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(label)
-                .child(Self::work_group_chevron(open, theme))
+                .child(Self::work_group_chevron(
+                    fraction,
+                    16.0,
+                    theme.colors.muted_foreground.to_paint(),
+                ))
                 .into_any_element(),
             (true, None) => div()
                 .id(format!("{selector}-work-trigger"))
@@ -1049,7 +1111,13 @@ impl ConversationSurface {
                 .items_center()
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .aria_label("Toggle work details")
-                .child(Self::work_group_chevron(open, theme))
+                .gap(theme.spacing.steps(1.0))
+                .child("Work history")
+                .child(Self::work_group_chevron(
+                    fraction,
+                    16.0,
+                    theme.colors.muted_foreground.to_paint(),
+                ))
                 .into_any_element(),
             (false, Some(label)) => div()
                 .min_w_0()
@@ -1094,7 +1162,7 @@ impl ConversationSurface {
         // width tween is faked; the rule rides inside the entrance below
         // while one plays.
         header = header.child(
-            separator(theme.colors.border.to_paint(), SeparatorAxis::Horizontal)
+            separator(transcript_separator_color(theme), SeparatorAxis::Horizontal)
                 .absolute()
                 .bottom(px(0.0))
                 .left(px(0.0)),
@@ -1142,23 +1210,16 @@ impl ConversationSurface {
         }
     }
 
-    /// Disclosure chevron for one session header: the reference `size-4`
-    /// `ChevronRight` rotated 90 degrees when open. Rotation rides the SVG
-    /// render transformation, which [`AssetGlyph`] does not forward yet, so
-    /// open swaps in the down glyph at the same 16 px muted geometry — the
-    /// accordion lane's own discrete mapping — with no tween claimed. The
-    /// exact rotation needs a minimal shared forwarding,
-    /// `AssetGlyph::with_transformation(Transformation)`, owned by the
-    /// asset-seam lane; with it the chevron becomes one right glyph under
-    /// `Transformation::rotate` on the 250 ms `AccordionChevron` clock.
-    pub(super) fn work_group_chevron(open: bool, theme: &ArtisanTheme) -> AnyElement {
-        asset_glyph(if open {
-            AssetId::TABLER_CHEVRON_DOWN
-        } else {
-            AssetId::TABLER_CHEVRON_RIGHT
-        })
-        .size(px(16.0))
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .into_any_element()
+    /// The same catalog chevron rotates with the panel's sampled progress.
+    /// Explicit tint preserves the asset seam's monochrome color contract.
+    pub(super) fn work_group_chevron(fraction: f32, size: f32, color: gpui::Hsla) -> AnyElement {
+        gpui::svg()
+            .path(AssetId::TABLER_CHEVRON_RIGHT.as_str())
+            .size(px(size))
+            .text_color(color)
+            .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                fraction * std::f32::consts::FRAC_PI_2,
+            )))
+            .into_any_element()
     }
 }

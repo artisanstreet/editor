@@ -5,6 +5,11 @@
 
 use super::*;
 
+// Include time waiting in the shared command queue, before the transport's
+// own request deadline starts. A missing completion must not strand the row
+// or a composer send waiting for account readiness.
+pub(super) const PROFILE_USAGE_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl NativeApplication {
     pub(super) fn sync_profile_actions(&mut self) {
         let show_usage = self.profile_usage_visible();
@@ -53,6 +58,7 @@ impl NativeApplication {
             .unwrap_or(ProfileUsageGeneration::first());
         self.profile_usage_generation = next;
         self.profile_usage.clear_for_connection();
+        self.pending_account_send = None;
     }
 
     /// Ensures per-engine usage for an opened menu.
@@ -116,6 +122,22 @@ impl NativeApplication {
                     failure.to_string(),
                     None,
                 );
+            } else {
+                cx.spawn(async move |view, cx| {
+                    cx.background_executor()
+                        .timer(PROFILE_USAGE_REFRESH_TIMEOUT)
+                        .await;
+                    let _ = view.update(cx, |application, cx| {
+                        application.settle_account_usage_failure(
+                            &engine_id,
+                            generation,
+                            request_seq,
+                            "Usage refresh timed out. Retry to check again.".to_owned(),
+                            cx,
+                        );
+                    });
+                })
+                .detach();
             }
         }
         cx.notify();
@@ -149,6 +171,7 @@ impl NativeApplication {
             return;
         }
         self.profile_usage.try_accept(entry, request_seq);
+        self.resume_account_send(engine_id, cx);
         self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }
@@ -159,6 +182,23 @@ impl NativeApplication {
         generation: ProfileUsageGeneration,
         request_seq: u64,
         failure: ServiceFailure,
+        cx: &mut Context<Self>,
+    ) {
+        self.settle_account_usage_failure(
+            engine_id,
+            generation,
+            request_seq,
+            failure.to_string(),
+            cx,
+        );
+    }
+
+    fn settle_account_usage_failure(
+        &mut self,
+        engine_id: &str,
+        generation: ProfileUsageGeneration,
+        request_seq: u64,
+        failure: String,
         cx: &mut Context<Self>,
     ) {
         if !account_usage_response_current(
@@ -184,10 +224,11 @@ impl NativeApplication {
         self.profile_usage.try_accept_failure(
             engine_id,
             &display_name,
-            failure.to_string(),
+            failure,
             None,
             request_seq,
         );
+        self.resume_account_send(engine_id, cx);
         self.refresh_settings_engine_snapshot(cx);
         cx.notify();
     }

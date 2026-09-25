@@ -9,17 +9,10 @@ pub(super) struct LocalSend {
 }
 
 impl NativeApplication {
-    pub(super) fn stage_local_send(&mut self) {
+    pub(super) fn stage_local_send(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = &self.message_flight {
             let text = flight.payload.text().map_or("", |text| text.as_str());
-            let text = if flight.payload.attachments().is_empty() {
-                text.to_owned()
-            } else {
-                format!(
-                    "{text}\n{} image attachment(s)",
-                    flight.payload.attachments().len()
-                )
-            };
+            let text = text.to_owned();
             self.optimistic_messages
                 .retain(|row| row.request != flight.request_id);
             self.optimistic_messages.push(LocalSend {
@@ -28,6 +21,30 @@ impl NativeApplication {
                 message: None,
                 text,
             });
+        }
+        if let Some(host) = self.conversation_host.clone() {
+            let surface = host.read(cx).surface().clone();
+            surface.update(cx, |surface, cx| {
+                surface.begin_send_entrance(
+                    self.message_flight
+                        .as_ref()
+                        .expect("staged flight")
+                        .request_id
+                        .as_str()
+                        .to_owned(),
+                    cx,
+                )
+            });
+            self.sync_local_sends(cx);
+            let _ = host.update(cx, |host, cx| {
+                host.dispatch(
+                    ConversationStateEvent::Viewport(
+                        crate::conversation_view_machine::ViewportEvent::JumpToBottomRequested,
+                    ),
+                    cx,
+                )
+            });
+            self.pump_host_boundary(&host, cx);
         }
     }
 
@@ -50,7 +67,7 @@ impl NativeApplication {
             Self::set_local_send_rows(host, Vec::new(), cx);
             return;
         }
-        let canonical: Vec<MessageId> = host
+        let canonical_items: Vec<(MessageId, String)> = host
             .read(cx)
             .canonical_snapshot()
             .map(|snapshot| {
@@ -58,15 +75,31 @@ impl NativeApplication {
                     .items()
                     .iter()
                     .filter_map(|item| match item {
-                        ConversationItem::UserMessage(message) => message.source_message_id.clone(),
-                        ConversationItem::MultimodalUserMessage(message) => {
-                            message.source_message_id.clone()
-                        }
+                        ConversationItem::UserMessage(message) => message
+                            .source_message_id
+                            .clone()
+                            .map(|id| (id, message.item_id.as_str().to_owned())),
+                        ConversationItem::MultimodalUserMessage(message) => message
+                            .source_message_id
+                            .clone()
+                            .map(|id| (id, message.item_id.as_str().to_owned())),
                         ConversationItem::AssistantMessage(_) => None,
                     })
                     .collect()
             })
             .unwrap_or_default();
+        let surface = host.read(cx).surface().clone();
+        for row in &self.optimistic_messages {
+            if let Some((_, item_id)) = canonical_items
+                .iter()
+                .find(|(id, _)| row.message.as_ref() == Some(id))
+            {
+                surface.update(cx, |surface, _| {
+                    surface.bind_send_entrance(row.request.as_str(), item_id)
+                });
+            }
+        }
+        let canonical: Vec<MessageId> = canonical_items.into_iter().map(|(id, _)| id).collect();
         let failed: Vec<_> = self
             .composer_queue
             .state
@@ -91,7 +124,7 @@ impl NativeApplication {
             let status = error.map_or_else(
                 || {
                     if row.message.is_some() {
-                        "Starting agent…"
+                        "Queued — waiting to start…"
                     } else {
                         "Sending…"
                     }
@@ -99,7 +132,12 @@ impl NativeApplication {
                 },
                 |error| format!("Could not start agent: {error}. Forge is retrying."),
             );
-            rows.push((row.text.clone(), status));
+            let attachments = entries
+                .iter()
+                .find(|entry| entry.identity().command_id() == row.request.as_str())
+                .map(|entry| entry.attachments().to_vec())
+                .unwrap_or_default();
+            rows.push((row.text.clone(), status, attachments));
         }
         // Include messages recovered from Forge after reopening a thread.
         for entry in entries {
@@ -112,16 +150,13 @@ impl NativeApplication {
                 continue;
             }
             let status = entry.dispatch_error().map_or_else(
-                || "Starting agent…".to_owned(),
+                || "Queued — waiting to start…".to_owned(),
                 |error| format!("Could not start agent: {error}. Forge is retrying."),
             );
             rows.push((
-                if entry.lip_text().is_empty() {
-                    "Image attachment".to_owned()
-                } else {
-                    entry.lip_text().to_owned()
-                },
+                entry.lip_text().to_owned(),
                 status,
+                entry.attachments().to_vec(),
             ));
         }
         Self::set_local_send_rows(host, rows, cx);
@@ -129,7 +164,7 @@ impl NativeApplication {
 
     fn set_local_send_rows(
         host: &Entity<ConversationHost>,
-        rows: Vec<(String, String)>,
+        rows: Vec<(String, String, Vec<artisan_domain::ImageAttachmentRef>)>,
         cx: &mut Context<Self>,
     ) {
         let surface = host.read(cx).surface().clone();

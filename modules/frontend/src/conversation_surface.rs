@@ -64,7 +64,7 @@ use gpui::{
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
@@ -139,9 +139,15 @@ mod transcript_window;
 
 pub use transcript_window::{TranscriptShapeLedger, TranscriptWindowReport};
 
-use disclosure::disclosure_flight_panel;
+use disclosure::{disclosure_flight_panel, disclosure_frame};
 use scroll_anchor::{RenderedScrollAnchor, ScrollAnchorRegistry, ViewportGeometry};
 use transcript_window::TranscriptWindowState;
+
+struct SendEntrance {
+    started: Instant,
+    request: String,
+    target: Option<SceneId>,
+}
 
 /// Native GPUI transcript surface over one immutable replacement scene.
 #[expect(
@@ -150,7 +156,8 @@ use transcript_window::TranscriptWindowState;
 )]
 pub struct ConversationSurface {
     composer_clearance: HashMap<gpui::WindowId, f32>,
-    pending_messages: Vec<(String, String)>,
+    pending_messages: Vec<(String, String, Vec<artisan_domain::ImageAttachmentRef>)>,
+    send_entrance: Option<SendEntrance>,
     scene: ConversationScene,
     /// Loaded user-message markers, rebuilt only when the scene changes.
     ///
@@ -182,8 +189,12 @@ pub struct ConversationSurface {
     jump_to_latest_focus: FocusHandle,
     answer_focus: FocusHandle,
     jump_to_latest_visible: bool,
+    smooth_bottom_pending: bool,
+    smooth_bottom_active: bool,
     last_viewport_observation: Option<ViewportObservation>,
     pending_viewport_observation: Option<ViewportObservation>,
+    pending_viewport_extent_change: bool,
+    follow_bottom_pending: bool,
     last_viewport_geometry: Option<ViewportGeometry>,
     viewport_observation_scheduled: bool,
     viewport_next_frame_scheduled: bool,
@@ -273,9 +284,9 @@ pub struct ConversationSurface {
     /// (the first activity's scene id).
     ///
     /// The reference keeps `open_groups` as local component state: an unset
-    /// chain falls back to its failure/liveness default every render, and
-    /// only a user toggle pins a value. The work-session disclosure stays
-    /// scene-owned; this map is presentation-only and never mutates the
+    /// chain starts closed even while live or failed. A user toggle or
+    /// explicit navigation to a tool row pins its value. The work-session
+    /// disclosure stays scene-owned; this map is presentation-only and never mutates the
     /// scene. Entries persist while the surface owns them, exactly like the
     /// reference component state; the set is bounded by user gestures.
     trace_groups_open: RefCell<HashMap<String, bool>>,
@@ -367,6 +378,10 @@ struct SurfaceRichLinkTitles<'a> {
 }
 
 impl RichLinkTitleSource for SurfaceRichLinkTitles<'_> {
+    fn favicon(&self, destination: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        self.titles.icon(destination)
+    }
+
     fn resolved_title(&self, destination: &str) -> Option<SharedString> {
         if let Some(title) = self.titles.lookup(destination) {
             return Some(title);
@@ -396,6 +411,16 @@ impl Render for ConversationSurface {
         // End-space height lives in framework window-local state, not on the
         // entity: two windows showing one surface measure different
         // viewports, and a shared scalar could never converge for both.
+        if self.smooth_bottom_pending {
+            self.smooth_bottom_pending = false;
+            let current = f32::from(self.scroll_handle.offset().y);
+            let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
+            self.transcript_scroll.cancel_to(current, maximum);
+            self.transcript_scroll
+                .push(current, -maximum - current, maximum);
+            self.smooth_bottom_active = true;
+            self.schedule_transcript_scroll_frame(window, cx);
+        }
         let end_space = window.use_state(cx, |_, _| 0.0_f32);
         let end_space_px = (*end_space.read(cx)).max(
             self.composer_clearance
@@ -403,6 +428,20 @@ impl Render for ConversationSurface {
                 .copied()
                 .unwrap_or(0.0),
         );
+        if self.follow_bottom_pending {
+            self.follow_bottom_pending = false;
+            // Like Electron's ResizeObserver, let the sent turn's reserved
+            // space absorb growth before handing over to tail following.
+            let floor = TRANSCRIPT_END_SPACE_PX.max(
+                self.composer_clearance
+                    .get(&window.window_handle().window_id())
+                    .copied()
+                    .unwrap_or(0.0),
+            );
+            if end_space_px <= floor && !self.transcript_scroll.active() {
+                self.scroll_handle.scroll_to_bottom();
+            }
+        }
         // The reader's current navigator marker is geometry-derived like
         // end space, so it lives in the same window-local state: two
         // windows sharing one surface converge independently.
@@ -453,14 +492,17 @@ impl Render for ConversationSurface {
                 }
             }
             self.finish_transcript_window(&built);
-            for (index, (text, status)) in self.pending_messages.iter().enumerate() {
+            for (index, (text, _, attachments)) in self.pending_messages.iter().enumerate() {
                 let selector = format!("local-send-{index}");
                 let block = UserMessageBlock {
                     id: SceneId::parse(selector.clone()).expect("bounded local row identity"),
                     body: text.clone(),
-                    attachments: Vec::new(),
+                    attachments: attachments.clone(),
                     disclosure: None,
                 };
+                // The just-sent bubble paints with no status label beneath it:
+                // neither the transient `Sending…` state nor a dispatch error
+                // reserves label space under the optimistic row.
                 transcript = transcript.child(
                     div()
                         .w_full()
@@ -471,13 +513,7 @@ impl Render for ConversationSurface {
                         .flex_col()
                         .items_end()
                         .gap(px(8.0))
-                        .child(self.render_user_message(&block, selector, &theme, cx))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme.colors.muted_foreground.to_paint())
-                                .child(status.clone()),
-                        ),
+                        .child(self.render_user_message(&block, selector, &theme, cx)),
                 );
             }
             // Long transcripts reserve anchoring room. Short conversations
@@ -552,10 +588,14 @@ impl Render for ConversationSurface {
                 theme,
                 MotionPolicy::Reduced,
                 ButtonVariant::Ghost,
-                ButtonSize::Small,
-                ButtonContent::text("Jump to latest"),
+                ButtonSize::IconSmall,
+                ButtonContent::icon_only(
+                    AssetId::TABLER_CHEVRON_DOWN,
+                    AccessibleLabel::new("Jump to latest").expect("nonempty label"),
+                ),
             ) {
                 let button = button
+                    .corner_radius(px(16.0))
                     .focus_visibility(FocusVisibility::Visible)
                     .debug_selector(JUMP_TO_LATEST_SELECTOR)
                     .on_activate(move |_, _, app| {
@@ -570,9 +610,30 @@ impl Render for ConversationSurface {
                 root = root.child(
                     div()
                         .absolute()
-                        .right(px(16.0))
-                        .bottom(px(16.0))
-                        .child(button),
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px((self
+                            .composer_clearance
+                            .get(&window.window_handle().window_id())
+                            .copied()
+                            .unwrap_or(24.0)
+                            - 16.0)
+                            .max(8.0)))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .relative()
+                                .size(px(32.0))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+                                .bg(glass_foreground_base(&theme))
+                                .shadow(glass_card_shadows())
+                                .child(glass_material_layer(GlassStrength::Quiet, px(16.0)))
+                                .child(glass_highlight_layer(GlassStrength::Quiet, px(16.0)))
+                                .child(button),
+                        ),
                 );
             }
         }

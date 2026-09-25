@@ -7,15 +7,53 @@
 use super::*;
 
 impl NativeApplication {
+    /// Refreshes the active scope or the local home picker every five minutes.
+    pub(super) fn refresh_model_catalog(
+        &mut self,
+        catalog: Option<NativeModelCatalog>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shutdown_prepared || self.service_stopped {
+            return;
+        }
+        if self.selected_thread.is_some() {
+            if self.catalog_controller.pending_favorite().is_none() {
+                if let Some(scope) = self.catalog_controller.refresh_catalog() {
+                    self.submit_composer_catalog_reads(&scope, cx);
+                } else if self.catalog_controller.scope().is_none() {
+                    self.discover_composer_catalog_for_settings(cx);
+                }
+            }
+        } else if self.machine_home.is_none()
+            && let Some(catalog) = catalog
+            && self
+                .model_selector
+                .read(cx)
+                .state()
+                .snapshot()
+                .catalog_revision
+                != catalog.catalog_revision
+        {
+            self.host_model_catalog = Some(catalog);
+            self.reset_model_selector_offline(cx);
+            self.sync_composer_model_policy(cx);
+            cx.notify();
+        }
+    }
+
     pub(super) fn reset_model_selector_offline(&mut self, cx: &mut Context<Self>) {
         // The Forge publishes a scope-free catalog snapshot (static baseline
         // plus live discovery) for surfaces without a thread-scoped runtime
         // read; fall back to the bundled manifest when it is absent.
         let catalog = self
-            .machine_home
-            .is_none()
-            .then(scope_free_catalog_snapshot)
-            .flatten()
+            .host_model_catalog
+            .clone()
+            .or_else(|| {
+                self.machine_home
+                    .is_none()
+                    .then(scope_free_catalog_snapshot)
+                    .flatten()
+            })
             .unwrap_or_else(|| {
                 NativeModelCatalog::offline()
                     .expect("the bundled model catalog is validated at the native boundary")
@@ -222,14 +260,10 @@ impl NativeApplication {
                 }
                 _ => None,
             });
-        let Some(profile_id) = profile else {
-            self.reset_composer_catalog(cx);
-            // Unconfigured threads without a registry profile still need the
-            // probed account verdict: static native models admit from usage
-            // readiness alone, without any backend catalog read.
-            self.ensure_profile_usage(false, None, cx);
-            return;
-        };
+        let profile_id = profile.unwrap_or_else(|| {
+            EngineProfileId::parse(crate::composer_model_config::NATIVE_DEFAULT_PROFILE_ID)
+                .expect("native default profile is valid")
+        });
         self.discover_composer_catalog(thread_id, profile_id, cx);
         self.sync_composer_model_policy(cx);
         self.ensure_profile_usage(false, None, cx);
@@ -312,6 +346,17 @@ impl NativeApplication {
         if self.catalog_controller.favorite_revision().is_some() {
             catalog.favorite_ids = self.catalog_controller.favorite_ids().to_vec();
         }
+        // Keep all discovered models visible while the next conversation loads.
+        // The cache is presentation only for OpenCode: discard scoped admission
+        // and defaults, but retain model and route metadata for the picker.
+        let mut host_catalog = catalog.clone();
+        host_catalog.scope = None;
+        host_catalog
+            .runnable_harness_ids
+            .retain(|engine| engine != "opencode2");
+        host_catalog.default_model_id = None;
+        host_catalog.model_defaults.clear();
+        self.host_model_catalog = Some(host_catalog);
         self.model_selector.update(cx, |selector, cx| {
             selector.set_snapshot(catalog, cx);
         });

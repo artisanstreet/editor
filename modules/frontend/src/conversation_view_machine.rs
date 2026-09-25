@@ -416,10 +416,18 @@ impl ViewportState {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ViewportEvent {
     ExtentChanged,
-    UserScrolled { at_bottom: bool },
+    UserScrolled {
+        at_bottom: bool,
+    },
+    /// Explicit user input cancels programmatic following.
+    UserInterruptedScroll,
     JumpToBottomRequested,
-    ProgrammaticScrollStarted { generation: ViewportGeneration },
-    ScrollCompleted { generation: ViewportGeneration },
+    ProgrammaticScrollStarted {
+        generation: ViewportGeneration,
+    },
+    ScrollCompleted {
+        generation: ViewportGeneration,
+    },
     LayoutSettled,
     OwnerClosed,
 }
@@ -568,6 +576,11 @@ mod viewport_statig {
                     context.none();
                     Handled
                 }
+                ViewportEvent::UserInterruptedScroll => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
+                }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::closed())
@@ -618,6 +631,11 @@ mod viewport_statig {
                         reason: CompletionRejection::NoActiveScroll,
                     });
                     Handled
+                }
+                ViewportEvent::UserInterruptedScroll => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
                 }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
@@ -687,6 +705,11 @@ mod viewport_statig {
                     });
                     Handled
                 }
+                ViewportEvent::UserInterruptedScroll => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
+                }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::closed())
@@ -751,6 +774,11 @@ mod viewport_statig {
                     context.push(ViewportEffect::HideJumpToLatest);
                     context.push(ViewportEffect::InvalidateRender);
                     Transition(State::following())
+                }
+                ViewportEvent::UserInterruptedScroll => {
+                    context.push(ViewportEffect::ShowJumpToLatest);
+                    context.push(ViewportEffect::InvalidateRender);
+                    Transition(State::detached())
                 }
                 ViewportEvent::OwnerClosed => {
                     context.push(ViewportEffect::InvalidateRender);
@@ -884,3 +912,27 @@ impl PartialEq for ViewportController {
 }
 
 impl Eq for ViewportController {}
+
+#[cfg(test)]
+mod jump_interruption_tests {
+    use super::*;
+
+    #[test]
+    fn jump_interruption_restores_detached_reader_and_allows_retry() {
+        let mut viewport = ViewportController::new();
+        viewport.handle(ViewportEvent::UserScrolled { at_bottom: false });
+        viewport.handle(ViewportEvent::JumpToBottomRequested);
+        assert!(viewport.state().is_scrolling());
+        let effects = viewport.handle(ViewportEvent::UserInterruptedScroll);
+        assert_eq!(viewport.state(), ViewportState::Detached);
+        assert!(effects.contains(&ViewportEffect::ShowJumpToLatest));
+        let effects = viewport.handle(ViewportEvent::JumpToBottomRequested);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, ViewportEffect::RequestBottomScroll { .. }))
+        );
+        viewport.handle(ViewportEvent::UserScrolled { at_bottom: true });
+        assert_eq!(viewport.state(), ViewportState::Following);
+    }
+}

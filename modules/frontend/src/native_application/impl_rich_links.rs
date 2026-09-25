@@ -52,6 +52,7 @@ impl NativeApplication {
         requested_url: &str,
         page_name: &str,
         expires_at_ms: i64,
+        favicon: &[u8],
         cx: &mut Context<Self>,
     ) {
         let Some(host) = self.conversation_host.clone() else {
@@ -61,6 +62,7 @@ impl NativeApplication {
         let surface = host.read(cx).surface().clone();
         surface.update(cx, |surface, surface_cx| {
             surface.set_rich_link_title(requested_url, &page_name, expires_at_ms, surface_cx);
+            surface.set_rich_link_favicon(requested_url, favicon, surface_cx);
         });
         cx.notify();
     }
