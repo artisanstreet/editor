@@ -24,7 +24,7 @@ impl SettingsScreen {
         let intro = match identity {
             BuildIdentity::Installed(_) => None,
             BuildIdentity::Unstaged(_) => Some(
-                "This binary is not part of an installed payload, so it has no recorded commit. Stage it with `cargo dev` to run it as an identified build.",
+                "This binary is not part of an installed payload, so it has no recorded commit. Install it with `nix run .#dev` to run it as an identified build.",
             ),
         };
         div()

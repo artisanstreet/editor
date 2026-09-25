@@ -131,9 +131,9 @@ strip = "none"
 debug-assertions = true
 overflow-checks = true
 
-# Payload integrity hashes every staged binary (about 1.4 GB in a debug
-# build) several times per `cargo dev` run; unoptimized SHA-256 made that the
-# slowest part of the dev loop. Optimizing only the hash crates keeps debug
+# Payload integrity hashing covers every binary of a payload, several times
+# per install; unoptimized SHA-256 made that the slowest part of installer
+# tests and dev-profile tools. Optimizing only the hash crates keeps debug
 # builds of everything else unchanged.
 [profile.dev.package.sha2]
 opt-level = 3
