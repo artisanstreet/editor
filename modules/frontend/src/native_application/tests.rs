@@ -316,8 +316,8 @@ fn install_ready_message_surface(
     application.ack_draft_saves(cx);
 }
 
-/// Delivers a Forge sidebar listing in which `thread_id` carries the
-/// Forge-resolved `title`, through the real sidebar-read handler.
+/// Delivers a Forge project listing in which `thread_id` carries the
+/// Forge-resolved `title`, through the real background-refresh handler.
 fn install_listed_title(
     application: &mut NativeApplication,
     cx: &mut Context<NativeApplication>,
@@ -333,7 +333,7 @@ fn install_listed_title(
     application.sidebar_threads.pending = Some((project_id.clone(), generation));
     let listing = ThreadListing::new(vec![thread(thread_id.as_str(), project_id.as_str(), title)])
         .expect("listing");
-    application.receive_sidebar_threads(&project_id, generation, Ok(listing), cx);
+    application.receive_refreshed_threads(&project_id, generation, Ok(listing), cx);
 }
 
 /// Drives the engine-settings controller to a persisted configuration

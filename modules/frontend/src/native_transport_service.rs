@@ -134,11 +134,15 @@ pub enum NativeTransportCommand {
     RetryProjectIntake,
     /// Select an existing Forge-owned project.
     SelectProject(ProjectId),
-    /// Refresh the sidebar without selecting a project or mounting a conversation.
-    ReadSidebarThreads {
+    /// Re-read the selected project's threads without selecting it or
+    /// mounting a conversation, after a push showed they changed.
+    RefreshThreads {
         project_id: ProjectId,
         generation: u64,
     },
+    /// Read the recent threads across every project; the Forge then pushes
+    /// their changes.
+    ReadRecentThreads,
     /// Create a new task in an existing, authoritative project.
     CreateTask(ProjectId),
     /// Ask the Forge to move one failed message into a new thread of its
@@ -330,12 +334,14 @@ pub enum NativeTransportEvent {
         /// Real thread listing.
         listing: ThreadListing,
     },
-    /// Background catalog read, fenced independently from navigation.
-    SidebarThreads {
+    /// Background project thread read, fenced independently from navigation.
+    ThreadsRefreshed {
         project_id: ProjectId,
         generation: u64,
         result: Result<ThreadListing, ServiceFailure>,
     },
+    /// The recent threads across every project, as read.
+    RecentThreads(Result<artisan_domain::RecentThreadListing, ServiceFailure>),
     /// Real bounded conversation state.
     Snapshot(ConversationSnapshot),
     /// Forge returned no attached projects.

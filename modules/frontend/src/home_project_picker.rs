@@ -1,6 +1,7 @@
-//! Project picker with home-headline and compact sidebar triggers.
+//! Project picker behind the home headline's inline trigger: the new-task
+//! surface's choice of project.
 //!
-//! Both triggers share the controlled selection, focus, and typeahead policy
+//! The trigger uses the controlled selection, focus, and typeahead policy
 //! from `ProjectPickerState`. Menus use the same glass material as the turn
 //! navigator. Project rows stay visible while typing jumps the highlight;
 //! Enter or Space selects, and Escape or an outside press dismisses.
@@ -17,7 +18,6 @@ use crate::native_composer_material::{
 };
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
-use artisan_ui::gradient::hover_fill_gradient;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{
@@ -45,13 +45,11 @@ const HOME_MENU_VIEWPORT_INSET_X_PX: f32 = 32.0;
 const HOME_MENU_VIEWPORT_INSET_Y_PX: f32 = 32.0;
 /// Gap between the trigger and the panel above it (legacy `sideOffset={10}`).
 const HOME_MENU_GAP_PX: f32 = 10.0;
-/// Shared radius for project triggers, cycle buttons, and menu rows.
-pub(crate) const PROJECT_CONTROL_RADIUS_PX: f32 = 6.0;
+/// Shared radius for the menu's project rows.
+const PROJECT_CONTROL_RADIUS_PX: f32 = 6.0;
 const PROJECT_MENU_RADIUS_PX: f32 = 10.0;
 /// Debug selector painted on the inline trigger span.
 pub const HOME_TRIGGER_SELECTOR: &str = "artisan-home-project-trigger";
-/// Debug selector painted on the compact sidebar trigger.
-pub const SIDEBAR_PROJECT_TRIGGER_SELECTOR: &str = "artisan-sidebar-project-trigger";
 /// Debug selector painted on the open menu panel.
 pub const HOME_MENU_SELECTOR: &str = "artisan-home-project-menu";
 /// Headline text size shared by the home heading and the inline trigger.
@@ -60,12 +58,6 @@ pub const HOME_HEADLINE_TEXT_PX: f32 = 28.0;
 pub const HOME_EMBLEM_SIZE_PX: f32 = 30.0;
 /// Prefix of the debug selectors painted on selectable rows.
 const HOME_ROW_SELECTOR_PREFIX: &str = "artisan-home-project-row";
-
-#[derive(Clone, Copy)]
-enum MenuPlacement {
-    Above,
-    Below,
-}
 
 /// Menu panel width for a viewport: the legacy `min(20rem, 100vw - 2rem)`
 /// clamp, floored at zero for degenerate windows.
@@ -312,7 +304,7 @@ impl HomeProjectPickerView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let viewport = window.viewport_size();
-        let menu = self.render_menu(viewport, MenuPlacement::Above, cx);
+        let menu = self.render_menu(viewport, cx);
         let disabled = self.state.is_disabled();
         self.trigger_focus.clone().tab_stop(!disabled);
 
@@ -349,88 +341,6 @@ impl HomeProjectPickerView {
                     })
                     .when(disabled, |span| span.opacity(0.5))
                     .child(underlined),
-            )
-            .into_any_element()
-    }
-
-    /// Renders the project picker as a compact glass sidebar control.
-    pub fn render_sidebar_trigger(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let disabled = self.state.is_disabled();
-        let material_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        self.trigger_focus.clone().tab_stop(!disabled);
-        let label = self
-            .state
-            .current_id()
-            .and_then(|current| {
-                self.state
-                    .projects()
-                    .iter()
-                    .find(|project| &project.id == current)
-            })
-            .map_or_else(
-                || SharedString::from("Choose project"),
-                |project| project.name.clone(),
-            );
-
-        div()
-            .id("sidebar-project-trigger-root")
-            .tab_group()
-            .on_mouse_down_out(cx.listener(Self::handle_outside_press))
-            .relative()
-            .flex_1()
-            .min_w(px(0.0))
-            .w_full()
-            .child(self.render_trigger_probe())
-            .children(
-                self.render_menu(window.viewport_size(), MenuPlacement::Below, cx)
-                    .map(deferred),
-            )
-            .child(
-                div()
-                    .id("sidebar-project-trigger")
-                    .debug_selector(|| SIDEBAR_PROJECT_TRIGGER_SELECTOR.to_owned())
-                    .track_focus(&self.trigger_focus)
-                    .on_key_down(cx.listener(Self::disarm_stale_release_fence))
-                    .when(!disabled, |trigger| {
-                        trigger
-                            .cursor_pointer()
-                            .hover(|style| style.bg(hover_fill_gradient(material_theme)))
-                            .on_click(cx.listener(Self::handle_trigger_click))
-                    })
-                    .when(disabled, |trigger| trigger.opacity(0.5))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .h(px(30.0))
-                    .w_full()
-                    .min_w(px(0.0))
-                    .px(px(8.0))
-                    .relative()
-                    .rounded(px(PROJECT_CONTROL_RADIUS_PX))
-                    .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
-                    .bg(glass_foreground_base(&material_theme))
-                    .shadow(glass_card_shadows())
-                    .child(glass_material_layer(
-                        GlassStrength::Strong,
-                        px(PROJECT_CONTROL_RADIUS_PX),
-                    ))
-                    .child(glass_highlight_layer(
-                        GlassStrength::Strong,
-                        px(PROJECT_CONTROL_RADIUS_PX),
-                    ))
-                    .text_size(px(13.0))
-                    .text_color(self.theme.foreground)
-                    .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
-                    .child(
-                        asset_glyph(AssetId::TABLER_CHEVRON_DOWN)
-                            .size(px(14.0))
-                            .flex_shrink_0()
-                            .text_color(self.theme.secondary),
-                    ),
             )
             .into_any_element()
     }
@@ -618,26 +528,16 @@ impl HomeProjectPickerView {
         }
     }
 
-    /// Renders the glass menu with one direct child per selectable row. Frames before
-    /// the probe records the trigger bounds render nothing.
-    fn render_menu(
-        &self,
-        viewport: gpui::Size<Pixels>,
-        placement: MenuPlacement,
-        cx: &Context<Self>,
-    ) -> Option<AnyElement> {
+    /// Renders the glass menu above the trigger with one direct child per
+    /// selectable row. Frames before the probe records the trigger bounds
+    /// render nothing.
+    fn render_menu(&self, viewport: gpui::Size<Pixels>, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.state.is_open() {
             return None;
         }
         let trigger_bounds = self.trigger_bounds.borrow().as_ref().copied()?;
-        let (anchor, position, gap) = match placement {
-            MenuPlacement::Above => (Anchor::BottomLeft, trigger_bounds.origin, -HOME_MENU_GAP_PX),
-            MenuPlacement::Below => (
-                Anchor::TopLeft,
-                trigger_bounds.bottom_left(),
-                HOME_MENU_GAP_PX,
-            ),
-        };
+        let (anchor, position, gap) =
+            (Anchor::BottomLeft, trigger_bounds.origin, -HOME_MENU_GAP_PX);
 
         let material_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let mut body = div()

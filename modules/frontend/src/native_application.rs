@@ -407,8 +407,6 @@ pub struct NativeApplication {
     picker_subscription: Option<Subscription>,
     home_picker: Option<Entity<HomeProjectPickerView>>,
     home_picker_subscription: Option<Subscription>,
-    sidebar_project_picker: Option<Entity<HomeProjectPickerView>>,
-    sidebar_project_picker_subscription: Option<Subscription>,
     project_navigation: impl_projects::ProjectNavigation,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
@@ -496,6 +494,8 @@ mod composer_queue_application;
 
 #[path = "native_application/impl_projects.rs"]
 mod impl_projects;
+#[path = "native_application/impl_recent_threads.rs"]
+mod impl_recent_threads;
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
 

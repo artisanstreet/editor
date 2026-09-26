@@ -1,20 +1,42 @@
-//! Flat sidebar thread groups and navigation-independent catalog refreshes.
+//! The sidebar's recent threads across every project, grouped by age.
+//!
+//! Rows are the Forge's recent-threads listing (`impl_recent_threads.rs`):
+//! the title, and beneath it the repository or project the thread works
+//! in. The Editor only sorts them into age groups
+//! ([`crate::recent_thread_groups`]) and regroups them when a row crosses an
+//! age boundary. Choosing a row opens the thread in its own project.
 
 use super::*;
-use artisan_domain::ThreadSummary;
+use crate::recent_thread_groups::{RecentThreadGroup, group_recent_threads, next_regrouping};
+use artisan_domain::{RecentThread, RecentThreadListing, UnixMillis};
 use gpui::ColorExt as _;
 use std::time::Instant;
+
+/// Height of one two-line thread row.
+pub(super) const SIDEBAR_THREAD_ROW_HEIGHT_PX: f32 = 48.0;
 
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
     focus: HashMap<ThreadId, FocusHandle>,
     hover: Rc<RefCell<SlidingHoverState>>,
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
-    pub(super) generation: u64,
-    pub(super) pending: Option<(ProjectId, u64)>,
-    next_read: Option<Instant>,
     selection: SidebarSelectionFade,
     selection_frame_pending: bool,
+    /// The recent threads the Forge served or last pushed.
+    pub(super) recent: Option<RecentThreadListing>,
+    /// Advances with every new recent-threads list.
+    pub(super) recent_revision: u64,
+    /// The list the selected project's listing was last checked against.
+    pub(super) refreshed_revision: u64,
+    /// The instant the next row changes age group, and the repaint waiting
+    /// for it.
+    regroup: Option<(UnixMillis, Task<()>)>,
+    /// Background reads of the selected project's listing.
+    pub(super) generation: u64,
+    pub(super) pending: Option<(ProjectId, u64)>,
+    /// A recent thread of the selected project to open once its listing
+    /// names it.
+    pub(super) open_after_refresh: Option<ThreadId>,
 }
 
 /// Two sequential halves of the transitions-dev icon-swap duration.
@@ -45,12 +67,12 @@ impl SidebarSelectionFade {
         }
     }
 
-    fn select(&mut self, target: Option<ThreadId>, ids: &[ThreadSummary], reduced: bool) -> bool {
+    fn select(&mut self, target: Option<ThreadId>, ids: &[ThreadId], reduced: bool) -> bool {
         let now = Instant::now();
         if self.target != target {
             self.origins = ids
                 .iter()
-                .map(|row| (row.thread_id.clone(), self.weight(&row.thread_id, now)))
+                .map(|id| (id.clone(), self.weight(id, now)))
                 .collect();
             let initial = self.target.is_none() && self.started.is_none();
             self.target = target;
@@ -80,113 +102,20 @@ fn fade_curve(progress: f32) -> f32 {
     artisan_ui::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32
 }
 
-/// Electron orders each group by the most recent sent message, falling back
-/// to creation for empty threads. Stable sorting preserves ties.
-fn thread_groups(listing: &ThreadListing) -> (Vec<ThreadSummary>, Vec<ThreadSummary>) {
-    let mut rows = listing
-        .threads()
-        .iter()
-        .filter(|thread| thread.has_started_response)
-        .cloned()
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|thread| {
-        std::cmp::Reverse(
-            thread
-                .last_message_at
-                .unwrap_or(thread.created_at)
-                .as_millis(),
-        )
-    });
-    rows.into_iter().partition(|thread| thread.has_active_work)
+/// The wall clock the age groups are measured against.
+pub(super) fn wall_clock() -> UnixMillis {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        });
+    UnixMillis::from_millis(millis)
 }
 
 impl NativeApplication {
-    pub(super) fn refresh_sidebar_threads(&mut self) {
-        if self.service_stopped
-            || self.shutdown_prepared
-            || self.sidebar_collapsed
-            || self.thread_switch_flight.is_some()
-            || self.intake_stage.is_some()
-            || self.thread_listing.is_none()
-        {
-            return;
-        }
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        if self.sidebar_threads.pending.is_some()
-            || self
-                .sidebar_threads
-                .next_read
-                .is_some_and(|at| Instant::now() < at)
-        {
-            return;
-        }
-        let Some(generation) = self.sidebar_threads.generation.checked_add(1) else {
-            return;
-        };
-        self.sidebar_threads.generation = generation;
-        self.sidebar_threads.next_read = Some(Instant::now() + Duration::from_millis(1500));
-        if self
-            .submit_command(NativeTransportCommand::ReadSidebarThreads {
-                project_id: project_id.clone(),
-                generation,
-            })
-            .is_ok()
-        {
-            self.sidebar_threads.pending = Some((project_id, generation));
-        }
-    }
-
-    pub(super) fn receive_sidebar_threads(
-        &mut self,
-        project_id: &ProjectId,
-        generation: u64,
-        result: Result<ThreadListing, ServiceFailure>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.sidebar_threads.pending.as_ref() != Some(&(project_id.clone(), generation)) {
-            return;
-        }
-        self.sidebar_threads.pending = None;
-        self.sidebar_threads.next_read = Some(Instant::now() + Duration::from_millis(1500));
-        if self.selected_project.as_ref() != Some(project_id)
-            || self.thread_switch_flight.is_some()
-            || self.intake_stage.is_some()
-        {
-            return;
-        }
-        let Ok(listing) = result else {
-            return;
-        };
-        if listing
-            .threads()
-            .iter()
-            .any(|thread| &thread.project_id != project_id)
-            || self.thread_listing.as_ref() == Some(&listing)
-        {
-            return;
-        }
-        if self.selected_thread.as_ref().is_some_and(|selected| {
-            !listing
-                .threads()
-                .iter()
-                .any(|thread| &thread.thread_id == selected)
-        }) {
-            self.handle_threads(project_id, &listing, cx);
-            return;
-        }
-        // Background reads must not auto-open a thread or disturb an in-flight
-        // snapshot, draft, route, or selected conversation.
-        self.thread_listing = Some(listing.clone());
-        self.update_thread_picker(listing, self.selected_thread.clone(), cx);
-        self.sync_command_menu_groups(cx);
-        cx.notify();
-    }
-
     fn animate_sidebar_selection(
         &mut self,
-        rows: &[ThreadSummary],
+        ids: &[ThreadId],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -199,7 +128,7 @@ impl NativeApplication {
         if self
             .sidebar_threads
             .selection
-            .select(target, rows, cx.reduce_motion())
+            .select(target, ids, cx.reduce_motion())
             && !self.sidebar_threads.selection_frame_pending
         {
             self.sidebar_threads.selection_frame_pending = true;
@@ -210,26 +139,50 @@ impl NativeApplication {
         }
     }
 
+    /// Repaints when the next row changes age group, so rows move between
+    /// groups as time passes without anything else changing.
+    fn schedule_regroup(
+        &mut self,
+        listing: &RecentThreadListing,
+        now: UnixMillis,
+        cx: &mut Context<Self>,
+    ) {
+        let next = next_regrouping(listing, now);
+        if self.sidebar_threads.regroup.as_ref().map(|(at, _)| *at) == next {
+            return;
+        }
+        self.sidebar_threads.regroup = next.map(|at| {
+            let delay = u64::try_from(at.as_millis().saturating_sub(now.as_millis()))
+                .map_or(Duration::ZERO, Duration::from_millis);
+            let task = cx.spawn(async move |app, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = app.update(cx, |app, cx| {
+                    app.sidebar_threads.regroup = None;
+                    cx.notify();
+                });
+            });
+            (at, task)
+        });
+    }
+
     pub(super) fn desktop_sidebar_threads(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let listing = self
-            .thread_listing
-            .clone()
-            .unwrap_or_else(empty_thread_listing);
-        self.animate_sidebar_selection(listing.threads(), window, cx);
-        self.sidebar_threads.focus.retain(|id, _| {
-            listing
-                .threads()
-                .iter()
-                .any(|thread| &thread.thread_id == id)
-        });
-        let hover_ids = listing
+        let listing = self.sidebar_threads.recent.clone().unwrap_or_default();
+        let now = wall_clock();
+        self.schedule_regroup(&listing, now, cx);
+        let ids = listing
             .threads()
             .iter()
-            .map(|thread| thread.thread_id.as_str().to_owned())
+            .map(|row| row.thread.thread_id.clone())
+            .collect::<Vec<_>>();
+        self.animate_sidebar_selection(&ids, window, cx);
+        self.sidebar_threads.focus.retain(|id, _| ids.contains(id));
+        let hover_ids = ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
             .collect::<Vec<_>>();
         self.sidebar_threads
             .hover
@@ -249,9 +202,7 @@ impl NativeApplication {
         .top_0()
         .left_0()
         .size_full();
-        let (working, settled) = thread_groups(&listing);
-        let show_separator = !working.is_empty() && !settled.is_empty();
-        let mut groups = div()
+        let mut container = div()
             .id("artisan-sidebar-threads")
             .relative()
             .flex_1()
@@ -260,7 +211,7 @@ impl NativeApplication {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(8.0))
+            .gap(self.theme.spacing.steps(3.0))
             .debug_selector(|| "artisan-sidebar-threads".to_owned())
             .on_hover(cx.listener(|app, hovered: &bool, _, cx| {
                 if *hovered {
@@ -278,42 +229,50 @@ impl NativeApplication {
                 px(6.0),
                 cx.reduce_motion(),
             ));
-        for (name, rows) in [("working", working), ("settled", settled)] {
-            if rows.is_empty() {
-                continue;
-            }
-            if name == "settled" && show_separator {
-                groups = groups.child(
-                    div()
-                        .h(px(1.0))
-                        .flex_none()
-                        .mx(px(12.0))
-                        .bg(self.theme.colors.border.to_paint())
-                        .debug_selector(|| "artisan-sidebar-thread-group-separator".to_owned()),
-                );
-            }
-            let selector = format!("artisan-sidebar-threads-{name}");
-            let mut group = div()
-                .id(SharedString::from(selector.clone()))
-                .w_full()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .debug_selector(move || selector.clone());
-            for thread in rows {
-                group = group.child(self.desktop_sidebar_thread(&thread, cx));
-            }
-            groups = groups.child(group);
+        for group in &group_recent_threads(&listing, now) {
+            container = container.child(self.desktop_sidebar_thread_group(group, cx));
         }
-        groups
+        container
+    }
+
+    fn desktop_sidebar_thread_group(
+        &mut self,
+        group: &RecentThreadGroup<'_>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let selector = format!("artisan-sidebar-threads-{}", group.age.id());
+        let header_selector = format!("{selector}-header");
+        let mut rows = div()
+            .id(SharedString::from(selector.clone()))
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(move || selector.clone())
+            .child(
+                div()
+                    .w_full()
+                    .px(px(8.0))
+                    .pb(self.theme.spacing.steps(1.0))
+                    .text_size(self.theme.typography.label_text)
+                    .text_color(self.theme.colors.muted_foreground.to_paint())
+                    .truncate()
+                    .debug_selector(move || header_selector.clone())
+                    .child(group.age.label()),
+            );
+        for thread in &group.threads {
+            rows = rows.child(self.desktop_sidebar_thread(thread, cx));
+        }
+        rows
     }
 
     fn desktop_sidebar_thread(
         &mut self,
-        thread: &ThreadSummary,
+        row: &RecentThread,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let thread = &row.thread;
         let focus = self
             .sidebar_threads
             .focus
@@ -328,20 +287,24 @@ impl NativeApplication {
             .desktop_theme
             .foreground
             .blend(&self.desktop_theme.secondary.opacity(weight));
-        let title = self
-            .listed_thread_display_title(&thread.thread_id)
-            .unwrap_or_else(|| thread.title.as_str().to_owned());
+        let title = SharedString::from(thread.title.as_str().to_owned());
+        let subtitle = SharedString::from(row.subtitle.as_str().to_owned());
         let selector = format!("artisan-sidebar-thread-{}", thread.thread_id.as_str());
-        let click_thread = thread.thread_id.clone();
-        let key_thread = thread.thread_id.clone();
+        let title_selector = format!("{selector}-title");
+        let subtitle_selector = format!("{selector}-subtitle");
+        let click_target = (thread.project_id.clone(), thread.thread_id.clone());
+        let key_target = click_target.clone();
         let color = self.theme.colors.muted.to_paint();
         let hover_id = thread.thread_id.as_str().to_owned();
         div()
             .id(SharedString::from(selector.clone()))
             .track_focus(&focus)
             .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(title.clone())
+            .aria_description(subtitle.clone())
             .w_full()
-            .h(px(34.0))
+            .h(px(SIDEBAR_THREAD_ROW_HEIGHT_PX))
             .flex_none()
             .min_w(px(0.0))
             .flex()
@@ -350,8 +313,6 @@ impl NativeApplication {
             .px(px(8.0))
             .rounded(px(6.0))
             .cursor_pointer()
-            .text_size(px(14.0))
-            .text_color(self.desktop_theme.foreground)
             .relative()
             .on_hover(cx.listener(move |app, hovered: &bool, _, cx| {
                 let mut hover = app.sidebar_threads.hover.borrow_mut();
@@ -373,15 +334,42 @@ impl NativeApplication {
                 desktop_nav_glyph(AssetId::TABLER_MESSAGE_CIRCLE, self.desktop_theme)
                     .text_color(glyph_color),
             )
-            .child(div().flex_1().min_w(px(0.0)).truncate().child(title))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(self.theme.typography.control_text)
+                            .text_color(self.desktop_theme.foreground)
+                            .debug_selector(move || title_selector.clone())
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(self.theme.typography.label_text)
+                            .text_color(self.theme.colors.muted_foreground.to_paint())
+                            .debug_selector(move || subtitle_selector.clone())
+                            .child(subtitle),
+                    ),
+            )
             .on_click(cx.listener(move |app, _, window, cx| {
                 window.focus(&focus, cx);
-                app.open_thread_from_sidebar(click_thread.clone(), cx);
+                let (project, thread) = click_target.clone();
+                app.open_recent_thread(project, thread, cx);
             }))
             .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
-                    app.open_thread_from_sidebar(key_thread.clone(), cx);
+                    let (project, thread) = key_target.clone();
+                    app.open_recent_thread(project, thread, cx);
                 }
             }))
     }
@@ -390,7 +378,6 @@ impl NativeApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artisan_domain::{ThreadTitle, UnixMillis};
 
     #[test]
     fn selected_foreground_fades_out_before_next_fades_in() {
@@ -409,181 +396,5 @@ mod tests {
         assert!(
             (fade.weight(&next, start + Duration::from_millis(250)) - 1.0).abs() < f32::EPSILON
         );
-    }
-
-    #[test]
-    fn sidebar_groups_work_first_and_sort_by_sent_message_not_projection_updates() {
-        let make = |id: &str, working, created, message: Option<i64>, updated| ThreadSummary {
-            thread_id: ThreadId::parse(id).unwrap(),
-            project_id: ProjectId::parse("project").unwrap(),
-            title: ThreadTitle::parse(id).unwrap(),
-            has_started_response: true,
-            has_active_work: working,
-            last_message_at: message.map(UnixMillis::from_millis),
-            created_at: UnixMillis::from_millis(created),
-            updated_at: UnixMillis::from_millis(updated),
-        };
-        let listing = ThreadListing::new(vec![
-            make("old", false, 1, Some(2), 999),
-            make("working-old", true, 1, Some(3), 900),
-            make("empty", false, 6, None, 6),
-            make("working-new", true, 1, Some(5), 5),
-            make("recent", false, 1, Some(8), 8),
-        ])
-        .unwrap();
-        let (working, settled) = thread_groups(&listing);
-        let ids = |rows: Vec<ThreadSummary>| {
-            rows.into_iter()
-                .map(|row| row.thread_id.as_str().to_owned())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(ids(working), ["working-new", "working-old"]);
-        assert_eq!(ids(settled), ["recent", "empty", "old"]);
-        let mut rows = listing
-            .threads()
-            .iter()
-            .filter(|thread| thread.has_started_response)
-            .cloned()
-            .collect::<Vec<_>>();
-        rows[3].has_active_work = false;
-        let (working, settled) = thread_groups(&ThreadListing::new(rows).unwrap());
-        assert_eq!(ids(working), ["working-old"]);
-        assert_eq!(ids(settled), ["recent", "empty", "working-new", "old"]);
-    }
-    #[test]
-    fn waiting_or_cancelled_drafts_do_not_become_sidebar_threads() {
-        let mut draft = ThreadSummary {
-            has_started_response: false,
-            has_active_work: true,
-            last_message_at: Some(UnixMillis::from_millis(2)),
-            thread_id: ThreadId::parse("draft").unwrap(),
-            project_id: ProjectId::parse("project").unwrap(),
-            title: ThreadTitle::parse("New task").unwrap(),
-            created_at: UnixMillis::from_millis(1),
-            updated_at: UnixMillis::from_millis(2),
-        };
-        for active in [true, false] {
-            draft.has_active_work = active;
-            let (working, settled) =
-                thread_groups(&ThreadListing::new(vec![draft.clone()]).unwrap());
-            assert!(working.is_empty() && settled.is_empty());
-        }
-        draft.has_started_response = true;
-        let (_, settled) = thread_groups(&ThreadListing::new(vec![draft]).unwrap());
-        assert_eq!(settled.len(), 1);
-    }
-
-    #[gpui::test]
-    fn sidebar_groups_have_an_inset_separator_and_rows_open_threads(cx: &mut gpui::TestAppContext) {
-        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
-        let project = ProjectId::parse("sidebar-project").unwrap();
-        let active = ThreadId::parse("active-thread").unwrap();
-        let idle = ThreadId::parse("idle-thread").unwrap();
-        cx.update(|_, app| {
-            view.update(app, |application, cx| {
-                application.selected_project = Some(project.clone());
-                application.selected_thread = Some(idle.clone());
-                application.thread_listing = Some(
-                    ThreadListing::new(vec![
-                        ThreadSummary {
-                            thread_id: active.clone(),
-                            project_id: project.clone(),
-                            title: ThreadTitle::parse("Active thread").unwrap(),
-                            has_started_response: true,
-                            has_active_work: true,
-                            last_message_at: None,
-                            created_at: UnixMillis::EPOCH,
-                            updated_at: UnixMillis::EPOCH,
-                        },
-                        ThreadSummary {
-                            thread_id: idle.clone(),
-                            project_id: project.clone(),
-                            title: ThreadTitle::parse("Idle thread").unwrap(),
-                            has_started_response: true,
-                            has_active_work: false,
-                            last_message_at: None,
-                            created_at: UnixMillis::EPOCH,
-                            updated_at: UnixMillis::EPOCH,
-                        },
-                    ])
-                    .unwrap(),
-                );
-                cx.notify();
-            });
-        });
-        cx.run_until_parked();
-        let working = cx
-            .debug_bounds("artisan-sidebar-threads-working")
-            .expect("working group");
-        let settled = cx
-            .debug_bounds("artisan-sidebar-threads-settled")
-            .expect("settled group");
-        let separator = cx
-            .debug_bounds("artisan-sidebar-thread-group-separator")
-            .expect("separator between populated groups");
-        assert_eq!(separator.size.height, px(1.0));
-        assert_eq!(separator.top() - working.bottom(), px(8.0));
-        assert_eq!(settled.top() - separator.bottom(), px(8.0));
-        assert_eq!(separator.left() - working.left(), px(12.0));
-        assert_eq!(working.right() - separator.right(), px(12.0));
-        let row = cx
-            .debug_bounds("artisan-sidebar-thread-idle-thread")
-            .expect("thread row");
-        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|_, app| {
-            let hover = view.read(app).sidebar_threads.hover.borrow();
-            assert_eq!(hover.active_id(), Some("idle-thread"));
-            assert!(hover.visible());
-        });
-        cx.simulate_click(row.center(), gpui::Modifiers::none());
-        cx.run_until_parked();
-        cx.update(|_, app| {
-            assert_eq!(
-                view.read(app).route(),
-                &NativeRoute::Thread {
-                    project,
-                    thread: idle
-                }
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn sidebar_refresh_preserves_draft_route_and_rejects_stale_project(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (view, cx) = cx.add_window_view(|window, cx| NativeApplication::new(None, window, cx));
-        let project = ProjectId::parse("sidebar-project").unwrap();
-        cx.update(|_, app| {
-            view.update(app, |application, cx| {
-                application.selected_project = Some(project.clone());
-                let route = application.route().clone();
-                let rows = ThreadListing::new(vec![ThreadSummary {
-                    thread_id: ThreadId::parse("background-thread").unwrap(),
-                    project_id: project.clone(),
-                    title: ThreadTitle::parse("Background work").unwrap(),
-                    has_started_response: true,
-                    has_active_work: true,
-                    last_message_at: None,
-                    created_at: UnixMillis::EPOCH,
-                    updated_at: UnixMillis::EPOCH,
-                }])
-                .unwrap();
-                application.sidebar_threads.pending = Some((project.clone(), 1));
-                application.receive_sidebar_threads(&project, 1, Ok(rows.clone()), cx);
-                assert_eq!(application.thread_listing, Some(rows.clone()));
-                assert_eq!(application.route(), &route);
-                assert!(application.selected_thread.is_none());
-                assert!(application.pending_thread.is_none());
-                application.sidebar_threads.pending = Some((project.clone(), 2));
-                application.receive_sidebar_threads(&project, 1, Ok(empty_thread_listing()), cx);
-                assert_eq!(application.thread_listing, Some(rows.clone()));
-                application.selected_project = Some(ProjectId::parse("other-project").unwrap());
-                application.receive_sidebar_threads(&project, 2, Ok(empty_thread_listing()), cx);
-                assert_eq!(application.thread_listing, Some(rows));
-                assert!(application.sidebar_threads.pending.is_none());
-            });
-        });
     }
 }

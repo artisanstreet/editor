@@ -564,7 +564,6 @@ impl NativeApplication {
                             .child(nav)
                             .child(marketplace),
                     )
-                    .child(self.desktop_project_switcher(window, cx).flex_shrink_0())
                     .child(self.desktop_sidebar_threads(window, cx)),
             )
             .child(

@@ -1377,8 +1377,7 @@ fn desktop_busy_sidebar_navigation_keeps_visible_task_and_draft(cx: &mut TestApp
             );
             let old_route = application.route().clone();
             application.intake_stage = Some(NativeProjectIntakeStage::CreatingThread);
-            application
-                .open_thread_from_sidebar(ThreadId::parse("target-task").expect("thread"), cx);
+            application.open_listed_thread(ThreadId::parse("target-task").expect("thread"), cx);
             assert_eq!(application.route(), &old_route);
             assert_eq!(application.composer.read(cx).draft(), "keep");
             assert!(commands.borrow().is_empty());

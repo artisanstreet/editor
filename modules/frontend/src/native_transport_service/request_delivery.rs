@@ -495,14 +495,15 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::RetryProjectIntake => {
                         retry_project_intake(runtime, frames, events).await?;
                     }
-                    NativeTransportCommand::ReadSidebarThreads {
+                    NativeTransportCommand::RefreshThreads {
                         project_id,
                         generation,
                     } => {
-                        handlers::read_sidebar_threads(
-                            runtime, frames, events, project_id, generation,
-                        )
-                        .await?;
+                        handlers::refresh_threads(runtime, frames, events, project_id, generation)
+                            .await?;
+                    }
+                    NativeTransportCommand::ReadRecentThreads => {
+                        handlers::read_recent_threads(runtime, frames, events).await?;
                     }
                     NativeTransportCommand::SelectProject(project_id) => {
                         select_project(runtime, frames, events, project_id).await?;

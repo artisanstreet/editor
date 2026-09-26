@@ -89,7 +89,7 @@ impl NativeApplication {
                 else {
                     return;
                 };
-                self.select_project_from_sidebar(project, cx);
+                self.choose_project(project, cx);
             }
             CommandMenuAction::OpenThread { thread_id } => {
                 let Some(thread) = self
@@ -105,7 +105,7 @@ impl NativeApplication {
                 else {
                     return;
                 };
-                self.open_thread_from_sidebar(thread, cx);
+                self.open_listed_thread(thread, cx);
             }
         }
     }
@@ -159,11 +159,8 @@ impl NativeApplication {
         cx.notify();
     }
 
-    pub(super) fn select_project_from_sidebar(
-        &mut self,
-        project_id: ProjectId,
-        cx: &mut Context<Self>,
-    ) {
+    /// The user chose a project in a picker or the command menu.
+    pub(super) fn choose_project(&mut self, project_id: ProjectId, cx: &mut Context<Self>) {
         self.select_project(project_id, true, cx);
     }
 
@@ -171,6 +168,20 @@ impl NativeApplication {
         &mut self,
         project_id: ProjectId,
         promote: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.enter_project(project_id, promote, None, cx);
+    }
+
+    /// Makes `project_id` the selected project. With a `thread` the project
+    /// opens on it (a recent thread chosen in the sidebar); without one it
+    /// opens on its remembered thread, and an unsent prompt follows the
+    /// project into a fresh task.
+    pub(super) fn enter_project(
+        &mut self,
+        project_id: ProjectId,
+        promote: bool,
+        thread: Option<ThreadId>,
         cx: &mut Context<Self>,
     ) {
         if !self
@@ -193,7 +204,14 @@ impl NativeApplication {
                 .last_threads
                 .insert(project.clone(), thread.clone());
         }
-        if (self.selected_thread_is_draft() || self.composer.read(cx).has_unsent_draft())
+        let opens_thread = thread.is_some();
+        if let Some(thread) = thread {
+            self.project_navigation
+                .last_threads
+                .insert(project_id.clone(), thread);
+        }
+        if !opens_thread
+            && (self.selected_thread_is_draft() || self.composer.read(cx).has_unsent_draft())
             && self.command_submission_is_available()
             && !self.composer.read(cx).is_submitting()
             && self.message_flight.is_none()
@@ -264,7 +282,8 @@ impl NativeApplication {
         self.request_project_repository(cx);
     }
 
-    pub(super) fn open_thread_from_sidebar(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+    /// Opens a thread of the selected project's listing.
+    pub(super) fn open_listed_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         if !self.thread_is_listed(&thread_id) || !self.project_picker_action_is_admissible() {
             return;
         }

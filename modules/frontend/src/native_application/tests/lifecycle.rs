@@ -993,7 +993,7 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mu
             application
                 .composer
                 .update(cx, |composer, _| composer.set_draft("Alpha idea"));
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
             assert_eq!(application.selected_project.as_ref(), Some(&beta));
             assert!(commands.borrow().iter().any(|command| matches!(
                 command,

@@ -127,7 +127,7 @@ impl Capture {
                 let Some(target) = target else {
                     return false;
                 };
-                app.open_thread_from_sidebar(target, cx);
+                app.open_listed_thread(target, cx);
                 true
             });
         }

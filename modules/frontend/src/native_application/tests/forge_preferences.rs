@@ -153,7 +153,7 @@ fn navigation_is_reported_to_the_forge_once_per_change(cx: &mut TestAppContext) 
             );
             application.selected_project = Some(ProjectId::parse("alpha").unwrap());
             let beta = ProjectId::parse("beta").unwrap();
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
             application.report_navigation(beta.clone(), None);
             application.report_navigation(beta, Some(ThreadId::parse("beta-1").unwrap()));
             assert_eq!(

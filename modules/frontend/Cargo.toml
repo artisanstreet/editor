@@ -398,6 +398,10 @@ name = "relative_time"
 path = "../../tests/frontend/relative_time.rs"
 
 [[test]]
+name = "recent_thread_groups"
+path = "../../tests/frontend/recent_thread_groups.rs"
+
+[[test]]
 name = "repository_mark"
 path = "../../tests/frontend/repository_mark.rs"
 

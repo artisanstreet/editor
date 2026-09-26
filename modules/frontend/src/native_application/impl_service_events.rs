@@ -40,7 +40,7 @@ impl NativeApplication {
             }
             self.handle_service_stopped(ServiceStopStatus::Failed, cx);
         }
-        self.refresh_sidebar_threads();
+        self.refresh_project_threads_if_stale();
         self.retry_thread_switch_if_admitted(cx);
         self.try_mount_pending_thread(cx);
         self.sync_composer_availability(cx);
@@ -106,13 +106,12 @@ impl NativeApplication {
                 project_id,
                 listing,
             } => self.handle_threads(&project_id, &listing, cx),
-            NativeTransportEvent::SidebarThreads {
+            NativeTransportEvent::ThreadsRefreshed {
                 project_id,
                 generation,
                 result,
-            } => {
-                self.receive_sidebar_threads(&project_id, generation, result, cx);
-            }
+            } => self.receive_refreshed_threads(&project_id, generation, result, cx),
+            NativeTransportEvent::RecentThreads(result) => self.receive_recent_threads(result, cx),
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
             NativeTransportEvent::ProjectIntakeProgress(stage) => {
                 self.handle_intake_progress(stage, cx);
@@ -292,7 +291,7 @@ impl NativeApplication {
             NativeTransportEvent::HostState(state) => self.apply_host_state(state, cx),
             NativeTransportEvent::Preferences(event) => self.handle_preferences_event(event, cx),
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
-            NativeTransportEvent::Reconnected => self.resume_composer_drafts(),
+            NativeTransportEvent::Reconnected => self.resume_after_reconnect(),
             NativeTransportEvent::HostHome(home) => self.adopt_resolved_home(home, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
