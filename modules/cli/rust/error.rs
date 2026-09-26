@@ -139,10 +139,16 @@ pub enum CliError {
     LifecycleBusy,
     #[error("native Forge lifecycle outcome is ambiguous")]
     LifecycleAmbiguous,
-    #[error("OpenCode2 authority check failed ({reason})")]
-    OpenCode2Authority { reason: &'static str },
-    #[error("OpenCode2 installation failed ({reason})")]
-    OpenCode2Install { reason: &'static str },
+    #[error("{engine} engine check failed ({reason})")]
+    EngineAuthority {
+        engine: &'static str,
+        reason: &'static str,
+    },
+    #[error("{engine} installation failed ({reason})")]
+    EngineInstall {
+        engine: &'static str,
+        reason: &'static str,
+    },
     #[error("OpenCode2 profile operation failed ({reason})")]
     OpenCode2Profile { reason: &'static str },
     #[error("Forge control request failed: {0}")]
@@ -171,9 +177,7 @@ impl CliError {
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::MissingInstance | Self::NotRunning => 3,
-            Self::Installation(_)
-            | Self::OpenCode2Install { .. }
-            | Self::OpenCode2Profile { .. } => 4,
+            Self::Installation(_) | Self::EngineInstall { .. } | Self::OpenCode2Profile { .. } => 4,
             Self::ForgeBusy { .. } | Self::LifecycleBusy => 5,
             Self::ForgeActivityUnavailable => 6,
             Self::ForgeReadinessTimeout

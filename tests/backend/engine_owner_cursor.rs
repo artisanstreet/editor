@@ -830,7 +830,7 @@ async fn fixture_kill_reports_interruption_with_durable_prefix() {
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();
-    let Ok(mut child) = spawn_acp_child(program.as_os_str(), &args, None) else {
+    let Ok(mut child) = spawn_acp_child(program.as_os_str(), &args, None, None) else {
         eprintln!("SKIP: fixture child spawn unavailable");
         return;
     };
@@ -1041,11 +1041,12 @@ async fn fixture_kill_prefix_run() -> String {
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();
-    let _child = spawn_acp_child(program.as_os_str(), &args, None).expect("fixture spawns");
+    let _child = spawn_acp_child(program.as_os_str(), &args, None, None).expect("fixture spawns");
     let script = CursorFixtureScript::new(&responses, tail);
     let program = script.program();
     let args = script.args();
-    let mut child = spawn_acp_child(program.as_os_str(), &args, None).expect("fixture spawns");
+    let mut child =
+        spawn_acp_child(program.as_os_str(), &args, None, None).expect("fixture spawns");
     let pipes = child.take_pipes().expect("piped stdio");
     drop(pipes.stderr);
     let mut reader = BufReader::new(pipes.stdout);

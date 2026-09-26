@@ -810,23 +810,7 @@ impl SettingsScreen {
         snapshot: &SettingsEngineSnapshot,
         cx: &mut Context<Self>,
     ) -> Div {
-        let body = settings_card(
-            theme,
-            vec![
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .py(px(20.0))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.colors.foreground.to_paint())
-                            .child(snapshot.installation_state()),
-                    ),
-            ],
-        );
+        let body = Self::installation_card(theme, snapshot, cx);
         settings_section_shell(
             theme,
             "installation",

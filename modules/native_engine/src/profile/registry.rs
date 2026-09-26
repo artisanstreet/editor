@@ -15,9 +15,7 @@ use serde::{
     de::{self, Deserializer, MapAccess, Visitor},
 };
 
-use crate::engine_core::{
-    NativeOpenCode2Authority, NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths,
-};
+use crate::engine_core::{ManagedEngine, ManagedInstallPathError, ManagedInstallPaths};
 use crate::io as files;
 use crate::io::NativeFileError;
 
@@ -185,7 +183,7 @@ pub(super) fn register_in_registry(
 }
 
 pub(super) fn derived_profile_home(
-    paths: &NativeOpenCode2InstallPaths,
+    paths: &ManagedInstallPaths,
     profile_id: &EngineProfileId,
     home: ProfileHomeKind,
 ) -> Result<PathBuf, NativeOpenCode2ProfileError> {
@@ -261,7 +259,7 @@ pub(super) fn decode_profile_registry(
 fn validate_profile_registry(
     document: ProfileRegistryDocument,
 ) -> Result<ProfileRegistry, NativeOpenCode2ProfileError> {
-    if document.engine_id != NativeOpenCode2Authority::certified_install_spec().engine_id() {
+    if document.engine_id != ManagedEngine::OpenCode2.id() {
         return Err(NativeOpenCode2ProfileError::ProfileRegistryUnsupportedEngine);
     }
     if document.format_version != PROFILE_REGISTRY_FORMAT_VERSION {
@@ -300,9 +298,7 @@ pub(super) fn encode_profile_registry(
     registry: &ProfileRegistry,
 ) -> Result<Vec<u8>, NativeOpenCode2ProfileError> {
     let document = ProfileRegistryDocument {
-        engine_id: NativeOpenCode2Authority::certified_install_spec()
-            .engine_id()
-            .to_owned(),
+        engine_id: ManagedEngine::OpenCode2.id().to_owned(),
         format_version: PROFILE_REGISTRY_FORMAT_VERSION,
         profiles: registry
             .profiles
@@ -326,13 +322,11 @@ pub(super) fn validate_profile_home(path: &Path) -> Result<(), NativeFileError> 
 }
 
 pub(super) fn map_profile_path_error(
-    error: NativeOpenCode2InstallPathError,
+    error: ManagedInstallPathError,
 ) -> NativeOpenCode2ProfileError {
     match error {
-        NativeOpenCode2InstallPathError::InvalidRoot => {
-            NativeOpenCode2ProfileError::ProfileRegistryUnsafe
-        }
-        NativeOpenCode2InstallPathError::Unavailable => {
+        ManagedInstallPathError::InvalidRoot => NativeOpenCode2ProfileError::ProfileRegistryUnsafe,
+        ManagedInstallPathError::Unavailable => {
             NativeOpenCode2ProfileError::ProfileRegistryUnavailable
         }
     }

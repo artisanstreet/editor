@@ -3,13 +3,11 @@
 pub mod account_usage;
 pub mod account_usage_claude;
 pub mod account_usage_codex;
-pub mod account_usage_resolve;
 
 pub use account_usage::{
-    CallError, CliLaunch, CliResolveInput, ExchangeBounds, JsonRpcSession, ProviderError,
-    ProviderUsage, USAGE_MAX_LINE_BYTES, USAGE_MAX_QUEUED_LINES, USAGE_MAX_SKIPPED_FRAMES,
-    USAGE_MAX_TOTAL_BYTES, USAGE_TEARDOWN_GRACE, USAGE_TEARDOWN_POLL, UsageReaderError,
-    resolve_claude_cli, resolve_cli_with, resolve_codex_cli,
+    CallError, ExchangeBounds, JsonRpcSession, ProviderError, ProviderUsage, USAGE_MAX_LINE_BYTES,
+    USAGE_MAX_QUEUED_LINES, USAGE_MAX_SKIPPED_FRAMES, USAGE_MAX_TOTAL_BYTES, USAGE_TEARDOWN_GRACE,
+    USAGE_TEARDOWN_POLL, UsageReaderError,
 };
 pub use account_usage_claude::{
     CLAUDE_USAGE_ARGS, CLAUDE_USAGE_MAX_BYTES, CLAUDE_USAGE_TIMEOUT, ClaudeUsageConfig,
@@ -56,10 +54,20 @@ pub use codex_authority::{
     VerifiedCodexLaunch, compare_codex_versions,
 };
 pub use engine_core::{
-    NativeOpenCode2Authority, NativeOpenCode2Error, NativeOpenCode2InstallLock,
-    NativeOpenCode2InstallLockError, NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths,
-    NativeOpenCode2InstallSpec, NativeOpenCode2State, NativeOpenCode2StateError,
-    OpenCode2Inspection, ResolvedOpenCode2Generation, platform_supported,
+    ArchiveError, ArtifactDigest, ArtifactPlan, Distribution, EngineIdle, EngineInspection,
+    EngineOperations, EngineSelection, EngineUseLease, EngineVersion, Feed, FeedError, FeedRequest,
+    HostPlatform, HttpsTransport, InstallError, InstallProgress, LaunchSource, LaunchTarget,
+    Layout, MAX_PREVIOUS_GENERATIONS, ManagedEngine, ManagedEngineAuthority, ManagedEngineError,
+    ManagedGeneration, ManagedInstallLock, ManagedInstallLockError, ManagedInstallPathError,
+    ManagedInstallPaths, ManagedStateError, ManagedToolchainState, NativeOpenCode2Authority,
+    ReleaseArtifact, ReleaseTransport, ResolvedGeneration, SeatedLaunch, SwitchOutcome,
+    TransportError, UnsupportedReason, VersionFilter, VersionListing, build_environment,
+    engine_home, managed_database, register_managed_database, resolve_launch_target,
+    resolve_launch_target_in,
+};
+pub use engine_core::{
+    Integrity, MAX_TRUST_RECORDS, TrustRecord, apply_managed_environment, managed_environment_for,
+    read_trust_records, record_for, versions_listed,
 };
 pub use io::{
     AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity, ensure_directory,

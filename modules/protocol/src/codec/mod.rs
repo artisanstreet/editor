@@ -90,6 +90,7 @@ use crate::types::{
 mod composer_draft;
 mod conversation;
 mod engine_config;
+mod engine_installs;
 mod engine_usage;
 mod envelope;
 mod error;
@@ -107,6 +108,7 @@ mod user_preferences;
 pub(crate) use composer_draft::*;
 pub(crate) use conversation::*;
 pub(crate) use engine_config::*;
+pub(crate) use engine_installs::*;
 pub(crate) use engine_usage::*;
 pub(crate) use envelope::*;
 pub(crate) use forge_decisions::*;

@@ -9,8 +9,12 @@ mod grok;
 mod opencode2;
 mod process;
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use artisan_native_engine::ManagedEngine;
 
 use tokio::sync::Mutex;
 
@@ -157,36 +161,37 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         return Arc::clone(bundle);
     }
 
-    let cursor_program = engine_executable("ARTISAN_CURSOR_EXECUTABLE", &["cursor-agent", "agent"]);
-    let grok_program = engine_executable("ARTISAN_GROK_EXECUTABLE", &["grok"]);
-    let opencode2_program = engine_executable("ARTISAN_OPENCODE2_EXECUTABLE", &["opencode2"]);
+    let codex_program = managed_program(ManagedEngine::Codex);
+    let cursor_program = managed_program(ManagedEngine::Cursor);
+    let grok_program = managed_program(ManagedEngine::Grok);
+    let opencode2_program = managed_program(ManagedEngine::OpenCode2);
     let (codex, claude, opencode2, cursor, grok) = tokio::join!(
-        discover_codex(),
-        discover_claude(),
-        discover_opencode2(opencode2_program.as_deref()),
-        discover_cursor(cursor_program.as_deref()),
-        discover_grok(grok_program.as_deref()),
+        discover_codex(codex_program.as_ref()),
+        discover_claude(managed_home(ManagedEngine::Claude)),
+        discover_opencode2(opencode2_program.as_ref()),
+        discover_cursor(cursor_program.as_ref()),
+        discover_grok(grok_program.as_ref()),
     );
 
     let mut retry_needed = false;
     let mut models = Vec::new();
     let mut probed_engines = Vec::new();
     let mut missing_engines = Vec::new();
-    for (engine_id, program, rows) in [
-        ("codex", None, codex),
-        ("claude", None, claude),
-        ("opencode2", opencode2_program, opencode2),
-        ("cursor", cursor_program, cursor),
-        ("grok", grok_program, grok),
+    for (engine_id, installed, rows) in [
+        ("codex", codex_program.is_some(), codex),
+        ("claude", true, claude),
+        ("opencode2", opencode2_program.is_some(), opencode2),
+        ("cursor", cursor_program.is_some(), cursor),
+        ("grok", grok_program.is_some(), grok),
     ] {
         match rows {
             Some(rows) => {
                 probed_engines.push(engine_id);
                 models.extend(rows);
             }
-            // A CLI-backed engine whose executable does not resolve is
-            // definitively not installed; a failed probe is retried promptly.
-            None if program.is_none() && matches!(engine_id, "opencode2" | "cursor" | "grok") => {
+            // An engine the Forge has not installed is definitively missing;
+            // a failed probe of an installed engine is retried promptly.
+            None if !installed => {
                 missing_engines.push(engine_id);
             }
             None => {
@@ -220,48 +225,33 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
     bundle
 }
 
-/// Resolves one engine executable: an explicit `ARTISAN_<ENGINE>_EXECUTABLE`
-/// override, then the first candidate found on `PATH`. Windows resolves
-/// `.exe` images before `.cmd`/`.bat` shims; `run_bounded` routes the latter
-/// through `cmd.exe`.
-fn engine_executable(env_var: &str, candidates: &[&str]) -> Option<String> {
-    if let Ok(value) = std::env::var(env_var) {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
-        }
-    }
-    candidates.iter().find_map(|name| resolve_program(name))
+/// A Forge-managed engine program: the verified executable, its complete
+/// environment, and its private home. Discovery never looks on `PATH`.
+pub(super) struct EngineProgram {
+    pub(super) executable: PathBuf,
+    pub(super) environment: Vec<(OsString, OsString)>,
+    pub(super) home: PathBuf,
 }
 
-/// Finds one program on `PATH`, returning the full path so batch shims keep
-/// their `.cmd` routing. Extensionless shell scripts are skipped on Windows
-/// because they are not executable images.
-fn resolve_program(name: &str) -> Option<String> {
-    if name.contains(['/', '\\']) {
-        return std::path::Path::new(name)
-            .is_file()
-            .then(|| name.to_owned());
-    }
-    let path = std::env::var_os("PATH")?;
-    let extensions: &[&str] = if cfg!(windows) {
-        &["exe", "cmd", "bat"]
-    } else {
-        &[""]
-    };
-    for directory in std::env::split_paths(&path) {
-        for extension in extensions {
-            let candidate = if extension.is_empty() {
-                directory.join(name)
-            } else {
-                directory.join(format!("{name}.{extension}"))
-            };
-            if candidate.is_file() {
-                return Some(candidate.to_string_lossy().into_owned());
-            }
-        }
-    }
-    None
+/// Resolves one managed engine for discovery; `None` when it is not
+/// installed on this Forge (or not supported on this platform).
+fn managed_program(engine: ManagedEngine) -> Option<EngineProgram> {
+    let target = artisan_native_engine::resolve_launch_target(engine).ok()?;
+    Some(EngineProgram {
+        executable: target.executable().to_path_buf(),
+        environment: target.environment().ok()?,
+        home: target.home(),
+    })
+}
+
+/// Returns the managed engine home even when the engine is not installed,
+/// so cached catalogues written by an earlier install stay readable.
+fn managed_home(engine: ManagedEngine) -> Option<PathBuf> {
+    let database = artisan_native_engine::managed_database()?;
+    Some(artisan_native_engine::engine_home(
+        database.parent()?,
+        engine,
+    ))
 }
 
 /// Maps an engine effort spelling to the Artisan level identifier.

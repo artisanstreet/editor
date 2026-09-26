@@ -490,4 +490,10 @@ pub enum Query {
     ResolveEngineConfiguration(crate::ResolveEngineConfiguration),
     /// See [`ReadRecentThreads`](crate::ReadRecentThreads).
     ReadRecentThreads(crate::ReadRecentThreads),
+    /// See [`ReadEngineInstalls`](crate::ReadEngineInstalls).
+    ReadEngineInstalls(crate::ReadEngineInstalls),
+    /// See [`ListEngineVersions`](crate::ListEngineVersions).
+    ListEngineVersions(crate::ListEngineVersions),
+    /// See [`ChangeEngineVersion`](crate::ChangeEngineVersion).
+    ChangeEngineVersion(crate::ChangeEngineVersion),
 }

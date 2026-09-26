@@ -16,7 +16,9 @@ const DEADLINE: Duration = Duration::from_secs(4);
 const MAX_BYTES: usize = 1024 * 1024;
 
 /// Probes Grok Build; `None` when it does not answer.
-pub(super) async fn discover_grok(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
+pub(super) async fn discover_grok(
+    program: Option<&super::EngineProgram>,
+) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
     let output = Box::pin(run_bounded(
         executable,

@@ -898,6 +898,19 @@ struct Request {
     # The recent threads across every project; the connection then receives
     # their changes as recentThreads events. Fresh ordinal.
     readRecentThreads @46 :Void;
+
+    # Every Forge-managed engine's install status; the connection then
+    # receives their changes as engineInstalls events. Fresh ordinal.
+    readEngineInstalls @47 :Void;
+
+    # The vendor's published versions of one managed engine (engine id).
+    # Fresh ordinal.
+    listEngineVersions @48 :Text;
+
+    # Selects `latest` or a version for one engine, or rolls it back. The
+    # answer is the snapshot after queuing; progress arrives as
+    # engineInstalls events. Fresh ordinal.
+    changeEngineVersion @49 :EngineVersionChange;
   }
 }
 
@@ -1005,6 +1018,12 @@ struct Response {
 
     # Answer to readRecentThreads. Fresh ordinal.
     recentThreads @44 :RecentThreadList;
+
+    # Answer to readEngineInstalls and changeEngineVersion. Fresh ordinal.
+    engineInstalls @45 :EngineInstallSnapshot;
+
+    # Answer to listEngineVersions. Fresh ordinal.
+    engineVersions @46 :EngineVersionList;
   }
 }
 
@@ -1123,6 +1142,10 @@ struct Event {
     # renamed, or removed to a connection that listed the projects. Fresh
     # member @11.
     projectCatalog @11 :ProjectList;
+
+    # Every Forge-managed engine's install status, pushed whenever one
+    # changes to a connection that read them. Fresh member @12.
+    engineInstalls @12 :EngineInstallSnapshot;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -2706,5 +2729,72 @@ struct EngineConfigurationResolution {
   union {
     resolved @2 :EngineRunConfig;
     refused @3 :ComposerState.SubmissionRefusal;
+  }
+}
+
+# Where one Forge-managed engine's install stands.
+enum EngineInstallPhase {
+  notInstalled @0;
+  installing @1;
+  ready @2;
+  failed @3;
+  unsupported @4;
+}
+
+# One Forge-managed engine's install status. Versions are empty when
+# absent; a held version means the engine does not follow `latest`.
+struct EngineInstallStatus {
+  engineId @0 :Text;
+  phase @1 :EngineInstallPhase;
+  activeVersion @2 :Text;
+  heldVersion @3 :Text;
+  latestVersion @4 :Text;
+  pendingVersion @5 :Text;
+  rollbackVersion @6 :Text;
+  hasProgress @7 :Bool;
+  progressPercent @8 :UInt8;
+  # Presentation-ready reason for failed and unsupported; empty otherwise.
+  reason @9 :Text;
+  # A developer override replaces the managed executable.
+  overridden @10 :Bool;
+  # How downloads are verified: a vendor checksum, or trust on first
+  # download with the recorded date of the active version (ISO-8601).
+  integrity @11 :EngineIntegrity;
+  trustedSince @12 :Text;
+  # Whether the vendor publishes a version list.
+  vendorVersionList @13 :Bool;
+}
+
+enum EngineIntegrity {
+  vendorChecksum @0;
+  trustOnFirstDownload @1;
+}
+
+# Every managed engine's status, at most 16.
+struct EngineInstallSnapshot {
+  engines @0 :List(EngineInstallStatus);
+}
+
+# One published vendor version and its local state.
+struct EngineVersionEntry {
+  version @0 :Text;
+  installed @1 :Bool;
+  active @2 :Bool;
+  belowFloor @3 :Bool;
+}
+
+# The vendor's versions of one engine, newest first, at most 64.
+struct EngineVersionList {
+  engineId @0 :Text;
+  versions @1 :List(EngineVersionEntry);
+}
+
+# Selects a version for one engine, or rolls it back.
+struct EngineVersionChange {
+  engineId @0 :Text;
+  union {
+    latest @1 :Void;
+    version @2 :Text;
+    rollback @3 :Void;
   }
 }

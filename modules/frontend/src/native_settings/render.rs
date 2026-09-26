@@ -15,6 +15,9 @@ mod sections;
 #[path = "render/about.rs"]
 mod about;
 
+#[path = "render/engine_install.rs"]
+mod engine_install;
+
 pub use self::chrome::{notification_gap_notice, telemetry_choice_caption};
 
 #[cfg(test)]

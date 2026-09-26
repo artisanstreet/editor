@@ -8,14 +8,16 @@
 //! process is always killed and reaped by the session guard, and the complete
 //! sequence is bounded by one overall deadline.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, iso_millis};
 
 use super::account_usage::{
-    CallError, CliLaunch, ExchangeBounds, JsonRpcSession, ProviderUsage, UsageReaderError,
+    CallError, ExchangeBounds, JsonRpcSession, ProviderUsage, UsageReaderError,
 };
+use crate::engine_core::{ManagedEngine, ManagedEngineError, resolve_launch_target_in};
 
 /// Default overall deadline for one Codex usage exchange (15 seconds).
 pub const CODEX_USAGE_OVERALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -36,13 +38,13 @@ const CODEX_OPENAI_AUTH_REASON: &str = "OpenAI authentication is required.";
 /// Configures one non-billable Codex account-usage read.
 #[derive(Clone, Debug)]
 pub struct CodexUsageConfig {
-    /// Provider executable (absolute path or PATH-resolved name).
+    /// Provider executable: the Forge-managed generation (or a fixture).
     pub executable: PathBuf,
     /// Extra arguments before `app-server --stdio`.
     pub executable_args: Vec<String>,
-    /// Interpreter prefix placed between the program and `executable_args`
-    /// (from [`CliLaunch`], empty for direct launches).
-    pub prefix_args: Vec<String>,
+    /// Complete child environment. When set the child starts from an empty
+    /// environment; `None` inherits the caller's (fixtures only).
+    pub environment: Option<Vec<(OsString, OsString)>>,
     /// Extra environment for the spawned child (fixture seam).
     pub spawn_env: Vec<(String, String)>,
     /// Caps the whole spawn-handshake-request sequence.
@@ -58,19 +60,27 @@ impl CodexUsageConfig {
         Self {
             executable,
             executable_args: Vec::new(),
-            prefix_args: Vec::new(),
+            environment: None,
             spawn_env: Vec::new(),
             overall_timeout: CODEX_USAGE_OVERALL_TIMEOUT,
             bounds: ExchangeBounds::defaults(),
         }
     }
 
-    /// Creates a read configuration from one resolved CLI launch.
-    #[must_use]
-    pub fn launched(launch: &CliLaunch) -> Self {
-        let mut config = Self::new(launch.program.clone());
-        config.prefix_args.clone_from(&launch.prefix_args);
-        config
+    /// Resolves the Forge-managed Codex executable and its explicit
+    /// environment for the Forge database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedEngineError`] when Codex is not installed or fails
+    /// verification.
+    pub fn managed(database_path: &Path) -> Result<Self, ManagedEngineError> {
+        let target = resolve_launch_target_in(ManagedEngine::Codex, database_path, &|name| {
+            std::env::var_os(name)
+        })?;
+        let mut config = Self::new(target.executable().to_path_buf());
+        config.environment = Some(target.environment()?);
+        Ok(config)
     }
 }
 
@@ -83,12 +93,16 @@ impl CodexUsageConfig {
 /// unauthenticated [`ProviderUsage`], never a failure.
 pub fn read_codex_usage(config: &CodexUsageConfig) -> Result<ProviderUsage, UsageReaderError> {
     let deadline = Instant::now() + config.overall_timeout;
-    let mut args = config.prefix_args.clone();
-    args.extend(config.executable_args.iter().cloned());
+    let mut args = config.executable_args.clone();
     args.push("app-server".to_owned());
     args.push("--stdio".to_owned());
-    let mut session =
-        JsonRpcSession::spawn(&config.executable, &args, &config.spawn_env, config.bounds)?;
+    let mut session = JsonRpcSession::spawn(
+        &config.executable,
+        &args,
+        config.environment.as_deref(),
+        &config.spawn_env,
+        config.bounds,
+    )?;
     call_with_deadline(&mut session, deadline, "initialize", &initialize_params())
         .map_err(|error| into_reader_error(&error))?;
     session

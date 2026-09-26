@@ -1,5 +1,6 @@
 use std::{fs, num::NonZeroU32, path::PathBuf};
 
+use artisan_native_engine::ManagedEngine;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
@@ -195,8 +196,12 @@ pub enum Commands {
         #[arg(long)]
         remove_data: bool,
     },
-    /// Inspect the managed native engine catalog.
+    /// Manage the Forge-owned engine binaries.
     Engine {
+        /// Forge database whose state directory owns the engines (defaults to
+        /// this installation's native instance).
+        #[arg(long, global = true, value_name = "PATH")]
+        database: Option<PathBuf>,
         #[command(subcommand)]
         command: EngineCommand,
     },
@@ -209,18 +214,82 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand)]
 pub enum EngineCommand {
-    /// List installed native engines and their verified generation metadata.
+    /// List every managed engine with its install state and selection.
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Install the certified native `OpenCode2` engine.
-    Install,
+    /// Show one engine's generations, selection, and pending switch.
+    Status {
+        #[arg(value_enum)]
+        engine: EngineArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the vendor's published versions, newest first.
+    Versions {
+        #[arg(value_enum)]
+        engine: EngineArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install the selected version of one engine, or of every supported engine.
+    Install {
+        #[arg(value_enum)]
+        engine: Option<EngineArg>,
+    },
+    /// Check the vendor for a newer release and install it when following `latest`.
+    Update {
+        #[arg(value_enum)]
+        engine: Option<EngineArg>,
+    },
+    /// Hold an engine at an exact version, or return it to `latest`.
+    Use {
+        #[arg(value_enum)]
+        engine: EngineArg,
+        /// An exact version such as `2.1.282`, or `latest`.
+        selection: String,
+    },
+    /// Switch back to the previously active generation and hold it.
+    Rollback {
+        #[arg(value_enum)]
+        engine: EngineArg,
+    },
+    /// Sign in with the managed engine's own login flow under its Forge home.
+    Login {
+        #[arg(value_enum)]
+        engine: EngineArg,
+        /// Arguments for the engine's login command (default: its sign-in command).
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Manage explicit certified `OpenCode2` profile homes.
     Profile {
         #[command(subcommand)]
         command: EngineProfileCommand,
     },
+}
+
+/// A managed engine named on the command line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum EngineArg {
+    Claude,
+    Codex,
+    Cursor,
+    Grok,
+    Opencode2,
+}
+
+impl EngineArg {
+    pub(crate) const fn engine(self) -> ManagedEngine {
+        match self {
+            Self::Claude => ManagedEngine::Claude,
+            Self::Codex => ManagedEngine::Codex,
+            Self::Cursor => ManagedEngine::Cursor,
+            Self::Grok => ManagedEngine::Grok,
+            Self::Opencode2 => ManagedEngine::OpenCode2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -265,24 +334,15 @@ impl From<TelemetryChoice> for Preference {
 }
 
 fn discover_layout(command: Option<&Commands>) -> Result<Layout> {
-    let is_install = matches!(
-        command,
-        Some(Commands::Engine {
-            command: EngineCommand::Install,
-        })
-    );
     let is_profile = matches!(
         command,
         Some(Commands::Engine {
             command: EngineCommand::Profile { .. },
+            ..
         })
     );
     let layout = Layout::discover().map_err(|error| {
-        if is_install {
-            CliError::OpenCode2Install {
-                reason: "installation_invalid",
-            }
-        } else if is_profile {
+        if is_profile {
             profile_surface_error()
         } else {
             error
@@ -379,7 +439,9 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
-        Commands::Engine { command } => engine_command(&layout, &command),
+        Commands::Engine { database, command } => {
+            engine_command(&layout, database.as_deref(), &command)
+        }
         Commands::Telemetry { command } => telemetry_command(&layout, command),
     }
 }

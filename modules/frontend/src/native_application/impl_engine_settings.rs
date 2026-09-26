@@ -386,6 +386,7 @@ impl NativeApplication {
             save_failed,
             choice_notice,
             models,
+            install: self.settings_engine_install(engine_id),
         }
     }
 
@@ -404,6 +405,7 @@ impl NativeApplication {
         if engine_id == crate::native_settings::FIXTURE_ENGINE_ID {
             return;
         }
+        self.ensure_engine_installs_read();
         let snapshot = self.settings_engine_snapshot(&engine_id, cx);
         screen.update(cx, |screen, screen_cx| {
             screen.set_engine_snapshot(snapshot, screen_cx);
@@ -490,6 +492,11 @@ impl NativeApplication {
                 model_id,
             } => {
                 self.choose_settings_engine_model(engine_id, model_id, cx);
+            }
+            SettingsScreenEvent::LoadEngineVersions { .. }
+            | SettingsScreenEvent::SelectEngineVersion { .. }
+            | SettingsScreenEvent::RollbackEngine { .. } => {
+                self.handle_engine_install_event(event, cx);
             }
         }
     }

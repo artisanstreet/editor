@@ -1,33 +1,26 @@
 //! Certified Claude Code CLI launch authority.
 //!
-//! Resolves the installed `claude` binary, enforces the minimum CLI version
-//! (`2.1.220`, the release whose native resume behavior Artisan verified,
-//! mirroring `claude_native_continuation_version` in
+//! Resolves the Forge-managed `claude` generation (see
+//! [`crate::engine_core`]), enforces the minimum CLI version (`2.1.220`, the
+//! release whose native resume behavior Artisan verified, mirroring
+//! `claude_native_continuation_version` in
 //! `modules/engines/src/claude/probe.ts`) at probe time, and produces the
 //! non-cloneable [`VerifiedClaudeLaunch`] capability carrying the exact
-//! executable plus the probed version. This mirrors the `codex`
-//! `VerifiedCodexLaunch` shape but is concrete to Claude: no certified
-//! generation, no install lock, no profile registry. The capability is
-//! intentionally neither `Clone` nor serializable.
+//! executable, its explicit environment, the probed version, and the engine
+//! use lease. The capability is intentionally neither `Clone` nor
+//! serializable.
 //!
-//! This is deliberately NOT the sibling discovery/posture module: no
-//! executable-source taxonomy, no bare-command fallback, no auth-state
-//! classification lives here. Discovery answers "what could run"; this
-//! authority answers "what is certified to spawn now", so an unverifiable
-//! file never becomes a launch capability.
-//!
-//! Resolution precedence and version parsing are owned once by the sibling
-//! [`crate::claude`] discovery module; this shell keeps the verified-launch
-//! certification (regular-file checks, database-path checks, capability
-//! construction) plus the transport constants its backend callers use, and
-//! delegates precedence, parsing, and gating to that module.
+//! Version parsing is owned once by the sibling [`crate::claude`] module.
 
 use std::{
+    ffi::OsString,
     fmt,
     path::{Component, Path, PathBuf},
 };
 
 use artisan_domain::EngineProfileId;
+
+use crate::engine_core::{ManagedEngine, ManagedEngineError, SeatedLaunch, resolve_launch_target};
 
 /// Minimum supported Claude Code CLI version (`claude --version`).
 ///
@@ -88,11 +81,9 @@ pub const CLAUDE_TRANSPORT: &str = "claude-cli-stream-json";
 /// Stream-JSON protocol version shared with the TypeScript adapter.
 pub const CLAUDE_PROTOCOL_VERSION: &str = "claude-stream-json-v1";
 
-/// Environment variable naming a Claude Code executable override.
-///
-/// Native-port convention mirroring `ARTISAN_CODEX_EXECUTABLE`. An explicitly
-/// configured value takes precedence over `PATH` lookup.
-pub const CLAUDE_EXECUTABLE_ENV_VAR: &str = "ARTISAN_CLAUDE_EXECUTABLE";
+/// Environment variable naming the Claude Code developer override: an
+/// absolute executable path, reported as an override in engine status.
+pub const CLAUDE_EXECUTABLE_ENV_VAR: &str = ManagedEngine::Claude.override_env();
 
 /// Payload-free failure while resolving or probing a Claude launch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,14 +128,14 @@ impl std::error::Error for NativeClaudeLaunchError {}
 
 /// A verified Claude launch capability for one exact profile.
 ///
-/// Carries the resolved executable plus the probed CLI version. It is
-/// intentionally neither `Clone` nor serializable; retain it until the
-/// protected spawn completes.
+/// Carries the managed executable, its complete child environment, the
+/// probed CLI version, and the engine use lease that defers generation
+/// switches while the run is live. It is intentionally neither `Clone` nor
+/// serializable; retain it until the protected run completes.
 #[must_use = "retain the capability until the protected launch is complete"]
 pub struct VerifiedClaudeLaunch {
-    database_path: PathBuf,
     profile_id: EngineProfileId,
-    executable: PathBuf,
+    seat: SeatedLaunch,
     version: String,
 }
 
@@ -172,7 +163,7 @@ impl VerifiedClaudeLaunch {
     /// Returns the exact verified executable path.
     #[must_use]
     pub fn executable_path(&self) -> &Path {
-        &self.executable
+        self.seat.executable()
     }
 
     /// Returns the probed CLI version (`X.Y.Z` with optional suffix).
@@ -187,6 +178,13 @@ impl VerifiedClaudeLaunch {
         claude_thinking_display_support(&self.version)
     }
 
+    /// Returns the complete child environment (`CLAUDE_CONFIG_DIR` and
+    /// `HOME` in the Forge-owned engine home). Spawn with `env_clear` first.
+    #[must_use]
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        self.seat.environment()
+    }
+
     /// Rechecks that the verified executable is still the same regular file.
     ///
     /// # Errors
@@ -194,14 +192,10 @@ impl VerifiedClaudeLaunch {
     /// Returns [`NativeClaudeLaunchError`] when the executable is no longer a
     /// verifiable regular file.
     pub fn revalidate(&self) -> Result<(), NativeClaudeLaunchError> {
-        verify_regular_executable(&self.executable)
+        verify_regular_executable(self.seat.executable())
     }
 
     /// Test-only construction over an explicitly supplied fixture program.
-    ///
-    /// The fixture must already be a regular file; the version string is
-    /// still parsed and still enforced against the minimum so fixture
-    /// launches cannot smuggle an unsupported version into the capability.
     ///
     /// # Errors
     ///
@@ -217,9 +211,8 @@ impl VerifiedClaudeLaunch {
         let version = parse_claude_version(version_stdout)?;
         check_minimum_version(&version)?;
         Ok(Self {
-            database_path: PathBuf::from("/test/claude.sqlite"),
             profile_id,
-            executable: program,
+            seat: SeatedLaunch::fixture(program),
             version: version.to_string(),
         })
     }
@@ -236,53 +229,27 @@ impl NativeClaudeAuthority {
         Self
     }
 
-    /// Resolves the installed Claude executable without probing its version.
-    ///
-    /// Honors `ARTISAN_CLAUDE_EXECUTABLE` when it names an existing regular
-    /// file, otherwise follows the single discovery precedence in
-    /// [`crate::claude::discovery`] (`PATH` searched for the platform
-    /// candidate names in order). Every candidate is certified as a regular
-    /// file before it is returned, so an unverified discovery fallback never
-    /// becomes a launch.
+    /// Resolves the Forge-managed Claude executable without probing its
+    /// version: the verified active generation, or the absolute developer
+    /// override. `PATH` and npm shims are never consulted.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeClaudeLaunchError`] when no verifiable executable is
-    /// available.
+    /// Returns [`NativeClaudeLaunchError`] when Claude is not installed, not
+    /// supported here, or fails verification.
     pub fn resolve_executable(&self) -> Result<PathBuf, NativeClaudeLaunchError> {
-        if let Ok(configured) = std::env::var(crate::claude::discovery::CLAUDE_EXECUTABLE_ENV_VAR) {
-            let trimmed = configured.trim();
-            if !trimmed.is_empty() {
-                let path = PathBuf::from(trimmed);
-                verify_regular_executable(&path)?;
-                return Ok(path);
-            }
-        }
-        let path_entries = std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let candidate = crate::claude::discovery::search_path_for(
-            path_entries,
-            crate::claude::discovery::candidate_file_names(),
-            |path| verify_regular_executable(path).is_ok(),
-        );
-        match candidate {
-            Some(path) => {
-                verify_regular_executable(&path)?;
-                Ok(path)
-            }
-            None => Err(NativeClaudeLaunchError::ExecutableUnavailable),
-        }
+        resolve_launch_target(ManagedEngine::Claude)
+            .map(|target| target.executable().to_path_buf())
+            .map_err(map_managed_error)
     }
 
     /// Resolves one profile into a verified launch capability.
     ///
     /// The database path is validated as absolute without `..` segments; the
-    /// executable is resolved and verified as a regular file; `version_stdout`
-    /// is the exact `claude --version` output captured at probe time and is
-    /// parsed plus enforced against [`CLAUDE_MINIMUM_CLI_VERSION`]. No process
-    /// is spawned here: the caller performs the bounded `--version` probe and
-    /// hands its bytes in, so this stays a pure verification boundary.
+    /// managed executable is resolved, verified, and seated with its explicit
+    /// environment and use lease; `version_stdout` is the exact
+    /// `claude --version` output captured at probe time and is parsed plus
+    /// enforced against [`CLAUDE_MINIMUM_CLI_VERSION`].
     ///
     /// # Errors
     ///
@@ -295,44 +262,26 @@ impl NativeClaudeAuthority {
         version_stdout: &str,
     ) -> Result<VerifiedClaudeLaunch, NativeClaudeLaunchError> {
         verify_database_path(database_path)?;
-        let executable = self.resolve_executable()?;
         let version = parse_claude_version(version_stdout)?;
         check_minimum_version(&version)?;
+        let seat =
+            SeatedLaunch::seat(ManagedEngine::Claude, database_path).map_err(map_managed_error)?;
+        verify_regular_executable(seat.executable())?;
         Ok(VerifiedClaudeLaunch {
-            database_path: database_path.to_path_buf(),
             profile_id: profile_id.clone(),
-            executable,
+            seat,
             version: version.to_string(),
         })
     }
+}
 
-    /// Resolves one profile against an explicitly supplied executable.
-    ///
-    /// Used by the owner at spawn time when the capability was already
-    /// probed: re-verifies the executable file and re-enforces the carried
-    /// version without PATH discovery.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NativeClaudeLaunchError`] when the path or version cannot be
-    /// certified.
-    pub fn resolve_launch_with_executable(
-        &self,
-        database_path: &Path,
-        profile_id: &EngineProfileId,
-        executable: &Path,
-        version: &str,
-    ) -> Result<VerifiedClaudeLaunch, NativeClaudeLaunchError> {
-        verify_database_path(database_path)?;
-        verify_regular_executable(executable)?;
-        let parsed = parse_claude_version(version)?;
-        check_minimum_version(&parsed)?;
-        Ok(VerifiedClaudeLaunch {
-            database_path: database_path.to_path_buf(),
-            profile_id: profile_id.clone(),
-            executable: executable.to_path_buf(),
-            version: parsed.to_string(),
-        })
+fn map_managed_error(error: ManagedEngineError) -> NativeClaudeLaunchError {
+    match error {
+        ManagedEngineError::UnsupportedPlatform => NativeClaudeLaunchError::UnsupportedPlatform,
+        ManagedEngineError::StateMissing | ManagedEngineError::ExecutableUnavailable => {
+            NativeClaudeLaunchError::ExecutableUnavailable
+        }
+        _ => NativeClaudeLaunchError::ExecutableUnsafe,
     }
 }
 

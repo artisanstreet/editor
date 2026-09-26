@@ -1,8 +1,11 @@
-//! Certified `OpenCode2` artifact specification, installation paths, and lock.
+//! Managed engine installation paths, the exclusive install lock, and the
+//! shared use lease.
 //!
-//! Owns the fixed certified identity of the managed artifact, the validated
-//! derivation of the toolchain locations, and the exclusive installation lock
-//! shared by installation, registration, and launch resolution.
+//! Every engine owns `<database parent>/toolchain/<engine>/` with its
+//! `versions/` generations, `state.json`, `selection.json`, an exclusive
+//! `install.lock` shared by installation, switching, pruning, and launch
+//! resolution, and a `use.lock` that running engine processes hold shared so
+//! a generation switch never happens mid-run.
 
 use std::{
     fmt,
@@ -18,258 +21,116 @@ use fs2::FileExt;
 use crate::io as native_files;
 use crate::io::NativeFileError;
 
-use super::state::ManagedGenerationV1;
-
-pub(crate) const CERTIFIED_ENGINE_ID: &str = "opencode2";
-pub(crate) const CERTIFIED_VERSION: &str = "0.0.0-beta-17778";
-pub(crate) const CERTIFIED_UPSTREAM_COMMIT: &str = "0d2684b67308380fc47540fe55deb55306a08e3f";
-pub(crate) const CERTIFIED_PLATFORM: &str = "win32";
-pub(crate) const CERTIFIED_ARCHITECTURE: &str = "x64";
-pub(crate) const CERTIFIED_ARTIFACT_KIND: &str = "npm-tarball";
-pub(crate) const CERTIFIED_ARCHIVE_MEMBER: &str = "package/bin/opencode2.exe";
-pub(crate) const CERTIFIED_BINARY: &str = "opencode2.exe";
-pub(crate) const CERTIFIED_NPM_INTEGRITY_SHA512: &str =
-    "Z0oMvTBUhxmz1IYuQSMOZTpI2HoWjeIjdxJ39SoGrhDwvJZK7OI0rgIMYtDGavOucOQT8oxrazUiO4j+2hVMpw==";
-pub(crate) const CERTIFIED_DOWNLOAD_BOUND_BYTES: u64 = 268_435_456;
-pub(crate) const CERTIFIED_EXECUTABLE_SIZE_BYTES: u64 = 144_313_344;
-pub(crate) const CERTIFIED_EXECUTABLE_SHA256_HEX: &str =
-    "452794a764e1033e629c4cd40bde6433c10c6bd32433fb3be279bf03969a6edf";
-pub(crate) const CERTIFIED_EXECUTABLE_SHA256: [u8; 32] = [
-    0x45, 0x27, 0x94, 0xa7, 0x64, 0xe1, 0x03, 0x3e, 0x62, 0x9c, 0x4c, 0xd4, 0x0b, 0xde, 0x64, 0x33,
-    0xc1, 0x0c, 0x6b, 0xd3, 0x24, 0x33, 0xfb, 0x3b, 0xe2, 0x79, 0xbf, 0x03, 0x96, 0x9a, 0x6e, 0xdf,
-];
-pub(crate) const CERTIFIED_NPM_URL: &str = "https://registry.npmjs.org/@opencode-ai/cli-windows-x64/-/cli-windows-x64-0.0.0-beta-17778.tgz";
+use super::catalog::ManagedEngine;
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_POLL: Duration = Duration::from_millis(50);
 
-/// The exact certified `OpenCode2` artifact identity shared by installation and
-/// launch resolution.
-#[derive(Clone, Copy)]
-pub struct NativeOpenCode2InstallSpec {
-    pub(crate) engine_id: &'static str,
-    pub(crate) version: &'static str,
-    pub(crate) upstream_commit: &'static str,
-    pub(crate) platform: &'static str,
-    pub(crate) architecture: &'static str,
-    pub(crate) artifact_kind: &'static str,
-    pub(crate) archive_member: &'static str,
-    pub(crate) binary: &'static str,
-    pub(crate) npm_integrity_sha512: &'static str,
-    pub(crate) npm_url: &'static str,
-    pub(crate) download_bound_bytes: u64,
-    pub(crate) executable_size_bytes: u64,
-    pub(crate) executable_sha256: [u8; 32],
-    pub(crate) executable_sha256_hex: &'static str,
-}
-
-impl fmt::Debug for NativeOpenCode2InstallSpec {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NativeOpenCode2InstallSpec")
-            .finish_non_exhaustive()
-    }
-}
-
-impl NativeOpenCode2InstallSpec {
-    /// Returns the certified engine identifier.
-    #[must_use]
-    pub const fn engine_id(&self) -> &'static str {
-        self.engine_id
-    }
-
-    /// Returns the certified artifact version.
-    #[must_use]
-    pub const fn version(&self) -> &'static str {
-        self.version
-    }
-
-    /// Returns the certified upstream source commit.
-    #[must_use]
-    pub const fn upstream_commit(&self) -> &'static str {
-        self.upstream_commit
-    }
-
-    /// Returns the certified target platform.
-    #[must_use]
-    pub const fn platform(&self) -> &'static str {
-        self.platform
-    }
-
-    /// Returns the certified target architecture.
-    #[must_use]
-    pub const fn architecture(&self) -> &'static str {
-        self.architecture
-    }
-
-    /// Returns the certified artifact kind.
-    #[must_use]
-    pub const fn artifact_kind(&self) -> &'static str {
-        self.artifact_kind
-    }
-
-    /// Returns the exact archive member containing the executable.
-    #[must_use]
-    pub const fn archive_member(&self) -> &'static str {
-        self.archive_member
-    }
-
-    /// Returns the certified executable file name.
-    #[must_use]
-    pub const fn binary(&self) -> &'static str {
-        self.binary
-    }
-
-    /// Returns the certified npm package integrity value.
-    #[must_use]
-    pub const fn npm_integrity_sha512(&self) -> &'static str {
-        self.npm_integrity_sha512
-    }
-
-    /// Returns the certified npm package URL.
-    #[must_use]
-    pub const fn npm_url(&self) -> &'static str {
-        self.npm_url
-    }
-
-    /// Returns the maximum permitted download size in bytes.
-    #[must_use]
-    pub const fn download_bound_bytes(&self) -> u64 {
-        self.download_bound_bytes
-    }
-
-    /// Returns the certified executable size in bytes.
-    #[must_use]
-    pub const fn executable_size_bytes(&self) -> u64 {
-        self.executable_size_bytes
-    }
-
-    /// Returns the certified executable SHA-256 digest.
-    #[must_use]
-    pub const fn executable_sha256(&self) -> &[u8; 32] {
-        &self.executable_sha256
-    }
-
-    /// Returns the certified executable SHA-256 digest in hexadecimal form.
-    #[must_use]
-    pub const fn executable_sha256_hex(&self) -> &'static str {
-        self.executable_sha256_hex
-    }
-
-    pub(crate) fn generation(&self, directory: &str) -> ManagedGenerationV1 {
-        ManagedGenerationV1 {
-            binary: self.binary.to_owned(),
-            directory: directory.to_owned(),
-            sha256: self.executable_sha256_hex.to_owned(),
-            version: self.version.to_owned(),
-        }
-    }
-}
-
-/// Failure while deriving or preparing the certified installation paths.
+/// Failure while deriving or preparing the managed installation paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NativeOpenCode2InstallPathError {
+pub enum ManagedInstallPathError {
     InvalidRoot,
     Unavailable,
 }
 
-impl fmt::Display for NativeOpenCode2InstallPathError {
+impl fmt::Display for ManagedInstallPathError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::InvalidRoot => "OpenCode2 installation root is invalid",
-            Self::Unavailable => "OpenCode2 installation root is unavailable",
+            Self::InvalidRoot => "managed engine installation root is invalid",
+            Self::Unavailable => "managed engine installation root is unavailable",
         })
     }
 }
 
-impl std::error::Error for NativeOpenCode2InstallPathError {}
+impl std::error::Error for ManagedInstallPathError {}
 
-/// The validated filesystem locations used by the certified installation.
+/// The validated filesystem locations of one engine's managed installation.
 #[must_use = "retain the validated paths for the operation they authorize"]
 #[derive(Clone)]
-pub struct NativeOpenCode2InstallPaths {
+pub struct ManagedInstallPaths {
+    engine: ManagedEngine,
     database_parent: PathBuf,
     toolchain_root: PathBuf,
     engine_root: PathBuf,
     versions_root: PathBuf,
     lock_path: PathBuf,
+    use_lock_path: PathBuf,
 }
 
-impl fmt::Debug for NativeOpenCode2InstallPaths {
+impl fmt::Debug for ManagedInstallPaths {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("NativeOpenCode2InstallPaths")
+            .debug_struct("ManagedInstallPaths")
+            .field("engine", &self.engine)
             .finish_non_exhaustive()
     }
 }
 
-impl NativeOpenCode2InstallPaths {
-    /// Derives the certified installation locations from an absolute database
+impl ManagedInstallPaths {
+    /// Derives the managed installation locations from an absolute database
     /// path.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallPathError::InvalidRoot`] for an unsafe
-    /// or structurally invalid database path.
+    /// Returns [`ManagedInstallPathError::InvalidRoot`] for an unsafe or
+    /// structurally invalid database path.
     pub fn derive(
         database_path: &Path,
-        spec: &NativeOpenCode2InstallSpec,
-    ) -> Result<Self, NativeOpenCode2InstallPathError> {
-        if !database_path.is_absolute()
-            || database_path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(NativeOpenCode2InstallPathError::InvalidRoot);
+        engine: ManagedEngine,
+    ) -> Result<Self, ManagedInstallPathError> {
+        if !is_absolute_without_parent_segments(database_path) {
+            return Err(ManagedInstallPathError::InvalidRoot);
         }
         let database_parent = database_path
             .parent()
             .filter(|parent| parent.is_absolute() && !parent.as_os_str().is_empty())
-            .ok_or(NativeOpenCode2InstallPathError::InvalidRoot)?;
+            .ok_or(ManagedInstallPathError::InvalidRoot)?;
         let toolchain_root = database_parent.join("toolchain");
-        let engine_root = toolchain_root.join(spec.engine_id());
-        let versions_root = engine_root.join("versions");
-        let lock_path = engine_root.join("install.lock");
-        if !engine_root.is_absolute()
-            || engine_root
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(NativeOpenCode2InstallPathError::InvalidRoot);
+        let engine_root = toolchain_root.join(engine.id());
+        if !is_absolute_without_parent_segments(&engine_root) {
+            return Err(ManagedInstallPathError::InvalidRoot);
         }
         Ok(Self {
+            engine,
             database_parent: database_parent.to_path_buf(),
+            versions_root: engine_root.join("versions"),
+            lock_path: engine_root.join("install.lock"),
+            use_lock_path: engine_root.join("use.lock"),
             toolchain_root,
             engine_root,
-            versions_root,
-            lock_path,
         })
     }
 
-    /// Creates the certified installation directories and verifies them.
+    /// Creates the installation directories and verifies them.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe,
+    /// Returns [`ManagedInstallPathError`] when a directory is unsafe,
     /// unavailable, or cannot be created.
-    pub fn prepare(&self) -> Result<(), NativeOpenCode2InstallPathError> {
+    pub fn prepare(&self) -> Result<(), ManagedInstallPathError> {
         native_files::ensure_directory(&self.toolchain_root).map_err(map_path_file_error)?;
         native_files::ensure_directory(&self.engine_root).map_err(map_path_file_error)?;
         native_files::ensure_directory(&self.versions_root).map_err(map_path_file_error)?;
         self.verify()
     }
 
-    /// Verifies the certified installation directories and ancestor chain.
+    /// Verifies the installation directories and ancestor chain.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallPathError`] when a directory is unsafe
-    /// or unavailable.
-    pub fn verify(&self) -> Result<(), NativeOpenCode2InstallPathError> {
+    /// Returns [`ManagedInstallPathError`] when a directory is unsafe or
+    /// unavailable.
+    pub fn verify(&self) -> Result<(), ManagedInstallPathError> {
         native_files::verify_directory(&self.database_parent).map_err(map_path_file_error)?;
         native_files::verify_directory(&self.toolchain_root).map_err(map_path_file_error)?;
         native_files::verify_directory(&self.engine_root).map_err(map_path_file_error)?;
         native_files::verify_directory(&self.versions_root).map_err(map_path_file_error)
+    }
+
+    /// Returns the engine these paths belong to.
+    #[must_use]
+    pub const fn engine(&self) -> ManagedEngine {
+        self.engine
     }
 
     /// Returns the validated directory containing the database.
@@ -284,7 +145,7 @@ impl NativeOpenCode2InstallPaths {
         &self.toolchain_root
     }
 
-    /// Returns the validated certified engine root.
+    /// Returns the validated engine root.
     #[must_use]
     pub fn engine_root(&self) -> &Path {
         &self.engine_root
@@ -301,11 +162,24 @@ impl NativeOpenCode2InstallPaths {
     pub fn lock_path(&self) -> &Path {
         &self.lock_path
     }
+
+    /// Returns the path of the shared use lease.
+    #[must_use]
+    pub fn use_lock_path(&self) -> &Path {
+        &self.use_lock_path
+    }
 }
 
-/// Failure while acquiring or fencing the certified installation lock.
+fn is_absolute_without_parent_segments(path: &Path) -> bool {
+    path.is_absolute()
+        && !path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+/// Failure while acquiring or fencing a managed installation lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NativeOpenCode2InstallLockError {
+pub enum ManagedInstallLockError {
     InvalidRoot,
     Unavailable,
     Timeout,
@@ -313,90 +187,96 @@ pub enum NativeOpenCode2InstallLockError {
     IdentityChanged,
 }
 
-impl fmt::Display for NativeOpenCode2InstallLockError {
+impl fmt::Display for ManagedInstallLockError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::InvalidRoot => "OpenCode2 installation root is invalid",
-            Self::Unavailable => "OpenCode2 installation lock is unavailable",
-            Self::Timeout => "OpenCode2 installation lock timed out",
-            Self::Busy => "OpenCode2 installation lock is busy",
-            Self::IdentityChanged => "OpenCode2 installation lock identity changed",
+            Self::InvalidRoot => "managed engine installation root is invalid",
+            Self::Unavailable => "managed engine installation lock is unavailable",
+            Self::Timeout => "managed engine installation lock timed out",
+            Self::Busy => "managed engine installation lock is busy",
+            Self::IdentityChanged => "managed engine installation lock identity changed",
         })
     }
 }
 
-impl std::error::Error for NativeOpenCode2InstallLockError {}
+impl std::error::Error for ManagedInstallLockError {}
 
-/// RAII custody of the exclusive lock shared by installation, registration,
-/// and profile launch resolution.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LockMode {
+    Exclusive,
+    Shared,
+}
+
+/// RAII custody of a fenced lock file.
 #[must_use = "the lock must remain live for the protected operation"]
-pub struct NativeOpenCode2InstallLock {
+pub struct ManagedInstallLock {
     path: PathBuf,
     file: File,
 }
 
-impl fmt::Debug for NativeOpenCode2InstallLock {
+impl fmt::Debug for ManagedInstallLock {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("NativeOpenCode2InstallLock")
+            .debug_struct("ManagedInstallLock")
             .finish_non_exhaustive()
     }
 }
 
-impl NativeOpenCode2InstallLock {
+impl ManagedInstallLock {
     /// Acquires and fences the exclusive installation lock, waiting briefly if
     /// another cooperating operation currently owns it.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallLockError`] when the lock path is
-    /// unsafe, unavailable, changed, or cannot be acquired before the timeout.
-    pub fn acquire(
-        paths: &NativeOpenCode2InstallPaths,
-    ) -> Result<Self, NativeOpenCode2InstallLockError> {
-        Self::acquire_inner(paths, true)
+    /// Returns [`ManagedInstallLockError`] when the lock path is unsafe,
+    /// unavailable, changed, or cannot be acquired before the timeout.
+    pub fn acquire(paths: &ManagedInstallPaths) -> Result<Self, ManagedInstallLockError> {
+        Self::acquire_at(paths, paths.lock_path(), LockMode::Exclusive, true)
     }
 
-    /// Attempts one non-blocking acquisition. It gives tests and callers a
-    /// typed way to prove that a live launch capability retains the fence.
+    /// Attempts one non-blocking exclusive acquisition.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallLockError::Busy`] when another
-    /// operation owns the lock, or another variant when the lock is unsafe,
-    /// unavailable, or changed.
-    pub fn try_acquire(
-        paths: &NativeOpenCode2InstallPaths,
-    ) -> Result<Self, NativeOpenCode2InstallLockError> {
-        Self::acquire_inner(paths, false)
+    /// Returns [`ManagedInstallLockError::Busy`] when another operation owns
+    /// the lock, or another variant when the lock is unsafe, unavailable, or
+    /// changed.
+    pub fn try_acquire(paths: &ManagedInstallPaths) -> Result<Self, ManagedInstallLockError> {
+        Self::acquire_at(paths, paths.lock_path(), LockMode::Exclusive, false)
     }
 
-    fn acquire_inner(
-        paths: &NativeOpenCode2InstallPaths,
+    fn acquire_at(
+        paths: &ManagedInstallPaths,
+        path: &Path,
+        mode: LockMode,
         wait: bool,
-    ) -> Result<Self, NativeOpenCode2InstallLockError> {
+    ) -> Result<Self, ManagedInstallLockError> {
         paths.verify().map_err(map_path_lock_error)?;
-        let file = open_lock(paths.lock_path())?;
+        let file = open_lock(path)?;
         let lock = Self {
-            path: paths.lock_path().to_path_buf(),
+            path: path.to_path_buf(),
             file,
         };
         let deadline = Instant::now()
             .checked_add(LOCK_TIMEOUT)
-            .ok_or(NativeOpenCode2InstallLockError::Timeout)?;
+            .ok_or(ManagedInstallLockError::Timeout)?;
         loop {
-            match lock.file.try_lock_exclusive() {
+            let attempt = match mode {
+                LockMode::Exclusive => FileExt::try_lock_exclusive(&lock.file),
+                LockMode::Shared => FileExt::try_lock_shared(&lock.file),
+            };
+            match attempt {
                 Ok(()) => break,
                 Err(error) if is_lock_contended(&error) && !wait => {
-                    return Err(NativeOpenCode2InstallLockError::Busy);
+                    return Err(ManagedInstallLockError::Busy);
                 }
                 Err(error) if is_lock_contended(&error) => {
                     if Instant::now() >= deadline {
-                        return Err(NativeOpenCode2InstallLockError::Timeout);
+                        return Err(ManagedInstallLockError::Timeout);
                     }
                     thread::sleep(LOCK_POLL);
                 }
-                Err(_) => return Err(NativeOpenCode2InstallLockError::Unavailable),
+                Err(_) => return Err(ManagedInstallLockError::Unavailable),
             }
         }
         lock.fence(paths)?;
@@ -408,29 +288,78 @@ impl NativeOpenCode2InstallLock {
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallLockError`] when the lock or its path
-    /// is unavailable, unsafe, or has changed.
-    pub fn fence(
-        &self,
-        paths: &NativeOpenCode2InstallPaths,
-    ) -> Result<(), NativeOpenCode2InstallLockError> {
+    /// Returns [`ManagedInstallLockError`] when the lock or its path is
+    /// unavailable, unsafe, or has changed.
+    pub fn fence(&self, paths: &ManagedInstallPaths) -> Result<(), ManagedInstallLockError> {
         paths.verify().map_err(map_path_lock_error)?;
         native_files::verify_regular_file(&self.path).map_err(|error| match error {
             NativeFileError::UnsafePath
             | NativeFileError::FileChanged
-            | NativeFileError::NotFound => NativeOpenCode2InstallLockError::IdentityChanged,
+            | NativeFileError::NotFound => ManagedInstallLockError::IdentityChanged,
             NativeFileError::TooLarge
             | NativeFileError::FileSizeMismatch
             | NativeFileError::FileHashMismatch
             | NativeFileError::Io
-            | NativeFileError::PrivatePermissions => NativeOpenCode2InstallLockError::Unavailable,
+            | NativeFileError::PrivatePermissions => ManagedInstallLockError::Unavailable,
         })?;
         let open_id = native_files::file_identity(&self.file).map_err(map_file_lock_error)?;
         let path_id = native_files::path_identity(&self.path).map_err(map_file_lock_error)?;
         if open_id != path_id {
-            return Err(NativeOpenCode2InstallLockError::IdentityChanged);
+            return Err(ManagedInstallLockError::IdentityChanged);
         }
         Ok(())
+    }
+}
+
+/// A shared lease held by every live engine process launched from a managed
+/// generation. A generation switch requires the lease exclusively, so it is
+/// deferred while any process of the engine is running.
+#[must_use = "the lease must stay alive for as long as the engine process runs"]
+pub struct EngineUseLease {
+    _lock: ManagedInstallLock,
+}
+
+impl fmt::Debug for EngineUseLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineUseLease")
+    }
+}
+
+impl EngineUseLease {
+    /// Takes a shared use lease, waiting for an in-progress switch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedInstallLockError`] when the lease file is unsafe or a
+    /// switch holds it beyond the timeout.
+    pub fn acquire(paths: &ManagedInstallPaths) -> Result<Self, ManagedInstallLockError> {
+        ManagedInstallLock::acquire_at(paths, paths.use_lock_path(), LockMode::Shared, true)
+            .map(|lock| Self { _lock: lock })
+    }
+}
+
+/// Exclusive custody of the use lease: proof that no managed process of the
+/// engine is running while a generation switch is published.
+#[must_use = "retain the idle proof while switching generations"]
+pub struct EngineIdle {
+    _lock: ManagedInstallLock,
+}
+
+impl fmt::Debug for EngineIdle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EngineIdle")
+    }
+}
+
+impl EngineIdle {
+    /// Attempts to prove the engine idle without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedInstallLockError::Busy`] while any lease is held.
+    pub fn try_acquire(paths: &ManagedInstallPaths) -> Result<Self, ManagedInstallLockError> {
+        ManagedInstallLock::acquire_at(paths, paths.use_lock_path(), LockMode::Exclusive, false)
+            .map(|lock| Self { _lock: lock })
     }
 }
 
@@ -442,11 +371,11 @@ pub(crate) fn is_lock_contended(error: &io::Error) -> bool {
         )
 }
 
-fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
+fn open_lock(path: &Path) -> Result<File, ManagedInstallLockError> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && (native_files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file())
     {
-        return Err(NativeOpenCode2InstallLockError::Unavailable);
+        return Err(ManagedInstallLockError::Unavailable);
     }
     let file = OpenOptions::new()
         .create(true)
@@ -454,75 +383,63 @@ fn open_lock(path: &Path) -> Result<File, NativeOpenCode2InstallLockError> {
         .write(true)
         .truncate(false)
         .open(path)
-        .map_err(|_| NativeOpenCode2InstallLockError::Unavailable)?;
+        .map_err(|_| ManagedInstallLockError::Unavailable)?;
     let metadata = file
         .metadata()
-        .map_err(|_| NativeOpenCode2InstallLockError::Unavailable)?;
+        .map_err(|_| ManagedInstallLockError::Unavailable)?;
     if native_files::metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file() {
-        return Err(NativeOpenCode2InstallLockError::Unavailable);
+        return Err(ManagedInstallLockError::Unavailable);
     }
     native_files::verify_regular_file(path).map_err(|error| match error {
         NativeFileError::UnsafePath | NativeFileError::FileChanged => {
-            NativeOpenCode2InstallLockError::IdentityChanged
+            ManagedInstallLockError::IdentityChanged
         }
         NativeFileError::NotFound
         | NativeFileError::TooLarge
         | NativeFileError::FileSizeMismatch
         | NativeFileError::FileHashMismatch
         | NativeFileError::Io
-        | NativeFileError::PrivatePermissions => NativeOpenCode2InstallLockError::Unavailable,
+        | NativeFileError::PrivatePermissions => ManagedInstallLockError::Unavailable,
     })?;
     let open_id = native_files::file_identity(&file).map_err(map_file_lock_error)?;
     let path_id = native_files::path_identity(path).map_err(map_file_lock_error)?;
     if open_id != path_id {
-        return Err(NativeOpenCode2InstallLockError::IdentityChanged);
+        return Err(ManagedInstallLockError::IdentityChanged);
     }
     Ok(file)
 }
 
-/// Returns whether the certified `OpenCode2` executable is supported here.
-#[must_use]
-pub const fn platform_supported() -> bool {
-    cfg!(all(target_os = "windows", target_arch = "x86_64"))
-}
-
-fn map_path_file_error(error: NativeFileError) -> NativeOpenCode2InstallPathError {
+fn map_path_file_error(error: NativeFileError) -> ManagedInstallPathError {
     match error {
         NativeFileError::UnsafePath | NativeFileError::PrivatePermissions => {
-            NativeOpenCode2InstallPathError::InvalidRoot
+            ManagedInstallPathError::InvalidRoot
         }
         NativeFileError::NotFound
         | NativeFileError::TooLarge
         | NativeFileError::FileChanged
         | NativeFileError::FileSizeMismatch
         | NativeFileError::FileHashMismatch
-        | NativeFileError::Io => NativeOpenCode2InstallPathError::Unavailable,
+        | NativeFileError::Io => ManagedInstallPathError::Unavailable,
     }
 }
 
-pub(crate) fn map_path_lock_error(
-    error: NativeOpenCode2InstallPathError,
-) -> NativeOpenCode2InstallLockError {
+pub(crate) fn map_path_lock_error(error: ManagedInstallPathError) -> ManagedInstallLockError {
     match error {
-        NativeOpenCode2InstallPathError::InvalidRoot => {
-            NativeOpenCode2InstallLockError::InvalidRoot
-        }
-        NativeOpenCode2InstallPathError::Unavailable => {
-            NativeOpenCode2InstallLockError::Unavailable
-        }
+        ManagedInstallPathError::InvalidRoot => ManagedInstallLockError::InvalidRoot,
+        ManagedInstallPathError::Unavailable => ManagedInstallLockError::Unavailable,
     }
 }
 
-fn map_file_lock_error(error: NativeFileError) -> NativeOpenCode2InstallLockError {
+fn map_file_lock_error(error: NativeFileError) -> ManagedInstallLockError {
     match error {
         NativeFileError::UnsafePath | NativeFileError::FileChanged => {
-            NativeOpenCode2InstallLockError::IdentityChanged
+            ManagedInstallLockError::IdentityChanged
         }
         NativeFileError::NotFound
         | NativeFileError::TooLarge
         | NativeFileError::FileSizeMismatch
         | NativeFileError::FileHashMismatch
         | NativeFileError::Io
-        | NativeFileError::PrivatePermissions => NativeOpenCode2InstallLockError::Unavailable,
+        | NativeFileError::PrivatePermissions => ManagedInstallLockError::Unavailable,
     }
 }

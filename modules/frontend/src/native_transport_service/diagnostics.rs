@@ -609,6 +609,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ComposerState(_) => "ComposerState",
             Self::ComposerDraft(_) => "ComposerDraft",
             Self::ForgeDecision(_) => "ForgeDecision",
+            Self::EngineInstalls(_) => "EngineInstalls",
             Self::Preferences(_) => "Preferences",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",

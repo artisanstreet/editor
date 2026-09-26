@@ -65,6 +65,7 @@ impl NativeApplication {
             }
             NativeTransportEvent::ComposerDraft(event) => self.receive_draft_event(event, cx),
             NativeTransportEvent::ForgeDecision(event) => self.receive_forge_decision(event, cx),
+            NativeTransportEvent::EngineInstalls(event) => self.receive_engine_installs(event, cx),
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,

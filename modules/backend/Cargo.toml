@@ -42,8 +42,10 @@ native-dialog.workspace = true
 winapi-util.workspace = true
 
 [dev-dependencies]
+artisan-native-engine = { path = "../native_engine", features = ["fixtures"] }
 rcgen.workspace = true
 sha2.workspace = true
+tempfile = "=3.27.0" # workspace-absent
 
 [[test]]
 name = "activated_conversation_replay"

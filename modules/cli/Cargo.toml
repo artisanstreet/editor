@@ -22,12 +22,10 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 base64.workspace = true
 clap = { version = "=4.6.6", features = ["derive", "env"] } # workspace-absent
-flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] } # workspace-absent
 fs2.workspace = true
 getrandom.workspace = true
 processkit.workspace = true
 rcgen.workspace = true
-reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls"] } # workspace-absent
 rustls.workspace = true
 rustls-pki-types.workspace = true
 serde = { version = "=1.0.229", features = ["derive"] } # workspace-absent
@@ -60,12 +58,8 @@ name = "cli_native_instance"
 path = "../../tests/cli/native_instance.rs"
 
 [[test]]
-name = "cli_native_opencode2_authority"
-path = "../../tests/cli/native_opencode2_authority.rs"
-
-[[test]]
-name = "cli_native_opencode2_install"
-path = "../../tests/cli/native_opencode2_install.rs"
+name = "cli_engine_commands"
+path = "../../tests/cli/engine_commands.rs"
 
 [[test]]
 name = "cli_native_lifecycle"

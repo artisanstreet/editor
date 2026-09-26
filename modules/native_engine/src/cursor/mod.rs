@@ -32,8 +32,7 @@ pub mod probe;
 
 pub use discovery::{
     CURSOR_AUTH_PROBE_ARGS, CURSOR_BINARY_NAME, CURSOR_EXECUTABLE_ENV, CURSOR_VERSION_ARGS,
-    CursorResolveSource, ResolvedCursorBinary, explicit_override, find_cursor_on_path,
-    parse_cursor_version, resolve_cursor_binary, resolve_live,
+    CursorResolveSource, ResolvedCursorBinary, parse_cursor_version, resolve_live,
 };
 pub use model::{
     CURSOR_ARTISAN_CODE_UNAVAILABLE_MODEL, CURSOR_ENGINE_ID, CURSOR_IMAGE_INPUT, CursorAcpInputs,

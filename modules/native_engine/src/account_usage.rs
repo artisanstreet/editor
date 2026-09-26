@@ -12,6 +12,7 @@
 //! shot on stdout. `tokio` is deliberately not used here; custody runs on
 //! `std` threads so a deadline can always preempt a blocked provider.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -23,10 +24,6 @@ use std::time::{Duration, Instant};
 use artisan_domain::{EngineUsageAuth, EngineUsageAuthentication, QuotaSurface};
 
 use command_group::CommandGroup as _;
-
-pub use super::account_usage_resolve::{
-    CliLaunch, CliResolveInput, resolve_claude_cli, resolve_cli_with, resolve_codex_cli,
-};
 
 /// Default per-line byte ceiling for provider stdio frames (1 MiB).
 ///
@@ -383,10 +380,14 @@ impl JsonRpcSession {
     pub fn spawn(
         executable: &Path,
         args: &[String],
+        environment: Option<&[(OsString, OsString)]>,
         env: &[(String, String)],
         bounds: ExchangeBounds,
     ) -> Result<Self, UsageReaderError> {
         let mut command = Command::new(executable);
+        if let Some(environment) = environment {
+            command.env_clear().envs(environment.iter().cloned());
+        }
         command
             .args(args)
             .envs(env.iter().map(|(key, value)| (key, value)))

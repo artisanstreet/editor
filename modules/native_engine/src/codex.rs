@@ -1,26 +1,25 @@
 //! Certified Codex CLI launch authority.
 //!
-//! Resolves the installed `codex` binary, enforces the minimum CLI version
-//! (`0.142.5`, mirroring `CodexTransportMetadata.minimum_cli_version` in
+//! Resolves the Forge-managed `codex` generation (see
+//! [`crate::engine_core`]), enforces the minimum CLI version (`0.142.5`,
+//! mirroring `CodexTransportMetadata.minimum_cli_version` in
 //! `modules/engines/src/codex/protocol.ts`) at probe time, and produces the
 //! non-cloneable [`VerifiedCodexLaunch`] capability carrying the exact
-//! executable plus the probed version. This mirrors the `opencode2`
-//! `VerifiedOpenCode2ProfileLaunch` shape but is concrete to Codex: no
-//! certified generation, no install lock, no profile registry. The capability
-//! is intentionally neither `Clone` nor serializable.
+//! executable, its explicit environment, the probed version, and the engine
+//! use lease. The capability is intentionally neither `Clone` nor
+//! serializable.
 //!
-//! Resolution precedence and version parsing are owned once by the sibling
-//! [`crate::codex`] discovery module; this shell keeps the verified-launch
-//! certification (regular-file checks, database-path checks, capability
-//! construction) plus the transport constants its backend callers use, and
-//! delegates precedence, parsing, and gating to that module.
+//! Version parsing is owned once by the sibling [`crate::codex`] module.
 
 use std::{
+    ffi::OsString,
     fmt,
     path::{Component, Path, PathBuf},
 };
 
 use artisan_domain::EngineProfileId;
+
+use crate::engine_core::{ManagedEngine, ManagedEngineError, SeatedLaunch, resolve_launch_target};
 
 /// Minimum supported Codex CLI version (`codex --version`).
 pub const CODEX_MINIMUM_CLI_VERSION: &str = "0.142.5";
@@ -88,14 +87,14 @@ impl std::error::Error for NativeCodexLaunchError {}
 
 /// A verified Codex launch capability for one exact profile.
 ///
-/// Carries the resolved executable plus the probed CLI version. It is
-/// intentionally neither `Clone` nor serializable; retain it until the
-/// protected spawn completes.
+/// Carries the managed executable, its complete child environment, the
+/// probed CLI version, and the engine use lease that defers generation
+/// switches while the run is live. It is intentionally neither `Clone` nor
+/// serializable; retain it until the protected run completes.
 #[must_use = "retain the capability until the protected launch is complete"]
 pub struct VerifiedCodexLaunch {
-    database_path: PathBuf,
     profile_id: EngineProfileId,
-    executable: PathBuf,
+    seat: SeatedLaunch,
     version: String,
 }
 
@@ -123,7 +122,7 @@ impl VerifiedCodexLaunch {
     /// Returns the exact verified executable path.
     #[must_use]
     pub fn executable_path(&self) -> &Path {
-        &self.executable
+        self.seat.executable()
     }
 
     /// Returns the probed CLI version (`X.Y.Z`).
@@ -132,15 +131,11 @@ impl VerifiedCodexLaunch {
         &self.version
     }
 
-    /// Returns the legacy private Codex home derived from the database parent.
-    ///
-    /// Retained for tooling display only. Dispatch and usage probes run with
-    /// the inherited ambient/explicit `CODEX_HOME` account and never seat a
-    /// managed home: the directory below does not necessarily exist and must
-    /// not be used as a child environment.
+    /// Returns the complete child environment (`CODEX_HOME` and `HOME` in
+    /// the Forge-owned engine home). Spawn with `env_clear` first.
     #[must_use]
-    pub fn codex_home(&self) -> PathBuf {
-        codex_home_for_database(&self.database_path)
+    pub fn environment(&self) -> &[(OsString, OsString)] {
+        self.seat.environment()
     }
 
     /// Rechecks that the verified executable is still the same regular file.
@@ -150,14 +145,10 @@ impl VerifiedCodexLaunch {
     /// Returns [`NativeCodexLaunchError`] when the executable is no longer a
     /// verifiable regular file.
     pub fn revalidate(&self) -> Result<(), NativeCodexLaunchError> {
-        verify_regular_executable(&self.executable)
+        verify_regular_executable(self.seat.executable())
     }
 
     /// Test-only construction over an explicitly supplied fixture program.
-    ///
-    /// The fixture must already be a regular file; the version string is
-    /// still parsed and still enforced against the minimum so fixture
-    /// launches cannot smuggle an unsupported version into the capability.
     ///
     /// # Errors
     ///
@@ -173,9 +164,8 @@ impl VerifiedCodexLaunch {
         let version = parse_codex_version(version_stdout)?;
         check_minimum_version(&version)?;
         Ok(Self {
-            database_path: PathBuf::from("/test/codex.sqlite"),
             profile_id,
-            executable: program,
+            seat: SeatedLaunch::fixture(program),
             version: version.to_string(),
         })
     }
@@ -192,66 +182,27 @@ impl NativeCodexAuthority {
         Self
     }
 
-    /// Resolves the installed Codex executable without probing its version.
-    ///
-    /// Honors `ARTISAN_CODEX_EXECUTABLE` when it names an existing regular
-    /// file, otherwise follows the single discovery precedence in
-    /// [`crate::codex::discovery`] (local Codex bin, versioned installs,
-    /// `WinGet` package, then `PATH` with the Windows App Execution Alias
-    /// rejected; the bare fallback command via `PATH` on non-Windows hosts).
-    /// Every candidate is certified as a regular file before it is returned,
-    /// so an unverified discovery fallback never becomes a launch.
+    /// Resolves the Forge-managed Codex executable without probing its
+    /// version: the verified active generation, or the absolute developer
+    /// override. `PATH`, `LOCALAPPDATA`, and `WinGet` are never consulted.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeCodexLaunchError`] when no verifiable executable is
-    /// available.
+    /// Returns [`NativeCodexLaunchError`] when Codex is not installed, not
+    /// supported here, or fails verification.
     pub fn resolve_executable(&self) -> Result<PathBuf, NativeCodexLaunchError> {
-        if let Ok(configured) =
-            std::env::var(crate::codex::discovery::CODEX_EXECUTABLE_OVERRIDE_ENV)
-        {
-            let trimmed = configured.trim();
-            if !trimmed.is_empty() {
-                let path = PathBuf::from(trimmed);
-                verify_regular_executable(&path)?;
-                return Ok(path);
-            }
-        }
-        if !cfg!(windows) {
-            let file_name = crate::codex::discovery::CODEX_FALLBACK_COMMAND;
-            if let Some(paths) = std::env::var_os("PATH") {
-                for entry in std::env::split_paths(&paths) {
-                    if entry.as_os_str().is_empty() {
-                        continue;
-                    }
-                    // npm and Nix expose CLI entry points through symlinks. Resolve
-                    // discovery candidates, then certify and retain the real file.
-                    let Ok(candidate) = std::fs::canonicalize(entry.join(file_name)) else {
-                        continue;
-                    };
-                    if verify_regular_executable(&candidate).is_ok() {
-                        return Ok(candidate);
-                    }
-                }
-            }
-            return Err(NativeCodexLaunchError::ExecutableUnavailable);
-        }
-        let input = live_codex_discovery_input();
-        let candidate = crate::codex::discovery::resolve_codex_executable(&input, &|path| {
-            verify_regular_executable(path).is_ok()
-        });
-        verify_regular_executable(&candidate)?;
-        Ok(candidate)
+        resolve_launch_target(ManagedEngine::Codex)
+            .map(|target| target.executable().to_path_buf())
+            .map_err(map_managed_error)
     }
 
     /// Resolves one profile into a verified launch capability.
     ///
     /// The database path is validated as absolute without `..` segments; the
-    /// executable is resolved and verified as a regular file; `version_stdout`
-    /// is the exact `codex --version` output captured at probe time and is
-    /// parsed plus enforced against [`CODEX_MINIMUM_CLI_VERSION`]. No process
-    /// is spawned here: the caller performs the bounded `--version` probe and
-    /// hands its bytes in, so this stays a pure verification boundary.
+    /// managed executable is resolved, verified, and seated with its explicit
+    /// environment and use lease; `version_stdout` is the exact
+    /// `codex --version` output captured at probe time and is parsed plus
+    /// enforced against [`CODEX_MINIMUM_CLI_VERSION`].
     ///
     /// # Errors
     ///
@@ -264,22 +215,24 @@ impl NativeCodexAuthority {
         version_stdout: &str,
     ) -> Result<VerifiedCodexLaunch, NativeCodexLaunchError> {
         verify_database_path(database_path)?;
-        let executable = self.resolve_executable()?;
         let version = parse_codex_version(version_stdout)?;
         check_minimum_version(&version)?;
+        let seat =
+            SeatedLaunch::seat(ManagedEngine::Codex, database_path).map_err(map_managed_error)?;
+        verify_regular_executable(seat.executable())?;
         Ok(VerifiedCodexLaunch {
-            database_path: database_path.to_path_buf(),
             profile_id: profile_id.clone(),
-            executable,
+            seat,
             version: version.to_string(),
         })
     }
+}
 
-    /// Resolves one profile against an explicitly supplied executable.
-    ///
-    /// Used by the owner at spawn time when the capability was already
-    /// probed: re-verifies the executable file and re-enforces the carried
-    /// version without PATH discovery.
+#[cfg(feature = "fixtures")]
+impl NativeCodexAuthority {
+    /// Fixture seam for owner tests: certifies an explicit program with the
+    /// managed environment of `database_path`. Compiled only with the
+    /// `fixtures` feature, never into production builds.
     ///
     /// # Errors
     ///
@@ -296,53 +249,23 @@ impl NativeCodexAuthority {
         verify_regular_executable(executable)?;
         let parsed = parse_codex_version(version)?;
         check_minimum_version(&parsed)?;
+        let seat = SeatedLaunch::explicit(ManagedEngine::Codex, database_path, executable)
+            .map_err(map_managed_error)?;
         Ok(VerifiedCodexLaunch {
-            database_path: database_path.to_path_buf(),
             profile_id: profile_id.clone(),
-            executable: executable.to_path_buf(),
+            seat,
             version: parsed.to_string(),
         })
     }
 }
 
-/// Builds the live Windows discovery input for
-/// [`NativeCodexAuthority::resolve_executable`].
-///
-/// The explicit override is handled (verified) by the caller, so it stays
-/// `None` here and never flows through the unverified discovery path.
-/// Versioned directory names come from one bounded read of the local Codex
-/// bin root; an unreadable root simply yields no versioned candidates.
-fn live_codex_discovery_input() -> crate::codex::discovery::CodexDiscoveryInput {
-    use crate::codex::discovery::{CodexDiscoveryInput, codex_local_root};
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty());
-    let path_entries = std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).collect())
-        .unwrap_or_default();
-    let root = codex_local_root(local_app_data.as_deref());
-    let mut directory_names = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&root) {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                directory_names.push(name.to_owned());
-            }
+fn map_managed_error(error: ManagedEngineError) -> NativeCodexLaunchError {
+    match error {
+        ManagedEngineError::UnsupportedPlatform => NativeCodexLaunchError::UnsupportedPlatform,
+        ManagedEngineError::StateMissing | ManagedEngineError::ExecutableUnavailable => {
+            NativeCodexLaunchError::ExecutableUnavailable
         }
-    }
-    // Discovery maps only `arm64` to the AArch64 WinGet binary; the Rust
-    // target name for that architecture is `aarch64`.
-    let architecture = if std::env::consts::ARCH == "aarch64" {
-        String::from("arm64")
-    } else {
-        String::from(std::env::consts::ARCH)
-    };
-    CodexDiscoveryInput {
-        architecture,
-        configured_executable: None,
-        local_app_data,
-        platform_windows: true,
-        path_entries,
-        directory_names,
+        _ => NativeCodexLaunchError::ExecutableUnsafe,
     }
 }
 
@@ -444,13 +367,6 @@ fn verify_regular_executable(path: &Path) -> Result<(), NativeCodexLaunchError> 
             Ok(())
         }
         Err(_) => Err(NativeCodexLaunchError::ExecutableUnavailable),
-    }
-}
-
-fn codex_home_for_database(database_path: &Path) -> PathBuf {
-    match database_path.parent() {
-        Some(parent) => parent.join("toolchain").join("codex").join("home"),
-        None => PathBuf::from("toolchain/codex/home"),
     }
 }
 

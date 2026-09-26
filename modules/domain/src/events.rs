@@ -91,6 +91,9 @@ pub enum Event {
     /// The attached-project catalog changed; pushed to a connection that
     /// listed the projects.
     ProjectCatalog(ProjectListing),
+    /// A Forge-managed engine's install status changed; pushed to a
+    /// connection that read the engine installs.
+    EngineInstalls(crate::EngineInstallSnapshot),
 }
 
 /// A subscribed thread's display title changed: the generated title was

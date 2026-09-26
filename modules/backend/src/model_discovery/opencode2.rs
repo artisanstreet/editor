@@ -9,7 +9,7 @@
 //! capability: thinking stays engine-managed and unexposed here.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -29,7 +29,9 @@ const MAX_LINE_BYTES: usize = 512;
 const MAX_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Probes the `OpenCode2` CLI; `None` when it does not answer.
-pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<DiscoveredModel>> {
+pub(super) async fn discover_opencode2(
+    program: Option<&super::EngineProgram>,
+) -> Option<Vec<DiscoveredModel>> {
     let executable = program?;
     // The CLI can finish its cold initialization with an empty successful
     // response. Retry once; this is not an authoritative empty catalogue.
@@ -50,7 +52,7 @@ pub(super) async fn discover_opencode2(program: Option<&str>) -> Option<Vec<Disc
     if identifiers.is_empty() {
         return None;
     }
-    let metadata = read_models_cache();
+    let metadata = read_models_cache(&executable.home);
     Some(
         identifiers
             .into_iter()
@@ -122,36 +124,20 @@ struct CacheEntry {
     variants: Vec<String>,
 }
 
-/// Locates the engine's catalogue cache under the user home or an explicit
-/// XDG/local cache root.
-fn models_cache_path() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        candidates.push(PathBuf::from(xdg).join("opencode").join("models.json"));
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        candidates.push(
-            PathBuf::from(home)
-                .join(".cache")
-                .join("opencode")
-                .join("models.json"),
-        );
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(
-            PathBuf::from(local)
-                .join("opencode")
-                .join("cache")
-                .join("models.json"),
-        );
-    }
-    candidates.into_iter().find(|path| path.is_file())
+/// Locates the engine's catalogue cache inside its Forge-managed home: the
+/// profile launch's `XDG_CACHE_HOME` (`<home>/cache`) or the default
+/// `<home>/.cache`.
+fn models_cache_path(home: &Path) -> Option<PathBuf> {
+    [home.join("cache"), home.join(".cache")]
+        .into_iter()
+        .map(|cache| cache.join("opencode").join("models.json"))
+        .find(|path| path.is_file())
 }
 
 /// Reads `(provider, model) -> metadata` from the engine cache. Any failure
 /// degrades to no metadata rather than to invented fields.
-fn read_models_cache() -> HashMap<(String, String), CacheEntry> {
-    let Some(path) = models_cache_path() else {
+fn read_models_cache(home: &Path) -> HashMap<(String, String), CacheEntry> {
+    let Some(path) = models_cache_path(home) else {
         return HashMap::new();
     };
     let Ok(metadata) = std::fs::metadata(&path) else {
@@ -333,7 +319,15 @@ mod tests {
         let program = directory.join("models");
         std::fs::write(&program, "#!/bin/sh\nif [ ! -e \"$0.ready\" ]; then touch \"$0.ready\"; exit 0; fi\nprintf 'test-provider/test-model\\n'\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let models = discover_opencode2(program.to_str()).await.unwrap();
+        let program = crate::model_discovery::EngineProgram {
+            executable: program,
+            environment: std::env::var_os("PATH")
+                .map(|path| ("PATH".into(), path))
+                .into_iter()
+                .collect(),
+            home: directory.clone(),
+        };
+        let models = discover_opencode2(Some(&program)).await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].provider, "test-provider");
         assert_eq!(models[0].native_model_id, "test-model");

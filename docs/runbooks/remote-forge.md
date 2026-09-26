@@ -109,6 +109,31 @@ For direct daemon deployments, Forge now accepts `--listen IP:PORT`. Omitting it
 retains the existing `127.0.0.1:0` behavior. The NixOS module exposes
 `services.artisan-forge.listenAddress`; its default remains loopback.
 
+## Engines
+
+The Forge installs, updates, and launches its own engine CLIs (Claude Code, Codex, Grok
+Build, and Cursor Agent on Linux) under `~/.local/state/artisan-forge/toolchain/<engine>/`, verified against the vendor's
+published checksums, and runs them with their own homes there; it never uses a `claude` or
+`codex` found on `PATH` (see `docs/plans/managed-engines.md`). The Editor's Settings engine
+pages show each engine's status, version, and version controls.
+
+A freshly installed engine has no account. Sign in once per host with the managed binary:
+
+```sh
+cargo build --locked -p artisan-editor-cli --bin ae
+DB=~/.local/state/artisan-forge/forge.db
+target/debug/ae engine list --database "$DB"
+target/debug/ae engine login claude --database "$DB"
+target/debug/ae engine login codex --database "$DB" -- --device-auth
+target/debug/ae engine login grok --database "$DB"
+target/debug/ae engine login cursor --database "$DB"
+```
+
+`ae engine versions|use|rollback|status <engine> --database "$DB"` operate on the same install
+state as the Forge. A systemd drop-in that sets `ARTISAN_CODEX_EXECUTABLE` (visible in
+`systemctl --user cat artisan-forge.service`) is obsolete: remove it and restart the service,
+otherwise it keeps overriding the managed Codex.
+
 ## Operations and diagnostics
 
 ```sh

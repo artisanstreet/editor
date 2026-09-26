@@ -196,6 +196,13 @@ pub use account_usage::{
     validate_iso_timestamp,
 };
 
+pub mod engine_install;
+pub use engine_install::{
+    ChangeEngineVersion, EngineInstallError, EngineInstallPhase, EngineInstallSnapshot,
+    EngineInstallStatus, EngineIntegrity, EngineVersionChange, EngineVersionEntry,
+    EngineVersionList, EngineVersionSelection, ListEngineVersions, ReadEngineInstalls,
+};
+
 pub mod composer_state;
 pub use composer_state::{
     QueuedMessageWithdrawalResult, ReadRecalledMessage, ReadRunUsage, RecalledMessageResult,

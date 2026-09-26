@@ -20,6 +20,7 @@ fn all_profile_commands_require_their_explicit_arguments() {
     assert!(matches!(
         register.command,
         Some(Commands::Engine {
+            database: None,
             command: EngineCommand::Profile {
                 command: EngineProfileCommand::Register {
                     profile_id,
@@ -33,6 +34,7 @@ fn all_profile_commands_require_their_explicit_arguments() {
     assert!(matches!(
         list.command,
         Some(Commands::Engine {
+            database: None,
             command: EngineCommand::Profile {
                 command: EngineProfileCommand::List { json: true },
             },
@@ -44,6 +46,7 @@ fn all_profile_commands_require_their_explicit_arguments() {
     assert!(matches!(
         read.command,
         Some(Commands::Engine {
+            database: None,
             command: EngineCommand::Profile {
                 command: EngineProfileCommand::Read { profile_id, json: false },
             },
@@ -126,6 +129,7 @@ fn verify_parser_succeeds_and_requires_explicit_profile_id() {
     assert!(matches!(
         verify.command,
         Some(Commands::Engine {
+            database: None,
             command: EngineCommand::Profile {
                 command: EngineProfileCommand::Verify { profile_id, json: false },
             },
@@ -145,6 +149,7 @@ fn verify_parser_succeeds_and_requires_explicit_profile_id() {
     assert!(matches!(
         verify_json.command,
         Some(Commands::Engine {
+            database: None,
             command: EngineCommand::Profile {
                 command: EngineProfileCommand::Verify { profile_id, json: true },
             },

@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 
 use artisan_domain::EngineProfileId;
 
-use crate::engine_core::{
-    NativeOpenCode2Authority, NativeOpenCode2InstallLock, platform_supported,
-};
+use crate::engine_core::{ManagedInstallLock, NativeOpenCode2Authority};
 use crate::io as files;
 use crate::io::AtomicReplaceOutcome;
 
@@ -71,7 +69,7 @@ impl NativeOpenCode2Authority {
         profile_id: &EngineProfileId,
         home: ProfileHomeKind,
     ) -> Result<ProfileRegistrationOutcome, NativeOpenCode2ProfileError> {
-        if !platform_supported() {
+        if !self.platform_supported() {
             return Err(NativeOpenCode2ProfileError::CertifiedEngineUnavailable);
         }
         let _pre_lock_generation = self
@@ -80,7 +78,7 @@ impl NativeOpenCode2Authority {
         let paths = self
             .install_paths(database_path)
             .map_err(map_profile_path_error)?;
-        let lock = NativeOpenCode2InstallLock::acquire(&paths)
+        let lock = ManagedInstallLock::acquire(&paths)
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;
         lock.fence(&paths)
             .map_err(|_| NativeOpenCode2ProfileError::ProfileLockUnavailable)?;

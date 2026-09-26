@@ -42,6 +42,8 @@ use crate::conversation_delivery_writer::{
 };
 use crate::request_handler::{ActivatedConversationSubscription, ConversationConnectionContext};
 
+#[path = "conversation_delivery_driver/engine_installs.rs"]
+mod engine_installs;
 #[path = "conversation_delivery_driver/recent_threads.rs"]
 mod recent_threads;
 use recent_threads::DeliveredRecentThreads;
@@ -69,6 +71,9 @@ pub(crate) struct ConversationDeliveryDriver {
     /// The project catalog last served or pushed, once the connection
     /// listed the projects.
     projects: Option<artisan_domain::ProjectListing>,
+    /// The engine installs last served or pushed, once the connection read
+    /// them.
+    engines: Option<artisan_domain::EngineInstallSnapshot>,
 }
 
 /// The host state last pushed to this connection and the host-state
@@ -113,6 +118,7 @@ impl ConversationDeliveryDriver {
             host: DeliveredHostState::default(),
             recent: None,
             projects: None,
+            engines: None,
         }
     }
 
@@ -164,6 +170,9 @@ impl ConversationDeliveryDriver {
         if let Some(listing) = outcome.follow_up.project_catalog {
             self.projects = Some(listing);
         }
+        if let Some(snapshot) = outcome.follow_up.engine_installs {
+            self.engines = Some(snapshot);
+        }
 
         if let Some(subscription) = outcome.activation {
             let thread_id = subscription.lease().thread_id().clone();
@@ -186,6 +195,7 @@ impl ConversationDeliveryDriver {
         // pushes the current usage.
         self.deliver_host_state(stamp, limit, cancel).await?;
         self.deliver_project_catalog(stamp, limit, cancel).await?;
+        self.deliver_engine_installs(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
@@ -231,6 +241,7 @@ impl ConversationDeliveryDriver {
         }
         self.deliver_host_state(stamp, limit, cancel).await?;
         self.deliver_project_catalog(stamp, limit, cancel).await?;
+        self.deliver_engine_installs(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 

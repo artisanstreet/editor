@@ -268,6 +268,13 @@ pub(crate) fn encode_request(
         ClientRequest::Query(Query::ReadRecentThreads(_)) => {
             encode_recent_threads_request(builder);
         }
+        ClientRequest::Query(Query::ReadEngineInstalls(_)) => encode_read_engine_installs(builder),
+        ClientRequest::Query(Query::ListEngineVersions(request)) => {
+            encode_list_engine_versions(builder, request);
+        }
+        ClientRequest::Query(Query::ChangeEngineVersion(request)) => {
+            encode_change_engine_version(builder, request);
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -357,6 +364,12 @@ pub(crate) fn encode_response_payload(
         }
         ResponsePayload::RecentThreads(listing) => {
             encode_recent_threads(builder.reborrow().init_recent_threads(), listing)?;
+        }
+        ResponsePayload::EngineInstalls(snapshot) => {
+            encode_engine_install_snapshot(builder.reborrow().init_engine_installs(), snapshot)?;
+        }
+        ResponsePayload::EngineVersions(list) => {
+            encode_engine_version_list(builder.reborrow().init_engine_versions(), list)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -786,6 +799,9 @@ pub(crate) fn decode_request(
             decode_user_preferences_request(value, &request_id)
         }
         request::Which::ReadRecentThreads(()) => Ok(decode_recent_threads_request()),
+        request::Which::ReadEngineInstalls(()) => Ok(decode_read_engine_installs()),
+        request::Which::ListEngineVersions(engine_id) => decode_list_engine_versions(engine_id),
+        request::Which::ChangeEngineVersion(change) => decode_change_engine_version(change?),
     }
 }
 
@@ -929,6 +945,12 @@ pub(crate) fn decode_response(
         }
         response::Which::RecentThreads(listing) => {
             ResponsePayload::RecentThreads(decode_recent_threads(listing?)?)
+        }
+        response::Which::EngineInstalls(snapshot) => {
+            ResponsePayload::EngineInstalls(decode_engine_install_snapshot(snapshot?)?)
+        }
+        response::Which::EngineVersions(list) => {
+            ResponsePayload::EngineVersions(decode_engine_version_list(list?)?)
         }
     };
     Ok(ServerResponse {

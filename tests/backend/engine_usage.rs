@@ -41,9 +41,7 @@ use artisan_domain::{
     ReadAccountUsage, RequestId, iso_millis, validate_iso_timestamp,
 };
 use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
-use artisan_native_engine::{
-    ClaudeUsageConfig, CliResolveInput, CodexUsageConfig, resolve_cli_with,
-};
+use artisan_native_engine::{ClaudeUsageConfig, CodexUsageConfig};
 use artisan_protocol::{ClientRequest, ErrorCode, ResponsePayload};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
@@ -439,81 +437,18 @@ fn codex_stuck_inherited_pipe_still_returns_within_grace() {
     );
 }
 
-fn shim_bin(label: &str) -> PathBuf {
-    static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
-    let dir = env::temp_dir().join(format!(
-        "artisan-usage-shim-{label}-{}-{}",
-        process::id(),
-        SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&dir).expect("shim directory should be created");
-    dir
-}
-
-#[cfg(windows)]
 #[test]
-fn codex_cmd_shim_reads_end_to_end() {
-    let dir = shim_bin("codex");
-    let shim = dir.join("codex.cmd");
-    fs::write(
-        &shim,
-        "@echo off\r\necho {\"id\":1,\"result\":{\"capabilities\":{}}}\r\necho {\"id\":2,\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":\"owner@example.test\"},\"requiresOpenaiAuth\":false}}\r\necho {\"id\":3,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":5.0}}}}}\r\n",
-    )
-    .expect("shim fixture should write");
-    let empty_root = shim_bin("empty-root");
-    let launch = resolve_cli_with(&CliResolveInput {
-        tool: "codex",
-        override_var: "ARTISAN_TEST_CODEX_OVERRIDE",
-        configured: None,
-        local_app_data: Some(empty_root.clone()),
-        path_dirs: vec![dir.clone()],
-        arch: "x86_64",
-    });
-    assert_eq!(launch.program, PathBuf::from("cmd"));
-    assert!(
-        launch
-            .prefix_args
-            .contains(&shim.to_string_lossy().into_owned())
-    );
-    let mut config = CodexUsageConfig::launched(&launch);
-    config.overall_timeout = Duration::from_secs(10);
-    let usage = artisan_native_engine::read_codex_usage(&config).expect("shim should answer");
-    assert_eq!(usage.auth.state(), EngineUsageAuthentication::Authenticated);
-    assert_eq!(usage.account_email.as_deref(), Some("owner@example.test"));
-    assert_eq!(usage.windows.len(), 1);
-    assert_eq!(usage.windows[0].percent_used(), 5.0);
-    fs::remove_dir_all(&dir).ok();
-    fs::remove_dir_all(&empty_root).ok();
-}
-
-#[cfg(windows)]
-#[test]
-fn claude_cmd_shim_reads_end_to_end() {
-    let dir = shim_bin("claude");
-    let shim = dir.join("claude.cmd");
-    fs::write(
-        &shim,
-        "@echo off\r\necho {\"result\":\"Current session: 9%% used\"}\r\n",
-    )
-    .expect("shim fixture should write");
-    let empty_root = shim_bin("empty-root");
-    let launch = resolve_cli_with(&CliResolveInput {
-        tool: "claude",
-        override_var: "ARTISAN_TEST_CLAUDE_OVERRIDE",
-        configured: None,
-        local_app_data: Some(empty_root.clone()),
-        path_dirs: vec![dir.clone()],
-        arch: "x86_64",
-    });
-    assert_eq!(launch.program, PathBuf::from("cmd"));
-    let mut config = ClaudeUsageConfig::launched(&launch);
-    config.timeout = Duration::from_secs(10);
-    let usage = artisan_native_engine::read_claude_usage(&config).expect("shim should answer");
-    assert_eq!(usage.windows.len(), 1);
-    assert_eq!(usage.windows[0].id(), "five_hour");
-    assert_eq!(usage.windows[0].percent_used(), 9.0);
-    fs::remove_dir_all(&dir).ok();
-    fs::remove_dir_all(&empty_root).ok();
+fn managed_usage_configs_never_fall_back_to_path() {
+    let root = env::temp_dir().join(format!("artisan-usage-managed-{}", process::id()));
+    fs::create_dir_all(&root).expect("fixture root");
+    let database = root.join("forge.db");
+    if env::var_os("ARTISAN_CLAUDE_EXECUTABLE").is_none() {
+        assert!(ClaudeUsageConfig::managed(&database).is_err());
+    }
+    if env::var_os("ARTISAN_CODEX_EXECUTABLE").is_none() {
+        assert!(CodexUsageConfig::managed(&database).is_err());
+    }
+    fs::remove_dir_all(&root).ok();
 }
 
 #[test]

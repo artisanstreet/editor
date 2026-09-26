@@ -11,9 +11,8 @@ use std::path::{Path, PathBuf};
 use artisan_domain::EngineProfileId;
 
 use crate::engine_core::{
-    NativeOpenCode2Authority, NativeOpenCode2Error, NativeOpenCode2InstallLock,
-    NativeOpenCode2InstallLockError, NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths,
-    NativeOpenCode2InstallSpec, ResolvedOpenCode2Generation, platform_supported,
+    ManagedEngineError, ManagedInstallLock, ManagedInstallLockError, ManagedInstallPathError,
+    ManagedInstallPaths, NativeOpenCode2Authority, ResolvedGeneration,
 };
 use crate::io::{NativeFileError, VerifiedFileIdentity};
 
@@ -29,18 +28,18 @@ use super::types::{
 #[must_use = "retain the capability until the protected launch is complete"]
 pub struct VerifiedOpenCode2ProfileLaunch {
     database_path: PathBuf,
-    paths: NativeOpenCode2InstallPaths,
+    paths: ManagedInstallPaths,
     profile_id: EngineProfileId,
     home: ProfileHomeKind,
-    install_spec: NativeOpenCode2InstallSpec,
+    authority: NativeOpenCode2Authority,
     profile_home: PathBuf,
     executable: PathBuf,
     generation_id: String,
-    version: &'static str,
+    version: String,
     executable_size_bytes: u64,
     executable_sha256: [u8; 32],
     executable_identity: VerifiedFileIdentity,
-    install_lock: NativeOpenCode2InstallLock,
+    install_lock: ManagedInstallLock,
 }
 
 impl fmt::Debug for VerifiedOpenCode2ProfileLaunch {
@@ -90,8 +89,8 @@ impl VerifiedOpenCode2ProfileLaunch {
 
     /// Returns the certified executable version.
     #[must_use]
-    pub const fn version(&self) -> &'static str {
-        self.version
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// Returns the certified executable size in bytes.
@@ -124,7 +123,7 @@ impl VerifiedOpenCode2ProfileLaunch {
         self.install_lock
             .fence(&self.paths)
             .map_err(map_launch_lock_error)?;
-        let authority = NativeOpenCode2Authority::with_spec(self.install_spec);
+        let authority = self.authority;
         let profile = read_exact_profile_from_path(
             &self.paths.engine_root().join("profiles.json"),
             &self.profile_id,
@@ -167,18 +166,17 @@ impl NativeOpenCode2Authority {
         database_path: &Path,
         profile_id: &EngineProfileId,
     ) -> Result<VerifiedOpenCode2ProfileLaunch, NativeOpenCode2ProfileLaunchError> {
-        if !platform_supported() {
+        if !self.platform_supported() {
             return Err(NativeOpenCode2ProfileLaunchError::UnsupportedPlatform);
         }
         let paths = self
             .install_paths(database_path)
             .map_err(map_launch_path_error)?;
-        let install_lock =
-            NativeOpenCode2InstallLock::acquire(&paths).map_err(map_launch_lock_error)?;
+        let install_lock = ManagedInstallLock::acquire(&paths).map_err(map_launch_lock_error)?;
         let first =
-            resolve_profile_under_fence(self, database_path, profile_id, &paths, &install_lock)?;
+            resolve_profile_under_fence(*self, database_path, profile_id, &paths, &install_lock)?;
         let second =
-            resolve_profile_under_fence(self, database_path, profile_id, &paths, &install_lock)?;
+            resolve_profile_under_fence(*self, database_path, profile_id, &paths, &install_lock)?;
         if first.profile.home != second.profile.home
             || first.home != second.home
             || !same_generation(&first.generation, &second.generation)
@@ -192,11 +190,11 @@ impl NativeOpenCode2Authority {
             paths,
             profile_id: second.profile.profile_id,
             home: second.profile.home,
-            install_spec: *self.spec(),
+            authority: *self,
             profile_home: second.home,
             executable: generation.executable_path().to_path_buf(),
             generation_id: generation.generation_id().to_owned(),
-            version: generation.version(),
+            version: generation.version().to_string(),
             executable_size_bytes: generation.executable_size_bytes(),
             executable_sha256: *generation.executable_sha256(),
             executable_identity: generation.file_identity(),
@@ -208,15 +206,15 @@ impl NativeOpenCode2Authority {
 struct ProfileResolution {
     profile: OpenCode2Profile,
     home: PathBuf,
-    generation: ResolvedOpenCode2Generation,
+    generation: ResolvedGeneration,
 }
 
 fn resolve_profile_under_fence(
-    authority: &NativeOpenCode2Authority,
+    authority: NativeOpenCode2Authority,
     database_path: &Path,
     profile_id: &EngineProfileId,
-    paths: &NativeOpenCode2InstallPaths,
-    install_lock: &NativeOpenCode2InstallLock,
+    paths: &ManagedInstallPaths,
+    install_lock: &ManagedInstallLock,
 ) -> Result<ProfileResolution, NativeOpenCode2ProfileLaunchError> {
     install_lock.fence(paths).map_err(map_launch_lock_error)?;
     let registry_path = paths.engine_root().join("profiles.json");
@@ -236,10 +234,7 @@ fn resolve_profile_under_fence(
     })
 }
 
-fn same_generation(
-    left: &ResolvedOpenCode2Generation,
-    right: &ResolvedOpenCode2Generation,
-) -> bool {
+fn same_generation(left: &ResolvedGeneration, right: &ResolvedGeneration) -> bool {
     left.executable_path() == right.executable_path()
         && left.generation_id() == right.generation_id()
         && left.version() == right.version()
@@ -249,33 +244,29 @@ fn same_generation(
 }
 
 fn same_generation_as_capability(
-    generation: &ResolvedOpenCode2Generation,
+    generation: &ResolvedGeneration,
     capability: &VerifiedOpenCode2ProfileLaunch,
 ) -> bool {
     generation.executable_path() == capability.executable_path()
         && generation.generation_id() == capability.generation_id()
-        && generation.version() == capability.version()
+        && generation.version().as_str() == capability.version()
         && generation.executable_size_bytes() == capability.executable_size_bytes()
         && generation.executable_sha256() == capability.executable_sha256()
         && generation.file_identity() == capability.executable_identity()
 }
 
-fn map_launch_path_error(
-    error: NativeOpenCode2InstallPathError,
-) -> NativeOpenCode2ProfileLaunchError {
+fn map_launch_path_error(error: ManagedInstallPathError) -> NativeOpenCode2ProfileLaunchError {
     match error {
-        NativeOpenCode2InstallPathError::InvalidRoot => {
+        ManagedInstallPathError::InvalidRoot => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryUnsafe
         }
-        NativeOpenCode2InstallPathError::Unavailable => {
+        ManagedInstallPathError::Unavailable => {
             NativeOpenCode2ProfileLaunchError::ProfileRegistryUnavailable
         }
     }
 }
 
-fn map_launch_lock_error(
-    _error: NativeOpenCode2InstallLockError,
-) -> NativeOpenCode2ProfileLaunchError {
+fn map_launch_lock_error(_error: ManagedInstallLockError) -> NativeOpenCode2ProfileLaunchError {
     NativeOpenCode2ProfileLaunchError::LockUnavailable
 }
 
@@ -339,32 +330,30 @@ fn map_launch_home_error(error: NativeFileError) -> NativeOpenCode2ProfileLaunch
     }
 }
 
-fn map_launch_authority_error(error: NativeOpenCode2Error) -> NativeOpenCode2ProfileLaunchError {
+fn map_launch_authority_error(error: ManagedEngineError) -> NativeOpenCode2ProfileLaunchError {
     match error {
-        NativeOpenCode2Error::UnsupportedPlatform => {
+        ManagedEngineError::UnsupportedPlatform => {
             NativeOpenCode2ProfileLaunchError::UnsupportedPlatform
         }
-        NativeOpenCode2Error::StateMissing => {
-            NativeOpenCode2ProfileLaunchError::InstallStateMissing
-        }
-        NativeOpenCode2Error::StateTooLarge
-        | NativeOpenCode2Error::StateMalformed
-        | NativeOpenCode2Error::StateUnsupportedVersion
-        | NativeOpenCode2Error::Io => NativeOpenCode2ProfileLaunchError::InstallStateInvalid,
-        NativeOpenCode2Error::ActiveGenerationUntrusted => {
+        ManagedEngineError::StateMissing => NativeOpenCode2ProfileLaunchError::InstallStateMissing,
+        ManagedEngineError::StateTooLarge
+        | ManagedEngineError::StateMalformed
+        | ManagedEngineError::StateUnsupportedVersion
+        | ManagedEngineError::Io => NativeOpenCode2ProfileLaunchError::InstallStateInvalid,
+        ManagedEngineError::ActiveGenerationUntrusted => {
             NativeOpenCode2ProfileLaunchError::GenerationUntrusted
         }
-        NativeOpenCode2Error::UnsafePath => NativeOpenCode2ProfileLaunchError::GenerationUnsafe,
-        NativeOpenCode2Error::ExecutableUnavailable => {
+        ManagedEngineError::UnsafePath => NativeOpenCode2ProfileLaunchError::GenerationUnsafe,
+        ManagedEngineError::ExecutableUnavailable => {
             NativeOpenCode2ProfileLaunchError::ExecutableUnavailable
         }
-        NativeOpenCode2Error::ExecutableChanged => {
+        ManagedEngineError::ExecutableChanged => {
             NativeOpenCode2ProfileLaunchError::ExecutableChanged
         }
-        NativeOpenCode2Error::ExecutableSizeMismatch => {
+        ManagedEngineError::ExecutableSizeMismatch => {
             NativeOpenCode2ProfileLaunchError::ExecutableSizeMismatch
         }
-        NativeOpenCode2Error::ExecutableHashMismatch => {
+        ManagedEngineError::ExecutableHashMismatch => {
             NativeOpenCode2ProfileLaunchError::ExecutableHashMismatch
         }
     }

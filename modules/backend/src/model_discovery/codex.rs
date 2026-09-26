@@ -9,13 +9,10 @@
 //! `max_context_window` per slug.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Instant;
 
-use artisan_native_engine::codex::{
-    CodexDiscoveryInput, codex_local_root, resolve_codex_executable,
-};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -29,51 +26,19 @@ const MAX_MODELS: usize = 512;
 /// Maximum accepted pages.
 const MAX_PAGES: usize = 8;
 
-/// Probes Codex; `None` when the executable is absent or the handshake fails.
-pub(super) async fn discover_codex() -> Option<Vec<DiscoveredModel>> {
-    let executable = resolve_codex_command();
+/// Probes the managed Codex; `None` when it is not installed or the handshake
+/// fails.
+pub(super) async fn discover_codex(
+    program: Option<&super::EngineProgram>,
+) -> Option<Vec<DiscoveredModel>> {
+    let program = program?;
     let deadline = Instant::now() + super::ENGINE_DEADLINE;
-    let mut session = CodexSession::start(&executable).ok()?;
+    let mut session = CodexSession::start(program).ok()?;
     let result = session.list_models(deadline).await;
     session.close().await;
     let rows = result?;
-    let context = read_context_windows();
+    let context = read_context_windows(&program.home.join(".codex"));
     Some(rows.into_iter().map(|row| map_row(row, &context)).collect())
-}
-
-/// Resolves the Codex executable with the same precedence the runtime uses:
-/// explicit override, per-user install, `WinGet`, then eligible PATH entries.
-fn resolve_codex_command() -> String {
-    let configured_executable = std::env::var("ARTISAN_CODEX_EXECUTABLE").ok();
-    let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
-    let path_entries = std::env::var("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
-    let root = codex_local_root(local_app_data.as_deref());
-    let directory_names = std::fs::read_dir(&root)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().is_dir())
-                .filter_map(|entry| entry.file_name().into_string().ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let architecture = match std::env::consts::ARCH {
-        "aarch64" => "arm64".to_owned(),
-        other => other.to_owned(),
-    };
-    let input = CodexDiscoveryInput {
-        architecture,
-        configured_executable,
-        local_app_data,
-        platform_windows: cfg!(windows),
-        path_entries,
-        directory_names,
-    };
-    resolve_codex_executable(&input, &|candidate| candidate.is_file())
-        .to_string_lossy()
-        .into_owned()
 }
 
 #[expect(
@@ -99,8 +64,10 @@ struct CodexSession {
 }
 
 impl CodexSession {
-    fn start(executable: &str) -> Result<Self, ()> {
-        let mut child = Command::new(executable)
+    fn start(program: &super::EngineProgram) -> Result<Self, ()> {
+        let mut child = Command::new(&program.executable)
+            .env_clear()
+            .envs(program.environment.iter().cloned())
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -329,11 +296,8 @@ fn map_row(row: RawCodexModel, context: &HashMap<String, (u64, u64)>) -> Discove
 }
 
 /// Reads the CLI-maintained model cache for context windows.
-fn read_context_windows() -> HashMap<String, (u64, u64)> {
-    let Some(path) = codex_models_cache_path() else {
-        return HashMap::new();
-    };
-    let Ok(bytes) = std::fs::read(path) else {
+fn read_context_windows(codex_home: &Path) -> HashMap<String, (u64, u64)> {
+    let Ok(bytes) = std::fs::read(codex_home.join("models_cache.json")) else {
         return HashMap::new();
     };
     if bytes.len() > 4 * 1024 * 1024 {
@@ -356,19 +320,6 @@ fn read_context_windows() -> HashMap<String, (u64, u64)> {
         }
     }
     map
-}
-
-fn codex_models_cache_path() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("CODEX_HOME") {
-        let home = home.trim();
-        if !home.is_empty() {
-            return Some(PathBuf::from(home).join("models_cache.json"));
-        }
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    (!home.trim().is_empty()).then(|| PathBuf::from(home).join(".codex").join("models_cache.json"))
 }
 
 #[cfg(test)]
