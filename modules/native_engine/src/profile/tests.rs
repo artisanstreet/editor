@@ -392,7 +392,7 @@ fn exact_default_and_primary_named_profile_resolution() {
         paths.engine_root().join("homes").join("default")
     );
     assert_eq!(named.generation_id(), generation_id());
-    assert_eq!(named.version(), "1.2.3-test");
+    assert_eq!(named.version(), "0.0.0-beta-17778");
     assert_eq!(named.executable_path(), test_executable(&paths));
     drop(named);
     assert!(matches!(
