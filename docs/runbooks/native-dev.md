@@ -145,9 +145,11 @@ or launch the Editor. Configure nix-direnv on the host for cached activation.
 
 The shell defaults to two Cargo jobs. Override `CARGO_BUILD_JOBS` when appropriate.
 Nix builder concurrency is separate. Every payload ends in fat-LTO links of several GB
-each (the Editor's near 10 GB), so the pipeline bounds them itself: `nix run .#dev`
-builds one derivation at a time (`--max-jobs 1`), and a payload's final Cargo build
-runs one job, so links never overlap. A Debug or Production payload then fits in 16 GB.
+each (the Editor's peaks near 14 GB in Debug, 5.5 GB in Production), so the pipeline
+bounds them itself: `nix run .#dev` builds one derivation at a time (`--max-jobs 1`),
+and a payload's final Cargo build runs one job, so links never overlap. On a 16 GB
+machine a Production build leaves about 9 GB free; a Debug build leaves under 1 GB and
+leans on swap while the Editor links, so stop other heavy work during a Debug build.
 
 ## Nix outputs
 
