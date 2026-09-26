@@ -12,6 +12,7 @@ use std::{fmt, path::Path};
 use super::{
     archive::ArchiveError,
     authority::ManagedEngineAuthority,
+    failure::{clear_install_failure, record_install_failure},
     feed::{
         FeedError, ReleaseArtifact, direct_release, latest_request, parse_latest, parse_release,
         parse_versions, release_request, versions_request,
@@ -223,6 +224,11 @@ impl<'a> EngineOperations<'a> {
     /// version when it is not retained, then switches (or queues the switch
     /// until the engine is idle).
     ///
+    /// Every outcome is recorded: a failure (other than another holder of
+    /// the install lock) in the engine's failure record, which status
+    /// surfaces report and the Forge retries with backoff; a success clears
+    /// it.
+    ///
     /// # Errors
     ///
     /// Returns [`InstallError`] when the target cannot be resolved,
@@ -231,17 +237,52 @@ impl<'a> EngineOperations<'a> {
         &self,
         progress: &dyn Fn(InstallProgress),
     ) -> Result<SwitchOutcome, InstallError> {
+        let mut target = None;
+        let result = self.resolve_and_switch(progress, &mut target);
+        self.record_outcome(&result, target.as_ref());
+        result
+    }
+
+    fn resolve_and_switch(
+        &self,
+        progress: &dyn Fn(InstallProgress),
+        target: &mut Option<EngineVersion>,
+    ) -> Result<SwitchOutcome, InstallError> {
         let paths = self.paths()?;
         let selection = self
             .authority
             .read_selection(paths.engine_root())
             .map_err(|_| InstallError::StateInvalid)?;
         progress(InstallProgress::Resolving);
-        let target = match selection {
+        let version = match selection {
             EngineSelection::Latest => self.latest_version()?,
             EngineSelection::Held(version) => version,
         };
-        self.switch_to(&paths, &target, progress)
+        self.switch_to(&paths, target.insert(version), progress)
+    }
+
+    /// Best effort: a record that cannot be written never masks the
+    /// install's own outcome.
+    fn record_outcome(
+        &self,
+        result: &Result<SwitchOutcome, InstallError>,
+        target: Option<&EngineVersion>,
+    ) {
+        let Ok(paths) = self.paths() else {
+            return;
+        };
+        let engine = self.authority.engine();
+        match result {
+            Ok(_) => {
+                let _ = clear_install_failure(paths.engine_root(), engine);
+            }
+            Err(error) if error.is_lock_contention() => {}
+            Err(error) => {
+                if paths.prepare().is_ok() {
+                    let _ = record_install_failure(paths.engine_root(), engine, error, target);
+                }
+            }
+        }
     }
 
     /// Persists `selection` and makes it active.

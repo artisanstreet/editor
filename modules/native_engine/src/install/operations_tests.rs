@@ -421,6 +421,80 @@ fn codex_installs_its_package_tree_from_npm_integrity() {
 }
 
 #[test]
+fn a_rejected_archive_is_recorded_with_its_reason_until_an_install_succeeds() {
+    let root = tempfile::tempdir().unwrap();
+    let database = database(root.path());
+    let tarball = tar_gzip_with_modes(&[
+        ("package/package.json", b"{}".as_slice(), b'0', 0o644),
+        ("package/vendor/escape", b"".as_slice(), b'2', 0o777),
+    ]);
+    let integrity = format!("sha512-{}", STANDARD.encode(Sha512::digest(&tarball)));
+    let url = "https://registry.npmjs.org/@openai/codex/-/codex-0.157.1-linux-x64.tgz";
+    let vendor = FixtureVendor::default()
+        .with(
+            "https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags",
+            r#"{"latest":"0.157.1"}"#,
+        )
+        .with(
+            "https://registry.npmjs.org/@openai%2fcodex/0.157.1-linux-x64",
+            format!(
+                r#"{{"version":"0.157.1-linux-x64","dist":{{"tarball":"{url}","integrity":"{integrity}"}}}}"#
+            ),
+        )
+        .with(url, tarball);
+    let codex = ManagedEngineAuthority::for_platform(ManagedEngine::Codex, HostPlatform::LinuxX64);
+    let operations = EngineOperations::new(codex, &database, &vendor);
+    let error = operations.ensure_selected(&|_| {}).unwrap_err();
+    assert_eq!(error.code(), "unsupported_entry");
+    assert_eq!(
+        error.to_string(),
+        "managed engine operation failed: unsupported_entry: symlink package/vendor/escape"
+    );
+    let engine_root = root.path().join("toolchain/codex");
+    let failure = crate::engine_core::read_install_failure(&engine_root, ManagedEngine::Codex)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        failure.detail,
+        "unsupported_entry: symlink package/vendor/escape"
+    );
+    assert_eq!(failure.version.as_deref(), Some("0.157.1"));
+    assert_eq!(failure.attempts, 1);
+    assert!(!failure.retry_due());
+    operations.ensure_selected(&|_| {}).unwrap_err();
+    assert_eq!(
+        crate::engine_core::read_install_failure(&engine_root, ManagedEngine::Codex)
+            .unwrap()
+            .unwrap()
+            .attempts,
+        2
+    );
+    let versions = root.path().join("toolchain/codex/versions");
+    assert_eq!(fs::read_dir(versions).unwrap().count(), 0);
+
+    let good = claude_vendor("2.1.283", &[("2.1.283", b"claude 2.1.283")]);
+    let claude_operations = EngineOperations::new(claude(), &database, &good);
+    let broken = claude_vendor("2.1.283", &[("2.1.283", b"claude 2.1.283")]).with(
+        &format!("{CLAUDE}/2.1.283/linux-x64/claude"),
+        b"tampered".to_vec(),
+    );
+    let claude_root = root.path().join("toolchain/claude");
+    EngineOperations::new(claude(), &database, &broken)
+        .ensure_selected(&|_| {})
+        .unwrap_err();
+    assert!(
+        crate::engine_core::read_install_failure(&claude_root, ManagedEngine::Claude)
+            .unwrap()
+            .is_some()
+    );
+    claude_operations.ensure_selected(&|_| {}).unwrap();
+    assert_eq!(
+        crate::engine_core::read_install_failure(&claude_root, ManagedEngine::Claude),
+        Ok(None)
+    );
+}
+
+#[test]
 fn unsupported_engines_never_touch_the_network() {
     let root = tempfile::tempdir().unwrap();
     let database = database(root.path());

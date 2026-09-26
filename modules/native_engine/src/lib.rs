@@ -66,8 +66,8 @@ pub use engine_core::{
     register_managed_database, resolve_launch_target, resolve_launch_target_in,
 };
 pub use engine_core::{
-    Integrity, MAX_TRUST_RECORDS, TrustRecord, apply_managed_environment, managed_environment_for,
-    read_trust_records, record_for, versions_listed,
+    InstallFailure, Integrity, MAX_TRUST_RECORDS, TrustRecord, apply_managed_environment,
+    managed_environment_for, read_install_failure, read_trust_records, record_for, versions_listed,
 };
 pub use io::{
     AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity, ensure_directory,

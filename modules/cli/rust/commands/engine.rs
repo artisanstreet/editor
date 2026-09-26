@@ -11,8 +11,8 @@ use std::{
 
 use artisan_native_engine::{
     EngineInspection, EngineOperations, EngineSelection, HttpsTransport, InstallError,
-    InstallProgress, ManagedEngine, ManagedEngineAuthority, SwitchOutcome, VersionListing,
-    read_trust_records, record_for, resolve_launch_target_in,
+    InstallFailure, InstallProgress, ManagedEngine, ManagedEngineAuthority, SwitchOutcome,
+    VersionListing, read_install_failure, read_trust_records, record_for, resolve_launch_target_in,
 };
 
 use crate::{CliError, Result, paths::Layout};
@@ -132,6 +132,13 @@ fn describe(database: &Path, engine: ManagedEngine) -> serde_json::Value {
                 artisan_domain::iso_millis(i64::try_from(first_seen).unwrap_or(i64::MAX)).into();
         }
     }
+    let failure = paths
+        .as_ref()
+        .and_then(|paths| read_install_failure(paths.engine_root(), engine).ok())
+        .flatten();
+    if let Some(failure) = failure {
+        apply_failure(&mut value, &failure);
+    }
     if let Some(state) = state {
         value["pending"] = state.pending.map(|pending| pending.version).into();
         value["previous"] = state
@@ -145,6 +152,25 @@ fn describe(database: &Path, engine: ManagedEngine) -> serde_json::Value {
         value["override"] = engine.override_env().into();
     }
     value
+}
+
+/// Reports the last failed install: as the status when nothing usable is
+/// installed, otherwise beside the ready version.
+fn apply_failure(value: &mut serde_json::Value, failure: &InstallFailure) {
+    let millis = |ms: u64| artisan_domain::iso_millis(i64::try_from(ms).unwrap_or(i64::MAX));
+    let record = serde_json::json!({
+        "reason": failure.code,
+        "detail": failure.detail,
+        "version": failure.version,
+        "attempts": failure.attempts,
+        "failed_at": millis(failure.failed_at_ms),
+        "retry_after": millis(failure.retry_at_ms()),
+    });
+    if value["status"] == "not_installed" {
+        value["status"] = "failed".into();
+        value["reason"] = failure.code.clone().into();
+    }
+    value["last_failure"] = record;
 }
 
 fn list(database: &Path, json: bool) {
@@ -178,6 +204,12 @@ fn summary_line(engine: &serde_json::Value) -> String {
             engine["version"].as_str().unwrap_or_default()
         ),
         Some("not_installed") => format!("{name}: not installed ({held})"),
+        Some("failed") => format!(
+            "{name}: failed: {} ({held})",
+            engine["last_failure"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+        ),
         Some("unsupported") => format!(
             "{name}: unsupported ({})",
             engine["message"].as_str().unwrap_or_default()
@@ -201,6 +233,18 @@ fn summary_line(engine: &serde_json::Value) -> String {
             }
         }
         _ => {}
+    }
+    let failure = &engine["last_failure"];
+    if let Some(detail) = failure["detail"].as_str() {
+        if engine["status"] != "failed" {
+            let _ = write!(line, "; last update failed: {detail}");
+        }
+        let _ = write!(
+            line,
+            "; attempt {}, the Forge retries after {}",
+            failure["attempts"],
+            failure["retry_after"].as_str().unwrap_or_default()
+        );
     }
     if let Some(pending) = engine["pending"].as_str() {
         let _ = write!(line, "; {pending} waits for the engine to be idle");
@@ -286,7 +330,7 @@ fn ensure(database: &Path, engine: Option<EngineArg>) -> Result<()> {
         match operations.ensure_selected(&report_progress(engine)) {
             Ok(outcome) => print_outcome(engine, &outcome),
             Err(error) => {
-                eprintln!("{}: {}", engine.display_name(), error.code());
+                eprintln!("{}: failed: {}", engine.display_name(), error.detail());
                 first_error.get_or_insert(install_error(engine)(error));
             }
         }
@@ -304,7 +348,10 @@ fn select(database: &Path, engine: ManagedEngine, selection: &str) -> Result<()>
         EngineOperations::new(ManagedEngineAuthority::new(engine), database, &transport);
     let outcome = operations
         .select(&selection, &report_progress(engine))
-        .map_err(install_error(engine))?;
+        .map_err(|error| {
+            eprintln!("{}: failed: {}", engine.display_name(), error.detail());
+            install_error(engine)(error)
+        })?;
     print_outcome(engine, &outcome);
     Ok(())
 }
@@ -432,5 +479,31 @@ mod tests {
             summary_line(&trusted),
             "Grok Build: ready 1.0.41 (held at 1.0.41); trusted on first download (hash recorded 2026-09-26)"
         );
+    }
+
+    #[test]
+    fn a_recorded_failure_replaces_not_installed() {
+        let failure = serde_json::from_str::<artisan_native_engine::InstallFailure>(
+            r#"{"format_version":1,"code":"too_many_entries","detail":"too_many_entries: 632 entries, limit 512","version":"0.157.1","attempts":2,"failed_at_ms":1790000000000}"#,
+        )
+        .unwrap();
+        let mut value = serde_json::json!({
+            "name": "Codex", "status": "not_installed", "selection": "latest",
+            "integrity": "vendor_checksum",
+        });
+        super::apply_failure(&mut value, &failure);
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["reason"], "too_many_entries");
+        assert_eq!(
+            summary_line(&value),
+            "Codex: failed: too_many_entries: 632 entries, limit 512 (follows latest); verified \
+             by vendor checksum; attempt 2, the Forge retries after 2026-09-21T14:15:20Z"
+        );
+        let mut ready = serde_json::json!({
+            "name": "Codex", "status": "ready", "version": "0.156.0", "selection": "latest",
+        });
+        super::apply_failure(&mut ready, &failure);
+        assert_eq!(ready["status"], "ready");
+        assert!(summary_line(&ready).contains("; last update failed: too_many_entries"));
     }
 }
