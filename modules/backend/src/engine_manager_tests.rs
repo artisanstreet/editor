@@ -131,8 +131,10 @@ fn installs_latest_at_start_and_reports_every_engine() {
     assert!(claude.vendor_version_list);
     for engine in ["grok", "cursor"] {
         let status = snapshot.engine(engine).unwrap();
-        assert_eq!(status.integrity, EngineIntegrity::TrustOnFirstDownload);
+        // An engine unsupported on this platform (Cursor on Windows) has no
+        // artifact, and so no integrity mode, to report.
         if status.phase != EngineInstallPhase::Unsupported {
+            assert_eq!(status.integrity, EngineIntegrity::TrustOnFirstDownload);
             assert!(!status.vendor_version_list);
         }
     }
