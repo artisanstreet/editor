@@ -571,6 +571,129 @@ fn reconcile_invalid_readiness(
     Ok(ReadinessReconcile::CleanedStale { pid: receipt.pid() })
 }
 
+/// Where the launched Editor's standard streams go.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EditorOutput {
+    /// The runner's own streams: an interactive terminal, or `--attach`,
+    /// where the runner lives exactly as long as the Editor anyway.
+    Inherit,
+    /// Detached from the runner's streams. A caller that reads `cargo dev`
+    /// through a pipe (an agent shell, `| tee`, CI) waits for end-of-file,
+    /// which never comes while a long-lived Editor holds the write end, so
+    /// the run looks hung long after the runner returned. On Unix the
+    /// Editor writes to this log instead; on Windows every inheritable
+    /// handle leaks into a child regardless of its standard streams, so the
+    /// Editor is started through the shell, which inherits none, and its
+    /// output is not captured.
+    Detached {
+        /// Per-root Editor log (Unix).
+        log: PathBuf,
+    },
+}
+
+/// Editor output log inside the runner directory.
+#[must_use]
+pub fn editor_log_path(paths: &DevPaths) -> PathBuf {
+    paths.runner_dir().join("editor.log")
+}
+
+/// Chooses the Editor's output routing for one launch.
+///
+/// Only an attached run, or a detached run whose stdout and stderr are both
+/// terminals, may hand the Editor the runner's streams: a terminal has no
+/// end-of-file for anyone to wait on.
+#[must_use]
+pub fn editor_output(attach: bool, streams_are_terminals: bool, log: PathBuf) -> EditorOutput {
+    if attach || streams_are_terminals {
+        EditorOutput::Inherit
+    } else {
+        EditorOutput::Detached { log }
+    }
+}
+
+/// Whether the runner's stdout and stderr are both interactive terminals.
+#[must_use]
+pub fn streams_are_terminals() -> bool {
+    use std::io::IsTerminal as _;
+
+    std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// Bound for the Windows shell launch to report the Editor's process id.
+pub const DEV_LAUNCH_REPORT_TIMEOUT_MS: u64 = 30_000;
+
+/// A launched dev Editor under the runner's control.
+///
+/// `child` is the Editor itself, except for a detached Windows launch, where
+/// it is the watcher that started the Editor through the shell and exits
+/// with the Editor's exit code.
+#[derive(Debug)]
+pub struct EditorProcess {
+    child: Child,
+    pid: u32,
+    watcher: bool,
+}
+
+impl EditorProcess {
+    /// Wraps an Editor child spawned directly.
+    #[must_use]
+    pub fn direct(child: Child) -> Self {
+        let pid = child.id();
+        Self {
+            child,
+            pid,
+            watcher: false,
+        }
+    }
+
+    /// The Editor's process id.
+    #[must_use]
+    pub const fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// The process whose exit reports the Editor's exit.
+    pub const fn child_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
+    /// Follows the Editor until it exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the wait failure.
+    pub fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait()
+    }
+
+    /// Leaves a confirmed Editor running on its own.
+    ///
+    /// A Windows watcher still holds the runner's inherited handles, so it is
+    /// stopped here; the Editor it started owns none of them and keeps
+    /// running. A direct child is simply no longer followed.
+    pub fn release(mut self) {
+        if self.watcher {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Stops the Editor after unconfirmed startup and returns its exit code
+    /// when known.
+    ///
+    /// Best-effort: killing the Editor releases its owned Forge through the
+    /// Editor's lease and Job Object containment.
+    #[must_use]
+    pub fn stop(mut self) -> Option<i32> {
+        if self.watcher {
+            terminate_pid(self.pid);
+        } else {
+            let _ = self.child.kill();
+        }
+        self.child.wait().ok().and_then(|status| status.code())
+    }
+}
+
 /// Spawns the staged Editor on the dev home.
 ///
 /// The child inherits the environment with `ARTISAN_HOME` pointed at the
@@ -578,7 +701,9 @@ fn reconcile_invalid_readiness(
 /// requested, and the startup receipt path set. Without a registered host
 /// the Editor therefore exercises its owned Forge custody path; with one
 /// (the reopen hint, or the first registered host) it connects to that
-/// host. Standard streams are inherited so Editor output stays visible.
+/// host. Either way it writes the startup receipt once its first host
+/// connection completes the initial queries. `output` routes its standard
+/// streams (see [`EditorOutput`]).
 ///
 /// # Errors
 ///
@@ -587,22 +712,193 @@ pub fn spawn_editor(
     editor_exe: &Path,
     home: &Path,
     receipt_path: &Path,
-) -> Result<Child, DevError> {
-    let mut command = std::process::Command::new(editor_exe);
+    output: &EditorOutput,
+) -> Result<EditorProcess, DevError> {
+    let cannot_launch = || DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot launch {}", editor_exe.display()),
+    };
+    match output {
+        EditorOutput::Inherit => {
+            let mut command = std::process::Command::new(editor_exe);
+            configure_editor_environment(&mut command, home, receipt_path);
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map(EditorProcess::direct)
+                .map_err(|_| cannot_launch())
+        }
+        EditorOutput::Detached { log } => spawn_detached(editor_exe, home, receipt_path, log),
+    }
+}
+
+/// Applies the dev launch environment to a command that starts the Editor.
+fn configure_editor_environment(
+    command: &mut std::process::Command,
+    home: &Path,
+    receipt_path: &Path,
+) {
     command
         .env(DEV_HOME_ENV, home)
         .env(STARTUP_RECEIPT_ENV, receipt_path)
         .env(OWNED_DEV_FORGE_ENV, "1")
         .env_remove(STRIPPED_DEV_HOME_ENV)
-        .env_remove(STRIPPED_DEV_READY_ENV)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    command.spawn().map_err(|_| DevError::Stage {
+        .env_remove(STRIPPED_DEV_READY_ENV);
+}
+
+/// Detached Unix launch: the Editor writes to the per-root log. Rust opens
+/// every descriptor close-on-exec and the child's standard descriptors are
+/// replaced, so the caller's pipe does not survive into the Editor.
+#[cfg(not(windows))]
+fn spawn_detached(
+    editor_exe: &Path,
+    home: &Path,
+    receipt_path: &Path,
+    log: &Path,
+) -> Result<EditorProcess, DevError> {
+    let log_error = |_| DevError::Stage {
         stage: "launch",
-        reason: format!("cannot launch {}", editor_exe.display()),
+        reason: format!("cannot open the editor log {}", log.display()),
+    };
+    let stdout = std::fs::File::create(log).map_err(log_error)?;
+    let stderr = stdout.try_clone().map_err(log_error)?;
+    let mut command = std::process::Command::new(editor_exe);
+    configure_editor_environment(&mut command, home, receipt_path);
+    command
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .map(EditorProcess::direct)
+        .map_err(|_| DevError::Stage {
+            stage: "launch",
+            reason: format!("cannot launch {}", editor_exe.display()),
+        })
+}
+
+/// Environment variable carrying the Editor path to the Windows watcher, so
+/// no path is ever spliced into the script text.
+#[cfg(windows)]
+const LAUNCH_EXE_ENV: &str = "ARTISAN_DEV_LAUNCH_EXE";
+
+/// Windows watcher script: starts the Editor through the shell
+/// (`ShellExecuteEx` inherits no handles but passes this environment),
+/// reports its process id, then exits with its exit code.
+#[cfg(windows)]
+const WATCHER_SCRIPT: &str = "$exe = $env:ARTISAN_DEV_LAUNCH_EXE; \
+    Remove-Item Env:ARTISAN_DEV_LAUNCH_EXE; \
+    $p = Start-Process -FilePath $exe -PassThru; \
+    $null = $p.Handle; \
+    [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); \
+    $p.WaitForExit(); exit $p.ExitCode";
+
+/// `CREATE_NO_WINDOW`: the watcher never shows a console.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Windows PowerShell, which every supported Windows ships.
+#[cfg(windows)]
+fn windows_powershell() -> Option<PathBuf> {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
+    let path = root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    path.is_file().then_some(path)
+}
+
+/// Detached Windows launch through the shell.
+///
+/// `CreateProcess` hands a child every inheritable handle of its parent,
+/// including the runner's own standard handles, whatever the child's
+/// standard streams are set to; the only safe way to start a process that
+/// holds none of them is the shell. The watcher that asks the shell does
+/// hold them, and is stopped once startup resolves.
+#[cfg(windows)]
+fn spawn_detached(
+    editor_exe: &Path,
+    home: &Path,
+    receipt_path: &Path,
+    _log: &Path,
+) -> Result<EditorProcess, DevError> {
+    use std::os::windows::process::CommandExt as _;
+
+    let cannot_launch = |detail: &str| DevError::Stage {
+        stage: "launch",
+        reason: format!("cannot launch {}: {detail}", editor_exe.display()),
+    };
+    let powershell = windows_powershell().ok_or_else(|| cannot_launch("no Windows PowerShell"))?;
+    let mut command = std::process::Command::new(powershell);
+    configure_editor_environment(&mut command, home, receipt_path);
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            WATCHER_SCRIPT,
+        ])
+        .env(LAUNCH_EXE_ENV, editor_exe)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| cannot_launch("the launcher did not start"))?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(cannot_launch("the launcher has no output"));
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = std::io::BufRead::read_line(&mut std::io::BufReader::new(stdout), &mut line);
+        let _ = sender.send(line);
+    });
+    let reported = receiver
+        .recv_timeout(Duration::from_millis(DEV_LAUNCH_REPORT_TIMEOUT_MS))
+        .ok()
+        .and_then(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| *pid != 0);
+    let Some(pid) = reported else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(cannot_launch(&format!(
+            "the shell did not report the editor process within {}s",
+            DEV_LAUNCH_REPORT_TIMEOUT_MS / 1_000
+        )));
+    };
+    Ok(EditorProcess {
+        child,
+        pid,
+        watcher: true,
     })
 }
+
+/// Terminates one process by id, best-effort.
+#[cfg(windows)]
+fn terminate_pid(pid: u32) {
+    let taskkill = std::env::var_os("SystemRoot")
+        .map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"));
+    if let Some(taskkill) = taskkill {
+        let _ = std::process::Command::new(taskkill)
+            .args(["/PID", &pid.to_string(), "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Unix launches never use a watcher.
+#[cfg(not(windows))]
+const fn terminate_pid(_: u32) {}
 
 /// Reads one receipt file without blocking.
 ///
@@ -670,15 +966,4 @@ pub fn wait_for_startup(child: &mut Child, receipt_path: &Path, timeout: Duratio
             ),
         );
     }
-}
-
-/// Stops an owned Editor after unconfirmed startup.
-///
-/// Best-effort: killing the Editor releases its owned Forge through the
-/// Editor's lease and Job Object containment. Returns the Editor's exit
-/// code when the wait completes.
-#[must_use]
-pub fn stop_editor(mut child: Child) -> Option<i32> {
-    let _ = child.kill();
-    child.wait().ok().and_then(|status| status.code())
 }

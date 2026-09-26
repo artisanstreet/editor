@@ -40,6 +40,16 @@ cargo dev --root /abs/path       # a separate dev installation (or ARTISAN_DEV_R
 cargo dev --attach               # stay attached until the Editor exits
 ```
 
+`cargo dev` returns once the Editor writes its startup receipt, which it does
+after its first host connection completes the initial queries, whichever host
+it opened (a registered host, or the owned dev Forge when none is registered);
+without a receipt it stops the Editor and fails after 90 seconds. In a terminal
+the Editor keeps writing to it. When the run's output is not a terminal (an
+agent shell, `| tee`, CI) the Editor is detached from it, so the caller sees
+end-of-file when the runner returns: on Unix its output goes to
+`<dev root>/.dev-runner/editor.log`; on Windows it is started through the shell
+and its output is not captured.
+
 Previous versions stay installed for rollback (three by default, `--keep N`).
 `CARGO_TARGET_DIR` is respected; do not share target directories across
 worktrees.

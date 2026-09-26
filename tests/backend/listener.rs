@@ -50,6 +50,13 @@ use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 /// hanging the runner.
 const WATCHDOG: Duration = Duration::from_secs(5);
 
+/// Bound for a broker to start its Forge application (SQLite migrations
+/// included) and bind. Startup is fixture setup, not the behaviour under
+/// test; every test in this file starts one concurrently, and on a loaded
+/// machine that alone outlasted [`WATCHDOG`] ("addr under watchdog") before
+/// any listener code ran.
+const STARTUP_WATCHDOG: Duration = Duration::from_secs(60);
+
 /// Deterministic issued bootstrap fixture; successful admissions rotate real
 /// system entropy behind the authority.
 const INITIAL_CAPABILITY: [u8; 32] = [0xb7; 32];
@@ -554,7 +561,7 @@ async fn await_bound_addr(
     guard: BrokerGuard,
 ) -> (SocketAddr, BrokerGuard) {
     loop {
-        match tokio::time::timeout(WATCHDOG, replies.recv()).await {
+        match tokio::time::timeout(STARTUP_WATCHDOG, replies.recv()).await {
             Ok(Some(BrokerReply::Bound(addr))) => break (addr, guard),
             Ok(Some(BrokerReply::StartupFailed(message))) => {
                 // Bounded cleanup completes before the primary startup
@@ -1699,7 +1706,7 @@ async fn start_until_cancel_broker_with(
         let _ = done_tx.send(());
     });
 
-    let addr = tokio::time::timeout(WATCHDOG, addr_rx)
+    let addr = tokio::time::timeout(STARTUP_WATCHDOG, addr_rx)
         .await
         .expect("addr under watchdog")
         .expect("broker bound");
@@ -1930,7 +1937,7 @@ async fn until_cancel_cancellation_before_admission_drains() {
         drop(runtime);
         let _ = done_tx.send(());
     });
-    let addr = tokio::time::timeout(WATCHDOG, addr_rx)
+    let addr = tokio::time::timeout(STARTUP_WATCHDOG, addr_rx)
         .await
         .expect("addr")
         .expect("sent");

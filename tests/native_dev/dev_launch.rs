@@ -14,8 +14,9 @@ use std::{
 };
 
 use native_dev::{
-    BinarySet, DevPaths, ReadinessReconcile, StartupWait, read_receipt, reconcile_stale_readiness,
-    staged_editor, staged_forge, wait_for_startup,
+    BinarySet, DevPaths, EditorOutput, ReadinessReconcile, StartupWait, editor_log_path,
+    editor_output, read_receipt, reconcile_stale_readiness, spawn_editor, staged_editor,
+    staged_forge, wait_for_startup,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -236,6 +237,113 @@ fn wait_resolves_a_receipt_written_mid_wait() {
     let _ = handle.join();
     let _ = child.kill();
     let _ = child.wait();
+    cleanup(&dir);
+}
+
+#[test]
+fn editor_output_detaches_unless_attached_or_on_a_terminal() {
+    let log = PathBuf::from("/dev-root/.dev-runner/editor.log");
+    // A piped or redirected run (an agent shell, `| tee`, CI) must not hand
+    // a long-lived Editor the pipe the caller waits on for end-of-file.
+    assert_eq!(
+        editor_output(false, false, log.clone()),
+        EditorOutput::Detached { log: log.clone() }
+    );
+    // A terminal has no end-of-file to wait on, and an attached runner lives
+    // exactly as long as the Editor: both keep the Editor's output visible.
+    assert_eq!(
+        editor_output(false, true, log.clone()),
+        EditorOutput::Inherit
+    );
+    assert_eq!(
+        editor_output(true, false, log.clone()),
+        EditorOutput::Inherit
+    );
+    assert_eq!(editor_output(true, true, log), EditorOutput::Inherit);
+}
+
+#[test]
+fn editor_log_lives_in_the_runner_directory() {
+    let dev_dir = scratch_dev_dir("editor-log");
+    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
+    assert_eq!(
+        editor_log_path(&paths),
+        paths.runner_dir().join("editor.log")
+    );
+}
+
+/// A detached Editor on Unix writes to the runner's log and holds none of
+/// the runner's standard streams, so a caller reading `cargo dev` through a
+/// pipe sees end-of-file as soon as the runner returns.
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_editor_writes_its_log_and_holds_no_runner_stream() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = scratch_dev_dir("detached-log");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let editor = dir.join("editor");
+    std::fs::write(&editor, "#!/bin/sh\necho editor started\nexec sleep 5\n").expect("stand-in");
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let log = dir.join("editor.log");
+    let receipt = dir.join("startup-receipt.json");
+    let mut process = spawn_editor(
+        &editor,
+        &dir,
+        &receipt,
+        &EditorOutput::Detached { log: log.clone() },
+    )
+    .expect("detached spawn");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("editor started")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the editor's output reaches its log"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for descriptor in [1, 2] {
+        let target = std::fs::read_link(format!("/proc/{}/fd/{descriptor}", process.pid()))
+            .expect("descriptor readable");
+        assert_eq!(
+            target, log,
+            "fd {descriptor} is the log, not a runner stream"
+        );
+    }
+    let stdin = std::fs::read_link(format!("/proc/{}/fd/0", process.pid())).expect("stdin");
+    assert_eq!(stdin, Path::new("/dev/null"));
+    assert_eq!(
+        wait_for_startup(process.child_mut(), &receipt, Duration::from_millis(100)),
+        StartupWait::Timeout
+    );
+    let _ = process.stop();
+    cleanup(&dir);
+}
+
+/// A detached Windows launch goes through the shell watcher, which reports
+/// the Editor's process id and exits with the Editor's exit code.
+#[cfg(windows)]
+#[test]
+fn detached_windows_launch_reports_the_editor_and_its_exit() {
+    let dir = scratch_dev_dir("detached-windows");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let root = std::env::var_os("SystemRoot").expect("SystemRoot");
+    // A stand-in that runs and exits on its own, without arguments.
+    let editor = PathBuf::from(root).join("System32").join("hostname.exe");
+    let receipt = dir.join("startup-receipt.json");
+    let mut process = spawn_editor(
+        &editor,
+        &dir,
+        &receipt,
+        &EditorOutput::Detached {
+            log: dir.join("editor.log"),
+        },
+    )
+    .expect("detached spawn");
+    assert_ne!(process.pid(), 0);
+    let outcome = wait_for_startup(process.child_mut(), &receipt, Duration::from_secs(20));
+    assert_eq!(outcome, StartupWait::EditorExited { code: Some(0) });
+    process.release();
     cleanup(&dir);
 }
 
