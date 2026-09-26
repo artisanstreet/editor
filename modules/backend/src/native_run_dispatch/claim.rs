@@ -201,111 +201,107 @@ async fn load_claim(
     // shared ACP row (no minimum CLI in the TypeScript evidence), Cursor has
     // no launch authority in C1 and requeues, and every other newly
     // representable engine requeues instead of running as another engine.
-    let launch =
-        match settings.config().selection() {
-            EngineSelection::OpenCode2(selection) => match launch_mode {
-                ClaimLaunchMode::Configured => {
-                    let profile_id = selection.profile_id();
-                    let Ok(launch) = context
-                        .config
-                        .authority
-                        .resolve_profile_launch(context.database_path, profile_id)
-                    else {
-                        context.requeue("engine profile unavailable").await;
-                        return None;
-                    };
-                    ResolvedLaunch::Configured(Box::new(launch))
+    let launch = match settings.config().selection() {
+        EngineSelection::OpenCode2(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let profile_id = selection.profile_id();
+                let Ok(launch) = context
+                    .config
+                    .authority
+                    .resolve_profile_launch(context.database_path, profile_id)
+                else {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
+                };
+                ResolvedLaunch::Configured(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(fixture) => {
+                let configured_profile = selection.profile_id();
+                if configured_profile.as_str() != fixture.profile_id.as_str() {
+                    context.requeue("engine profile unavailable").await;
+                    return None;
                 }
-                #[cfg(test)]
-                ClaimLaunchMode::Fixture(fixture) => {
-                    let configured_profile = selection.profile_id();
-                    if configured_profile.as_str() != fixture.profile_id.as_str() {
-                        context.requeue("engine profile unavailable").await;
+                ResolvedLaunch::Fixture(fixture)
+            }
+        },
+        EngineSelection::Codex(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let resolved =
+                    resolve_codex_launch(context.database_path, selection.profile_id()).await;
+                let launch = match resolved {
+                    Ok(launch) => launch,
+                    Err(failure) => {
+                        context.requeue(failure.reason()).await;
                         return None;
                     }
-                    ResolvedLaunch::Fixture(fixture)
-                }
-            },
-            EngineSelection::Codex(selection) => match launch_mode {
-                ClaimLaunchMode::Configured => {
-                    let launch =
-                        match resolve_codex_launch(context.database_path, selection.profile_id())
-                            .await
-                        {
-                            Ok(launch) => launch,
-                            Err(failure) => {
-                                context.requeue(failure.reason()).await;
-                                return None;
-                            }
-                        };
-                    ResolvedLaunch::Codex(Box::new(launch))
-                }
-                #[cfg(test)]
-                ClaimLaunchMode::Fixture(_) => {
-                    context.requeue("engine unavailable").await;
-                    return None;
-                }
-            },
-            EngineSelection::Claude(selection) => match launch_mode {
-                ClaimLaunchMode::Configured => {
-                    let launch =
-                        match resolve_claude_launch(context.database_path, selection.profile_id())
-                            .await
-                        {
-                            Ok(launch) => launch,
-                            Err(failure) => {
-                                context.requeue(failure.reason()).await;
-                                return None;
-                            }
-                        };
-                    ResolvedLaunch::Claude(Box::new(launch))
-                }
-                #[cfg(test)]
-                ClaimLaunchMode::Fixture(_) => {
-                    context.requeue("engine unavailable").await;
-                    return None;
-                }
-            },
-            EngineSelection::Grok(selection) => match launch_mode {
-                ClaimLaunchMode::Configured => {
-                    let launch =
-                        match resolve_grok_launch(context.database_path, selection.profile_id())
-                            .await
-                        {
-                            Ok(launch) => launch,
-                            Err(failure) => {
-                                context.requeue(failure.reason()).await;
-                                return None;
-                            }
-                        };
-                    ResolvedLaunch::Grok(Box::new(launch))
-                }
-                #[cfg(test)]
-                ClaimLaunchMode::Fixture(_) => {
-                    context.requeue("engine unavailable").await;
-                    return None;
-                }
-            },
-            EngineSelection::Cursor(selection) => match launch_mode {
-                ClaimLaunchMode::Configured => {
-                    // C1 owns the definition row but no launch authority yet: the
-                    // probe/authority packet resolves this. Requeue without
-                    // running as another engine.
-                    let Some(launch) =
-                        resolve_cursor_launch(context.database_path, selection.profile_id())
-                    else {
-                        context.requeue("engine profile unavailable").await;
+                };
+                ResolvedLaunch::Codex(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Claude(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let resolved =
+                    resolve_claude_launch(context.database_path, selection.profile_id()).await;
+                let launch = match resolved {
+                    Ok(launch) => launch,
+                    Err(failure) => {
+                        context.requeue(failure.reason()).await;
                         return None;
-                    };
-                    ResolvedLaunch::Cursor(Box::new(launch))
-                }
-                #[cfg(test)]
-                ClaimLaunchMode::Fixture(_) => {
-                    context.requeue("engine unavailable").await;
+                    }
+                };
+                ResolvedLaunch::Claude(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Grok(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                let resolved =
+                    resolve_grok_launch(context.database_path, selection.profile_id()).await;
+                let launch = match resolved {
+                    Ok(launch) => launch,
+                    Err(failure) => {
+                        context.requeue(failure.reason()).await;
+                        return None;
+                    }
+                };
+                ResolvedLaunch::Grok(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+        EngineSelection::Cursor(selection) => match launch_mode {
+            ClaimLaunchMode::Configured => {
+                // C1 owns the definition row but no launch authority yet: the
+                // probe/authority packet resolves this. Requeue without
+                // running as another engine.
+                let Some(launch) =
+                    resolve_cursor_launch(context.database_path, selection.profile_id())
+                else {
+                    context.requeue("engine profile unavailable").await;
                     return None;
-                }
-            },
-        };
+                };
+                ResolvedLaunch::Cursor(Box::new(launch))
+            }
+            #[cfg(test)]
+            ClaimLaunchMode::Fixture(_) => {
+                context.requeue("engine unavailable").await;
+                return None;
+            }
+        },
+    };
     Some(LoadedClaim {
         context,
         payload,
