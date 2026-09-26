@@ -171,6 +171,34 @@ pub fn import(bytes: &[u8]) -> Result<PathBuf, ForgeCredentialError> {
     import_into(&registry_root()?, bytes)
 }
 
+/// Imports the invitation file at `path` and remembers `path` as the host's
+/// source, so a later incarnation of the same host can be refreshed from it.
+///
+/// Only the first import of a registration records its source; the file's
+/// bytes are zeroed once imported, since they carry the bootstrap secret.
+pub fn import_file(path: &Path) -> Result<PathBuf, ForgeCredentialError> {
+    import_file_into(&registry_root()?, path)
+}
+
+fn import_file_into(root: &Path, path: &Path) -> Result<PathBuf, ForgeCredentialError> {
+    use std::io::Read as _;
+
+    let mut bytes = Zeroizing::new(Vec::new());
+    fs::File::open(path)
+        .and_then(|file| {
+            file.take((MAX_INVITATION_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|_| ForgeCredentialError::Provisioning)?;
+    let home = import_into(root, &bytes)?;
+    if !home.join("credentials/source.json").exists() {
+        let source =
+            serde_json::to_vec(path).map_err(|_| ForgeCredentialError::ManifestMalformed)?;
+        install_private(&home, "source.json", &source)?;
+    }
+    Ok(home)
+}
+
 fn import_into(root: &Path, bytes: &[u8]) -> Result<PathBuf, ForgeCredentialError> {
     let invitation = HostInvitation::decode(bytes)?;
     fs::create_dir_all(root).map_err(|_| ForgeCredentialError::Provisioning)?;
@@ -475,6 +503,31 @@ mod tests {
         import_into(&root, &incarnation(1)).unwrap();
         assert!(!retiring.exists() && !half.exists());
         assert!(root.join("unrelated-directory").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_import_records_its_source_once() {
+        let root = temporary_root("hosts-file");
+        let invitation = root.join("invitation.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&invitation, incarnation(1)).unwrap();
+        let home = import_file_into(&root.join("hosts"), &invitation).unwrap();
+        let recorded: PathBuf =
+            serde_json::from_slice(&read_private(&home, "source.json").unwrap()).unwrap();
+        assert_eq!(recorded, invitation);
+
+        // A newer incarnation from another path is a new registration with
+        // its own source; the superseded one is retired.
+        let moved = root.join("moved.json");
+        fs::write(&moved, incarnation(2)).unwrap();
+        let next = import_file_into(&root.join("hosts"), &moved).unwrap();
+        assert_ne!(next, home);
+        let recorded: PathBuf =
+            serde_json::from_slice(&read_private(&next, "source.json").unwrap()).unwrap();
+        assert_eq!(recorded, moved);
+        assert!(!home.exists());
+        assert!(import_file_into(&root.join("hosts"), &root.join("absent.json")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,60 +1,50 @@
 # Forge hosts, including WSL
 
-The native editor can connect directly to an authenticated Forge over QUIC/UDP.
-WSL uses the same connection protocol as another Linux machine. Default local
-startup still owns a Forge bound to `127.0.0.1`; remote mode is explicit.
+The native editor connects directly to an authenticated Forge over QUIC/UDP.
+WSL uses the same connection protocol as another Linux machine. The Editor has
+no Forge of its own; every Forge it uses is a registered host.
 
-## Install inside Ubuntu WSL
+## A Linux installation as a host
 
-From this checkout inside the distro:
-
-```sh
-python3 scripts/install_forge_host.py
-```
-
-The installer builds pinned `.#forge` and `.#forge-host` Nix packages, retains
-GC roots for the installed packages, and enables a per-user systemd service.
-It runs as your Linux user, with access to that user's projects, Git, and engine
-tools. Nix must already be installed and `systemctl --user` must work.
-
-The service discovers the IPv4 source address selected by the default route on
-each launch. To use a different interface, choose its address explicitly:
+An Artisan installation on Linux runs its Forge as a systemd user service it
+owns, and serves other machines once its Forge has host access:
 
 ```sh
-python3 scripts/install_forge_host.py --address 172.29.34.184 --port 4433 --name Ubuntu
+ae setup <instance values> --listen auto:4433 --host-name Ubuntu --autostart
+ae start
 ```
 
-The explicit address must be updated if that interface changes address. The
-installer refuses to overwrite a service with different settings. Review the
-existing unit before replacing it. A running WSL distro/user service is required;
-adding a saved host does not start a stopped distro automatically.
+- `--listen auto:PORT` binds the IPv4 source address of the default route,
+  resolved at each start, so a WSL distribution whose address changes keeps
+  publishing a current endpoint; `--listen IP:PORT` binds one fixed address.
+  Without `--listen` the Forge is loopback-only.
+- `--autostart` writes and enables `artisan-forge.service` (the dev channel's
+  installation: `artisan-forge-dev.service`), which runs the installation's
+  `ae start --foreground`. `ae start` starts it through the user manager.
+- Each start publishes a private invitation at `<installation>/host.json`
+  (`~/.local/share/Artisan Street Dev/host.json` for the dev installation).
 
-For a Cargo development build:
+For development, `nix run .#dev` does all of this from the checkout inside the
+distro and registers the invitation with the Windows Editor it installs; see
+[native development](native-dev.md). It runs as your Linux user, with access to
+that user's projects, Git, and engine tools. A running WSL distro and user
+manager are required; adding a saved host does not start a stopped distro.
 
-```sh
-cargo build --locked -p artisan-backend --bin forge -p artisan-native-dev --bin forge-host
-python3 scripts/install_forge_host.py --bin-dir "$PWD/target/debug"
-```
-
-The service publishes a private invitation at:
-
-```text
-~/.local/state/artisan-forge/host.json
-```
-
-It contains the endpoint, public certificate, initial capability, and daemon
-incarnation. Transfer it through a trusted channel. The private key stays on the
-Linux machine; neither secret is placed in the Nix store or passed as a command
-line argument. Files and directories use the existing private credential storage
-boundary (Unix permissions or Windows ACLs).
+The invitation contains the endpoint, public certificate, initial capability,
+and daemon incarnation. Transfer it through a trusted channel. The private key
+stays on the Linux machine; neither secret is placed in the Nix store or passed
+as a command line argument. Files and directories use the existing private
+credential storage boundary (Unix permissions or Windows ACLs).
 
 ## Add and select the machine
 
-Build/run the updated Windows editor. Open the bottom-left profile menu, then its avatar/name/host header (or use Ctrl+K), and select **Add host from invitation…**. For this Ubuntu distro,
-select:
+`nix run .#dev` registers the dev Forge with the dev Editor itself. To add a
+host by hand, open the bottom-left profile menu, then its avatar/name/host
+header (or use Ctrl+K), and select **Add host from invitation…**. For the dev
+installation in this Ubuntu distro, select:
 
 ```text
-\\wsl.localhost\Ubuntu\home\sander\.local\state\artisan-forge\host.json
+\\wsl.localhost\Ubuntu\home\sander\.local\share\Artisan Street Dev\host.json
 ```
 
 Import trusts the certificate in the selected invitation. Only import invitations
@@ -73,9 +63,9 @@ The Editor has no built-in host: it never starts a Forge of its own. The machine
 menu lists registered hosts and **Add new host**. At launch the Editor opens the
 host it last connected to (resolved to that host's current registration), else
 the first registered host; with none registered the window offers **Add a host**.
-Development runs are the exception: `cargo dev` sets `ARTISAN_DEV_OWNED_FORGE=1`
-so a dev Editor without a host starts the dev installation's own Forge, and
-`ARTISAN_DEV_FORGE_HOME` still attaches to a manually started dev Forge.
+`editor --host-home <registration>` opens one registered host explicitly (the
+dev runner launches the dev Editor this way), and `ARTISAN_DEV_FORGE_HOME`
+attaches a development Editor to a manually started Forge.
 
 Selecting a machine changes the active Forge connection **in the same editor
 window**. Switching does not spawn an editor process or disconnect other hosts.
@@ -112,43 +102,42 @@ retains the existing `127.0.0.1:0` behavior. The NixOS module exposes
 ## Engines
 
 The Forge installs, updates, and launches its own engine CLIs (Claude Code, Codex, Grok
-Build, and Cursor Agent on Linux) under `~/.local/state/artisan-forge/toolchain/<engine>/`, verified against the vendor's
-published checksums, and runs them with their own homes there; it never uses a `claude` or
-`codex` found on `PATH` (see `docs/plans/managed-engines.md`). The Editor's Settings engine
-pages show each engine's status, version, and version controls.
+Build, and Cursor Agent on Linux) under `<installation>/data/toolchain/<engine>/`, beside its
+database, verified against the vendor's published checksums, and runs them with their own
+homes there; it never uses a `claude` or `codex` found on `PATH` (see
+`docs/plans/managed-engines.md`). The Editor's Settings engine pages show each engine's
+status, version, and version controls.
 
-A freshly installed engine has no account. Sign in once per host with the managed binary:
+A freshly installed engine has no account. Sign in once per host with the installation's
+`ae`, which manages its own Forge without flags:
 
 ```sh
-cargo build --locked -p artisan-editor-cli --bin ae
-DB=~/.local/state/artisan-forge/forge.db
-target/debug/ae engine list --database "$DB"
-target/debug/ae engine login claude --database "$DB"
-target/debug/ae engine login codex --database "$DB" -- --device-auth
-target/debug/ae engine login grok --database "$DB"
-target/debug/ae engine login cursor --database "$DB"
+ae engine list
+ae engine login claude
+ae engine login codex -- --device-auth
+ae engine login grok
+ae engine login cursor
 ```
 
-`ae engine versions|use|rollback|status <engine> --database "$DB"` operate on the same install
-state as the Forge. A systemd drop-in that sets `ARTISAN_CODEX_EXECUTABLE` (visible in
-`systemctl --user cat artisan-forge.service`) is obsolete: remove it and restart the service,
-otherwise it keeps overriding the managed Codex.
+`ae engine versions|use|rollback|status <engine>` operate on the same install state as the
+Forge; `--database PATH` selects another Forge's state.
 
 ## Operations and diagnostics
 
 ```sh
-systemctl --user status artisan-forge.service
-journalctl --user -u artisan-forge.service
-systemctl --user restart artisan-forge.service
-systemctl --user disable --now artisan-forge.service
+ae status
+ae doctor
+systemctl --user status artisan-forge-dev.service
+journalctl --user -u artisan-forge-dev.service
+ae autostart --disable        # stop the service and remove its unit
 ```
 
 After a restart, select the host again once its previous connection has stopped
 to refresh its invitation in the existing window.
 An interrupted credential-rotation handshake is quarantined rather than replayed;
-restart Forge and select the host again in that case. An unclean daemon termination may
-leave a readiness file. Verify the previous process has exited before removing
-`~/.local/state/artisan-forge/readiness.json` and restarting the service.
+restart Forge and select the host again in that case. A readiness receipt left by
+a Forge that was killed is reconciled by the next `ae start`: it is removed only
+when the Forge that wrote it is gone and nothing holds the installation's custody.
 
 Headless client verification (also supported by `editor.exe`):
 

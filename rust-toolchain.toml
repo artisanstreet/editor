@@ -1,4 +1,6 @@
 [toolchain]
 channel = "1.98.0"
 components = ["clippy", "rustfmt", "rust-src"]
+# Windows binaries are cross-built from Linux with the MinGW-w64 toolchain.
+targets = ["x86_64-pc-windows-gnu"]
 profile = "minimal"

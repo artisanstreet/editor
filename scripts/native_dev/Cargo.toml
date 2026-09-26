@@ -1,6 +1,6 @@
 [package]
 name = "artisan-native-dev"
-description = "One-command native development loop: build the product binaries, install them as a signed dev-channel release into the per-user Artisan Street Dev installation, and launch the installed Editor on its owned Forge"
+description = "`nix run .#dev`: build the product with Nix and deploy the Linux Forge service and the Editor through the shipping installer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,11 +18,11 @@ path = "src/main.rs"
 [dependencies]
 ae-installer = { path = "../../modules/installer" }
 artisan-build-info = { path = "../../modules/build_info" }
+artisan-database = { path = "../../modules/database" }
 artisan-editor-cli = { path = "../../modules/cli" }
 fs2.workspace = true
-hex = "=0.4.3" # workspace-absent
+sea-orm.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
@@ -30,11 +30,9 @@ tokio = { workspace = true, features = ["rt"] }
 workspace = true
 
 [dev-dependencies]
-ae-installer = { path = "../../modules/installer" }
-artisan-build-info = { path = "../../modules/build_info" }
-artisan-editor-cli = { path = "../../modules/cli" }
-fs2.workspace = true
-serde_json.workspace = true
+base64.workspace = true
+clap = { version = "=4.6.6", features = ["derive", "env"] } # workspace-absent
+tempfile = "=3.27.0" # workspace-absent
 
 [[test]]
 name = "dev_args"
@@ -53,8 +51,8 @@ name = "dev_payload"
 path = "../../tests/native_dev/dev_payload.rs"
 
 [[test]]
-name = "dev_instance"
-path = "../../tests/native_dev/dev_instance.rs"
+name = "dev_provision"
+path = "../../tests/native_dev/dev_provision.rs"
 
 [[test]]
 name = "dev_binaries"
@@ -65,8 +63,16 @@ name = "dev_stage"
 path = "../../tests/native_dev/dev_stage.rs"
 
 [[test]]
-name = "dev_identity"
-path = "../../tests/native_dev/dev_identity.rs"
+name = "dev_legacy"
+path = "../../tests/native_dev/dev_legacy.rs"
+
+[[test]]
+name = "dev_nix"
+path = "../../tests/native_dev/dev_nix.rs"
+
+[[test]]
+name = "dev_editor"
+path = "../../tests/native_dev/dev_editor.rs"
 
 [[bin]]
 name = "forge-host"

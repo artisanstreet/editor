@@ -186,3 +186,6 @@ path = "../../tests/ui/skeleton.rs"
 [[test]]
 name = "ui_native_select"
 path = "../../tests/ui/native_select.rs"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

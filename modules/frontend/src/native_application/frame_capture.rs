@@ -177,8 +177,14 @@ impl Capture {
             && started.elapsed() >= Duration::from_secs(10)
         {
             let elapsed_seconds = started.elapsed().as_secs_f64();
-            let screenshot = window.render_to_image();
-            let screenshot_error = screenshot.as_ref().err().map(ToString::to_string);
+            // Pixel capture needs GPUI test support, which only visual-proof
+            // builds carry; frame timings work in every build.
+            #[cfg(feature = "visual-proof")]
+            let screenshot = window.render_to_image().map_err(|error| error.to_string());
+            #[cfg(not(feature = "visual-proof"))]
+            let screenshot: Result<image::RgbaImage, String> =
+                Err("pixel capture requires the visual-proof feature".to_owned());
+            let screenshot_error = screenshot.as_ref().err().cloned();
             let screenshot = screenshot.ok();
             let report = serde_json::json!({
                 "debug_assertions": cfg!(debug_assertions),

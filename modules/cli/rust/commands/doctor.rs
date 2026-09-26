@@ -93,7 +93,9 @@ pub(super) fn doctor(
             "protocol health is unavailable without a valid installation".to_owned(),
         ))
     };
-    let instance_state = instance::load(layout);
+    // The Forge instance is the native configuration `ae setup` writes and
+    // `ae start` runs, not the retired pre-native instance files.
+    let (instance_state, _) = inspect_native_instance(layout);
     // Payload drift (for example a development build copied over an installed
     // version) is reported, never repaired. Versions installed before payload
     // manifests existed stay honestly unverifiable without failing doctor.
@@ -101,12 +103,19 @@ pub(super) fn doctor(
         payload::PayloadHealth::Unverifiable,
         |manifest: &InstallationManifest| payload::verify(&manifest.version_root()),
     );
+    #[cfg(target_os = "linux")]
+    let service = Some(service_health(layout));
+    #[cfg(not(target_os = "linux"))]
+    let service: Option<(&'static str, String)> = None;
     // Repair never invents a Forge configuration. `ae setup` is the sole
     // explicit creator.
     let healthy = installation.is_ok()
         && protocol.is_ok()
-        && instance_state.is_ok()
-        && !matches!(payload_health, payload::PayloadHealth::Modified(_));
+        && instance_state == "ok"
+        && !matches!(payload_health, payload::PayloadHealth::Modified(_))
+        && service
+            .as_ref()
+            .is_none_or(|(state, _)| matches!(*state, "ok" | "absent"));
     if json {
         println!(
             "{}",
@@ -114,12 +123,13 @@ pub(super) fn doctor(
                 "healthy": healthy,
                 "installation": if installation.is_ok() { "ok" } else { "error" },
                 "protocol": if protocol.is_ok() { "ok" } else { "error" },
-                "instance": if instance_state.is_ok() { "ok" } else { "missing" },
+                "instance": instance_state,
                 "payload": payload_health.as_str(),
                 "payload_issues": match &payload_health {
                     payload::PayloadHealth::Modified(issues) => issues.clone(),
                     _ => Vec::new(),
                 },
+                "service": service.as_ref().map(|(state, _)| *state),
             })
         );
     } else {
@@ -131,14 +141,10 @@ pub(super) fn doctor(
             "{}: artisan:// protocol",
             if protocol.is_ok() { "ok" } else { "error" }
         );
-        println!(
-            "{}: forge instance",
-            if instance_state.is_ok() {
-                "ok"
-            } else {
-                "error"
-            }
-        );
+        match instance_state {
+            "ok" => println!("ok: forge instance"),
+            state => println!("error: forge instance ({state}; run `ae setup`)"),
+        }
         match &payload_health {
             payload::PayloadHealth::Verified => println!("ok: version payload"),
             payload::PayloadHealth::Modified(issues) => {
@@ -148,6 +154,14 @@ pub(super) fn doctor(
                 println!("warn: version payload (unverifiable: no payload manifest)");
             }
         }
+        if let Some((state, detail)) = &service {
+            let level = match *state {
+                "ok" => "ok",
+                "absent" => "warn",
+                _ => "error",
+            };
+            println!("{level}: forge service ({detail})");
+        }
     }
     if healthy {
         Ok(())
@@ -155,6 +169,54 @@ pub(super) fn doctor(
         Err(CliError::Installation(
             "doctor found unresolved issues".into(),
         ))
+    }
+}
+
+/// The Linux Forge service: its state (`ok`, `absent`, `drifted`,
+/// `foreign`, or `unavailable`) and a human detail. Other platforms have no
+/// service line.
+#[cfg(target_os = "linux")]
+fn service_health(layout: &Layout) -> (&'static str, String) {
+    use crate::service::{ForgeService, UserSystemctl};
+
+    match ForgeService::for_current_user(&layout.root) {
+        Ok(service) => {
+            let health = service.health(&UserSystemctl);
+            (health.state(), service_detail(&service, &health))
+        }
+        Err(error) => ("unavailable", error.to_string()),
+    }
+}
+
+/// One doctor line's detail for `health` of `service`.
+#[cfg(any(target_os = "linux", test))]
+fn service_detail(
+    service: &crate::service::ForgeService,
+    health: &crate::service::ServiceHealth,
+) -> String {
+    use crate::service::ServiceHealth;
+
+    let name = service.unit_name();
+    let known = |value: Option<bool>, yes: &'static str, no: &'static str| match value {
+        Some(true) => yes,
+        Some(false) => no,
+        None => "unknown",
+    };
+    match health {
+        ServiceHealth::Absent => format!("{name} is not installed; run `ae setup --autostart`"),
+        ServiceHealth::Foreign => format!(
+            "{} was not written for this installation",
+            service.unit_path().display()
+        ),
+        ServiceHealth::Drifted => {
+            format!("{name} no longer runs this installation; run `ae setup --autostart`")
+        }
+        ServiceHealth::Installed { enabled, active } => format!(
+            "{name} {}, {}",
+            known(*enabled, "enabled", "disabled"),
+            known(*active, "active", "inactive")
+        ),
+        ServiceHealth::Unavailable(reason) => reason.clone(),
     }
 }
 
@@ -290,4 +352,57 @@ pub(super) fn payload_issue_codes(issues: &[String]) -> Vec<DoctorPayloadIssue> 
         }
     }
     codes
+}
+
+#[cfg(test)]
+mod service_tests {
+    use std::path::Path;
+
+    use super::service_detail;
+    use crate::service::{ForgeService, ServiceHealth, UserDirectories};
+
+    #[test]
+    fn doctor_names_the_unit_and_what_to_do_for_every_state() {
+        let service = ForgeService::for_root(
+            Path::new("/home/ada/.local/share/Artisan Street Dev"),
+            &UserDirectories {
+                home: Some("/home/ada".into()),
+                ..UserDirectories::default()
+            },
+        )
+        .expect("service");
+        let detail = |health: ServiceHealth| {
+            (
+                health.state(),
+                health.is_healthy(),
+                service_detail(&service, &health),
+            )
+        };
+        assert_eq!(
+            detail(ServiceHealth::Installed {
+                enabled: Some(true),
+                active: Some(true)
+            }),
+            (
+                "ok",
+                true,
+                "artisan-forge-dev.service enabled, active".to_owned()
+            )
+        );
+        let (state, healthy, text) = detail(ServiceHealth::Absent);
+        assert_eq!((state, healthy), ("absent", true));
+        assert!(text.contains("ae setup --autostart"));
+        for (health, state) in [
+            (ServiceHealth::Drifted, "drifted"),
+            (ServiceHealth::Foreign, "foreign"),
+            (
+                ServiceHealth::Unavailable("no manager".to_owned()),
+                "unavailable",
+            ),
+        ] {
+            let (reported, healthy, _) = detail(health);
+            assert_eq!(reported, state);
+            assert!(!healthy, "{state} makes doctor fail");
+        }
+    }
 }

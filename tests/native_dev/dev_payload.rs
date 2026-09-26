@@ -1,16 +1,17 @@
-//! A local build becomes an installed dev release through the shipping
-//! installer: assembled and signed by the runner, verified and activated by
-//! `artisan-install`, and loadable by the Editor's own discovery.
+//! A Nix-built payload becomes an installed dev release through the shipping
+//! installer: signed by the runner beside the read-only payload, verified
+//! and activated by `artisan-install`, and loadable by the Editor's own
+//! discovery.
 
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use artisan_build_info::{BuildIdentity, BuildInfo, Channel};
+use artisan_build_info::{BuildIdentity, BuildInfo, Channel, FORMAT_VERSION};
 use artisan_editor_cli::{manifest::InstallationManifest, payload};
 use artisan_install::LocalSigner;
-use native_dev::{BinarySet, DevPaths, GitState, assemble, install_tree, staged_editor};
+use native_dev::{DevPaths, install_payload, payload_identity, sign_payload, staged_editor};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -22,59 +23,65 @@ fn scratch(case: &str) -> PathBuf {
     ))
 }
 
-fn fixture_set(directory: &Path, editor: &str) -> BinarySet {
-    std::fs::create_dir_all(directory).expect("sources");
-    let write = |stem: &str, content: &str| {
-        let path = directory.join(native_dev::exe_name(stem));
-        std::fs::write(&path, content).expect("fixture binary");
-        path
-    };
-    BinarySet {
-        ae: write("ae", "fixture-ae"),
-        editor: write("editor", editor),
-        forge: write("forge", "fixture-forge"),
-        installer: write("installer", "fixture-installer"),
+/// A payload shaped exactly like a Nix stage output.
+fn nix_payload(directory: &Path, version: &str, editor: &str) -> (PathBuf, BuildInfo) {
+    let payload = directory.join(format!("payload-{version}"));
+    std::fs::create_dir_all(payload.join("bin")).expect("bin");
+    for (stem, content) in [
+        ("ae", "fixture-ae"),
+        ("editor", editor),
+        ("forge", "fixture-forge"),
+        ("installer", "fixture-installer"),
+    ] {
+        std::fs::write(
+            payload.join("bin").join(native_dev::exe_name(stem)),
+            content,
+        )
+        .expect("fixture binary");
     }
-}
-
-fn git(commit: &str) -> GitState {
-    GitState {
-        commit: Some(commit.to_owned()),
+    let identity = BuildInfo {
+        format_version: FORMAT_VERSION,
+        version: version.to_owned(),
+        channel: Channel::Dev,
+        commit: Some("1111111111111111111111111111111111111111".to_owned()),
         dirty: false,
-        commit_count: Some(42),
-    }
+        profile: "production-debug".to_owned(),
+        target: "x86_64-unknown-linux-gnu".to_owned(),
+        built_at: None,
+    };
+    std::fs::create_dir_all(payload.join("resources")).expect("resources");
+    std::fs::write(
+        payload.join(artisan_build_info::RESOURCE_PATH),
+        identity.to_json(),
+    )
+    .expect("identity");
+    (payload, identity)
 }
 
-fn install(paths: &DevPaths, work: &Path, binaries: &BinarySet, commit: &str) -> BuildInfo {
+fn install(paths: &DevPaths, payload: &Path) -> BuildInfo {
+    let identity = payload_identity(payload).expect("payload identity");
     let signer = LocalSigner::load_or_create(&paths.home).expect("local key");
-    let tree = work.join("payload");
-    let info = assemble(binaries, &git(commit), "dev", &tree, &signer).expect("assembles");
-    install_tree(paths, &tree, &signer).expect("installs");
-    info
+    let manifests = paths.runner_dir().join("manifest");
+    sign_payload(payload, &manifests, &identity, &signer).expect("signs");
+    install_payload(paths, payload, &manifests, &signer, false).expect("installs");
+    identity
 }
 
 #[test]
-fn an_installed_build_is_a_verified_dev_release_the_editor_can_load() {
+fn a_nix_payload_installs_as_a_verified_dev_release_the_editor_can_load() {
     let work = scratch("install");
     let paths = DevPaths::new(&work.join("Artisan Street Dev")).expect("absolute root");
-    let binaries = fixture_set(&work.join("target/debug"), "editor-one");
-    let info = install(
-        &paths,
-        &work,
-        &binaries,
-        "1111111111111111111111111111111111111111",
-    );
-    assert_eq!(info.channel, Channel::Dev);
+    let (payload, identity) = nix_payload(&work, "0.0.0-dev.42+g1111111111.naaaaaaaaaa", "one");
+    assert_eq!(install(&paths, &payload), identity);
     assert!(
-        info.version.starts_with("0.0.0-dev.42+g1111111111.b"),
-        "{}",
-        info.version
+        !payload.join(artisan_install::TREE_MANIFEST_NAME).exists(),
+        "the payload itself stays untouched"
     );
 
     let manifest = InstallationManifest::load(&paths.manifest_path).expect("shipping loader");
     assert_eq!(
         manifest.active_version.as_deref(),
-        Some(info.version.as_str())
+        Some(identity.version.as_str())
     );
     let version_root = paths.active_version_root().expect("active version");
     assert_eq!(
@@ -83,37 +90,44 @@ fn an_installed_build_is_a_verified_dev_release_the_editor_can_load() {
     );
     assert_eq!(
         BuildIdentity::for_executable(&staged_editor(&version_root)),
-        BuildIdentity::Installed(info)
+        BuildIdentity::Installed(identity)
     );
     assert!(paths.permanent_ae.is_file());
     let _ = std::fs::remove_dir_all(&work);
 }
 
 #[test]
-fn identical_builds_share_a_version_and_new_builds_get_their_own() {
+fn reinstalling_a_payload_is_idempotent_and_new_payloads_keep_the_old_for_rollback() {
     let work = scratch("versions");
     let paths = DevPaths::new(&work.join("root")).expect("absolute root");
-    let first = fixture_set(&work.join("one"), "editor-one");
-    let commit = "2222222222222222222222222222222222222222";
-    let installed = install(&paths, &work, &first, commit);
-    let again = install(&paths, &work, &first, commit);
-    assert_eq!(installed.version, again.version, "same bytes, same version");
+    let (first, first_identity) = nix_payload(&work, "0.0.0-dev.1+naaaaaaaaaa", "one");
+    install(&paths, &first);
+    install(&paths, &first);
 
-    let second = fixture_set(&work.join("two"), "editor-two");
-    let rebuilt = install(&paths, &work, &second, commit);
-    assert_ne!(rebuilt.version, installed.version, "new bytes, new version");
+    let (second, second_identity) = nix_payload(&work, "0.0.0-dev.2+nbbbbbbbbbb", "two");
+    install(&paths, &second);
     assert_eq!(
         std::fs::read(staged_editor(&paths.active_version_root().expect("active")))
             .expect("installed editor"),
-        b"editor-two"
+        b"two"
     );
+    assert_ne!(first_identity.version, second_identity.version);
     assert!(
         paths
             .home
             .join("versions")
-            .join(&installed.version)
+            .join(&first_identity.version)
             .is_dir(),
         "the previous version stays for rollback"
     );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
+fn a_directory_without_nix_identity_is_not_a_payload() {
+    let work = scratch("not-a-payload");
+    std::fs::create_dir_all(work.join("bin")).expect("bin");
+    let error = payload_identity(&work).expect_err("no identity");
+    assert!(error.to_string().contains("nix build"), "{error}");
     let _ = std::fs::remove_dir_all(&work);
 }

@@ -10,7 +10,10 @@ name = "editor"
 path = "src/main.rs"
 
 [features]
-visual-proof = ["gpui_platform/test-support"]
+# Debug-stage facilities (the GPUI element inspector). Never part of a
+# Production build.
+debug-tools = ["gpui/inspector"]
+visual-proof = ["gpui/test-support", "gpui_platform/test-support"]
 
 [[example]]
 name = "parity-visual-proof"
@@ -27,9 +30,11 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 base64.workspace = true
-gpui.workspace = true
+# The profiler backs the Settings FPS overlay and ARTISAN_FRAME_CAPTURE.
+gpui = { workspace = true, features = ["profiler"] }
 gpui_platform.workspace = true
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp", "ico"] }
+mimalloc.workspace = true
 resvg = { version = "=0.48.1", default-features = false }
 rustls-pki-types.workspace = true
 serde_json.workspace = true
@@ -40,6 +45,7 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["profiler", "test-support"] }
 quinn.workspace = true
 rcgen.workspace = true
 

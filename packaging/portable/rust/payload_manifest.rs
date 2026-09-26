@@ -1,14 +1,26 @@
-//! Hermetic generator for the per-version payload integrity manifest.
+//! Hermetic generator for the per-version payload integrity manifest and the
+//! portable payload archive.
 //!
-//! The action receives only explicitly declared Cargo files. It hashes those
-//! bytes, validates their canonical archive names, and serializes the same
-//! compact, lexically ordered JSON shape written by the installer staging
-//! code. It does not inspect a directory, runfiles tree, environment, or
-//! build metadata.
+//! The action receives only explicitly declared files. It hashes those bytes,
+//! validates their canonical archive names, and serializes the same compact,
+//! lexically ordered JSON shape written by the installer staging code. With
+//! `--archive` it also writes the payload ZIP: the declared files plus the
+//! manifest, stored uncompressed in lexical order with fixed metadata, so the
+//! same inputs always produce the same bytes. It does not inspect a
+//! directory, runfiles tree, environment, or build metadata.
 
-use std::{collections::BTreeMap, env, fmt::Write as _, fs, path::PathBuf, process};
+use std::{
+    collections::BTreeMap,
+    env,
+    fmt::Write as _,
+    fs,
+    io::{Cursor, Write as _},
+    path::PathBuf,
+    process,
+};
 
 use sha2::{Digest, Sha256};
+use zip::{CompressionMethod, DateTime, ZipWriter, write::SimpleFileOptions};
 
 #[derive(serde::Serialize)]
 struct PayloadManifest {
@@ -44,7 +56,8 @@ const REQUIRED_LAYOUT: &[(&str, &str)] = &[
 
 #[derive(Debug)]
 struct Config {
-    output: PathBuf,
+    output: Option<PathBuf>,
+    archive: Option<PathBuf>,
     layout: PathBuf,
     files: Vec<FileInput>,
 }
@@ -70,6 +83,7 @@ fn run() -> Result<(), String> {
 
     let mut files = BTreeMap::new();
     let mut folded_names = BTreeMap::new();
+    let mut members = BTreeMap::new();
     for input in config.files {
         let metadata = fs::metadata(&input.path)
             .map_err(|error| format!("stat input {}: {error}", input.path.display()))?;
@@ -82,6 +96,7 @@ fn run() -> Result<(), String> {
         let bytes = fs::read(&input.path)
             .map_err(|error| format!("read input {}: {error}", input.path.display()))?;
         add_digest(&mut files, &mut folded_names, &input.member, &bytes)?;
+        members.insert(input.member, bytes);
     }
 
     if files.is_empty() {
@@ -92,10 +107,46 @@ fn run() -> Result<(), String> {
         format_version: 1,
         files,
     };
-    let bytes = serde_json::to_vec(&document)
+    let manifest = serde_json::to_vec(&document)
         .map_err(|error| format!("serialize payload manifest: {error}"))?;
-    fs::write(&config.output, bytes)
-        .map_err(|error| format!("write manifest {}: {error}", config.output.display()))
+    if let Some(archive) = &config.archive {
+        let bytes = payload_archive(members, &manifest)?;
+        fs::write(archive, bytes)
+            .map_err(|error| format!("write archive {}: {error}", archive.display()))?;
+    }
+    if let Some(output) = &config.output {
+        fs::write(output, manifest)
+            .map_err(|error| format!("write manifest {}: {error}", output.display()))?;
+    }
+    Ok(())
+}
+
+/// The payload ZIP: every member stored, in lexical order, with a fixed
+/// timestamp and Unix mode 0777, and no extra fields.
+fn payload_archive(
+    mut members: BTreeMap<String, Vec<u8>>,
+    manifest: &[u8],
+) -> Result<Vec<u8>, String> {
+    members.insert(PAYLOAD_MANIFEST_NAME.to_owned(), manifest.to_vec());
+    let timestamp = DateTime::from_date_and_time(2010, 1, 1, 0, 0, 0)
+        .map_err(|error| format!("archive timestamp: {error}"))?;
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .last_modified_time(timestamp)
+        .unix_permissions(0o777);
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    for (member, bytes) in members {
+        writer
+            .start_file(member.as_str(), options)
+            .map_err(|error| format!("archive member {member}: {error}"))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("archive member {member}: {error}"))?;
+    }
+    let archive = writer
+        .finish()
+        .map_err(|error| format!("finish archive: {error}"))?;
+    Ok(archive.into_inner())
 }
 
 fn parse_args<I>(args: I) -> Result<Config, String>
@@ -104,12 +155,14 @@ where
 {
     let mut args = args;
     let mut output = None;
+    let mut archive = None;
     let mut layout = None;
     let mut files = Vec::new();
 
     while let Some(option) = args.next() {
         match option.as_str() {
             "--output" => output = Some(next_argument(&mut args, "--output")?),
+            "--archive" => archive = Some(next_argument(&mut args, "--archive")?),
             "--layout" => layout = Some(next_argument(&mut args, "--layout")?),
             "--file" => {
                 let member = next_argument(&mut args, "--file member")?;
@@ -123,8 +176,12 @@ where
         }
     }
 
+    if output.is_none() && archive.is_none() {
+        return Err("missing --output or --archive".to_owned());
+    }
     Ok(Config {
-        output: PathBuf::from(output.ok_or_else(|| "missing --output".to_owned())?),
+        output: output.map(PathBuf::from),
+        archive: archive.map(PathBuf::from),
         layout: PathBuf::from(layout.ok_or_else(|| "missing --layout".to_owned())?),
         files,
     })

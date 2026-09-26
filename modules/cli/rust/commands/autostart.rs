@@ -1,6 +1,5 @@
 use std::{
     fs,
-    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Instant,
 };
@@ -9,6 +8,7 @@ use crate::{
     CliError, Result,
     credentials::{self, ForgeCredentialPaths},
     error::io,
+    host_access::{self, HostAccess},
     instance::{self, NativeInstanceConfig},
     paths::Layout,
     payload, process, telemetry,
@@ -19,9 +19,28 @@ use super::{
     require_launchable_installation,
 };
 
-const AUTOSTART_TASK_NAME: &str = "Artisan Forge";
+#[cfg(any(not(target_os = "linux"), test))]
+mod logon_task;
+#[cfg(target_os = "linux")]
+mod systemd;
+
+#[cfg(test)]
+pub(super) use logon_task::{
+    ScheduledTaskDeletion, StableLauncher, scheduled_task_action, scheduled_task_create_args,
+    scheduled_task_deletion, stable_launcher_kind,
+};
 
 pub(super) fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result<()> {
+    // The Forge creates its files, not their directories.
+    for runtime_path in [
+        &values.database_path,
+        &values.custody_path,
+        &values.readiness_path,
+    ] {
+        if let Some(parent) = runtime_path.parent() {
+            fs::create_dir_all(parent).map_err(io("create Forge runtime directory"))?;
+        }
+    }
     let credential_paths = ForgeCredentialPaths::from_home(&layout.root)?;
     let instance_path = layout.native_instance_path();
     let instance_id = match fs::symlink_metadata(&instance_path) {
@@ -50,26 +69,49 @@ pub(super) fn setup_native(layout: &Layout, values: NativeSetupValues) -> Result
     Ok(())
 }
 
+/// Starts the Forge: in the foreground as a supervisor (what the Linux
+/// service runs), through the user's service manager when the installation
+/// has one, or detached. A Forge with host access publishes its invitation
+/// once ready.
 pub(super) fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_launchable_installation(layout)?;
     telemetry::load_or_create(layout)?;
     payload::require_verified(&manifest.version_root())?;
+    let access = HostAccess::load(&layout.root)?;
     let spec = native_launch_spec(layout)?;
-    process::start_until(&spec, foreground, Instant::now() + FORGE_READY_TIMEOUT)
+    let deadline = Instant::now() + FORGE_READY_TIMEOUT;
+    let publish = |readiness: &process::ForgeReadiness| match &access {
+        Some(access) => host_access::publish_invitation(&layout.root, access, readiness).map(drop),
+        None => Ok(()),
+    };
+    if foreground {
+        return process::supervise(&spec, deadline, &mut |readiness| publish(readiness));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(result) = systemd::start(layout, &spec, deadline)? {
+        return Ok(result);
+    }
+    let result = process::start_until(&spec, false, deadline)?;
+    if let process::ForgeReadinessStatus::Ready(readiness) =
+        process::readiness_status(spec.readiness_path(), spec.executable())
+    {
+        publish(&readiness)?;
+    }
+    Ok(result)
 }
 
 pub(super) fn unsupported_lifecycle_control() -> Result<()> {
     Err(CliError::UnsupportedLifecycleControl)
 }
 
-pub(super) fn autostart(disable: bool) -> Result<()> {
+pub(super) fn autostart(layout: &Layout, disable: bool) -> Result<()> {
     if disable {
-        disable_autostart()?;
+        disable_autostart(layout)?;
         println!("disabled");
     } else {
         println!(
             "{}",
-            if autostart_enabled()? {
+            if autostart_enabled(layout)? {
                 "enabled"
             } else {
                 "disabled"
@@ -79,249 +121,57 @@ pub(super) fn autostart(disable: bool) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn enable_autostart(layout: &Layout) -> Result<()> {
-    let manifest = require_installation(layout)?;
-    let permanent_ae = manifest.permanent_ae_path.as_deref().ok_or_else(|| {
-        CliError::Installation(
-            "the installation has no permanent ae launcher path; run `ae doctor --fix` before enabling autostart"
-                .into(),
-        )
-    })?;
-    let launcher = stable_launcher_kind(permanent_ae).ok_or_else(|| {
-        CliError::Installation(format!(
-            "the permanent ae launcher at {} must be an absolute ae.exe, ae.cmd, or ae.bat file; run `ae doctor --fix` before enabling autostart",
-            permanent_ae.display()
-        ))
-    })?;
-    if !permanent_ae.is_absolute() || !permanent_ae.is_file() {
-        return Err(CliError::Installation(format!(
-            "the permanent ae launcher is unavailable at {}; run `ae doctor --fix` before enabling autostart",
-            permanent_ae.display()
-        )));
+/// Starts the Forge with the user's session: the systemd user service on
+/// Linux, the logon task on Windows. `configuration_changed` restarts a
+/// running Linux service so a new configuration takes effect.
+pub(super) fn enable_autostart(layout: &Layout, configuration_changed: bool) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd::enable(layout, configuration_changed)
     }
-    let action = scheduled_task_action(
-        permanent_ae,
-        launcher,
-        match launcher {
-            StableLauncher::Executable => None,
-            StableLauncher::CommandScript => Some(trusted_windows_command_processor()?),
-        },
-    )?;
-    create_autostart_task(&action)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum StableLauncher {
-    Executable,
-    CommandScript,
-}
-
-pub(super) fn stable_launcher_kind(path: &Path) -> Option<StableLauncher> {
-    match path.file_name()?.to_str()? {
-        name if name.eq_ignore_ascii_case("ae.exe") => Some(StableLauncher::Executable),
-        name if name.eq_ignore_ascii_case("ae.cmd") || name.eq_ignore_ascii_case("ae.bat") => {
-            Some(StableLauncher::CommandScript)
-        }
-        _ => None,
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = configuration_changed;
+        logon_task::enable(layout)
     }
 }
 
-pub(super) fn scheduled_task_action(
-    permanent_ae: &Path,
-    launcher: StableLauncher,
-    command_processor: Option<PathBuf>,
-) -> Result<String> {
-    match launcher {
-        StableLauncher::Executable => Ok(format!("\"{}\" start", permanent_ae.display())),
-        StableLauncher::CommandScript => {
-            let command_processor = command_processor.ok_or_else(|| {
-                CliError::Installation(
-                    "no trusted Windows command processor is available for the permanent ae script"
-                        .into(),
-                )
-            })?;
-            reject_cmd_metacharacters(permanent_ae)?;
-            reject_cmd_metacharacters(&command_processor)?;
-            Ok(format!(
-                "\"{}\" /d /s /c \"\"{}\" start\"",
-                command_processor.display(),
-                permanent_ae.display()
-            ))
-        }
+/// Stops a service-managed Forge `pid` through the user manager; `false`
+/// when the installation's Forge is not a running service.
+pub(super) fn stop_service(layout: &Layout, pid: u32) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd::stop(layout, pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (layout, pid);
+        Ok(false)
     }
 }
 
-fn reject_cmd_metacharacters(path: &Path) -> Result<()> {
-    let path = path.to_str().ok_or_else(|| {
-        CliError::Installation("the permanent ae script path is not valid Unicode".into())
-    })?;
-    if path.chars().any(|character| {
-        matches!(
-            character,
-            '%' | '!' | '^' | '&' | '|' | '<' | '>' | '(' | ')' | '"' | '\r' | '\n'
-        )
-    }) {
-        return Err(CliError::Installation(
-            "the permanent ae script path contains characters unsafe for Windows cmd.exe".into(),
-        ));
+fn disable_autostart(layout: &Layout) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd::disable(layout)
     }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn trusted_windows_command_processor() -> Result<PathBuf> {
-    let system_root = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| {
-            CliError::Installation(
-                "Windows SystemRoot is unavailable; cannot safely schedule the permanent ae script"
-                    .into(),
-            )
-        })?;
-    let command_processor = system_root.join("System32").join("cmd.exe");
-    if !command_processor.is_file() {
-        return Err(CliError::Installation(format!(
-            "trusted Windows command processor is unavailable at {}; run `ae doctor --fix`",
-            command_processor.display()
-        )));
-    }
-    Ok(command_processor)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn trusted_windows_command_processor() -> Result<PathBuf> {
-    Err(CliError::Unsupported(
-        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
-    ))
-}
-
-pub(super) fn scheduled_task_create_args(action: &str) -> Vec<String> {
-    vec![
-        "/Create".into(),
-        "/TN".into(),
-        AUTOSTART_TASK_NAME.into(),
-        "/TR".into(),
-        action.into(),
-        "/SC".into(),
-        "ONLOGON".into(),
-        "/RL".into(),
-        "LIMITED".into(),
-        "/F".into(),
-    ]
-}
-
-#[cfg(target_os = "windows")]
-fn create_autostart_task(action: &str) -> Result<()> {
-    let status = hidden_schtasks(
-        &scheduled_task_create_args(action),
-        "create Forge autostart task",
-    )?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(CliError::Control(format!(
-            "could not create current-user Forge autostart task ({status})"
-        )))
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = layout;
+        logon_task::disable()
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-fn create_autostart_task(_: &str) -> Result<()> {
-    Err(CliError::Unsupported(
-        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
-    ))
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ScheduledTaskDeletion {
-    AlreadyAbsent,
-    Deleted,
-    Failed,
-}
-
-/// Converts scheduler exit outcomes into idempotent removal semantics without
-/// running a real task operation in unit tests.
-pub(super) fn scheduled_task_deletion(
-    task_exists: bool,
-    delete_succeeded: bool,
-) -> ScheduledTaskDeletion {
-    match (task_exists, delete_succeeded) {
-        (false, _) => ScheduledTaskDeletion::AlreadyAbsent,
-        (true, true) => ScheduledTaskDeletion::Deleted,
-        (true, false) => ScheduledTaskDeletion::Failed,
+fn autostart_enabled(layout: &Layout) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd::enabled(layout)
     }
-}
-
-#[cfg(target_os = "windows")]
-fn disable_autostart() -> Result<()> {
-    let query_status = hidden_schtasks(
-        &["/Query".into(), "/TN".into(), AUTOSTART_TASK_NAME.into()],
-        "inspect Forge autostart task before removal",
-    )?;
-    if matches!(
-        scheduled_task_deletion(query_status.success(), true),
-        ScheduledTaskDeletion::AlreadyAbsent
-    ) {
-        return Ok(());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = layout;
+        logon_task::enabled()
     }
-    let delete_status = hidden_schtasks(
-        &[
-            "/Delete".into(),
-            "/TN".into(),
-            AUTOSTART_TASK_NAME.into(),
-            "/F".into(),
-        ],
-        "remove Forge autostart task",
-    )?;
-    match scheduled_task_deletion(true, delete_status.success()) {
-        ScheduledTaskDeletion::Deleted => Ok(()),
-        ScheduledTaskDeletion::AlreadyAbsent => unreachable!("task existence was checked first"),
-        ScheduledTaskDeletion::Failed => Err(CliError::Control(format!(
-            "could not remove current-user Forge autostart task ({delete_status})"
-        ))),
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn disable_autostart() -> Result<()> {
-    Err(CliError::Unsupported(
-        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn autostart_enabled() -> Result<bool> {
-    let status = hidden_schtasks(
-        &["/Query".into(), "/TN".into(), AUTOSTART_TASK_NAME.into()],
-        "inspect Forge autostart task",
-    )?;
-    Ok(status.success())
-}
-
-#[cfg(not(target_os = "windows"))]
-fn autostart_enabled() -> Result<bool> {
-    Err(CliError::Unsupported(
-        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn hidden_schtasks(
-    arguments: &[String],
-    context: &'static str,
-) -> Result<std::process::ExitStatus> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("schtasks.exe")
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(io(context))
 }
 
 pub(super) fn delegate_installer(

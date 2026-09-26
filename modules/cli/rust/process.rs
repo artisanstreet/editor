@@ -16,8 +16,8 @@ mod lifecycle;
 mod receipt;
 mod spec;
 
-pub use lifecycle::{ForgeProcessLease, start, start_owned, start_owned_until, start_until};
-pub use receipt::readiness_status;
+pub use lifecycle::{ForgeProcessLease, start_owned, start_owned_until, start_until, supervise};
+pub use receipt::{ReadinessReconcile, readiness_status, reconcile_stale_readiness};
 pub(crate) use spec::validate_credential_manifest;
 pub use spec::{ForgeLaunchSpec, ForgeReadiness, ForgeReadinessStatus, StartResult};
 
@@ -181,8 +181,8 @@ mod tests {
                 OsString::from("ARGV-CREDENTIAL-SECRET"),
             ],
             readiness_path: PathBuf::from("READINESS-PATH-SECRET"),
+            custody_path: PathBuf::from("CUSTODY-PATH-SECRET"),
         };
-
         let debug = format!("{spec:?}");
         assert!(debug.contains("ForgeLaunchSpec"));
         assert!(debug.contains("argv_count: 2"));
@@ -672,10 +672,10 @@ mod tests {
 
         for endpoint in [
             "127.0.0.1:0",
-            "127.0.0.2:4317",
+            "224.0.0.1:4317",
             "0.0.0.0:4317",
             "localhost:4317",
-            "[::1]:4317",
+            "[::]:4317",
             "http://127.0.0.1:4317",
             "127.0.0.1",
             "127.0.0.1:01",

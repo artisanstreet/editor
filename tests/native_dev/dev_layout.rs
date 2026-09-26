@@ -94,13 +94,13 @@ fn binary_names_follow_the_platform() {
 }
 
 #[test]
-fn stage_lines_are_plain_and_numbered() {
+fn stage_lines_are_plain_and_numbered_per_half() {
     assert_eq!(
-        stage_line(2, 7, "assemble", ""),
-        "dev: stage 2/7 assemble ... ok"
+        stage_line("forge", 2, "sign", ""),
+        "dev: forge 2 sign ... ok"
     );
     assert_eq!(
-        stage_line(3, 7, "install", "dev channel"),
-        "dev: stage 3/7 install ... ok (dev channel)"
+        stage_line("editor", 3, "install", "dev channel"),
+        "dev: editor 3 install ... ok (dev channel)"
     );
 }

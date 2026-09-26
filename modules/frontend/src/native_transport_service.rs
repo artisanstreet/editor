@@ -2,7 +2,7 @@
 //!
 //! The service is deliberately a synchronous bounded bridge around one
 //! service thread. The thread owns its Tokio runtime, authenticated session,
-//! rotated capability, and owned Forge lease. Only owned domain values and
+//! and rotated capability. Only owned domain values and
 //! redacted typed diagnostics cross the bridge.
 
 #![forbid(unsafe_code)]
@@ -38,13 +38,10 @@ use artisan_domain::{
 };
 use artisan_editor_cli::{
     credentials::{
-        NativeClientCredentials, RECONNECT_LOCK_TIMEOUT, ReconnectBinding,
-        ReconnectCapabilityStore, ReconnectSessionLease, load_client_credentials,
+        RECONNECT_LOCK_TIMEOUT, ReconnectBinding, ReconnectCapabilityStore, ReconnectSessionLease,
+        load_client_credentials,
     },
-    instance::NativeInstanceConfig,
-    manifest::InstallationManifest,
-    paths::Layout,
-    process::{ForgeLaunchSpec, ForgeProcessLease, ForgeReadiness, start_owned},
+    process::ForgeReadiness,
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
@@ -626,9 +623,7 @@ struct ServiceRuntime {
     target: artisan_transport::SessionTarget,
     pinned_identity: PinnedIdentity,
     limits: ClientSessionLimits,
-    lease: Option<ForgeProcessLease>,
     cancel: CancelHandle,
-    shutdown_grace: Duration,
     known_threads: HashSet<ThreadId>,
     /// Attachments this connection uploaded or read back from the Forge store.
     intake: IntakeState,
@@ -653,7 +648,7 @@ fn publish(
 
 #[cfg(test)]
 fn custody_trace() -> Vec<CustodyStep> {
-    cleanup_plan(true, true, true)
+    cleanup_plan(true, true)
 }
 
 #[path = "native_composer_transport.rs"]
@@ -711,7 +706,7 @@ mod request_construction;
 use request_construction::reconnect_hello;
 use request_construction::{
     FrameFactory, StableMutation, account_usage_request, approval_stable_mutation, attach_mutation,
-    build_reconnect_binding, composer_catalog_request, create_mutation, draft_submission_mutation,
+    composer_catalog_request, create_mutation, draft_submission_mutation,
     engine_config_stable_mutation, finite_duration, make_request_frame,
     model_favorite_stable_mutation, model_favorites_request, project_repository_request,
     project_request, query_request, question_stable_mutation, real_unix_millis,

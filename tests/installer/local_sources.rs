@@ -88,9 +88,16 @@ async fn a_signed_tree_installs_and_activates_as_a_dev_release() {
     let tree = signed_tree(&root, directory.path(), "0.0.0-dev.1+gaaaa", "one");
     let trust = local_trust(&root).unwrap();
 
-    install(options(&root, ReleaseSource::Tree { path: tree }, trust))
-        .await
-        .unwrap();
+    install(options(
+        &root,
+        ReleaseSource::Tree {
+            path: tree,
+            manifest_directory: None,
+        },
+        trust,
+    ))
+    .await
+    .unwrap();
 
     let state = installation(&root);
     assert_eq!(state["active_version"], "0.0.0-dev.1+gaaaa");
@@ -120,6 +127,7 @@ async fn a_new_version_reuses_unchanged_files_and_reinstalling_is_idempotent() {
         &root,
         ReleaseSource::Tree {
             path: first.clone(),
+            manifest_directory: None,
         },
         trust.clone(),
     ))
@@ -127,7 +135,10 @@ async fn a_new_version_reuses_unchanged_files_and_reinstalling_is_idempotent() {
     .unwrap();
     install(options(
         &root,
-        ReleaseSource::Tree { path: second },
+        ReleaseSource::Tree {
+            path: second,
+            manifest_directory: None,
+        },
         trust.clone(),
     ))
     .await
@@ -159,9 +170,16 @@ async fn a_new_version_reuses_unchanged_files_and_reinstalling_is_idempotent() {
     }
 
     // Re-activating an existing identical version is a rollback, not an error.
-    install(options(&root, ReleaseSource::Tree { path: first }, trust))
-        .await
-        .unwrap();
+    install(options(
+        &root,
+        ReleaseSource::Tree {
+            path: first,
+            manifest_directory: None,
+        },
+        trust,
+    ))
+    .await
+    .unwrap();
     assert_eq!(installation(&root)["active_version"], "0.0.0-dev.1+gaaaa");
 }
 
@@ -174,14 +192,20 @@ async fn a_version_with_different_bytes_is_refused_as_tampered() {
     let trust = local_trust(&root).unwrap();
     install(options(
         &root,
-        ReleaseSource::Tree { path: first },
+        ReleaseSource::Tree {
+            path: first,
+            manifest_directory: None,
+        },
         trust.clone(),
     ))
     .await
     .unwrap();
     let error = install(options(
         &root,
-        ReleaseSource::Tree { path: impostor },
+        ReleaseSource::Tree {
+            path: impostor,
+            manifest_directory: None,
+        },
         trust,
     ))
     .await
@@ -200,7 +224,10 @@ async fn a_file_changed_after_signing_is_refused() {
     std::fs::write(tree.join("bin").join(exe("forge")), b"swapped").unwrap();
     let error = install(options(
         &root,
-        ReleaseSource::Tree { path: tree },
+        ReleaseSource::Tree {
+            path: tree,
+            manifest_directory: None,
+        },
         local_trust(&root).unwrap(),
     ))
     .await
@@ -218,7 +245,10 @@ async fn another_roots_key_cannot_install_into_this_root() {
     let foreign = signed_tree(&other, directory.path(), "0.0.0-dev.1+gaaaa", "one");
     let error = install(options(
         &root,
-        ReleaseSource::Tree { path: foreign },
+        ReleaseSource::Tree {
+            path: foreign,
+            manifest_directory: None,
+        },
         local_trust(&root).unwrap(),
     ))
     .await
@@ -235,7 +265,10 @@ async fn dev_releases_stay_in_dev_installations() {
 
     let mut expecting_stable = options(
         &root,
-        ReleaseSource::Tree { path: tree.clone() },
+        ReleaseSource::Tree {
+            path: tree.clone(),
+            manifest_directory: None,
+        },
         trust.clone(),
     );
     expecting_stable.expected_channel = Some("stable".to_owned());
@@ -257,9 +290,16 @@ async fn dev_releases_stay_in_dev_installations() {
     ))
     .await
     .unwrap();
-    let error = install(options(&root, ReleaseSource::Tree { path: tree }, trust))
-        .await
-        .unwrap_err();
+    let error = install(options(
+        &root,
+        ReleaseSource::Tree {
+            path: tree,
+            manifest_directory: None,
+        },
+        trust,
+    ))
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("nightly channel"), "{error}");
     assert_eq!(installation(&root)["active_version"], "1.2.3");
 }
@@ -282,9 +322,16 @@ async fn release_trust_never_verifies_a_dev_release() {
     let Ok(explicit) = TrustKey::resolve(Some(&public)) else {
         return; // release test builds refuse explicit keys outright
     };
-    let error = install(options(&root, ReleaseSource::Tree { path: tree }, explicit))
-        .await
-        .unwrap_err();
+    let error = install(options(
+        &root,
+        ReleaseSource::Tree {
+            path: tree,
+            manifest_directory: None,
+        },
+        explicit,
+    ))
+    .await
+    .unwrap_err();
     assert!(error.to_string().contains("local key"), "{error}");
 }
 
@@ -436,7 +483,10 @@ async fn pruning_keeps_the_active_version_and_the_most_recent_others() {
         );
         install(options(
             &root,
-            ReleaseSource::Tree { path: tree },
+            ReleaseSource::Tree {
+                path: tree,
+                manifest_directory: None,
+            },
             local_trust(&root).unwrap(),
         ))
         .await
@@ -453,4 +503,36 @@ async fn pruning_keeps_the_active_version_and_the_most_recent_others() {
     );
     assert!(!root.join("versions/0.0.0-dev.0+ga").exists());
     assert_eq!(installation(&root)["active_version"], "0.0.0-dev.3+gd");
+}
+
+#[tokio::test]
+async fn a_read_only_payload_is_signed_and_installed_without_touching_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    let payload = directory.path().join("payload");
+    write_tree(&payload, "store");
+    let manifests = directory.path().join("manifests");
+    let signer = LocalSigner::load_or_create(&root).unwrap();
+    signer
+        .write_tree_manifest_to(
+            &payload,
+            &manifests,
+            &LocalRelease {
+                product_version: "0.0.0-dev.1+nstore".to_owned(),
+                platform: Platform::detect().unwrap(),
+            },
+        )
+        .unwrap();
+    assert!(!payload.join(TREE_MANIFEST_NAME).exists());
+    install(options(
+        &root,
+        ReleaseSource::Tree {
+            path: payload,
+            manifest_directory: Some(manifests),
+        },
+        signer.trust(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(installation(&root)["active_version"], "0.0.0-dev.1+nstore");
 }

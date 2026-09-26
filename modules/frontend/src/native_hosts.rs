@@ -67,23 +67,7 @@ pub(crate) fn group() -> CommandMenuGroup {
 }
 
 pub(crate) fn import(path: &Path) -> Result<PathBuf, ForgeCredentialError> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take((hosts::MAX_INVITATION_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-        })
-        .map_err(|_| ForgeCredentialError::Provisioning)?;
-    let result = hosts::import(&bytes).and_then(|home| {
-        if !home.join("credentials/source.json").exists() {
-            let source = serde_json::to_vec(&path.to_path_buf())
-                .map_err(|_| ForgeCredentialError::ManifestMalformed)?;
-            hosts::install_private(&home, "source.json", &source)?;
-        }
-        Ok(home)
-    });
-    // The invitation contains a bootstrap secret; don't retain its serialized bytes.
-    bytes.fill(0);
+    let result = hosts::import_file(path);
     if let Ok(home) = &result {
         refresh(Some(home));
     }

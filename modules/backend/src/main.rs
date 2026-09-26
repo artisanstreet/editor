@@ -7,6 +7,11 @@
 
 use std::process::ExitCode;
 
+/// mimalloc outperforms the platform allocators for Forge's concurrent
+/// request and persistence work.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     // Directory-helper dispatch is deliberately the first normal-process
     // action: helper mode must not construct the Forge runtime or its owners.

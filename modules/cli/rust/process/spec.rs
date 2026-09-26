@@ -2,6 +2,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fmt,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -19,6 +20,7 @@ pub struct ForgeLaunchSpec {
     pub(super) executable: PathBuf,
     pub(super) argv: Vec<OsString>,
     pub(super) readiness_path: PathBuf,
+    pub(super) custody_path: PathBuf,
 }
 
 impl fmt::Debug for ForgeLaunchSpec {
@@ -47,7 +49,16 @@ impl ForgeLaunchSpec {
                 credentials.capability_path(),
             ),
             readiness_path: config.readiness_path().to_path_buf(),
+            custody_path: config.custody_path().to_path_buf(),
         })
+    }
+
+    /// Binds the Forge to `address` instead of an ephemeral loopback port.
+    #[must_use]
+    pub fn listening_on(mut self, address: SocketAddr) -> Self {
+        self.argv.push(OsString::from("--listen"));
+        self.argv.push(OsString::from(address.to_string()));
+        self
     }
 
     pub fn executable(&self) -> &Path {
@@ -60,6 +71,10 @@ impl ForgeLaunchSpec {
 
     pub fn readiness_path(&self) -> &Path {
         &self.readiness_path
+    }
+
+    pub fn custody_path(&self) -> &Path {
+        &self.custody_path
     }
 }
 
@@ -112,9 +127,9 @@ impl ForgeReadiness {
         }
 
         let endpoint = endpoint.into();
-        if !is_exact_loopback_endpoint(&endpoint) {
+        if !is_concrete_endpoint(&endpoint) {
             return Err(CliError::InvalidForgeReadiness {
-                reason: "endpoint is not an IPv4 127.0.0.1 address with a nonzero port",
+                reason: "endpoint is not a canonical unicast IP address with a nonzero port",
             });
         }
 
@@ -181,17 +196,19 @@ impl<'de> Deserialize<'de> for ForgeReadiness {
     }
 }
 
-fn is_exact_loopback_endpoint(endpoint: &str) -> bool {
-    let Some(port_text) = endpoint.strip_prefix("127.0.0.1:") else {
+/// A Forge listens on loopback, or on the reachable address its host access
+/// names (see `host_access`); either way the receipt holds the one concrete
+/// address it bound, in canonical form.
+fn is_concrete_endpoint(endpoint: &str) -> bool {
+    let Ok(address) = endpoint.parse::<SocketAddr>() else {
         return false;
     };
-    if port_text.is_empty()
-        || (port_text.len() > 1 && port_text.starts_with('0'))
-        || !port_text.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return false;
-    }
-    port_text.parse::<u16>().is_ok_and(|port| port != 0)
+    let ip = address.ip();
+    address.to_string() == endpoint
+        && address.port() != 0
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !matches!(ip, std::net::IpAddr::V4(ip) if ip.is_broadcast())
 }
 
 fn is_sha256_hex(value: &str) -> bool {

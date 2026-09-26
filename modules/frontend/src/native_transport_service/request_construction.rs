@@ -438,18 +438,3 @@ pub(super) fn reconnect_hello(
 ) -> Result<WireEnvelope, ServiceFailure> {
     reconnect_hello_with_capability(frames, capability).map_err(|(failure, _)| failure)
 }
-
-pub(super) fn build_reconnect_binding(
-    instance_id: [u8; 16],
-    target: LoopbackTarget,
-    pinned_identity: PinnedIdentity,
-    forge_pid: u32,
-) -> Result<ReconnectBinding, StartupError> {
-    ReconnectBinding::new(
-        instance_id,
-        target.addr().port(),
-        *pinned_identity.as_bytes(),
-        NonZeroU32::new(forge_pid).ok_or(StartupError::Stage(ServiceFailureStage::Readiness))?,
-    )
-    .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))
-}

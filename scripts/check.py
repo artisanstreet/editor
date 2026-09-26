@@ -5,8 +5,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from build_support import build, executable, run
-from package import package
+from build_support import ROOT, build, executable, run
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--tests-only', action='store_true', help='run tests with already-built fixtures')
@@ -36,12 +35,18 @@ with tempfile.TemporaryDirectory() as tmp:
     payload_dir.mkdir()
     for name in ('ae', 'editor', 'forge', 'installer'):
         executable(payload_dir, name).write_bytes(('archive fixture: ' + name).encode())
+    files = [argument for name in ('ae', 'editor', 'forge', 'installer')
+             for argument in ('--file', f'bin/{executable(payload_dir, name).name}',
+                              str(executable(payload_dir, name)))]
     for variable, filename in [
         ('ARTISAN_VERSIONED_PAYLOAD_ARCHIVE', 'payload.zip'),
         ('ARTISAN_VERSIONED_PAYLOAD_ARCHIVE_REPRODUCIBILITY', 'repeat.zip'),
     ]:
-        env[variable] = str(package(payload_dir, Path(tmp) / filename,
-                                    executable(bin_dir, 'payload-manifest-generator')))
+        archive = Path(tmp) / filename
+        run(str(executable(bin_dir, 'payload-manifest-generator')),
+            '--layout', str(ROOT / 'packaging/portable/versioned_layout.txt'),
+            '--archive', str(archive), *files)
+        env[variable] = str(archive)
     for name in ('ae', 'editor', 'forge', 'installer'):
         env[f'ARTISAN_VERSIONED_PAYLOAD_{name.upper()}_BINARY'] = str(executable(payload_dir, name))
     if args.runner == 'nextest':

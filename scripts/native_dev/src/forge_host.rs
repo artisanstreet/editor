@@ -1,5 +1,15 @@
-//! Foreground Forge service supervisor and private invitation publisher.
-use artisan_editor_cli::credentials::{self, hosts};
+//! Foreground Forge supervisor for a bare Forge home, used by the
+//! remote-host integration check (`scripts/test_remote_host.py`).
+//!
+//! Installed Forges run under `ae start --foreground` (the Linux service);
+//! this fixture drives the same pieces for a home without an installation:
+//! stale readiness reconciliation and host invitation publishing come from
+//! the product's `ae` library.
+use artisan_editor_cli::{
+    credentials,
+    host_access::{self, HostAccess, ListenAddress},
+    process::{self, ForgeReadiness},
+};
 use native_dev::provision;
 use std::{
     collections::BTreeMap,
@@ -49,8 +59,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let get = |key: &str| options.get(key).cloned().ok_or("missing required option");
     let home = PathBuf::from(get("--home")?);
     let forge = PathBuf::from(get("--forge")?);
-    let listen = resolve_address(&get("--listen")?)?;
-    let advertise = resolve_address(&get("--advertise")?)?;
+    let listen = resolve(&get("--listen")?)?;
+    let advertise = resolve(&get("--advertise")?)?;
     if !home.is_absolute()
         || !forge.is_absolute()
         || listen.port() == 0
@@ -60,13 +70,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "absolute paths and matching nonzero listening/advertised ports required".into(),
         );
     }
+    let access = HostAccess::new(ListenAddress::Explicit(advertise), get("--name")?)?;
     let paths = credentials::provision_or_load(&home)?;
     let ready = home.join("readiness.json");
     // Serialize supervisors before checking custody or replacing crash leftovers.
     let _supervisor = lock_supervisor(&home)?;
-    remove_stale_readiness(&home, &ready)?;
-    let incarnation = artisan_editor_cli::instance::mint_instance_id()?;
-    let mut command = Command::new(forge);
+    process::reconcile_stale_readiness(&ready, &home.join("custody"), &forge)?;
+    let mut command = Command::new(&forge);
     for (key, value) in [
         ("--database", home.join("forge.db")),
         ("--custody", home.join("custody")),
@@ -86,7 +96,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut child = command.spawn()?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
-        while !ready.exists() {
+        let readiness = loop {
+            if let Some(readiness) = std::fs::read(&ready)
+                .ok()
+                .and_then(|bytes| ForgeReadiness::from_json(&bytes).ok())
+                .filter(|readiness| readiness.pid() == child.id())
+            {
+                break readiness;
+            }
             if child.try_wait()?.is_some() {
                 return Err("Forge exited before becoming ready".into());
             }
@@ -94,18 +111,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("Forge readiness timeout".into());
             }
             std::thread::sleep(Duration::from_millis(100));
-        }
-        let invitation =
-            hosts::invitation_for(&home, get("--name")?, advertise, incarnation, child.id())?;
-        // Each start publishes new incarnation metadata; the stable path is replaced atomically.
-        let export = home.join(format!("export-{}", child.id()));
-        let source = hosts::install_private(&export, "host.json", &invitation.encode()?)?;
-        std::fs::rename(source, home.join("host.json"))?;
-        let _ = std::fs::remove_dir(export.join("credentials"));
-        let _ = std::fs::remove_dir(export);
+        };
+        let invitation = host_access::publish_invitation(&home, &access, &readiness)?;
         eprintln!(
             "Forge ready at {advertise}; private invitation: {}",
-            home.join("host.json").display()
+            invitation.display()
         );
         let status = child.wait()?;
         if !status.success() {
@@ -122,18 +132,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
-fn resolve_address(value: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    let Some(port) = value.strip_prefix("auto:") else {
-        return Ok(value.parse()?);
-    };
-    // Select the default IPv4 route without sending application data.
-    let route = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))?;
-    route.connect((std::net::Ipv4Addr::new(192, 0, 2, 1), 9))?;
-    let ip = route.local_addr()?.ip();
-    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
-        return Err("no usable default IPv4 route; configure an explicit endpoint".into());
-    }
-    Ok(SocketAddr::new(ip, port.parse()?))
+fn resolve(value: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
+    let address: ListenAddress = value.parse()?;
+    Ok(address.resolve()?)
 }
 
 fn apply_policy(command: &mut Command) {
@@ -189,14 +190,16 @@ fn apply_policy(command: &mut Command) {
         .arg(provision::DEV_RUN_PROMPT_DELIVERY);
 }
 
-fn wait_for_previous(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
-    if !path.exists() {
+/// Waits for a previous Forge still finishing its shutdown to release the
+/// home's custody, which it holds until after its readiness is gone.
+fn wait_for_previous(custody: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !custody.exists() {
         return Ok(());
     }
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open(path)?;
+        .open(custody)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
@@ -222,26 +225,6 @@ fn lock_supervisor(home: &std::path::Path) -> Result<std::fs::File, std::io::Err
     Ok(file)
 }
 
-fn remove_stale_readiness(
-    home: &std::path::Path,
-    ready: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // The daemon holds custody for its whole lifetime. Refuse cleanup while
-    // a live owner holds it, including a child surviving a supervisor crash.
-    let custody = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(home.join("custody"))?;
-    fs2::FileExt::try_lock_exclusive(&custody)?;
-    match std::fs::remove_file(ready) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[cfg(test)]
 mod restart_tests {
     use super::*;
@@ -265,28 +248,11 @@ mod restart_tests {
     }
 
     #[test]
-    fn stale_receipt_is_removed_only_without_a_live_owner() {
-        let home = std::env::temp_dir().join(format!("forge-restart-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
-        let ready = home.join("readiness.json");
-        std::fs::write(&ready, b"stale").unwrap();
-        let owner = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(home.join("custody"))
-            .unwrap();
-        fs2::FileExt::try_lock_exclusive(&owner).unwrap();
-        assert!(remove_stale_readiness(&home, &ready).is_err());
-        assert!(ready.exists());
-        drop(owner);
-        let supervisor = lock_supervisor(&home).unwrap();
-        assert!(lock_supervisor(&home).is_err());
-        remove_stale_readiness(&home, &ready).unwrap();
-        assert!(!ready.exists());
-        remove_stale_readiness(&home, &ready).unwrap();
+    fn one_supervisor_per_home() {
+        let home = tempfile::tempdir().expect("home");
+        let supervisor = lock_supervisor(home.path()).expect("first supervisor");
+        assert!(lock_supervisor(home.path()).is_err());
         drop(supervisor);
-        std::fs::remove_dir_all(home).unwrap();
+        lock_supervisor(home.path()).expect("released");
     }
 }

@@ -1,13 +1,10 @@
 # Native frame measurements
 
-Use `scripts/dev.ps1 -Performance` on Windows when evaluating animation or
-scrolling. This selects Cargo's `performance` profile, which inherits `dev`
-and enables optimization level 2. Debug symbols and assertions remain enabled.
-The ordinary `dev` profile stays unoptimized for step-through debugging.
-The visual verification script also builds with `--profile performance` by default.
-When supplying `-ExePath`, choose `target/performance/editor.exe`; opening
-`target/debug/editor.exe` bypasses these optimizations even when the same
-VSync and scheduling fixes are compiled in. The script flags that mismatch.
+Measure the stages Nix builds, never raw Cargo output: `nix run .#dev` (Debug)
+or `nix run .#dev -- --production` (Production). Both stages share the
+Production codegen (opt-level 3, fat LTO, one codegen unit, `panic = "abort"`,
+mimalloc, x86-64-v3); Debug adds debug info, debug assertions, overflow
+checks, and the GPUI inspector. Report which stage a number came from.
 
 
 The top-right counter measures presentation submissions during scheduled
@@ -121,7 +118,24 @@ The Windows wake callback now schedules dirty windows directly. The paint
 region is validated before rendering so requests raised during rendering
 survive to the next frame. Throttled retries use one timer instead of polling.
 
-Nix provides `nix run .#performance` for the performance-profile staged application and `nix develop .#performance` for pinned profiling tools. Supply an absolute `ARTISAN_FRAME_CAPTURE` path outside the store. See the [development runbook](runbooks/native-dev.md#desktop-and-performance-tools) for the launch and host requirements.
+## Windows stage measurement, 2026-09-25
+
+Nix-built stages (`x86_64-pc-windows-gnu`, MinGW-w64), Radeon RX 9070 XT,
+1024×720 on the new-thread screen, forced full-window redraws with VSync off
+(`ARTISAN_FRAME_CAPTURE_VSYNC=0`), ten-second measurement:
+
+| Stage | Window | CPU draw median / p99 | Submission median | Presentations |
+| --- | --- | --- | --- | --- |
+| Debug | active | 0.57 / 0.99 ms | 1.14 ms | 530 per second sustained |
+| Production | inactive | 0.54 / 0.86 ms | 0.38 ms | 1.05 ms median interval within bursts (about 950 per second); throttled between them |
+
+Debug assertions and overflow checks cost about 5% of CPU draw time. The
+Production run could not take the foreground, so its sustained rate is
+throttled by GPUI's inactive-window policy; compare draw times, not rates,
+across those rows. A chat thread with history costs more: a Debug capture
+on one measured 4.15 ms median draw while inactive.
+
+`nix develop .#performance` provides pinned profiling tools. Supply an absolute `ARTISAN_FRAME_CAPTURE` path outside the store. See the [development runbook](runbooks/native-dev.md#desktop-and-performance-tools) for the launch and host requirements.
 
 ## Scroll following and tool-chain defaults
 

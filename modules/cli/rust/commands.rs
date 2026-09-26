@@ -900,7 +900,7 @@ mod tests {
                 native_run_max_command_retries,
                 native_run_prompt_delivery,
                 native_run_stream_after: 0,
-                autostart: false,
+                ..
             }) if database_path.is_absolute()
                 && custody_path.is_absolute()
                 && readiness_path.is_absolute()

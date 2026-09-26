@@ -12,13 +12,13 @@ use super::{
     COMMAND_CAPACITY, ExpectedResponse, FrameFactory, IntakeRetry, NativeTransportCommand,
     PeerFailure, ReadinessValidationError, RequestAttemptError, RequestFailure, ServiceFailure,
     ServiceFailureCategory, StartupError, ThreadSelectionDecision, approval_stable_mutation,
-    attach_mutation, build_reconnect_binding, contains_exact_project, contains_exact_thread,
-    create_command_values, create_mutation, draft_submission_mutation,
-    engine_config_stable_mutation, finite_duration, known_thread_for_queue, make_request_frame,
-    payload_health_decision, project_repository_request, project_request, question_stable_mutation,
-    reconnect_hello, rich_link_request, session_needs_reconnect, snapshot_request,
-    thread_engine_settings_request, thread_selection_decision, threads_request, try_send_command,
-    validate_readiness, validate_response_family,
+    attach_mutation, contains_exact_project, contains_exact_thread, create_command_values,
+    create_mutation, draft_submission_mutation, engine_config_stable_mutation, finite_duration,
+    known_thread_for_queue, make_request_frame, payload_health_decision,
+    project_repository_request, project_request, question_stable_mutation, reconnect_hello,
+    rich_link_request, session_needs_reconnect, snapshot_request, thread_engine_settings_request,
+    thread_selection_decision, threads_request, try_send_command, validate_readiness,
+    validate_response_family,
 };
 use artisan_domain::UnixMillis;
 use artisan_domain::{
@@ -38,9 +38,9 @@ use artisan_protocol::{
 };
 use artisan_transport::{
     ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
-    FrameError, LoopbackTarget, OperationKind, PinnedIdentity,
+    FrameError, OperationKind,
 };
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 fn project(value: &str, name: &str) -> ProjectSummary {
     ProjectSummary {
@@ -999,20 +999,6 @@ fn reconnect_hello_consumes_a_capability_without_formatting_or_copying_it() {
 }
 
 #[test]
-fn reconnect_binding_uses_validated_target_pin_and_owned_pid() {
-    let target = LoopbackTarget::new("127.0.0.1:40123".parse().expect("socket address"))
-        .expect("loopback target");
-    let pinned_identity = PinnedIdentity::from_digest([0xB6; 32]);
-    let binding = build_reconnect_binding([0xC7; 16], target, pinned_identity, 4_242)
-        .expect("reconnect binding");
-    assert_eq!(binding.instance_id, [0xC7; 16]);
-    assert_eq!(binding.endpoint_port, 40_123);
-    assert_eq!(binding.certificate_sha256, [0xB6; 32]);
-    assert_eq!(binding.pid, NonZeroU32::new(4_242).expect("pid"));
-    assert!(build_reconnect_binding([0xC7; 16], target, pinned_identity, 0).is_err());
-}
-
-#[test]
 fn directory_unknown_is_a_terminal_attach_classification() {
     let failure = RequestFailure {
         failure: ServiceFailure::new(
@@ -1033,13 +1019,12 @@ fn directory_unknown_is_a_terminal_attach_classification() {
 }
 
 #[test]
-fn custody_trace_is_session_then_quarantine_then_lease_then_release() {
+fn custody_trace_is_session_then_quarantine_then_release() {
     assert_eq!(
         super::custody_trace(),
         vec![
             super::CustodyStep::SessionShutdown,
             super::CustodyStep::ReconnectQuarantine,
-            super::CustodyStep::LeaseShutdown,
             super::CustodyStep::ReconnectRelease,
             super::CustodyStep::Stopped,
         ]

@@ -14,9 +14,9 @@ use std::{
 };
 
 use native_dev::{
-    BinarySet, DevPaths, EditorOutput, ReadinessReconcile, StartupWait, editor_log_path,
-    editor_output, read_receipt, reconcile_stale_readiness, spawn_editor, staged_editor,
-    staged_forge, wait_for_startup,
+    BinarySet, DevPaths, EditorOutput, StartupWait, editor_library_path, editor_log_path,
+    editor_output, read_receipt, spawn_editor, staged_editor, staged_forge, wait_for_startup,
+    windows_command_line,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -47,7 +47,6 @@ fn receipt_env_and_schema_match_the_frontend_contract() {
         "ARTISAN_DEV_STARTUP_RECEIPT"
     );
     assert_eq!(native_dev::STARTUP_RECEIPT_SCHEMA, "artisan-dev-startup-v1");
-    assert_eq!(native_dev::OWNED_DEV_FORGE_ENV, "ARTISAN_DEV_OWNED_FORGE");
 }
 
 #[test]
@@ -273,7 +272,7 @@ fn editor_log_lives_in_the_runner_directory() {
 }
 
 /// A detached Editor on Unix writes to the runner's log and holds none of
-/// the runner's standard streams, so a caller reading `cargo dev` through a
+/// the runner's standard streams, so a caller reading the runner through a
 /// pipe sees end-of-file as soon as the runner returns.
 #[cfg(target_os = "linux")]
 #[test]
@@ -283,7 +282,11 @@ fn detached_editor_writes_its_log_and_holds_no_runner_stream() {
     let dir = scratch_dev_dir("detached-log");
     std::fs::create_dir_all(&dir).expect("scratch dir");
     let editor = dir.join("editor");
-    std::fs::write(&editor, "#!/bin/sh\necho editor started\nexec sleep 5\n").expect("stand-in");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\necho editor started \"$@\"\nexec sleep 5\n",
+    )
+    .expect("stand-in");
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     let log = dir.join("editor.log");
     let receipt = dir.join("startup-receipt.json");
@@ -292,10 +295,13 @@ fn detached_editor_writes_its_log_and_holds_no_runner_stream() {
         &dir,
         &receipt,
         &EditorOutput::Detached { log: log.clone() },
+        &["--host-home".into(), "/tmp/host home".into()],
     )
     .expect("detached spawn");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("editor started")) {
+    while !std::fs::read_to_string(&log)
+        .is_ok_and(|text| text.contains("editor started --host-home /tmp/host home"))
+    {
         assert!(
             std::time::Instant::now() < deadline,
             "the editor's output reaches its log"
@@ -338,6 +344,7 @@ fn detached_windows_launch_reports_the_editor_and_its_exit() {
         &EditorOutput::Detached {
             log: dir.join("editor.log"),
         },
+        &[],
     )
     .expect("detached spawn");
     assert_ne!(process.pid(), 0);
@@ -347,230 +354,40 @@ fn detached_windows_launch_reports_the_editor_and_its_exit() {
     cleanup(&dir);
 }
 
-/// A syntactically valid readiness receipt naming a pid that cannot exist.
-///
-/// `u32::MAX` passes the CLI receipt validation (nonzero pid, loopback
-/// endpoint, 64-hex pin) while no live process can match it, so the
-/// launcher must treat it as stale — exactly the owned-Forge-killed state
-/// the restart fix targets.
-fn dead_forge_receipt() -> Vec<u8> {
-    br#"{"schema":"artisan-forge-ready-v1","endpoint":"127.0.0.1:9","certificate_sha256":"abababababababababababababababababababababababababababababababab","pid":4294967295}"#.to_vec()
-}
-
-fn readiness_home(case: &str) -> (PathBuf, DevPaths) {
-    let dev_dir = scratch_dev_dir(case);
-    let paths = DevPaths::new(&dev_dir).expect("absolute dev dir");
-    // Mirror provision: the readiness and custody directories exist before
-    // any Forge runs, so reconcile only ever sees unexpected shapes.
-    for runtime_path in [
-        paths.readiness_path(),
-        paths.custody_path(),
-        paths.database_path(),
-    ] {
-        std::fs::create_dir_all(runtime_path.parent().expect("runtime parent"))
-            .expect("runtime dir");
-    }
-    (dev_dir, paths)
-}
-
 #[test]
-fn missing_readiness_reconciles_to_absent() {
-    let (dev_dir, paths) = readiness_home("reconcile-missing");
+fn the_linux_editor_loads_recorded_graphics_libraries_then_host_drivers() {
+    let exists = |directory: &str| directory == "/usr/lib/wsl/lib";
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-            .expect("missing reconciles"),
-        ReadinessReconcile::Absent
+        editor_library_path(
+            Some("/nix/store/a/lib:/nix/store/b/lib"),
+            Some("/opt/lib"),
+            exists
+        ),
+        Some("/nix/store/a/lib:/nix/store/b/lib:/opt/lib:/usr/lib/wsl/lib".to_owned())
     );
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn stale_valid_readiness_permits_a_second_launch() {
-    let (dev_dir, paths) = readiness_home("reconcile-stale");
-    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
-    // Publish temporaries are never swept: a stale temporary cannot block
-    // the next publish, and deleting by pattern would violate preservation.
-    let stray = paths
-        .readiness_path()
-        .parent()
-        .expect("parent")
-        .join(".artisan-forge-ready-19808-0.tmp");
-    std::fs::write(&stray, b"orphan publish temporary").expect("stray tmp");
-    let sibling = paths
-        .readiness_path()
-        .parent()
-        .expect("parent")
-        .join("notes.txt");
-    std::fs::write(&sibling, b"operator notes").expect("sibling");
-
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-            .expect("stale reconciles"),
-        ReadinessReconcile::CleanedStale { pid: u32::MAX }
+        editor_library_path(Some("/nix/store/a/lib"), None, |_| false),
+        Some("/nix/store/a/lib".to_owned())
     );
-    assert!(
-        !paths.readiness_path().exists(),
-        "stale receipt must be gone before the next publish"
-    );
-    assert!(stray.exists(), "publish temporaries are never swept");
-    assert!(sibling.exists(), "unrelated siblings are preserved");
-    cleanup(&dev_dir);
+    assert_eq!(editor_library_path(None, Some("/opt/lib"), exists), None);
 }
 
 #[test]
-fn malformed_readiness_is_preserved_and_refused() {
-    let (dev_dir, paths) = readiness_home("reconcile-malformed");
-    std::fs::write(paths.readiness_path(), b"not a receipt").expect("malformed receipt");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("malformed refused");
-    assert!(
-        error.to_string().contains("malformed"),
-        "unexpected: {error}"
-    );
-    assert!(
-        paths.readiness_path().exists(),
-        "malformed bytes are preserved, never deleted"
-    );
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn oversized_readiness_is_preserved_and_refused() {
-    let (dev_dir, paths) = readiness_home("reconcile-oversized");
-    std::fs::write(paths.readiness_path(), vec![b'x'; 5000]).expect("oversized receipt");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("oversized refused");
-    assert!(
-        error.to_string().contains("size bound"),
-        "unexpected: {error}"
-    );
-    assert!(
-        paths.readiness_path().exists(),
-        "oversized bytes are preserved"
-    );
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn non_file_readiness_is_preserved_and_refused() {
-    let (dev_dir, paths) = readiness_home("reconcile-dir");
-    std::fs::create_dir_all(paths.readiness_path()).expect("directory at receipt path");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("directory refused");
-    assert!(
-        error.to_string().contains("not a regular file"),
-        "unexpected: {error}"
-    );
-    assert!(paths.readiness_path().is_dir(), "directory is preserved");
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn publish_temporaries_are_never_swept() {
-    let (dev_dir, paths) = readiness_home("reconcile-tmp");
-    let parent = paths
-        .readiness_path()
-        .parent()
-        .expect("parent")
-        .to_path_buf();
-    // Even the exact runtime temporary shape is preserved: stale
-    // temporaries cannot block the next publish, so nothing but a
-    // proven-stale receipt is ever removed.
-    let exact = parent.join(".artisan-forge-ready-7-3.tmp");
-    std::fs::write(&exact, b"orphan").expect("exact tmp");
-    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
+fn windows_command_lines_quote_like_the_c_runtime() {
+    let line = |arguments: &[&str]| {
+        windows_command_line(
+            &arguments
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+        )
+    };
     assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-            .expect("stale reconciles"),
-        ReadinessReconcile::CleanedStale { pid: u32::MAX }
+        line(&["--host-home", r"C:\Users\Ada Lovelace\hosts\abc-def"]),
+        r#"--host-home "C:\Users\Ada Lovelace\hosts\abc-def""#
     );
-    assert!(!paths.readiness_path().exists(), "stale receipt removed");
-    assert!(exact.exists(), "exact publish temporary is preserved");
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn held_custody_refuses_and_preserves_the_receipt() {
-    let (dev_dir, paths) = readiness_home("reconcile-custody");
-    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
-    std::fs::write(paths.custody_path(), b"custody carrier").expect("custody file");
-
-    // A live Forge holds the home's custody lock from startup until after
-    // shutdown. Holding it here simulates that live owner: even though the
-    // receipt's pid is dead, the home must not be touched.
-    let held = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(paths.custody_path())
-        .expect("custody opens");
-    fs2::FileExt::try_lock_exclusive(&held).expect("test holds custody");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("custody refuses");
-    assert!(
-        matches!(error, native_dev::DevError::CustodyHeld { .. }),
-        "unexpected: {error}"
-    );
-    assert!(
-        paths.readiness_path().exists(),
-        "receipt preserved while custody is held"
-    );
-    drop(held);
-
-    // With custody released, the same stale receipt reconciles normally.
-    assert_eq!(
-        reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-            .expect("stale reconciles"),
-        ReadinessReconcile::CleanedStale { pid: u32::MAX }
-    );
-    assert!(!paths.readiness_path().exists());
-    cleanup(&dev_dir);
-}
-
-#[test]
-fn missing_custody_shape_fails_closed() {
-    let (dev_dir, paths) = readiness_home("reconcile-no-custody");
-    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
-    // A receipt with no custody directory is an unexpected shape: a Forge
-    // can only have run here if custody existed, so fail closed instead of
-    // inventing custody to justify removal.
-    std::fs::remove_dir_all(paths.custody_path().parent().expect("custody parent"))
-        .expect("custody dir removed");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("missing refused");
-    assert!(error.to_string().contains("custody"), "unexpected: {error}");
-    assert!(
-        paths.readiness_path().exists(),
-        "receipt preserved on unexpected custody shape"
-    );
-    cleanup(&dev_dir);
-}
-
-/// A symlinked ancestor must refuse removal: deleting through it could
-/// operate outside the dev home. Unix-only: Windows reparse points cannot
-/// be fabricated without privileges, and the same walker covers both.
-#[cfg(unix)]
-#[test]
-fn symlinked_parent_refuses_and_preserves() {
-    use std::os::unix::fs::symlink;
-
-    let outer = scratch_dev_dir("reconcile-symlink");
-    let real = outer.join("real").join("Artisan Street Dev");
-    std::fs::create_dir_all(real.join("readiness")).expect("real readiness");
-    std::fs::create_dir_all(real.join("custody")).expect("real custody");
-    let linked = outer.join("linked");
-    symlink(outer.join("real"), &linked).expect("ancestor symlink");
-    // Every owned path now resolves through the symlinked ancestor.
-    let paths = DevPaths::new(&linked.join("Artisan Street Dev")).expect("absolute root");
-    std::fs::write(paths.readiness_path(), dead_forge_receipt()).expect("stale receipt");
-    let error = reconcile_stale_readiness(&paths, &staged_forge(&version_root(&paths)))
-        .expect_err("symlink refused");
-    assert!(
-        error.to_string().contains("symbolic link"),
-        "unexpected: {error}"
-    );
-    assert!(
-        paths.readiness_path().exists(),
-        "receipt preserved behind a symlinked parent"
-    );
-    cleanup(&outer);
+    assert_eq!(line(&[r"C:\trailing dir\"]), r#""C:\trailing dir\\""#);
+    assert_eq!(line(&[r#"say "hi""#]), r#""say \"hi\"""#);
+    assert_eq!(line(&[""]), r#""""#);
+    assert_eq!(line(&[]), "");
 }

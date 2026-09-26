@@ -21,12 +21,19 @@
       ];
       perSystem = nixpkgs.lib.genAttrs systems (
         system:
+        let
+          overlays = [ rust-overlay.overlays.default ];
+          pkgs = import nixpkgs { inherit system overlays; };
+        in
         import ./nix/workspace.nix {
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ rust-overlay.overlays.default ];
+          inherit self pkgs crane;
+          # Windows binaries are cross-built with the MinGW-w64 toolchain
+          # (Rust target x86_64-pc-windows-gnu), which nixpkgs builds and caches.
+          windowsPkgs = import nixpkgs {
+            localSystem = system;
+            crossSystem = pkgs.lib.systems.examples.mingwW64;
+            inherit overlays;
           };
-          inherit crane;
         }
       );
       collect = name: nixpkgs.lib.mapAttrs (_: value: value.${name}) perSystem;
