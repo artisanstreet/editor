@@ -521,6 +521,136 @@ async fn generated_titles_survive_catalog_reads_and_preserve_manual_names() {
     }
 }
 
+/// Inserts one thread with an optional latest message and assistant text,
+/// bypassing the run pipeline (foreign keys off) the way replay fixtures do.
+async fn seed_recent(
+    database: &DatabaseConnection,
+    project: &str,
+    thread: &str,
+    updated_at: i64,
+    message_at: Option<i64>,
+    assistant_text: &str,
+) {
+    use sea_orm::ConnectionTrait;
+    let statements = [
+        format!(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms, engine_run_config_revision) VALUES ('{thread}', '{project}', 'Thread {thread}', {updated_at}, {updated_at}, 0)"
+        ),
+        message_at.map_or_else(String::new, |at| {
+            format!(
+                "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('{thread}-message', '{thread}', 0, 'Hello', {at})"
+            )
+        }),
+        format!(
+            "INSERT INTO conversation_items (item_id, thread_id, turn_id, ordinal, kind, revision, lifecycle, item_kind, source_message_id, run_id, native_item_key, phase, body, created_at_ms, updated_at_ms) VALUES ('{thread}-item', '{thread}', '{thread}-turn', 1, 'item', 0, 'completed', 'assistant_message', NULL, '{thread}-run', NULL, 'final', '{assistant_text}', 1, 1)"
+        ),
+    ];
+    database
+        .execute_unprepared("PRAGMA foreign_keys = OFF")
+        .await
+        .expect("fixture disables foreign keys");
+    for statement in statements.iter().filter(|statement| !statement.is_empty()) {
+        database
+            .execute_unprepared(statement)
+            .await
+            .expect("recent thread fixture should insert");
+    }
+    database
+        .execute_unprepared("PRAGMA foreign_keys = ON")
+        .await
+        .expect("fixture restores foreign keys");
+}
+
+fn thread_ids(threads: &[artisan_domain::ThreadSummary]) -> Vec<&str> {
+    threads
+        .iter()
+        .map(|thread| thread.thread_id.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
+    let (database, repository) = memory_repository().await;
+    attach_project(&repository).await;
+    repository
+        .attach_project(attach_input(
+            "attach-second",
+            "directory-2",
+            "project-2",
+            "C:/repos/second",
+        ))
+        .await
+        .expect("second project should attach");
+    seed_recent(&database, "project-1", "old-message", 50, Some(300), "Hi").await;
+    seed_recent(&database, "project-2", "new-message", 10, Some(900), "Hi").await;
+    // Without a message, activity is the last update.
+    seed_recent(&database, "project-2", "updated-only", 600, None, "Hi").await;
+    // Equal activity orders by thread id.
+    seed_recent(&database, "project-1", "tie-b", 600, None, "Hi").await;
+    // Assistant text has not started: a draft is not a recent thread.
+    seed_recent(&database, "project-1", "draft", 950, Some(950), "").await;
+
+    let recent = repository
+        .list_recent_threads(10)
+        .await
+        .expect("recent threads should list");
+    assert_eq!(
+        thread_ids(&recent),
+        ["new-message", "tie-b", "updated-only", "old-message"]
+    );
+    assert!(recent.iter().all(|thread| thread.has_started_response));
+    assert_eq!(recent[0].project_id, project_id("project-2"));
+    assert_eq!(
+        recent[0].last_message_at,
+        Some(UnixMillis::from_millis(900))
+    );
+
+    let bounded = repository
+        .list_recent_threads(2)
+        .await
+        .expect("a bounded page should list");
+    assert_eq!(thread_ids(&bounded), ["new-message", "tie-b"]);
+}
+
+#[tokio::test]
+async fn recent_threads_fingerprint_moves_with_what_the_listing_shows() {
+    let (database, repository) = memory_repository().await;
+    attach_project(&repository).await;
+    let empty = repository
+        .recent_threads_fingerprint()
+        .await
+        .expect("fingerprint should read");
+    assert_eq!(
+        repository.recent_threads_fingerprint().await.unwrap(),
+        empty,
+        "an unchanged catalog keeps its fingerprint"
+    );
+    seed_recent(&database, "project-1", "thread-a", 100, Some(100), "Hi").await;
+    let seeded = repository.recent_threads_fingerprint().await.unwrap();
+    assert_ne!(seeded, empty);
+    repository
+        .create_thread(create_input(
+            "draft",
+            "draft",
+            "project-1",
+            "New thread",
+            200,
+        ))
+        .await
+        .unwrap();
+    let with_draft = repository.recent_threads_fingerprint().await.unwrap();
+    assert_ne!(with_draft, seeded);
+    repository
+        .record_generated_thread_title(&thread_id("draft"), &title("Refined"))
+        .await
+        .unwrap();
+    assert_ne!(
+        repository.recent_threads_fingerprint().await.unwrap(),
+        with_draft,
+        "a refined title changes the fingerprint"
+    );
+}
+
 #[tokio::test]
 async fn first_message_fallback_does_not_block_the_harness_title() {
     let (database, repository) = memory_repository().await;

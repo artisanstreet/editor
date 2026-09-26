@@ -61,6 +61,8 @@ pub use repository::{
     FailedMessageRecovery, MessageOutboxFingerprint, QueuedMessageRepositoryError,
 };
 
+pub use repository::RecentThreadsFingerprint;
+
 pub use repository::{
     COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
     ComposerDraftSaveOutcome, DraftSubmission, DraftSubmissionError, SaveComposerDraftInput,

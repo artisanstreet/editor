@@ -30,6 +30,7 @@ mod m20260927_000017_composer_draft_submissions;
 mod m20260928_000018_composer_attachment_sources;
 mod m20260929_000019_user_preferences;
 mod m20260930_000020_chunked_composer_attachments;
+mod m20261001_000021_conversation_item_thread_index;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DatabaseConnection, TransactionTrait};
@@ -62,6 +63,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260928_000018_composer_attachment_sources::Migration),
             Box::new(m20260929_000019_user_preferences::Migration),
             Box::new(m20260930_000020_chunked_composer_attachments::Migration),
+            Box::new(m20261001_000021_conversation_item_thread_index::Migration),
         ]
     }
 }
