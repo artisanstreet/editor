@@ -7,7 +7,7 @@
 //! repair rows, create a side table, or expose provider binding bytes.
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde::Deserialize;
 
@@ -44,7 +44,8 @@ pub struct SessionContinuationQuery {
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionContinuationLookup {
-    /// There are no historical run rows after applying the exclusion.
+    /// No historical run reached its provider after applying the exclusion
+    /// and stepping over never-started runs.
     NoHistory,
     /// A settled, compatible provider binding and its durable facts are safe
     /// for the caller to offer to the HTTP resume leaf.
@@ -61,7 +62,8 @@ pub enum SessionContinuationUnavailableReason {
     /// A queued, launching, running, waiting, or cancellation-requested run
     /// may still produce external effects.
     ActiveRun,
-    /// A settled run has no complete provider binding tuple.
+    /// A settled run committed output yet has no provider binding tuple.
+    /// Unbound runs without output never started and are not history.
     UnboundSettledRun,
     /// An interrupted run has an ambiguous external outcome.
     AmbiguousRun,
@@ -264,10 +266,16 @@ impl Repository {
     /// engine/profile scope.
     ///
     /// Rows are ordered by immutable creation time descending and then by run
-    /// id descending.  A newer active, unbound, ambiguous, or incompatible
-    /// row is returned as an explicit disposition and never skipped in favour
-    /// of an older conversation.  The only intentional skip is
-    /// `exclude_run_id`, which is the caller's current newly-launched run.
+    /// id descending.  A newer active, ambiguous, or incompatible row is
+    /// returned as an explicit disposition and never skipped in favour of an
+    /// older conversation.  Two skips are intentional: `exclude_run_id`,
+    /// which is the caller's current newly-launched run, and settled runs
+    /// that never started (no provider binding, no committed output). A
+    /// never-started run left no provider conversation, so it is not
+    /// history: with nothing older the lookup is [`NoHistory`] on any
+    /// engine, and otherwise the next older run decides under these rules.
+    ///
+    /// [`NoHistory`]: SessionContinuationLookup::NoHistory
     ///
     /// The read is transactionally consistent across the run, checkpoint,
     /// receipts, and thread sequence row.  It never mutates or repairs any
@@ -308,25 +316,91 @@ async fn read_session_continuation<C: ConnectionTrait>(
     database: &C,
     query: &SessionContinuationQuery,
 ) -> Result<SessionContinuationLookup, RepositoryError> {
-    let mut candidates = entities::assistant_run::Entity::find()
-        .filter(entities::assistant_run::Column::ThreadId.eq(query.thread_id.as_str()));
-    if let Some(exclude_run_id) = &query.exclude_run_id {
-        candidates =
-            candidates.filter(entities::assistant_run::Column::RunId.ne(exclude_run_id.as_str()));
+    // Only the newest run that ever reached its provider may decide
+    // continuation. A settled run that never bound a provider session and
+    // never committed output left no provider-side conversation behind: the
+    // thread is still effectively new at that point, so the run is stepped
+    // over and the next older run (if any) decides under the normal rules.
+    // Each step is one indexed read; nothing caps the thread's lifetime.
+    let mut older_than: Option<(i64, String)> = None;
+    loop {
+        let mut candidates = entities::assistant_run::Entity::find()
+            .filter(entities::assistant_run::Column::ThreadId.eq(query.thread_id.as_str()));
+        if let Some(exclude_run_id) = &query.exclude_run_id {
+            candidates = candidates
+                .filter(entities::assistant_run::Column::RunId.ne(exclude_run_id.as_str()));
+        }
+        if let Some((created_at_ms, run_id)) = &older_than {
+            candidates = candidates.filter(
+                Condition::any()
+                    .add(entities::assistant_run::Column::CreatedAtMs.lt(*created_at_ms))
+                    .add(
+                        Condition::all()
+                            .add(entities::assistant_run::Column::CreatedAtMs.eq(*created_at_ms))
+                            .add(entities::assistant_run::Column::RunId.lt(run_id.as_str())),
+                    ),
+            );
+        }
+        let candidate = candidates
+            .order_by_desc(entities::assistant_run::Column::CreatedAtMs)
+            .order_by_desc(entities::assistant_run::Column::RunId)
+            .one(database)
+            .await
+            .map_err(|source| database_error("read session-continuation candidate", source))?;
+        let Some(row) = candidate else {
+            return Ok(SessionContinuationLookup::NoHistory);
+        };
+        let run_id = parse_run_id(&row.run_id)?;
+        validate_run_row(&row, query)?;
+        if never_started(database, &row, &run_id).await? {
+            older_than = Some((row.created_at_ms, row.run_id));
+            continue;
+        }
+        return inspect_candidate(database, query, row, run_id).await;
     }
-    // Only the newest non-excluded run may decide continuation. Reading
-    // older rows adds no authority and must not cap the thread's lifetime.
-    let candidate = candidates
-        .order_by_desc(entities::assistant_run::Column::CreatedAtMs)
-        .order_by_desc(entities::assistant_run::Column::RunId)
+}
+
+/// Whether a settled run never reached its provider: no provider binding was
+/// ever recorded and no batch or assistant item was ever committed for it.
+/// Such a run cannot hold provider-side state worth continuing, whichever
+/// engine it selected, so it is not continuation history.
+async fn never_started<C: ConnectionTrait>(
+    database: &C,
+    run: &entities::assistant_run::Model,
+    run_id: &RunId,
+) -> Result<bool, RepositoryError> {
+    let settled = matches!(
+        run.lifecycle,
+        AssistantRunLifecycle::Interrupted
+            | AssistantRunLifecycle::Completed
+            | AssistantRunLifecycle::Failed
+            | AssistantRunLifecycle::Cancelled
+    );
+    if !settled
+        || run.provider_binding.is_some()
+        || run.provider_binding_version.is_some()
+        || run.provider_bound_at_ms.is_some()
+    {
+        return Ok(false);
+    }
+    let receipt = entities::run_batch_receipt::Entity::find()
+        .filter(entities::run_batch_receipt::Column::RunId.eq(run_id.as_str()))
         .one(database)
         .await
-        .map_err(|source| database_error("read session-continuation candidate", source))?;
-    let Some(row) = candidate else {
-        return Ok(SessionContinuationLookup::NoHistory);
-    };
-    let run_id = parse_run_id(&row.run_id)?;
-    inspect_candidate(database, query, row, run_id).await
+        .map_err(|source| database_error("read never-started run receipts", source))?;
+    if receipt.is_some() {
+        return Ok(false);
+    }
+    let output = entities::conversation_item::Entity::find()
+        .filter(entities::conversation_item::Column::RunId.eq(run_id.as_str()))
+        .filter(
+            entities::conversation_item::Column::ItemKind
+                .eq(entities::ConversationItemKind::AssistantMessage),
+        )
+        .one(database)
+        .await
+        .map_err(|source| database_error("read never-started run output", source))?;
+    Ok(output.is_none())
 }
 
 async fn inspect_candidate<C: ConnectionTrait>(
@@ -335,8 +409,6 @@ async fn inspect_candidate<C: ConnectionTrait>(
     run: entities::assistant_run::Model,
     run_id: RunId,
 ) -> Result<SessionContinuationLookup, RepositoryError> {
-    validate_run_row(&run, query)?;
-
     match &run.lifecycle {
         AssistantRunLifecycle::Queued
         | AssistantRunLifecycle::Launching

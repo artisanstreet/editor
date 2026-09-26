@@ -10,11 +10,11 @@ use artisan_database::{
     SqliteConfig, connect,
 };
 use artisan_domain::{
-    ApprovalMode, ByteLimit, CodexSelection, CountLimit, EngineAgentId, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
-    EngineProfileId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess, PermissionId, RequestId, RunId,
-    ThreadId, UnixMillis, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeSelection, CodexSelection, CountLimit, EngineAgentId,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineRuntimeControls,
+    EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess,
+    PermissionId, RequestId, RunId, ThreadId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -260,6 +260,49 @@ async fn seed_run(
         None,
     )
     .await;
+}
+
+/// Adds one conversation item for `run_id` (assistant items carry the run)
+/// to that run's seeded turn.
+async fn seed_run_item(
+    database: &DatabaseConnection,
+    run_id: &str,
+    item_kind: entities::ConversationItemKind,
+) {
+    let item_id = format!("item-{run_id}-{item_kind:?}");
+    let ordinal = item_id.bytes().fold(7_i64, |value, byte| {
+        value.wrapping_mul(31).wrapping_add(i64::from(byte)) & i64::MAX
+    });
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Item),
+        entity_id: Set(item_id.clone()),
+    }
+    .insert(database)
+    .await
+    .expect("item ordinal should insert");
+    let is_user = item_kind == entities::ConversationItemKind::UserMessage;
+    entities::conversation_item::ActiveModel {
+        item_id: Set(item_id),
+        thread_id: Set(THREAD_ID.to_owned()),
+        turn_id: Set(format!("turn-{run_id}")),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Item),
+        revision: Set(0),
+        lifecycle: Set(EntityLifecycle::Completed),
+        item_kind: Set(item_kind),
+        source_message_id: Set(is_user.then(|| format!("message-{run_id}"))),
+        run_id: Set((!is_user).then(|| run_id.to_owned())),
+        native_item_key: Set(None),
+        phase: Set((!is_user).then_some(entities::RenderPhase::Final)),
+        body: Set("item body".to_owned()),
+        created_at_ms: Set(1),
+        updated_at_ms: Set(1),
+    }
+    .insert(database)
+    .await
+    .expect("item should insert");
 }
 
 fn is_active(lifecycle: &AssistantRunLifecycle) -> bool {
@@ -524,7 +567,7 @@ async fn ordering_is_newest_first_and_current_run_is_the_only_exclusion() {
 }
 
 #[tokio::test]
-async fn newer_unbound_failure_does_not_fall_back_to_an_old_session() {
+async fn newer_never_started_failure_falls_through_to_the_older_session() {
     let (database, repository) = migrated_memory_database().await;
     seed_run(
         &database,
@@ -547,14 +590,56 @@ async fn newer_unbound_failure_does_not_fall_back_to_an_old_session() {
     )
     .await;
 
-    let lookup = repository
+    // The failed run never bound a session or produced output, so it left no
+    // provider conversation: the older bound run decides.
+    let SessionContinuationLookup::Usable(continuation) = repository
         .read_session_continuation(query("profile-fixture", None))
         .await
-        .expect("continuation read should succeed");
+        .expect("continuation read should succeed")
+    else {
+        panic!("a never-started run must not block the older session");
+    };
+    assert_eq!(continuation.prior_run.run_id.as_str(), "run-old");
+    assert_eq!(continuation.session_id.as_str(), "old-session");
+}
+
+#[tokio::test]
+async fn unbound_run_with_committed_output_still_blocks_fallback() {
+    let (database, repository) = migrated_memory_database().await;
+    seed_run(
+        &database,
+        "run-old",
+        100,
+        AssistantRunLifecycle::Completed,
+        "profile-fixture",
+        Some("old-session"),
+        None,
+    )
+    .await;
+    seed_run(
+        &database,
+        "run-unbound-output",
+        200,
+        AssistantRunLifecycle::Failed,
+        "profile-fixture",
+        None,
+        None,
+    )
+    .await;
+    seed_run_item(
+        &database,
+        "run-unbound-output",
+        entities::ConversationItemKind::AssistantMessage,
+    )
+    .await;
+
     assert_eq!(
-        lookup,
+        repository
+            .read_session_continuation(query("profile-fixture", None))
+            .await
+            .expect("continuation read should succeed"),
         SessionContinuationLookup::Unavailable(artisan_database::SessionContinuationUnavailable {
-            run_id: RunId::parse("run-unbound-failure").expect("run id is valid"),
+            run_id: RunId::parse("run-unbound-output").expect("run id is valid"),
             reason: SessionContinuationUnavailableReason::UnboundSettledRun,
         },)
     );
@@ -765,5 +850,212 @@ async fn interrupted_codex_resumes_only_its_bound_session() {
     assert_eq!(
         blocked.reason,
         SessionContinuationUnavailableReason::AmbiguousRun
+    );
+}
+
+fn claude_config() -> EngineRunConfig {
+    let codex = codex_config();
+    let permission = EnginePermissionPolicy::new(
+        PermissionId::parse("permission-claude").expect("permission id is valid"),
+        EngineAgentId::parse("agent-claude").expect("agent id is valid"),
+        ApprovalMode::OnRequest,
+        FilesystemAccess::Workspace,
+        NetworkAccess::Enabled,
+        WebSearchAccess::Disabled,
+    );
+    EngineRunConfig::new(
+        EngineSelection::Claude(
+            ClaudeSelection::new(
+                EngineProfileId::parse("profile-claude").expect("profile id is valid"),
+                Some(EngineModelId::parse("claude-opus-5-5").expect("model id is valid")),
+                permission,
+                None,
+                None,
+                false,
+                false,
+            )
+            .expect("claude selection is valid"),
+        ),
+        codex.runtime(),
+    )
+}
+
+/// Selects `config` on the thread at `revision` and returns the exact
+/// write-once snapshot a run launched under it would carry.
+async fn select_config(
+    database: &DatabaseConnection,
+    repository: &Repository,
+    config: EngineRunConfig,
+    revision: u64,
+) -> (i64, Vec<u8>) {
+    let version = i64::from(config.storage_codec_version());
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: RequestId::parse(format!("request-config-{revision}"))
+                .expect("request id is valid"),
+            thread_id: ThreadId::parse(THREAD_ID).expect("thread id should be valid"),
+            precondition: EngineConfigUpdatePrecondition::Exact(
+                EngineConfigRevision::new(revision).expect("revision is valid"),
+            ),
+            config,
+            accepted_at: UnixMillis::from_millis(20),
+        })
+        .await
+        .expect("engine configuration should persist");
+    let blob = entities::thread::Entity::find_by_id(THREAD_ID)
+        .one(database)
+        .await
+        .expect("thread should read")
+        .expect("thread should exist")
+        .engine_run_config
+        .expect("thread has a snapshot")
+        .into_vec();
+    (version, blob)
+}
+
+fn scoped(engine_id: EngineId, profile_id: &str) -> SessionContinuationQuery {
+    SessionContinuationQuery {
+        thread_id: ThreadId::parse(THREAD_ID).expect("thread id should be valid"),
+        engine_id,
+        profile_id: EngineProfileId::parse(profile_id).expect("profile id should be valid"),
+        exclude_run_id: None,
+    }
+}
+
+/// Replays the stuck production thread: one Claude run that was reaped as
+/// `startup_reconciliation_unknown_outcome` before Claude ever announced a
+/// session, one user item, zero assistant items. The thread never produced
+/// content, so it is still effectively new and either engine starts fresh.
+#[tokio::test]
+async fn never_started_interrupted_claude_run_is_no_history_on_any_engine() {
+    let (database, repository) = migrated_memory_database().await;
+    let claude = select_config(&database, &repository, claude_config(), 1).await;
+    seed_run_with_snapshot(
+        &database,
+        "run-41fdfe14",
+        100,
+        AssistantRunLifecycle::Interrupted,
+        "profile-claude",
+        None,
+        None,
+        Some(claude),
+    )
+    .await;
+    let run = entities::assistant_run::Entity::find_by_id("run-41fdfe14")
+        .one(&database)
+        .await
+        .expect("run should read")
+        .expect("run should exist");
+    let mut active: entities::assistant_run::ActiveModel = run.into();
+    active.error_code = Set(Some("startup_reconciliation_unknown_outcome".to_owned()));
+    active.update(&database).await.expect("run should update");
+    seed_run_item(
+        &database,
+        "run-41fdfe14",
+        entities::ConversationItemKind::UserMessage,
+    )
+    .await;
+
+    // Message 2 selected Codex; its refused send created no run row.
+    let _codex = select_config(&database, &repository, codex_config(), 2).await;
+    assert_eq!(
+        repository
+            .read_session_continuation(scoped(EngineId::Codex, "profile-codex"))
+            .await
+            .expect("codex continuation read should succeed"),
+        SessionContinuationLookup::NoHistory,
+        "a Codex send must start a fresh provider session"
+    );
+    assert_eq!(
+        repository
+            .read_session_continuation(scoped(EngineId::Claude, "profile-claude"))
+            .await
+            .expect("claude continuation read should succeed"),
+        SessionContinuationLookup::NoHistory,
+        "a Claude send must start a fresh provider session, not an ambiguous refusal"
+    );
+}
+
+#[tokio::test]
+async fn bound_claude_run_with_content_still_refuses_another_engine() {
+    let (database, repository) = migrated_memory_database().await;
+    let claude = select_config(&database, &repository, claude_config(), 1).await;
+    seed_run_with_snapshot(
+        &database,
+        "run-claude-bound",
+        100,
+        AssistantRunLifecycle::Completed,
+        "profile-claude",
+        Some(r#"{"engine":"claude","profile_id":"profile-claude","session_id":"claude-session"}"#),
+        Some(1),
+        Some(claude),
+    )
+    .await;
+    seed_run_item(
+        &database,
+        "run-claude-bound",
+        entities::ConversationItemKind::AssistantMessage,
+    )
+    .await;
+    // A later never-started Codex attempt does not hide the bound history.
+    let codex = select_config(&database, &repository, codex_config(), 2).await;
+    seed_run_with_snapshot(
+        &database,
+        "run-codex-unstarted",
+        200,
+        AssistantRunLifecycle::Failed,
+        "profile-codex",
+        None,
+        None,
+        Some(codex),
+    )
+    .await;
+
+    assert_eq!(
+        repository
+            .read_session_continuation(scoped(EngineId::Codex, "profile-codex"))
+            .await
+            .expect("continuation read should succeed"),
+        SessionContinuationLookup::Incompatible(
+            artisan_database::SessionContinuationIncompatible {
+                run_id: RunId::parse("run-claude-bound").expect("run id is valid"),
+                reason: SessionContinuationIncompatibility::Engine,
+            },
+        )
+    );
+    let SessionContinuationLookup::Usable(resumed) = repository
+        .read_session_continuation(scoped(EngineId::Claude, "profile-claude"))
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("the bound Claude session remains resumable on Claude");
+    };
+    assert_eq!(resumed.session_id.as_str(), "claude-session");
+}
+
+#[tokio::test]
+async fn bound_interrupted_claude_run_stays_ambiguous() {
+    let (database, repository) = migrated_memory_database().await;
+    let claude = select_config(&database, &repository, claude_config(), 1).await;
+    seed_run_with_snapshot(
+        &database,
+        "run-claude-interrupted",
+        100,
+        AssistantRunLifecycle::Interrupted,
+        "profile-claude",
+        Some(r#"{"engine":"claude","profile_id":"profile-claude","session_id":"claude-session"}"#),
+        None,
+        Some(claude),
+    )
+    .await;
+    assert_eq!(
+        repository
+            .read_session_continuation(scoped(EngineId::Claude, "profile-claude"))
+            .await
+            .expect("continuation read should succeed"),
+        SessionContinuationLookup::Unavailable(artisan_database::SessionContinuationUnavailable {
+            run_id: RunId::parse("run-claude-interrupted").expect("run id is valid"),
+            reason: SessionContinuationUnavailableReason::AmbiguousRun,
+        },)
     );
 }
