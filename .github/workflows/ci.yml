@@ -74,7 +74,6 @@ jobs:
           nix build -L .#unsigned-release --out-link result-manifest
           nix build -L .#closure --out-link result-closure
           nix build -L .#dev-dependencies --out-link result-dev-deps
-          nix build -L .#release-dependencies --out-link result-release-deps
           mkdir artifacts
           cp -L result-payload artifacts/artisan-nix-payload.zip
           cp -L result-manifest artifacts/unsigned-release.json
@@ -92,4 +91,4 @@ jobs:
           CACHIX_CACHE: ${{ vars.CACHIX_CACHE }}
         run: |
           test -n "$CACHIX_AUTH_TOKEN"
-          nix path-info --recursive ./result-payload ./result-manifest ./result-closure ./result-dev-deps ./result-release-deps | cachix push "$CACHIX_CACHE"
+          nix path-info --recursive ./result-payload ./result-manifest ./result-closure ./result-dev-deps | cachix push "$CACHIX_CACHE"

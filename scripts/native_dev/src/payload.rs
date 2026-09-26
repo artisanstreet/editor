@@ -1,150 +1,69 @@
-//! Turning a local build into an installed dev release.
+//! Installing a Nix-built payload as a dev release.
 //!
-//! The runner never copies binaries into an installation itself. It
-//! assembles the build outputs and their identity into an unpacked payload
-//! tree, signs a tree manifest with the dev root's local key, and hands the
-//! tree to `artisan-install`, the same code that installs published
-//! releases. Retiring a running dev Editor and Forge, activation, and
-//! rollback therefore behave exactly as they do for a real update.
+//! Nix builds the payload (`bin/` plus `resources/build-info.json`) and owns
+//! its identity. The runner never copies binaries into an installation
+//! itself: it signs a tree manifest for the payload with the dev root's local
+//! key, next to (not inside) the read-only payload, and hands both to
+//! `artisan-install`, the same code that installs published releases.
+//! Retiring a running dev Editor and Forge, activation, and rollback
+//! therefore behave exactly as they do for a real update.
 
-use std::{fs, io::Read, path::Path};
+use std::path::Path;
 
-use artisan_build_info::{BuildInfo, Channel, FORMAT_VERSION};
+use artisan_build_info::BuildInfo;
 use artisan_install::{
     InstallIntegrationOptions, InstallOptions, LOCAL_CHANNEL, LocalRelease, LocalSigner, Platform,
     ReleaseSource, RetirementPolicy,
 };
-use sha2::{Digest, Sha256};
 
-use crate::{
-    binaries::BinarySet,
-    error::DevError,
-    identity::{GitState, dev_version, runner_target},
-    paths::DevPaths,
-};
+use crate::{error::DevError, paths::DevPaths};
 
-/// Directory inside the Cargo target directory where payloads are assembled.
-pub const PAYLOAD_DIRECTORY: &str = "artisan-dev-payload";
-
-/// Lowercase hex SHA-256 of one file.
+/// Reads the identity Nix recorded in `payload`.
 ///
 /// # Errors
 ///
-/// Returns [`DevError::Stage`] when the file cannot be read.
-pub fn hash_file(path: &Path) -> Result<String, DevError> {
-    let unreadable = || DevError::Stage {
-        stage: "assemble",
-        reason: format!("cannot read {}", path.display()),
-    };
-    let mut file = fs::File::open(path).map_err(|_| unreadable())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 256 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(|_| unreadable())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+/// Returns [`DevError::Stage`] when the payload carries no valid identity.
+pub fn payload_identity(payload: &Path) -> Result<BuildInfo, DevError> {
+    BuildInfo::read(payload).map_err(|error| DevError::Stage {
+        stage: "payload",
+        reason: format!(
+            "{} is not a Nix-built payload ({error}); build one with `nix build .#<platform>-<stage>`",
+            payload.display()
+        ),
+    })
 }
 
-/// Version of a payload: the checkout's dev version plus a digest of the
-/// binaries, so equal bytes always share a version (re-installing them is a
-/// no-op re-activation) and different bytes never do, even for rebuilds of
-/// the same commit.
-#[must_use]
-pub fn payload_version(git: &GitState, binaries_digest: &str) -> String {
-    let base = dev_version(env!("CARGO_PKG_VERSION"), git);
-    let digest = binaries_digest.get(..10).unwrap_or(binaries_digest);
-    if base.contains('+') {
-        format!("{base}.b{digest}")
-    } else {
-        format!("{base}+b{digest}")
-    }
-}
-
-/// Digest over the binaries' own digests, in payload order.
+/// Signs a tree manifest for `payload` into `manifests` with the dev root's
+/// local key, leaving the payload itself untouched.
 ///
 /// # Errors
 ///
-/// Returns [`DevError::Stage`] when a binary cannot be read.
-pub fn binaries_digest(binaries: &BinarySet) -> Result<String, DevError> {
-    let mut hasher = Sha256::new();
-    for (relative, source) in binaries.entries() {
-        hasher.update(relative.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(hash_file(&source)?.as_bytes());
-        hasher.update(b"\n");
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-/// Assembles `binaries` and their identity into a signed payload tree at
-/// `tree`, replacing any previous assembly there.
-///
-/// # Errors
-///
-/// Returns [`DevError::Stage`] when the tree cannot be written or signed.
-pub fn assemble(
-    binaries: &BinarySet,
-    git: &GitState,
-    profile: &str,
-    tree: &Path,
+/// Returns [`DevError::Stage`] when the payload layout is invalid or the
+/// manifest cannot be written.
+pub fn sign_payload(
+    payload: &Path,
+    manifests: &Path,
+    identity: &BuildInfo,
     signer: &LocalSigner,
-) -> Result<BuildInfo, DevError> {
+) -> Result<(), DevError> {
     let failed = |reason: String| DevError::Stage {
-        stage: "assemble",
+        stage: "sign",
         reason,
     };
-    if tree.exists() {
-        fs::remove_dir_all(tree)
-            .map_err(|error| failed(format!("cannot clear {}: {error}", tree.display())))?;
-    }
-    for (relative, source) in binaries.entries() {
-        let destination = tree.join(&relative);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| failed(format!("cannot create {}: {error}", parent.display())))?;
-        }
-        // The tree is read, never executed, so linking build outputs is safe
-        // here; the installer copies them into the installation.
-        if fs::hard_link(&source, &destination).is_err() {
-            fs::copy(&source, &destination)
-                .map_err(|error| failed(format!("cannot copy {}: {error}", source.display())))?;
-        }
-    }
-    let info = BuildInfo {
-        format_version: FORMAT_VERSION,
-        version: payload_version(git, &binaries_digest(binaries)?),
-        channel: Channel::Dev,
-        commit: git.commit.clone(),
-        dirty: git.dirty,
-        profile: profile.to_owned(),
-        target: runner_target().to_owned(),
-        built_at: None,
-    };
-    let identity = tree.join(artisan_build_info::RESOURCE_PATH);
-    if let Some(parent) = identity.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| failed(format!("cannot create {}: {error}", parent.display())))?;
-    }
-    fs::write(&identity, info.to_json())
-        .map_err(|error| failed(format!("cannot write {}: {error}", identity.display())))?;
     let platform = Platform::detect().map_err(|error| failed(error.to_string()))?;
     signer
-        .write_tree_manifest(
-            tree,
+        .write_tree_manifest_to(
+            payload,
+            manifests,
             &LocalRelease {
-                product_version: info.version.clone(),
+                product_version: identity.version.clone(),
                 platform,
             },
         )
-        .map_err(|error| failed(format!("cannot sign the payload: {error}")))?;
-    Ok(info)
+        .map_err(|error| failed(format!("cannot sign {}: {error}", payload.display())))
 }
 
-/// Installs the signed tree into the dev root as a `dev`-channel release.
+/// Installs the signed payload into the dev root as a `dev`-channel release.
 ///
 /// A running dev Editor is closed and its Forge stopped first, exactly as a
 /// release update retires superseded instances; PATH, shortcuts, and the
@@ -153,11 +72,17 @@ pub fn assemble(
 /// # Errors
 ///
 /// Returns [`DevError::Install`] when the installer refuses or fails.
-pub fn install_tree(paths: &DevPaths, tree: &Path, signer: &LocalSigner) -> Result<(), DevError> {
+pub fn install_payload(
+    paths: &DevPaths,
+    payload: &Path,
+    manifests: &Path,
+    signer: &LocalSigner,
+) -> Result<(), DevError> {
     let platform = Platform::detect().map_err(DevError::Install)?;
     let options = InstallOptions {
         source: ReleaseSource::Tree {
-            path: tree.to_path_buf(),
+            path: payload.to_path_buf(),
+            manifest_directory: Some(manifests.to_path_buf()),
         },
         platform,
         install_root: paths.home.clone(),

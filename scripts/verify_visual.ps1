@@ -1,5 +1,5 @@
 # verify_visual.ps1 - the only acceptance gate that matters.
-# Installs an identified build (cargo dev stage) or launches -ExePath, waits
+# Installs an identified build (nix run .#dev -- stage) or launches -ExePath, waits
 # for the window, and captures it to PNG.
 # Output: evidence\<name>-<timestamp>.png  - attach this path to your report.
 # A task without a capture from THIS script is rejected. Agent claims are not evidence.
@@ -17,7 +17,7 @@ $verificationFailure = $null
 if ($VerifyWslPicker) { $VerifyMachineSwitch = $true }
 # UI acceptance uses the optimized dev profile; ordinary debug builds are for debugging.
 if ($ExePath -match '[\\/]debug[\\/]') {
-  Write-Warning 'Unoptimized debug executable: use target/performance/editor.exe for FPS and interaction evaluation.'
+  Write-Warning 'Unoptimized executable: capture an installed Debug or Production stage build for FPS and interaction evaluation.'
 }
 if (($HostHome -or $OpenMachines -or $VerifyMachineSwitch) -and -not $ExePath) { throw 'Host capture requires -ExePath' }
 $repo = $PSScriptRoot | Split-Path   # script lives in <repo>\scripts\
@@ -61,15 +61,16 @@ if ($ExePath) {
   if ($arguments.Count -gt 0) { $launch.ArgumentList = $arguments }
   $proc = Start-Process @launch
 } else {
-  # Capture an identified build, never a raw cargo output: install the
-  # optimized build into the dev installation through the shipping
-  # installer, then launch the installed Editor on that root.
-  & (Join-Path $PSScriptRoot 'dev.ps1') -Performance -StageOnly
-  if ($LASTEXITCODE -ne 0) { throw "cargo dev stage failed with exit $LASTEXITCODE" }
-  $where = & (Join-Path $PSScriptRoot 'dev.ps1') where
+  # Capture an identified build, never a raw cargo output: Nix (in WSL)
+  # builds the Debug stage and installs it into the dev installation through
+  # the shipping installer, then the installed Editor launches on that root.
+  $repo = Split-Path -Parent $PSScriptRoot
+  wsl.exe --cd $repo -- nix run .#dev -- stage
+  if ($LASTEXITCODE -ne 0) { throw "nix run .#dev -- stage failed with exit $LASTEXITCODE" }
+  $where = wsl.exe --cd $repo -- nix run .#dev -- where
   $devRoot = ($where | Select-String -Pattern '^root: (.+)$').Matches[0].Groups[1].Value
   $installedEditor = ($where | Select-String -Pattern '^editor: (.+)$').Matches[0].Groups[1].Value
-  if (-not $installedEditor) { throw 'cargo dev where reported no installed editor' }
+  if (-not $installedEditor) { throw 'nix run .#dev -- where reported no installed editor' }
   $env:ARTISAN_HOME = $devRoot
   $proc = Start-Process -FilePath $installedEditor -PassThru
 }

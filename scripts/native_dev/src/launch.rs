@@ -705,9 +705,15 @@ impl EditorProcess {
 /// connection completes the initial queries. `output` routes its standard
 /// streams (see [`EditorOutput`]).
 ///
+/// A detached Editor leaves the runner's process group on Unix and, on
+/// Windows, breaks away from the runner's job object: a runner started
+/// through WSL interop runs in a job that terminates its processes when the
+/// WSL session ends.
+///
 /// # Errors
 ///
-/// Returns [`DevError::Stage`] when the Editor cannot be spawned.
+/// Returns [`DevError::Stage`] when the log cannot be created or the Editor
+/// cannot be spawned.
 pub fn spawn_editor(
     editor_exe: &Path,
     home: &Path,
@@ -758,6 +764,8 @@ fn spawn_detached(
     receipt_path: &Path,
     log: &Path,
 ) -> Result<EditorProcess, DevError> {
+    use std::os::unix::process::CommandExt as _;
+
     let log_error = |_| DevError::Stage {
         stage: "launch",
         reason: format!("cannot open the editor log {}", log.display()),
@@ -766,10 +774,13 @@ fn spawn_detached(
     let stderr = stdout.try_clone().map_err(log_error)?;
     let mut command = std::process::Command::new(editor_exe);
     configure_editor_environment(&mut command, home, receipt_path);
+    // Its own process group: Ctrl-C and hangups aimed at the terminal job
+    // that ran the runner do not reach the Editor.
     command
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
+        .process_group(0)
         .spawn()
         .map(EditorProcess::direct)
         .map_err(|_| DevError::Stage {
@@ -797,6 +808,12 @@ const WATCHER_SCRIPT: &str = "$exe = $env:ARTISAN_DEV_LAUNCH_EXE; \
 /// `CREATE_NO_WINDOW`: the watcher never shows a console.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `CREATE_BREAKAWAY_FROM_JOB`: a runner started through WSL interop runs in
+/// a job that ends its processes with the WSL session; the watcher, and so
+/// the Editor it starts, leave that job.
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 /// Windows PowerShell, which every supported Windows ships.
 #[cfg(windows)]
@@ -843,7 +860,7 @@ fn spawn_detached(
             WATCHER_SCRIPT,
         ])
         .env(LAUNCH_EXE_ENV, editor_exe)
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

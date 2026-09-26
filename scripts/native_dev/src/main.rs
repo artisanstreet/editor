@@ -1,4 +1,4 @@
-//! `dev` binary (`cargo dev`): build, install, and launch the dev Editor.
+//! `dev` binary: install a Nix-built payload and launch the dev Editor.
 //!
 //! The binary is deliberately thin: every reusable step lives in the
 //! [`native_dev`] library so it stays covered by `tests/native_dev`. Here
@@ -13,11 +13,11 @@ use artisan_build_info::{BuildIdentity, BuildInfo};
 use artisan_install::LocalSigner;
 use native_dev::{
     Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, EditorOutput,
-    EditorProcess, GitState, InstanceOutcome, PAYLOAD_DIRECTORY, ReadinessReconcile, StartupWait,
-    Workspace, assemble, clear_stale_receipt, editor_log_path, editor_output, fresh_receipt_path,
-    install_tree, locate_binaries, profile_for_bin_dir, provision_forge_home,
-    reconcile_stale_readiness, resolve_dev_root, spawn_editor, stage_line, staged_editor,
-    staged_forge, streams_are_terminals, usage, wait_for_startup,
+    EditorProcess, InstanceOutcome, ReadinessReconcile, StartupWait, clear_stale_receipt,
+    editor_log_path, editor_output, fresh_receipt_path, install_payload, locate_binaries,
+    payload_identity, provision_forge_home, reconcile_stale_readiness, resolve_dev_root,
+    sign_payload, spawn_editor, stage_line, staged_editor, staged_forge, streams_are_terminals,
+    usage, wait_for_startup,
 };
 
 fn main() -> std::process::ExitCode {
@@ -79,7 +79,7 @@ fn report_where(paths: &DevPaths) {
             println!("editor: {}", editor.display());
             println!("build: {}", BuildIdentity::for_executable(&editor));
         }
-        Err(_) => println!("build: nothing installed yet; run `cargo dev`"),
+        Err(_) => println!("build: nothing installed yet; run `nix run .#dev`"),
     }
 }
 
@@ -98,68 +98,31 @@ fn prune(paths: &DevPaths, keep: usize) {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear stage-by-stage runbook; each stage's error hint stays adjacent to its call"
-)]
 fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome> {
     let launch = options.command == Command::Run;
     let total = if launch { 7 } else { 5 };
-    // Prebuilt binaries (for example from Nix) need no Cargo workspace;
-    // building does.
-    let workspace = match (Workspace::locate(), &options.bin_dir) {
-        (Ok(workspace), _) => Some(workspace),
-        (Err(_), Some(_)) => None,
-        (Err(error), None) => return Err(fail(error)),
+    let Some(payload) = options.payload.as_deref() else {
+        return Err(fail(DevError::Usage {
+            reason: "no payload to install".to_owned(),
+        }));
     };
-    let (bin_dir, profile) = match (&options.bin_dir, &workspace) {
-        (Some(bin_dir), _) => (
-            bin_dir.clone(),
-            options
-                .profile
-                .clone()
-                .unwrap_or_else(|| profile_for_bin_dir(bin_dir)),
-        ),
-        (None, Some(workspace)) => {
-            let profile = options.profile.clone().unwrap_or_else(|| "dev".to_owned());
-            (workspace.build(&profile).map_err(fail)?, profile)
-        }
-        (None, None) => unreachable!("building requires a located workspace"),
-    };
-    let binaries = locate_binaries(Some(&bin_dir)).map_err(fail)?;
-    println!(
-        "{}",
-        stage_line(
-            1,
-            total,
-            "build",
-            &format!("{profile} in {}", bin_dir.display())
-        )
-    );
+    let identity = payload_identity(payload).map_err(fail)?;
+    locate_binaries(Some(&payload.join("bin"))).map_err(fail)?;
+    println!("{}", stage_line(1, total, "payload", &identity.version));
 
     let lock = DevLock::acquire(paths).map_err(fail)?;
     let signer =
         LocalSigner::load_or_create(&paths.home).map_err(|error| fail(DevError::Install(error)))?;
-    let (tree, checkout) = match &workspace {
-        Some(workspace) => (
-            workspace.target_directory.join(PAYLOAD_DIRECTORY),
-            workspace.root.clone(),
-        ),
-        None => (
-            paths.runner_dir().join("payload"),
-            std::env::current_dir().unwrap_or_default(),
-        ),
-    };
-    let git = GitState::read(&checkout);
-    let info = assemble(&binaries, &git, &profile, &tree, &signer).map_err(fail)?;
-    println!("{}", stage_line(2, total, "assemble", &info.version));
+    let manifests = paths.runner_dir().join("manifest");
+    sign_payload(payload, &manifests, &identity, &signer).map_err(fail)?;
+    println!("{}", stage_line(2, total, "sign", signer.key_id()));
 
-    install_tree(paths, &tree, &signer).map_err(|error| {
+    install_payload(paths, payload, &manifests, &signer).map_err(|error| {
         eprintln!("dev: error: {error}");
         eprintln!("dev: hint: the previously active version is untouched");
         Outcome::Failure
     })?;
-    println!("{}", stage_line(3, total, "install", &describe(&info)));
+    println!("{}", stage_line(3, total, "install", &describe(&identity)));
 
     let outcome = provision_forge_home(paths).map_err(fail)?;
     let detail = match outcome {
@@ -184,13 +147,34 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         );
         return Ok(0);
     }
+    launch_installed(options, paths, lock, &version_root, total)
+}
+
+/// Stages 6 and 7: launch the installed Editor and confirm its startup.
+/// The install lock is released once the Editor is spawned.
+fn launch_installed(
+    options: &DevArgs,
+    paths: &DevPaths,
+    lock: DevLock,
+    version_root: &Path,
+    total: u32,
+) -> Result<u8, Outcome> {
+    let editor = staged_editor(version_root);
     let receipt_path = fresh_receipt_path(paths);
     clear_stale_receipt(&receipt_path).map_err(fail)?;
-    match reconcile_stale_readiness(paths, &staged_forge(&version_root)).map_err(fail)? {
-        ReadinessReconcile::Absent => {}
-        ReadinessReconcile::CleanedStale { pid } => {
+    // Installing retired every superseded version, so a live Forge of the
+    // active version means this exact build is already running: an
+    // unchanged tree builds the same payload.
+    match reconcile_stale_readiness(paths, &staged_forge(version_root)) {
+        Ok(ReadinessReconcile::Absent) => {}
+        Ok(ReadinessReconcile::CleanedStale { pid }) => {
             println!("dev: removed stale readiness of dead forge pid {pid}");
         }
+        Err(DevError::PreviousForgeRunning { pid }) => {
+            println!("dev: this build is already running (forge pid {pid}); nothing to relaunch");
+            return Ok(0);
+        }
+        Err(error) => return Err(fail(error)),
     }
     println!(
         "{}",
@@ -204,7 +188,7 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
     let mut editor_process =
         spawn_editor(&editor, &paths.home, &receipt_path, &output).map_err(fail)?;
     // Installs and launches are serialized only up to here: the lock is
-    // never held for the Editor's lifetime, so the next `cargo dev` can
+    // never held for the Editor's lifetime, so the next `nix run .#dev` can
     // retire this Editor and relaunch its new build.
     drop(lock);
     let startup = wait_for_startup(
@@ -243,7 +227,7 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         let pid = editor_process.pid();
         editor_process.release();
         println!(
-            "dev: editor running (pid {pid}); run `cargo dev` again to replace it with a new build"
+            "dev: editor running (pid {pid}); run `nix run .#dev` again to replace it with a new build"
         );
         if let EditorOutput::Detached { log } = &output {
             if cfg!(windows) {
@@ -256,7 +240,7 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         }
         return Ok(0);
     }
-    wait_for_exit(editor_process, &version_root)
+    wait_for_exit(editor_process, version_root)
 }
 
 /// Follows the dev Editor until it exits, including when a later run

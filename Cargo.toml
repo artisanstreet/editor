@@ -36,12 +36,13 @@ capnpc = "=0.27.0"
 command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
 fs2 = "=0.4.3"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "5015ad3f9e5571c84d0131731b44c1d4410d160a", features = ["inspector", "test-support", "profiler"] }
+gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "5015ad3f9e5571c84d0131731b44c1d4410d160a" }
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "5015ad3f9e5571c84d0131731b44c1d4410d160a", features = ["wgpu"] }
 http = { version = "=1.5.0", default-features = false, features = ["std"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
+mimalloc = { version = "=0.1.52", default-features = false }
 native-dialog = { version = "=0.9.7", default-features = false, features = [
     "windows_dpi_awareness",
 ] }
@@ -99,15 +100,41 @@ zeroize = "=1.9.0"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# Native rendering must be measured with optimization. Keep debug symbols,
-# assertions, and the ordinary dev profile for step-through debugging.
-[profile.performance]
-inherits = "dev"
-opt-level = 2
+# Two build stages share one codegen.
+#
+# Production: every stable rustc setting that trades build time for runtime
+# speed. Whole-program (fat) LTO over one codegen unit lets LLVM inline and
+# optimize across every crate, including GPUI and wgpu; panics abort instead
+# of unwinding (nothing in the product catches panics). Line tables are split
+# out of the shipped binary for symbolicated crash reports. The CPU baseline
+# lives in .cargo/config.toml so every build of a target shares it.
+[profile.production]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+incremental = false
+debug-assertions = false
+overflow-checks = false
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "debuginfo"
 
-# Payload integrity hashes every staged binary (about 1.4 GB in a debug
-# build) several times per `cargo dev` run; unoptimized SHA-256 made that the
-# slowest part of the dev loop. Optimizing only the hash crates keeps debug
+# Debug: Production's codegen unchanged, plus debugging facilities: full
+# debug info kept in the binary, debug assertions, and overflow checks. The
+# Debug stage also enables the `debug-tools` features (GPUI inspector).
+[profile.production-debug]
+inherits = "production"
+debug = "full"
+split-debuginfo = "off"
+strip = "none"
+debug-assertions = true
+overflow-checks = true
+
+# Payload integrity hashing covers every binary of a payload, several times
+# per install; unoptimized SHA-256 made that the slowest part of installer
+# tests and dev-profile tools. Optimizing only the hash crates keeps debug
 # builds of everything else unchanged.
 [profile.dev.package.sha2]
 opt-level = 3

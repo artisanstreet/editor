@@ -331,8 +331,8 @@ fn forbid_installed_home(root: &Path) -> Result<()> {
     Err(CliError::DebugBuildGuard(format!(
         "this debug build of `ae` refuses to touch the installed Artisan home at {}; \
          manage the installation with the installed `ae`, and for development \
-         stage an isolated home with `cargo dev` and point ARTISAN_HOME at \
-         <dev-dir>/home",
+         install a dev build with `nix run .#dev`, which runs in the separate \
+         Artisan Street Dev installation",
         installed.display()
     )))
 }
@@ -651,7 +651,7 @@ mod tests {
         let installed = platform_root().expect("installed home");
         assert!(matches!(
             forbid_installed_home(&installed),
-            Err(CliError::DebugBuildGuard(message)) if message.contains("cargo dev")
+            Err(CliError::DebugBuildGuard(message)) if message.contains("nix run .#dev")
         ));
         assert!(forbid_installed_home(&installed.join("data")).is_err());
         assert!(forbid_installed_home(&std::env::temp_dir().join("artisan-dev-home")).is_ok());

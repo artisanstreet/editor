@@ -56,8 +56,12 @@ pub enum ReleaseSource {
     /// An unpacked payload on disk (`bin/`, `resources/`) described by a
     /// signed tree manifest, as the `dev` runner produces it.
     Tree {
-        /// Payload root holding the tree manifest and signature.
+        /// Payload root (`bin/`, `resources/`).
         path: PathBuf,
+        /// Directory holding the tree manifest and signature, when they do
+        /// not sit in the payload root (a read-only payload, such as a Nix
+        /// store path, signed without copying it).
+        manifest_directory: Option<PathBuf>,
     },
 }
 
@@ -93,7 +97,10 @@ impl ReleaseSource {
         }
         let path = std::path::absolute(location).map_err(io(location))?;
         if path.join(TREE_MANIFEST_NAME).is_file() {
-            Ok(Self::Tree { path })
+            Ok(Self::Tree {
+                path,
+                manifest_directory: None,
+            })
         } else if path.join(RELEASE_MANIFEST_NAME).is_file() {
             Ok(Self::Directory { path })
         } else {
@@ -191,9 +198,13 @@ pub(super) async fn acquire(
                 },
             })
         }
-        ReleaseSource::Tree { path } => {
-            let bytes = read_bounded(&path.join(TREE_MANIFEST_NAME))?;
-            let signature = read_bounded(&path.join(TREE_SIGNATURE_NAME))?;
+        ReleaseSource::Tree {
+            path,
+            manifest_directory,
+        } => {
+            let manifests = manifest_directory.as_deref().unwrap_or(path);
+            let bytes = read_bounded(&manifests.join(TREE_MANIFEST_NAME))?;
+            let signature = read_bounded(&manifests.join(TREE_SIGNATURE_NAME))?;
             let manifest = decode_tree(&bytes, &signature, trust)?;
             if manifest.platform != platform.os || manifest.architecture != platform.arch {
                 return Err(InstallerError::MissingArtifact {
