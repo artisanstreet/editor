@@ -303,6 +303,7 @@ impl NativeTransportCommand {
             | Self::SelectProject(_)
             | Self::RefreshThreads { .. }
             | Self::ReadRecentThreads
+            | Self::ReadProjects
             | Self::RequestSnapshot(_)
             | Self::ReadMessageImage(_)
             | Self::LoadThreadEngineSettings { .. }

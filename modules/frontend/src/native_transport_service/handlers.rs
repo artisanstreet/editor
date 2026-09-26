@@ -759,3 +759,22 @@ pub(super) async fn refresh_threads(
         },
     )
 }
+
+/// Lists the attached projects again (after a reconnect, or when a recent
+/// thread names a project this Editor does not know). The listing also asks
+/// the Forge to push later catalog changes on this connection.
+pub(super) async fn read_projects(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let result = match runtime
+        .request(frames, project_request(), ExpectedResponse::Projects)
+        .await
+    {
+        Ok(ResponsePayload::ProjectListing(listing)) => Ok(listing),
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(failure) => Err(failure.into()),
+    };
+    publish(events, NativeTransportEvent::ProjectCatalog(result))
+}

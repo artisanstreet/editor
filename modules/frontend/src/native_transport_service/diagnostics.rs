@@ -620,6 +620,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::SelectProject(_) => "SelectProject",
             Self::RefreshThreads { .. } => "RefreshThreads",
             Self::ReadRecentThreads => "ReadRecentThreads",
+            Self::ReadProjects => "ReadProjects",
             Self::CreateTask(_) => "CreateTask",
             Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
             Self::RequestSnapshot(_) => "RequestSnapshot",

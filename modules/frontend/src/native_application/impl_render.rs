@@ -50,9 +50,10 @@ impl Render for NativeApplication {
             .relative()
             .child(shell)
             .child(self.command_menu.clone())
-            .children(self.machine_error.clone().map(|message| {
+            .children(self.window_error.clone().map(|message| {
                 div()
-                    .id("machine-error")
+                    .id("window-error")
+                    .debug_selector(|| "window-error".to_owned())
                     .absolute()
                     .top_8()
                     .right_4()
@@ -62,7 +63,7 @@ impl Render for NativeApplication {
                     .child(message)
                     .child("  ×")
                     .on_click(cx.listener(|app, _, _, cx| {
-                        app.machine_error = None;
+                        app.window_error = None;
                         cx.notify();
                     }))
             }))

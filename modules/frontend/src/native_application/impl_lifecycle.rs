@@ -120,7 +120,7 @@ impl NativeApplication {
             application.route_command_action(&menu, cx);
         });
         let mut application = Self {
-            machine_error: None,
+            window_error: None,
             machine_home: None,
             machine_label: crate::native_hosts::no_host_label().into(),
             machine_menu: impl_machines::MachineMenu::new(cx),

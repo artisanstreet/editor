@@ -399,6 +399,8 @@ pub enum HostStateEvent {
     RunUsage(artisan_domain::RunUsageResult),
     /// The recent threads across every project.
     RecentThreads(artisan_domain::RecentThreadListing),
+    /// The attached-project catalog.
+    ProjectCatalog(ProjectListing),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -439,10 +441,12 @@ pub fn validate_uni_envelope(
             artisan_domain::Event::RecentThreads(listing) => Ok(UniDelivery::HostState(
                 HostStateEvent::RecentThreads(listing.clone()),
             )),
+            artisan_domain::Event::ProjectCatalog(listing) => Ok(UniDelivery::HostState(
+                HostStateEvent::ProjectCatalog(listing.clone()),
+            )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)
-            | artisan_domain::Event::FirstMessageQueued(_)
-            | artisan_domain::Event::ProjectCatalog(_) => Err(ServiceFailure::new(
+            | artisan_domain::Event::FirstMessageQueued(_) => Err(ServiceFailure::new(
                 ServiceFailureStage::Delivery,
                 ServiceFailureCategory::Integrity,
             )),

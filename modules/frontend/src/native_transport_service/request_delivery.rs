@@ -505,6 +505,9 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::ReadRecentThreads => {
                         handlers::read_recent_threads(runtime, frames, events).await?;
                     }
+                    NativeTransportCommand::ReadProjects => {
+                        handlers::read_projects(runtime, frames, events).await?;
+                    }
                     NativeTransportCommand::SelectProject(project_id) => {
                         select_project(runtime, frames, events, project_id).await?;
                     }

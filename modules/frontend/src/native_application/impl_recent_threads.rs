@@ -9,9 +9,24 @@
 //! message), that listing is read again once, so the thread picker, the
 //! command menu, and opening a thread stay on the Forge's data.
 
+use std::time::Instant;
+
 use artisan_domain::{RecentThread, RecentThreadListing};
 
 use super::*;
+
+/// How long a chosen recent thread may wait for its project to be listed or
+/// for the view to settle before the window reports it could not open.
+pub(super) const RECENT_OPEN_WAIT: Duration = Duration::from_secs(10);
+
+/// A chosen recent thread that has not opened yet.
+pub(super) struct AwaitedOpen {
+    pub(super) project: ProjectId,
+    pub(super) thread: ThreadId,
+    /// Whether the projects were listed again for it.
+    catalog_requested: bool,
+    deadline: Instant,
+}
 
 impl NativeApplication {
     /// Applies the recent threads the Forge served.
@@ -24,6 +39,13 @@ impl NativeApplication {
         if let Ok(listing) = result {
             self.apply_recent_threads(listing, cx);
         }
+    }
+
+    /// Advances the sidebar's pending work as service events arrive: a
+    /// stale project listing is read again, a chosen thread opens.
+    pub(super) fn advance_recent_threads(&mut self, cx: &mut Context<Self>) {
+        self.refresh_project_threads_if_stale();
+        self.retry_awaited_open(cx);
     }
 
     /// Applies the recent threads the Forge served or pushed.
@@ -41,17 +63,162 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// A reconnected connection asks for the recent threads again, which
-    /// also resumes their pushes, and sends the drafts it parked.
+    /// A reconnected connection lists the projects and reads the recent
+    /// threads again, which also resumes their pushes, and sends the drafts
+    /// it parked.
     pub(super) fn resume_after_reconnect(&mut self) {
         self.resume_composer_drafts();
+        let _ = self.submit_command(NativeTransportCommand::ReadProjects);
         let _ = self.submit_command(NativeTransportCommand::ReadRecentThreads);
     }
 
-    /// Opens a recent thread in its own project: at once when the selected
+    /// Applies the project catalog the Forge pushed, or listed on request.
+    /// The selected project stays when it is still attached; otherwise the
+    /// catalog is handled like the first listing. A click waiting for its
+    /// project then proceeds.
+    pub(super) fn apply_project_catalog(
+        &mut self,
+        listing: &ProjectListing,
+        cx: &mut Context<Self>,
+    ) {
+        let still_selected = self.selected_project.as_ref().is_some_and(|selected| {
+            listing
+                .projects()
+                .iter()
+                .any(|project| &project.project_id == selected)
+        });
+        if still_selected {
+            let options = self.ordered_project_options(listing);
+            if options != self.project_options {
+                self.project_options = options;
+                self.sync_project_pickers(cx);
+            }
+        } else if self.thread_switch_flight.is_none() {
+            let before = self.selected_project.clone();
+            self.handle_projects(listing, cx);
+            // The first listing's project is read by the transport itself;
+            // a pushed catalog that selects it must ask for its threads.
+            let first = listing
+                .projects()
+                .first()
+                .map(|project| &project.project_id);
+            if self.selected_project != before
+                && self.selected_project.as_ref() == first
+                && let Some(project) = self.selected_project.clone()
+                && let Err(error) =
+                    self.submit_command(NativeTransportCommand::SelectProject(project))
+            {
+                self.set_failure(command_failure(error), cx);
+            }
+        }
+        self.retry_awaited_open(cx);
+        cx.notify();
+    }
+
+    /// Applies the answer to an explicit project listing: a click waiting
+    /// for a project the Forge does not list fails visibly.
+    pub(super) fn receive_projects(
+        &mut self,
+        result: Result<ProjectListing, ServiceFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Ok(listing) = &result {
+            self.apply_project_catalog(listing, cx);
+        }
+        let unknown = self
+            .sidebar_threads
+            .awaited_open
+            .as_ref()
+            .is_some_and(|awaited| !self.project_is_listed(&awaited.project));
+        if unknown && let Some(awaited) = self.sidebar_threads.awaited_open.take() {
+            let reason = if result.is_ok() {
+                "its project is no longer attached to this Forge"
+            } else {
+                "the Forge's projects could not be listed"
+            };
+            self.fail_recent_open(&awaited, reason, cx);
+        }
+    }
+
+    fn project_is_listed(&self, project: &ProjectId) -> bool {
+        self.project_options
+            .iter()
+            .any(|option| &option.id == project)
+    }
+
+    /// Opens a recent thread in its own project. Choosing a row is never a
+    /// silent no-op: a project this Editor does not list yet is listed
+    /// again first, and a view busy with a switch opens it once the switch
+    /// settles; either wait is bounded by [`RECENT_OPEN_WAIT`], after which
+    /// the window shows why the thread did not open.
+    pub(super) fn open_recent_thread(
+        &mut self,
+        project: ProjectId,
+        thread: ThreadId,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_threads.awaited_open = Some(AwaitedOpen {
+            project,
+            thread,
+            catalog_requested: false,
+            deadline: Instant::now() + RECENT_OPEN_WAIT,
+        });
+        self.retry_awaited_open(cx);
+    }
+
+    /// Advances a waiting recent-thread click; called as events arrive.
+    pub(super) fn retry_awaited_open(&mut self, cx: &mut Context<Self>) {
+        let Some(mut awaited) = self.sidebar_threads.awaited_open.take() else {
+            return;
+        };
+        if Instant::now() >= awaited.deadline {
+            self.fail_recent_open(&awaited, "the Editor is still busy", cx);
+            return;
+        }
+        if !self.project_is_listed(&awaited.project) {
+            if !awaited.catalog_requested {
+                if self
+                    .submit_command(NativeTransportCommand::ReadProjects)
+                    .is_err()
+                {
+                    self.fail_recent_open(&awaited, "the Forge is not connected", cx);
+                    return;
+                }
+                awaited.catalog_requested = true;
+            }
+            self.sidebar_threads.awaited_open = Some(awaited);
+            return;
+        }
+        if !self.project_picker_action_is_admissible() {
+            self.sidebar_threads.awaited_open = Some(awaited);
+            return;
+        }
+        self.open_known_recent_thread(awaited.project, awaited.thread, cx);
+    }
+
+    fn fail_recent_open(&mut self, awaited: &AwaitedOpen, reason: &str, cx: &mut Context<Self>) {
+        let title = self
+            .sidebar_threads
+            .recent
+            .as_ref()
+            .and_then(|recent| {
+                recent
+                    .threads()
+                    .iter()
+                    .find(|row| row.thread.thread_id == awaited.thread)
+            })
+            .map_or_else(
+                || String::from("this thread"),
+                |row| format!("\u{201c}{}\u{201d}", row.thread.title.as_str()),
+            );
+        self.window_error = Some(format!("Couldn't open {title}: {reason}."));
+        cx.notify();
+    }
+
+    /// Opens a recent thread of a listed project: at once when the selected
     /// project lists it, after one read of the listing when the thread is
     /// newer than the listing, and by entering its project otherwise.
-    pub(super) fn open_recent_thread(
+    fn open_known_recent_thread(
         &mut self,
         project: ProjectId,
         thread: ThreadId,

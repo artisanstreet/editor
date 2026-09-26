@@ -40,7 +40,7 @@ impl NativeApplication {
             }
             self.handle_service_stopped(ServiceStopStatus::Failed, cx);
         }
-        self.refresh_project_threads_if_stale();
+        self.advance_recent_threads(cx);
         self.retry_thread_switch_if_admitted(cx);
         self.try_mount_pending_thread(cx);
         self.sync_composer_availability(cx);
@@ -112,6 +112,7 @@ impl NativeApplication {
                 result,
             } => self.receive_refreshed_threads(&project_id, generation, result, cx),
             NativeTransportEvent::RecentThreads(result) => self.receive_recent_threads(result, cx),
+            NativeTransportEvent::ProjectCatalog(result) => self.receive_projects(result, cx),
             NativeTransportEvent::Snapshot(snapshot) => self.handle_snapshot(snapshot, cx),
             NativeTransportEvent::ProjectIntakeProgress(stage) => {
                 self.handle_intake_progress(stage, cx);

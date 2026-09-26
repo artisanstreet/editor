@@ -10,10 +10,14 @@ use super::*;
 use crate::recent_thread_groups::{RecentThreadGroup, group_recent_threads, next_regrouping};
 use artisan_domain::{RecentThread, RecentThreadListing, UnixMillis};
 use gpui::ColorExt as _;
+use gpui::prelude::FluentBuilder as _;
 use std::time::Instant;
 
 /// Height of one two-line thread row.
 pub(super) const SIDEBAR_THREAD_ROW_HEIGHT_PX: f32 = 48.0;
+
+/// Spoken after a working row's subtitle.
+pub(super) const SIDEBAR_WORKING_LABEL: &str = "working";
 
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
@@ -37,6 +41,8 @@ pub(super) struct SidebarThreadsState {
     /// A recent thread of the selected project to open once its listing
     /// names it.
     pub(super) open_after_refresh: Option<ThreadId>,
+    /// A chosen recent thread waiting for its project or a settled view.
+    pub(super) awaited_open: Option<super::impl_recent_threads::AwaitedOpen>,
 }
 
 /// Two sequential halves of the transitions-dev icon-swap duration.
@@ -289,9 +295,16 @@ impl NativeApplication {
             .blend(&self.desktop_theme.secondary.opacity(weight));
         let title = SharedString::from(thread.title.as_str().to_owned());
         let subtitle = SharedString::from(row.subtitle.as_str().to_owned());
+        let description = if thread.has_active_work {
+            SharedString::from(format!("{subtitle}, {SIDEBAR_WORKING_LABEL}"))
+        } else {
+            subtitle.clone()
+        };
         let selector = format!("artisan-sidebar-thread-{}", thread.thread_id.as_str());
         let title_selector = format!("{selector}-title");
         let subtitle_selector = format!("{selector}-subtitle");
+        let working_selector = format!("{selector}-working");
+        let working_tone = self.theme.colors.primary.to_paint();
         let click_target = (thread.project_id.clone(), thread.thread_id.clone());
         let key_target = click_target.clone();
         let color = self.theme.colors.muted.to_paint();
@@ -302,7 +315,7 @@ impl NativeApplication {
             .tab_index(0)
             .role(gpui::Role::Button)
             .aria_label(title.clone())
-            .aria_description(subtitle.clone())
+            .aria_description(description)
             .w_full()
             .h(px(SIDEBAR_THREAD_ROW_HEIGHT_PX))
             .flex_none()
@@ -360,6 +373,18 @@ impl NativeApplication {
                             .child(subtitle),
                     ),
             )
+            // Live work keeps its prominence without reordering the
+            // chronological groups: the rail's trailing state dot.
+            .when(thread.has_active_work, |row| {
+                row.child(
+                    div()
+                        .size(px(crate::shell::LEGACY_RAIL_STATE_DOT_PX))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(working_tone)
+                        .debug_selector(move || working_selector.clone()),
+                )
+            })
             .on_click(cx.listener(move |app, _, window, cx| {
                 window.focus(&focus, cx);
                 let (project, thread) = click_target.clone();

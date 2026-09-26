@@ -309,7 +309,9 @@ type ProfileTipAnchor = Option<((String, String), HoverRect)>;
     reason = "independent window, sidebar, and profile flags are tracked separately by the paint tree; packing them would conflate distinct render states"
 )]
 pub struct NativeApplication {
-    machine_error: Option<String>,
+    /// A dismissible window-level error, such as a host that could not be
+    /// added or a recent thread that could not be opened.
+    window_error: Option<String>,
     machine_home: Option<std::path::PathBuf>,
     machine_label: String,
     machine_menu: impl_machines::MachineMenu,

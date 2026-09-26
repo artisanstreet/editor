@@ -443,3 +443,175 @@ fn project_menu_shares_sliding_hover_with_keyboard_navigation(cx: &mut TestAppCo
         assert!(hover.transition().is_none());
     });
 }
+
+fn catalog(ids: &[&str]) -> ProjectListing {
+    ProjectListing::new(ids.iter().map(|id| project(id, id)).collect()).expect("catalog")
+}
+
+#[gpui::test]
+fn a_thread_in_a_project_attached_elsewhere_opens_on_first_click(cx: &mut TestAppContext) {
+    use gpui::px;
+
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, commands) = command_sink([]);
+
+    let there = ProjectId::parse("there").expect("fixture project");
+    let target = ThreadId::parse("over-there").expect("fixture thread");
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            application.handle_projects(&catalog(&["here"]), cx);
+            application.thread_listing = Some(ThreadListing::new(Vec::new()).expect("listing"));
+            push_recent(
+                application,
+                recent_listing(vec![recent_row(
+                    target.as_str(),
+                    "there",
+                    "Attached elsewhere",
+                    "owner/there",
+                    HOUR_MS,
+                )]),
+                cx,
+            );
+        });
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("artisan-sidebar-thread-over-there")
+        .expect("row of a project this Editor does not list yet");
+    commands.borrow_mut().clear();
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    cx.update(|_, app| {
+        let application = view.read(app);
+        assert!(
+            commands
+                .borrow()
+                .iter()
+                .any(|command| matches!(command, NativeTransportCommand::ReadProjects)),
+            "an unknown project is listed again rather than ignored"
+        );
+        assert!(application.window_error.is_none());
+    });
+
+    // The Forge pushes the catalog with the project another client attached.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(
+                NativeTransportEvent::HostState(
+                    crate::native_transport_service::HostStateEvent::ProjectCatalog(catalog(&[
+                        "here", "there",
+                    ])),
+                ),
+                cx,
+            );
+            assert!(
+                application
+                    .project_options
+                    .iter()
+                    .any(|option| option.id == there),
+                "the attached project appears"
+            );
+            assert_eq!(application.selected_project.as_ref(), Some(&there));
+            assert_eq!(
+                application.project_navigation.last_threads.get(&there),
+                Some(&target)
+            );
+            assert!(commands.borrow().iter().any(|command| matches!(
+                command,
+                NativeTransportCommand::SelectProject(project) if project == &there
+            )));
+            assert!(application.sidebar_threads.awaited_open.is_none());
+            // The listing answer that follows changes nothing further.
+            application.handle_service_event(
+                NativeTransportEvent::ProjectCatalog(Ok(catalog(&["here", "there"]))),
+                cx,
+            );
+            assert!(application.window_error.is_none());
+        });
+    });
+}
+
+#[gpui::test]
+fn a_thread_whose_project_is_gone_reports_why_it_did_not_open(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, _) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            application.handle_projects(&catalog(&["here"]), cx);
+            push_recent(
+                application,
+                recent_listing(vec![recent_row("gone", "removed", "Lost work", "gone", 1)]),
+                cx,
+            );
+            application.open_recent_thread(
+                ProjectId::parse("removed").expect("project"),
+                ThreadId::parse("gone").expect("thread"),
+                cx,
+            );
+            assert!(
+                application.window_error.is_none(),
+                "it waits for the listing"
+            );
+            application.handle_service_event(
+                NativeTransportEvent::ProjectCatalog(Ok(catalog(&["here"]))),
+                cx,
+            );
+            let error = application.window_error.clone().expect("a visible error");
+            assert!(error.contains("Lost work") && error.contains("no longer attached"));
+        });
+    });
+}
+
+#[gpui::test]
+fn working_threads_show_the_state_dot_until_their_work_ends(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let listing = |working: bool| {
+        let mut row = recent_row("busy", "alpha", "Busy thread", "owner/repo", HOUR_MS);
+        row.thread.has_active_work = working;
+        recent_listing(vec![
+            recent_row("newer", "alpha", "Newer", "owner/repo", 60_000),
+            row,
+        ])
+    };
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            push_recent(application, listing(true), cx)
+        });
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(800.0)));
+    cx.run_until_parked();
+    let dot = cx
+        .debug_bounds("artisan-sidebar-thread-busy-working")
+        .expect("a working row shows the state dot");
+    let row = cx.debug_bounds("artisan-sidebar-thread-busy").expect("row");
+    assert!(
+        dot.right() <= row.right() && dot.left() > row.center().x,
+        "trailing"
+    );
+    let newer = cx
+        .debug_bounds("artisan-sidebar-thread-newer")
+        .expect("row");
+    assert!(
+        newer.bottom() <= row.top(),
+        "working rows keep chronological order"
+    );
+    assert!(
+        cx.debug_bounds("artisan-sidebar-thread-newer-working")
+            .is_none()
+    );
+
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            push_recent(application, listing(false), cx)
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("artisan-sidebar-thread-busy-working")
+            .is_none(),
+        "the dot leaves when the pushed list says the work ended"
+    );
+}
