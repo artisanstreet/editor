@@ -555,6 +555,37 @@ mod tests {
         );
     }
 
+    /// `ae` reached through the PATH link an installation owns
+    /// (`~/.local/bin/ae`) runs as its target, so it manages that
+    /// installation with no flags.
+    #[cfg(unix)]
+    #[test]
+    fn ae_linked_onto_the_path_resolves_its_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data");
+        let root = data.join("Artisan Street Dev");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin").join("ae"), b"ae").unwrap();
+        let link = directory.path().join("home/.local/bin/ae");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(root.join("bin").join("ae"), &link).unwrap();
+        // The kernel reports a symlinked command's executable as its target.
+        let executable = fs::canonicalize(&link).unwrap();
+        assert_eq!(
+            discover_root_from(
+                None,
+                None,
+                Some(&executable),
+                NativePlatform::Unix,
+                None,
+                Some(&directory.path().join("home")),
+                Some(&data),
+            )
+            .unwrap(),
+            fs::canonicalize(&root).unwrap()
+        );
+    }
+
     #[test]
     fn default_discovery_refuses_a_nonempty_legacy_root_without_mutation() {
         let directory = tempfile::tempdir().unwrap();

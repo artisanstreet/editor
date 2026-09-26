@@ -14,6 +14,7 @@
 
 use std::{
     ffi::OsStr,
+    fmt::Write as _,
     fs,
     io::Write as _,
     path::{Path, PathBuf},
@@ -154,8 +155,11 @@ pub fn unit_name_for(root: &Path, data_directory: Option<&Path>) -> String {
         });
     readable.unwrap_or_else(|| {
         let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
-        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        format!("{UNIT_PREFIX}-{}.service", &hex[..12])
+        let hex = digest.iter().take(6).fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+        format!("{UNIT_PREFIX}-{hex}.service")
     })
 }
 
@@ -212,6 +216,49 @@ pub enum UnitFile {
     },
     /// A unit of this name that this installation did not write.
     Foreign,
+}
+
+/// What `ae doctor` reports about an installation's service.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServiceHealth {
+    /// No unit: the Forge is not autostarted (`ae setup --autostart`).
+    Absent,
+    /// A unit of this name that this installation did not write.
+    Foreign,
+    /// This installation's unit, no longer launching its permanent `ae`.
+    Drifted,
+    /// This installation's current unit; `None` when the manager could not
+    /// be asked.
+    Installed {
+        /// Whether it starts at login.
+        enabled: Option<bool>,
+        /// Whether it runs now.
+        active: Option<bool>,
+    },
+    /// The unit could not be inspected.
+    Unavailable(String),
+}
+
+impl ServiceHealth {
+    /// Stable state name: `ok`, `absent`, `drifted`, `foreign`, or
+    /// `unavailable`.
+    #[must_use]
+    pub const fn state(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Foreign => "foreign",
+            Self::Drifted => "drifted",
+            Self::Installed { .. } => "ok",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+
+    /// Whether the installation is healthy: an absent service is only a
+    /// choice not to autostart.
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        matches!(self, Self::Absent | Self::Installed { .. })
+    }
 }
 
 /// The Forge service of one installation.
@@ -393,6 +440,21 @@ impl ForgeService {
                 })?;
                 require(systemctl, &["daemon-reload"])
             }
+        }
+    }
+
+    /// The service's health, asking `systemctl` only about a current unit.
+    #[must_use]
+    pub fn health(&self, systemctl: &dyn Systemctl) -> ServiceHealth {
+        match self.inspect() {
+            Ok(UnitFile::Absent) => ServiceHealth::Absent,
+            Ok(UnitFile::Foreign) => ServiceHealth::Foreign,
+            Ok(UnitFile::Owned { current: false }) => ServiceHealth::Drifted,
+            Ok(UnitFile::Owned { current: true }) => ServiceHealth::Installed {
+                enabled: self.is_enabled(systemctl).ok(),
+                active: self.is_active(systemctl).ok(),
+            },
+            Err(error) => ServiceHealth::Unavailable(error.to_string()),
         }
     }
 

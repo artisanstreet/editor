@@ -12,8 +12,8 @@ use std::{
 use artisan_editor_cli::{
     Result,
     service::{
-        ForgeService, Systemctl, SystemctlOutput, UnitFile, UserDirectories, quote_exec_argument,
-        unit_name_for,
+        ForgeService, ServiceHealth, Systemctl, SystemctlOutput, UnitFile, UserDirectories,
+        quote_exec_argument, unit_name_for,
     },
 };
 
@@ -248,6 +248,33 @@ fn remove_disables_stops_and_deletes_only_an_owned_unit() {
         systemctl.calls.borrow().as_slice(),
         ["disable --now artisan-forge-dev.service", "daemon-reload"]
     );
+}
+
+#[test]
+fn health_follows_the_unit_file_and_the_manager() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (service, root) = dev_service(scratch.path());
+    let systemctl = FakeSystemctl {
+        enabled: true,
+        active: false,
+        ..FakeSystemctl::default()
+    };
+    assert_eq!(service.health(&systemctl), ServiceHealth::Absent);
+    service.install(&systemctl, None).expect("install");
+    assert_eq!(
+        service.health(&systemctl),
+        ServiceHealth::Installed {
+            enabled: Some(true),
+            active: Some(false)
+        }
+    );
+    let unit = fs::read_to_string(service.unit_path()).expect("unit");
+    fs::write(
+        service.unit_path(),
+        unit.replace(&root.display().to_string(), "/elsewhere"),
+    )
+    .expect("rewrite");
+    assert_eq!(service.health(&systemctl), ServiceHealth::Foreign);
 }
 
 #[test]
