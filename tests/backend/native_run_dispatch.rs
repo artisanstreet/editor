@@ -31,6 +31,7 @@ fn config(
         ConversationCommitNotifier::new(),
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_millis(10),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(10),
@@ -51,6 +52,7 @@ fn config_with_notifier(
         notifier,
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_millis(10),
+            launch_deadline: Duration::from_secs(120),
             poll_interval,
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(500),
@@ -76,6 +78,7 @@ fn config_for_fixture_dispatch(
         notifier,
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_secs(30),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_secs(5),
@@ -94,6 +97,7 @@ fn scheduler_requires_positive_injected_durations() {
         ConversationCommitNotifier::new(),
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::ZERO,
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(10),
@@ -3141,6 +3145,7 @@ fn config_for_live_send_proof(
         notifier,
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_secs(180),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(50),
             retry_backoff: Duration::from_millis(500),
             shutdown_budget: Duration::from_secs(10),
@@ -4634,3 +4639,6 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
         artisan_database::ResolveInteractionOutcome::Applied(_)
     ));
 }
+
+#[path = "native_run_dispatch_start.rs"]
+mod provider_start;

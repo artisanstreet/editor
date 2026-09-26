@@ -57,6 +57,11 @@ const DRAIN_TIMEOUT_OPTION: &str = "--drain-timeout-ms";
 pub(super) const ADMISSION_CAPACITY_OPTION: &str = "--admission-capacity";
 const REQUESTS_PER_CONNECTION_OPTION: &str = "--requests-per-connection";
 const NATIVE_CLAIM_LEASE_OPTION: &str = "--native-run-claim-lease-ms";
+const NATIVE_LAUNCH_DEADLINE_OPTION: &str = "--native-run-launch-deadline-ms";
+/// Provider startup deadline when the launcher does not pass
+/// `--native-run-launch-deadline-ms`: generous enough for a cold CLI that
+/// syncs plugins or refreshes credentials before announcing its session.
+const DEFAULT_NATIVE_LAUNCH_DEADLINE_MS: u64 = 120_000;
 const NATIVE_POLL_INTERVAL_OPTION: &str = "--native-run-poll-interval-ms";
 const NATIVE_RETRY_BACKOFF_OPTION: &str = "--native-run-retry-backoff-ms";
 const NATIVE_SHUTDOWN_BUDGET_OPTION: &str = "--native-run-shutdown-budget-ms";
@@ -339,6 +344,7 @@ impl ForgeLaunchConfig {
 
 struct ParsedNativeRunArguments {
     claim_lease_ms: Option<u64>,
+    launch_deadline_ms: Option<u64>,
     poll_interval_ms: Option<u64>,
     retry_backoff_ms: Option<u64>,
     shutdown_budget_ms: Option<u64>,
@@ -352,6 +358,7 @@ impl ParsedNativeRunArguments {
     fn empty() -> Self {
         Self {
             claim_lease_ms: None,
+            launch_deadline_ms: None,
             poll_interval_ms: None,
             retry_backoff_ms: None,
             shutdown_budget_ms: None,
@@ -449,6 +456,11 @@ fn parse_native_option(
         NATIVE_CLAIM_LEASE_OPTION => {
             set_duration(&mut parsed.claim_lease_ms, option, raw_value.as_os_str())
         }
+        NATIVE_LAUNCH_DEADLINE_OPTION => set_duration(
+            &mut parsed.launch_deadline_ms,
+            option,
+            raw_value.as_os_str(),
+        ),
         NATIVE_POLL_INTERVAL_OPTION => {
             set_duration(&mut parsed.poll_interval_ms, option, raw_value.as_os_str())
         }
@@ -504,6 +516,11 @@ fn build_launch_config(
                 native_run.claim_lease_ms,
                 NATIVE_CLAIM_LEASE_OPTION,
             )?),
+            launch_deadline: Duration::from_millis(
+                native_run
+                    .launch_deadline_ms
+                    .unwrap_or(DEFAULT_NATIVE_LAUNCH_DEADLINE_MS),
+            ),
             poll_interval: Duration::from_millis(required(
                 native_run.poll_interval_ms,
                 NATIVE_POLL_INTERVAL_OPTION,

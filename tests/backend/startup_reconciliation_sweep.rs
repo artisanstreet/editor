@@ -1341,3 +1341,23 @@ async fn error_display_is_content_free_and_bounded() {
     assert!(!display.contains("turn-"));
     assert!(display.len() < 500);
 }
+
+#[test]
+fn live_lease_expiry_input_selects_the_live_recovery_text() {
+    let at = UnixMillis::from_millis(SWEEP_OPERATED_AT_MS);
+    let live = StartupReconciliationSweepInput::live_lease_expiry(at, 64).expect("live input");
+    assert_eq!(
+        live.recovery,
+        artisan_database::ExpiredLeaseRecovery::LiveLeaseExpiry
+    );
+    assert_eq!(
+        StartupReconciliationSweepInput::new(at, 64)
+            .expect("startup input")
+            .recovery,
+        artisan_database::ExpiredLeaseRecovery::Startup
+    );
+    assert!(matches!(
+        StartupReconciliationSweepInput::live_lease_expiry(at, 0),
+        Err(StartupReconciliationSweepError::InvalidLimit { limit: 0 })
+    ));
+}

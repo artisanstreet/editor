@@ -148,6 +148,7 @@ fn native_run() -> NativeRunDispatcherConfig {
         ConversationCommitNotifier::new(),
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_millis(10),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(500),
@@ -1989,4 +1990,34 @@ fn join_within<T>(handle: JoinHandle<T>, timeout: Duration) -> T {
         thread::yield_now();
     }
     handle.join().expect("Forge worker should not panic")
+}
+
+#[test]
+fn launch_deadline_option_is_optional_positive_and_single() {
+    let directory = TemporaryDirectory::new("native-launch-deadline");
+    parse(parser_arguments(&directory))
+        .expect("an absent launch deadline selects the documented default");
+
+    let with_deadline = |value: &str| {
+        let mut arguments = parser_arguments(&directory);
+        arguments.extend([
+            OsString::from("--native-run-launch-deadline-ms"),
+            OsString::from(value),
+        ]);
+        arguments
+    };
+    parse(with_deadline("45000")).expect("an explicit launch deadline parses");
+    assert!(matches!(
+        parse(with_deadline("0")),
+        Err(ForgeConfigError::NativeRunConfiguration { .. })
+    ));
+    let mut duplicate = with_deadline("45000");
+    duplicate.extend([
+        OsString::from("--native-run-launch-deadline-ms"),
+        OsString::from("46000"),
+    ]);
+    assert!(matches!(
+        parse(duplicate),
+        Err(ForgeConfigError::Duplicate { .. })
+    ));
 }

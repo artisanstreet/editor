@@ -51,7 +51,7 @@ use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use sea_orm::EntityTrait;
 
 use super::{
-    ClaimExecution, ClaimIds, LoadedClaim, NativeRunDispatcherConfig,
+    ClaimExecution, ClaimIds, ClaimLease, LoadedClaim, NativeRunDispatcherConfig,
     NativeRunDispatcherConfigInput, ResolvedLaunch, TurnConsumptionContext, consume_turn,
     launch_claim,
 };
@@ -263,6 +263,7 @@ fn stream_dispatcher_config(notifier: ConversationCommitNotifier) -> NativeRunDi
         notifier,
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_millis(10),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(10),
@@ -545,7 +546,9 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
             let origin = SystemCommandOrigin;
             let stop = CancelHandle::new();
             let process_cancel = CancelHandle::new();
+            let claim_lease = ClaimLease::new(&claimed, config.claim_lease);
             let context = ClaimExecution {
+                lease: &claim_lease,
                 repository: &repository,
                 database_path: &temp.db_path,
                 config: &config,
@@ -1044,7 +1047,9 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
             let origin = SystemCommandOrigin;
             let stop = CancelHandle::new();
             let process_cancel = CancelHandle::new();
+            let claim_lease = ClaimLease::new(&claimed, config.claim_lease);
             let context = ClaimExecution {
+                lease: &claim_lease,
                 repository: &repository,
                 database_path: &temp.db_path,
                 config: &config,

@@ -188,6 +188,28 @@ pub struct ClaimedMessageDispatch {
     pub updated_at: UnixMillis,
 }
 
+impl ClaimedMessageDispatch {
+    /// The same claim after its owner renewed the lease window.
+    ///
+    /// Launch and bind fence the exact persisted lease window, so the live
+    /// claim holder presents this view once its heartbeat has moved the
+    /// expiry (and, while still leased, the update stamp). The owner token is
+    /// carried over unchanged within the claiming process.
+    #[must_use]
+    pub fn renewed(&self, lease_expires_at: UnixMillis, updated_at: UnixMillis) -> Self {
+        Self {
+            message_id: self.message_id.clone(),
+            correlation_id: self.correlation_id.clone(),
+            attempt_count: self.attempt_count,
+            queued_at: self.queued_at,
+            available_at: self.available_at,
+            owner: DispatchLeaseOwner(self.owner.0),
+            lease_expires_at,
+            updated_at,
+        }
+    }
+}
+
 /// Owner-fenced completion of one claimed dispatch.
 pub struct CompleteMessageDispatch {
     /// The dispatch to complete.

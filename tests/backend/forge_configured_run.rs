@@ -30,6 +30,7 @@ fn dispatcher() -> NativeRunDispatcherConfig {
         ConversationCommitNotifier::new(),
         NativeRunDispatcherConfigInput {
             claim_lease: Duration::from_millis(10),
+            launch_deadline: Duration::from_secs(120),
             poll_interval: Duration::from_millis(10),
             retry_backoff: Duration::from_millis(10),
             shutdown_budget: Duration::from_millis(10),
