@@ -31,10 +31,10 @@ use artisan_domain::{
     ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
     ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
     ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReadComposerCatalog,
-    ReadModelFavorites, ReadThreadEngineSettings, RequestId, RespondApproval, RespondQuestion,
-    SetModelFavorite, SetThreadEngineConfig, SubmitComposerDraft, ThreadId, ThreadListing,
-    ThreadSummary, ThreadTitle, UnixMillis,
+    ProjectSummary, Query, QueryTurnCount, ReadComposerCatalog, ReadModelFavorites,
+    ReadThreadEngineSettings, RequestId, RespondApproval, RespondQuestion, SetModelFavorite,
+    SetThreadEngineConfig, SubmitComposerDraft, ThreadId, ThreadListing, ThreadSummary,
+    ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -48,10 +48,10 @@ use artisan_editor_cli::{
 };
 use artisan_protocol::{
     ClientRequest, ConversationSubscriptionStarted, ConversationSubscriptionStopped, ErrorCode,
-    FirstMessageReceipt, FrameId, Hello, HelloCredential, ProjectRepository,
-    ProjectRepositoryQuery, ProtocolVersion, QueueMessageReceipt, RegisteredEngineProfilesResult,
-    ResolveRichLinkRequest, ResponsePayload, ServerEvent, SetThreadEngineConfigResult,
-    ThreadEngineSettingsResult, VersionOffer, WireEnvelope, WireEnvelopeBody,
+    FrameId, Hello, HelloCredential, ProjectRepository, ProjectRepositoryQuery, ProtocolVersion,
+    QueueMessageReceipt, RegisteredEngineProfilesResult, ResolveRichLinkRequest, ResponsePayload,
+    ServerEvent, SetThreadEngineConfigResult, ThreadEngineSettingsResult, VersionOffer,
+    WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
     CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
@@ -215,10 +215,9 @@ pub enum NativeTransportCommand {
     /// Durably save one desired model-favorite state with stable retry
     /// identity.
     SetModelFavorite(Box<SetModelFavorite>),
-    /// Durably queue the first exact message body on one known thread.
-    QueueFirstMessage(Box<QueueFirstMessage>),
-    /// Send one thread's composer draft at the revision its body was stored
-    /// under; the Forge queues exactly that draft once.
+    /// Send one composer draft (a thread's, or a project's new-task draft
+    /// that creates its thread) at the revision its body was stored under;
+    /// the Forge queues exactly that draft once.
     SubmitComposerDraft(Box<SubmitComposerDraft>),
     /// Resolve one assistant-authored HTTP(S) link's page title.
     ResolveRichLink {
@@ -536,17 +535,6 @@ pub enum NativeTransportEvent {
         /// Redacted failure.
         failure: ServiceFailure,
     },
-    /// Durable first-message queue accepted or replayed by Forge.
-    FirstMessageQueued(FirstMessageReceipt),
-    /// Durable first-message queue failed with a redacted diagnostic.
-    FirstMessageFailed {
-        /// Thread whose queue request failed.
-        thread_id: ThreadId,
-        /// Exact queue request that failed.
-        request_id: RequestId,
-        /// Redacted failure.
-        failure: ServiceFailure,
-    },
     /// General message accepted or replayed by Forge.
     MessageQueued(QueueMessageReceipt),
     /// A draft submission failed; the draft stays in the composer.
@@ -717,11 +705,11 @@ use request_construction::reconnect_hello;
 use request_construction::{
     FrameFactory, StableMutation, account_usage_request, approval_stable_mutation, attach_mutation,
     build_reconnect_binding, composer_catalog_request, create_mutation, draft_submission_mutation,
-    engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
-    make_request_frame, model_favorite_stable_mutation, model_favorites_request,
-    project_repository_request, project_request, query_request, question_stable_mutation,
-    real_unix_millis, reconnect_hello_with_capability, registered_profiles_request,
-    rich_link_request, snapshot_request, thread_engine_settings_request, threads_request,
+    engine_config_stable_mutation, finite_duration, make_request_frame,
+    model_favorite_stable_mutation, model_favorites_request, project_repository_request,
+    project_request, query_request, question_stable_mutation, real_unix_millis,
+    reconnect_hello_with_capability, registered_profiles_request, rich_link_request,
+    snapshot_request, thread_engine_settings_request, threads_request,
 };
 
 #[path = "native_transport_service/response_validation.rs"]
@@ -782,9 +770,8 @@ mod answer_handlers;
 use answer_handlers::{respond_approval, respond_question};
 use handlers::{
     durable_save_request, known_thread_for_queue, list_registered_profiles, load_initial_catalog,
-    load_thread_engine_settings, query_project_repository, queue_first_message, read_message_image,
-    request_snapshot, resolve_rich_link, select_project, set_thread_engine_config,
-    submit_composer_draft,
+    load_thread_engine_settings, query_project_repository, read_message_image, request_snapshot,
+    resolve_rich_link, select_project, set_thread_engine_config, submit_composer_draft,
 };
 
 #[cfg(test)]

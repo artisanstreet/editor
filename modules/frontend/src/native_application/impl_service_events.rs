@@ -248,9 +248,6 @@ impl NativeApplication {
             } => {
                 self.handle_engine_settings_failed(thread_id, generation, failure, cx);
             }
-            // Legacy first-message results never settle a draft submission.
-            NativeTransportEvent::FirstMessageQueued(_)
-            | NativeTransportEvent::FirstMessageFailed { .. } => {}
             // Answer receipts and failures settle their row gates through the
             // existing transport pairing policy.
             NativeTransportEvent::ApprovalAnswered { .. }
