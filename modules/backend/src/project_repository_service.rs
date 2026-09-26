@@ -81,6 +81,52 @@ pub struct ConfiguredRemote {
     pub url: String,
 }
 
+/// One observation of a project root: its repository identity, and whether
+/// the root is a linked worktree rather than the repository's main checkout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryObservation {
+    /// The repository identity [`ProjectRepositoryService::inspect_root`]
+    /// reports.
+    pub repository: ProjectRepository,
+    /// Present when the root is a linked worktree (`git worktree add`).
+    pub linked_worktree: Option<LinkedWorktree>,
+}
+
+/// A linked worktree's own identity beside its repository's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinkedWorktree {
+    /// The worktree's directory name.
+    pub directory_name: String,
+    /// HEAD's abbreviated commit, when HEAD names one.
+    pub short_head: Option<String>,
+}
+
+/// Abbreviated commit length used for a detached worktree.
+const SHORT_HEAD_LENGTH: usize = 7;
+
+/// Classifies `git rev-parse --path-format=absolute --git-dir
+/// --git-common-dir --show-toplevel` output: a git directory that differs
+/// from the common directory belongs to a linked worktree.
+#[must_use]
+pub fn linked_worktree(rev_parse: &str, head: &str) -> Option<LinkedWorktree> {
+    let mut lines = rev_parse.lines().map(str::trim);
+    let (git_dir, common_dir, top_level) = (lines.next()?, lines.next()?, lines.next()?);
+    if git_dir.is_empty() || git_dir == common_dir {
+        return None;
+    }
+    let directory_name = top_level
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    let short_head = (!head.is_empty()).then(|| head.chars().take(SHORT_HEAD_LENGTH).collect());
+    Some(LinkedWorktree {
+        directory_name,
+        short_head,
+    })
+}
+
 /// Parses `git config --get-regexp` output into configured remotes.
 ///
 /// Each line is `remote.<name>.url <url>`; the first space separates the key
@@ -267,13 +313,41 @@ impl ProjectRepositoryService {
     /// elapses; a directory Git does not track is
     /// [`ProjectRepository::NotRepository`] and is not an error.
     pub async fn inspect_root(&self, root: &RootPath) -> Result<ProjectRepository, GitReadError> {
-        match timeout(self.read_timeout, self.inspect_root_inner(root)).await {
+        self.observe(root, false)
+            .await
+            .map(|observation| observation.repository)
+    }
+
+    /// Observes one already-attached project root: its repository identity
+    /// and whether it is a linked worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GitReadError`] when Git cannot run or the read deadline
+    /// elapses.
+    pub async fn observe_root(
+        &self,
+        root: &RootPath,
+    ) -> Result<RepositoryObservation, GitReadError> {
+        self.observe(root, true).await
+    }
+
+    async fn observe(
+        &self,
+        root: &RootPath,
+        worktree: bool,
+    ) -> Result<RepositoryObservation, GitReadError> {
+        match timeout(self.read_timeout, self.observe_inner(root, worktree)).await {
             Ok(result) => result,
             Err(_) => Err(GitReadError::Timeout),
         }
     }
 
-    async fn inspect_root_inner(&self, root: &RootPath) -> Result<ProjectRepository, GitReadError> {
+    async fn observe_inner(
+        &self,
+        root: &RootPath,
+        worktree: bool,
+    ) -> Result<RepositoryObservation, GitReadError> {
         let inside = self
             .run_git(
                 root,
@@ -282,10 +356,13 @@ impl ProjectRepositoryService {
             )
             .await?;
         if inside.exit_code != 0 || inside.stdout.trim() != "true" {
-            return Ok(ProjectRepository::NotRepository);
+            return Ok(RepositoryObservation {
+                repository: ProjectRepository::NotRepository,
+                linked_worktree: None,
+            });
         }
 
-        let (head_ref, head_object, configured) = tokio::join!(
+        let (head_ref, head_object, configured, directories) = tokio::join!(
             self.run_git(
                 root,
                 &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -301,10 +378,30 @@ impl ProjectRepositoryService {
                 &["config", "--get-regexp", r"^remote\..*\.url$"],
                 PROJECT_REPOSITORY_MAX_STDOUT_BYTES,
             ),
+            async {
+                if worktree {
+                    self.run_git(
+                        root,
+                        &[
+                            "rev-parse",
+                            "--path-format=absolute",
+                            "--git-dir",
+                            "--git-common-dir",
+                            "--show-toplevel",
+                        ],
+                        PROJECT_REPOSITORY_MAX_STDOUT_BYTES,
+                    )
+                    .await
+                    .map(Some)
+                } else {
+                    Ok(None)
+                }
+            },
         );
         let head_ref = head_ref?;
         let head_object = head_object?;
         let configured = configured?;
+        let directories = directories?;
 
         let branch_name = if head_ref.exit_code == 0 {
             head_ref.stdout.trim().to_owned()
@@ -337,7 +434,15 @@ impl ProjectRepositoryService {
         let default_remote = default_remote_name(&remotes);
         let snapshot = RepositorySnapshot::new(branch, default_remote, remotes)
             .map_err(|_| GitReadError::Unavailable)?;
-        Ok(ProjectRepository::Repository(snapshot))
+        // A Git too old for `--path-format` fails the read: the root then
+        // counts as the main checkout.
+        let linked_worktree = directories
+            .filter(|output| output.exit_code == 0)
+            .and_then(|output| linked_worktree(&output.stdout, &head));
+        Ok(RepositoryObservation {
+            repository: ProjectRepository::Repository(snapshot),
+            linked_worktree,
+        })
     }
 
     /// Runs one bounded Git read against the stored project root.

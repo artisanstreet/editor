@@ -5,7 +5,37 @@
 #[path = "../../modules/backend/src/git_remote_url_policy.rs"]
 mod git_remote_url_policy;
 
-use git_remote_url_policy::{RepositoryHost, repository_host_for, repository_web_url_for};
+use git_remote_url_policy::{
+    RepositoryHost, repository_host_for, repository_path_for, repository_web_url_for,
+};
+
+#[test]
+fn repository_paths_omit_the_host_and_the_git_suffix() {
+    let cases = [
+        ("https://github.com/owner/repo.git", Some("owner/repo")),
+        ("git@github.com:owner/repo.git", Some("owner/repo")),
+        (
+            "ssh://git@host.example:2222/group/sub/repo.git/",
+            Some("group/sub/repo"),
+        ),
+        (
+            "git@ssh.dev.azure.com:v3/org/project/repo",
+            Some("org/project/repo"),
+        ),
+        ("https://forge.example/v3/owner/repo", Some("v3/owner/repo")),
+        ("https://github.com/", None),
+        ("/srv/git/repo.git", None),
+        ("file:///srv/git/repo.git", None),
+        ("", None),
+    ];
+    for (remote, expected) in cases {
+        assert_eq!(
+            repository_path_for(remote).as_deref(),
+            expected,
+            "remote: {remote}"
+        );
+    }
+}
 
 #[test]
 fn every_remote_syntax_preserves_host_custody_and_https_projection() {

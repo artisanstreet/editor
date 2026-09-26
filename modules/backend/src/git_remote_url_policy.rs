@@ -469,6 +469,26 @@ pub fn repository_host_for(url: &str) -> RepositoryHost {
     }
 }
 
+/// Names the repository a network remote publishes to by its path on the
+/// host, without the host: `owner/repo` for GitHub-style remotes, the full
+/// group path (`group/sub/repo`) for nested namespaces, with any `.git`
+/// suffix removed. Azure DevOps SSH paths drop their `v3` prefix.
+///
+/// Local, file, malformed, and path-less remotes return `None`: they name no
+/// repository a reader could recognise.
+#[must_use]
+pub fn repository_path_for(url: &str) -> Option<String> {
+    let parts = parse_remote(url)?;
+    if !parts.networked || parts.path.is_empty() {
+        return None;
+    }
+    let path = match parts.path.strip_prefix("v3/") {
+        Some(azure) if classify_hostname(&parts.hostname) == RepositoryHost::Azure => azure,
+        _ => parts.path.as_str(),
+    };
+    Some(path.to_owned())
+}
+
 /// Derives the HTTPS page a browser should open for a Git remote.
 ///
 /// Network remotes with a non-empty normalized path use the hostname and path
