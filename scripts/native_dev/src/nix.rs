@@ -138,7 +138,9 @@ pub fn untracked_refusal(listing: &str) -> Option<DevError> {
 /// Returns [`DevError::Stage`] when Nix fails or reports unexpected output.
 pub fn build(installables: &[String]) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("nix")
-        .args(["build", "--no-link", "--json"])
+        // One derivation at a time: every payload ends in fat-LTO links, and
+        // two payloads linking at once exhaust a 16 GB machine.
+        .args(["build", "--no-link", "--json", "--max-jobs", "1"])
         .args(installables)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())

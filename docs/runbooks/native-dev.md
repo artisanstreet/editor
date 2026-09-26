@@ -144,8 +144,10 @@ For automatic activation, install direnv, add its hook to your shell, and run
 or launch the Editor. Configure nix-direnv on the host for cached activation.
 
 The shell defaults to two Cargo jobs. Override `CARGO_BUILD_JOBS` when appropriate.
-Nix builder concurrency is separate: on this WSL machine use `--max-jobs 2 --cores 3`
-(for example through `NIX_CONFIG`, which `nix run .#dev` passes to its build).
+Nix builder concurrency is separate. Every payload ends in fat-LTO links of several GB
+each (the Editor's near 10 GB), so the pipeline bounds them itself: `nix run .#dev`
+builds one derivation at a time (`--max-jobs 1`), and a payload's final Cargo build
+runs one job, so links never overlap. A Debug or Production payload then fits in 16 GB.
 
 ## Nix outputs
 

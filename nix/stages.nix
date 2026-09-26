@@ -186,6 +186,12 @@ let
         dontStrip = stage == "debug";
         # One Cargo invocation builds all four binaries, so shared crates
         # compile once; the payload holds exactly those four and the identity.
+        # Each binary ends in a single-threaded fat-LTO link; the Editor's
+        # peaks near 10 GB. At one job per core four links overlap and
+        # exhaust a 16 GB machine, and even two leave under 1.5 GB free. The
+        # dependencies are already compiled, so linking one at a time mostly
+        # serializes work that was single-threaded anyway.
+        CARGO_BUILD_JOBS = 1;
         installPhaseCommand = ''
           mkdir -p "$out/bin"
           for binary in ${lib.concatMapStringsSep " " (binary: host.exe binary.name) binaries}; do
