@@ -6,7 +6,9 @@
 
 use std::fmt::Write as _;
 
-use artisan_domain::{EngineInstallPhase, EngineInstallStatus, EngineVersionEntry};
+use artisan_domain::{
+    EngineInstallPhase, EngineInstallStatus, EngineIntegrity, EngineVersionEntry,
+};
 
 /// The vendor version list as the page knows it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -96,6 +98,33 @@ impl SettingsEngineInstall {
         }
     }
 
+    /// Returns how this engine's downloads are verified, stating the weaker
+    /// guarantee plainly for engines without vendor checksums.
+    #[must_use]
+    pub fn integrity_copy(&self) -> String {
+        match self.status.integrity {
+            EngineIntegrity::VendorChecksum => {
+                "Verified by the vendor's published checksum.".to_owned()
+            }
+            EngineIntegrity::TrustOnFirstDownload => {
+                let recorded = self
+                    .status
+                    .trusted_since
+                    .as_deref()
+                    .and_then(|since| since.get(..10))
+                    .map_or_else(String::new, |date| format!(" (hash recorded {date})"));
+                let listing = if self.status.vendor_version_list {
+                    ""
+                } else {
+                    " The vendor publishes no version list, so Artisan offers the latest release and versions this Forge downloaded before."
+                };
+                format!(
+                    "Trusted on first download{recorded}: the vendor publishes no checksum, so Artisan records the hash of the first HTTPS download of each version and rejects any later download that differs.{listing}"
+                )
+            }
+        }
+    }
+
     /// Whether version controls apply (the engine can be managed here).
     #[must_use]
     pub fn manageable(&self) -> bool {
@@ -121,6 +150,9 @@ mod tests {
                 progress_percent: None,
                 reason: None,
                 overridden: false,
+                integrity: artisan_domain::EngineIntegrity::VendorChecksum,
+                trusted_since: None,
+                vendor_version_list: true,
             },
             versions: SettingsEngineVersions::NotLoaded,
             request_failure: None,
@@ -151,6 +183,22 @@ mod tests {
         assert!(copy.contains("2.1.283 is ready and activates when no run is using"));
         assert!(copy.contains("developer override"));
         assert!(!install(EngineInstallPhase::Unsupported).manageable());
+    }
+
+    #[test]
+    fn integrity_copy_states_the_trust_mode() {
+        assert!(
+            install(EngineInstallPhase::Ready)
+                .integrity_copy()
+                .starts_with("Verified by the vendor")
+        );
+        let mut trusted = install(EngineInstallPhase::Ready);
+        trusted.status.integrity = EngineIntegrity::TrustOnFirstDownload;
+        trusted.status.trusted_since = Some("2026-09-26T09:30:00.000Z".to_owned());
+        trusted.status.vendor_version_list = false;
+        let copy = trusted.integrity_copy();
+        assert!(copy.starts_with("Trusted on first download (hash recorded 2026-09-26)"));
+        assert!(copy.contains("no version list"));
     }
 
     #[test]

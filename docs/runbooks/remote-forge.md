@@ -111,8 +111,8 @@ retains the existing `127.0.0.1:0` behavior. The NixOS module exposes
 
 ## Engines
 
-The Forge installs, updates, and launches its own engine CLIs (Claude Code and Codex on
-Linux) under `~/.local/state/artisan-forge/toolchain/<engine>/`, verified against the vendor's
+The Forge installs, updates, and launches its own engine CLIs (Claude Code, Codex, Grok
+Build, and Cursor Agent on Linux) under `~/.local/state/artisan-forge/toolchain/<engine>/`, verified against the vendor's
 published checksums, and runs them with their own homes there; it never uses a `claude` or
 `codex` found on `PATH` (see `docs/plans/managed-engines.md`). The Editor's Settings engine
 pages show each engine's status, version, and version controls.
@@ -125,6 +125,8 @@ DB=~/.local/state/artisan-forge/forge.db
 target/debug/ae engine list --database "$DB"
 target/debug/ae engine login claude --database "$DB"
 target/debug/ae engine login codex --database "$DB" -- --device-auth
+target/debug/ae engine login grok --database "$DB"
+target/debug/ae engine login cursor --database "$DB"
 ```
 
 `ae engine versions|use|rollback|status <engine> --database "$DB"` operate on the same install

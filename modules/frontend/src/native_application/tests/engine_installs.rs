@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::native_settings::{SettingsEngineVersions, SettingsScreenEvent};
-use crate::native_transport_service::{EngineInstallsCommand, EngineInstallsEvent, HostStateEvent};
+use crate::native_transport_service::{
+    EngineInstallsCommand, EngineInstallsEvent, HoldKind, HostStateEvent,
+};
 use artisan_domain::{
     EngineInstallPhase, EngineInstallSnapshot, EngineInstallStatus, EngineVersionChange,
     EngineVersionEntry, EngineVersionList, EngineVersionSelection,
@@ -22,12 +24,19 @@ fn pushed(phase: EngineInstallPhase, active: Option<&str>) -> NativeTransportEve
             progress_percent: None,
             reason: None,
             overridden: false,
+            integrity: artisan_domain::EngineIntegrity::VendorChecksum,
+            trusted_since: None,
+            vendor_version_list: true,
         }])
         .expect("snapshot"),
     ))
 }
 
 #[gpui::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario walks the push, listing, selection, rollback, and hold path in order"
+)]
 fn pushed_statuses_and_version_controls_round_trip_through_the_forge(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(test_application);
     let (sink, commands) = command_sink([]);
@@ -113,7 +122,6 @@ fn pushed_statuses_and_version_controls_round_trip_through_the_forge(cx: &mut Te
             assert!(sent.contains(&EngineInstallsCommand::ListVersions("claude".to_owned())));
             // Version changes hold the connection so a host switch drains
             // them; reads never do.
-            use crate::native_transport_service::HoldKind;
             for command in &sent {
                 let kind = NativeTransportCommand::EngineInstalls(command.clone()).hold_kind();
                 match command {

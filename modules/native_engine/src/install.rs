@@ -42,16 +42,18 @@ mod spec;
 mod state;
 #[path = "install/transport.rs"]
 mod transport;
+#[path = "install/trust.rs"]
+mod trust;
 #[path = "install/version.rs"]
 mod version;
 
 pub use archive::ArchiveError;
 pub use authority::{EngineInspection, ManagedEngineAuthority, ResolvedGeneration};
 pub use catalog::{
-    ArtifactPlan, Distribution, Feed, HostPlatform, Layout, ManagedEngine, UnsupportedReason,
-    VersionFilter,
+    ArtifactPlan, Distribution, Feed, HostPlatform, Integrity, Layout, ManagedEngine,
+    UnsupportedReason, VersionFilter,
 };
-pub use feed::{ArtifactDigest, FeedError, FeedRequest, ReleaseArtifact};
+pub use feed::{ArtifactDigest, FeedError, FeedRequest, ReleaseArtifact, versions_listed};
 pub use launch::{
     LaunchSource, LaunchTarget, SeatedLaunch, apply_managed_environment, build_environment,
     engine_home, managed_database, managed_environment_for, register_managed_database,
@@ -71,6 +73,7 @@ pub use state::{
     ManagedToolchainState,
 };
 pub use transport::{HttpsTransport, ReleaseTransport, TransportError};
+pub use trust::{MAX_TRUST_RECORDS, TrustRecord, read_trust_records, record_for};
 pub use version::EngineVersion;
 
 #[cfg(test)]

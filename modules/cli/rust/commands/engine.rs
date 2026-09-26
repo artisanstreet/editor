@@ -12,7 +12,7 @@ use std::{
 use artisan_native_engine::{
     EngineInspection, EngineOperations, EngineSelection, HttpsTransport, InstallError,
     InstallProgress, ManagedEngine, ManagedEngineAuthority, SwitchOutcome, VersionListing,
-    resolve_launch_target_in,
+    read_trust_records, record_for, resolve_launch_target_in,
 };
 
 use crate::{CliError, Result, paths::Layout};
@@ -117,6 +117,21 @@ fn describe(database: &Path, engine: ManagedEngine) -> serde_json::Value {
     value["name"] = engine.display_name().into();
     value["selection"] = selection.into();
     value["floor"] = engine.floor().into();
+    if let Ok(plan) = authority.plan() {
+        value["integrity"] = plan.integrity.code().into();
+        let trusted = paths
+            .as_ref()
+            .zip(value["version"].as_str())
+            .and_then(|(paths, version)| {
+                let records = read_trust_records(paths.engine_root(), engine).ok()?;
+                record_for(&records, version, authority.platform())
+                    .map(|record| record.first_seen_at_ms)
+            });
+        if let Some(first_seen) = trusted {
+            value["trusted_since"] =
+                artisan_domain::iso_millis(i64::try_from(first_seen).unwrap_or(i64::MAX)).into();
+        }
+    }
     if let Some(state) = state {
         value["pending"] = state.pending.map(|pending| pending.version).into();
         value["previous"] = state
@@ -172,6 +187,21 @@ fn summary_line(engine: &serde_json::Value) -> String {
             engine["reason"].as_str().unwrap_or_default()
         ),
     };
+    match engine["integrity"].as_str() {
+        Some("vendor_checksum") => line.push_str("; verified by vendor checksum"),
+        Some("trust_on_first_download") => {
+            let since = engine["trusted_since"]
+                .as_str()
+                .and_then(|since| since.get(..10));
+            match since {
+                Some(date) => {
+                    let _ = write!(line, "; trusted on first download (hash recorded {date})");
+                }
+                None => line.push_str("; trusted on first download"),
+            }
+        }
+        _ => {}
+    }
     if let Some(pending) = engine["pending"].as_str() {
         let _ = write!(line, "; {pending} waits for the engine to be idle");
     }
@@ -376,5 +406,31 @@ const fn default_login_arguments(engine: ManagedEngine) -> &'static [&'static st
     match engine {
         ManagedEngine::Claude | ManagedEngine::OpenCode2 => &["auth", "login"],
         ManagedEngine::Codex | ManagedEngine::Cursor | ManagedEngine::Grok => &["login"],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary_line;
+
+    #[test]
+    fn status_lines_name_the_trust_mode() {
+        let vendor = serde_json::json!({
+            "name": "Codex", "status": "ready", "version": "0.157.1",
+            "selection": "latest", "integrity": "vendor_checksum",
+        });
+        assert_eq!(
+            summary_line(&vendor),
+            "Codex: ready 0.157.1 (follows latest); verified by vendor checksum"
+        );
+        let trusted = serde_json::json!({
+            "name": "Grok Build", "status": "ready", "version": "1.0.41",
+            "selection": "1.0.41", "integrity": "trust_on_first_download",
+            "trusted_since": "2026-09-26T09:30:00.000Z",
+        });
+        assert_eq!(
+            summary_line(&trusted),
+            "Grok Build: ready 1.0.41 (held at 1.0.41); trusted on first download (hash recorded 2026-09-26)"
+        );
     }
 }

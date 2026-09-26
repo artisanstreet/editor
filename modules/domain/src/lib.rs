@@ -199,8 +199,8 @@ pub use account_usage::{
 pub mod engine_install;
 pub use engine_install::{
     ChangeEngineVersion, EngineInstallError, EngineInstallPhase, EngineInstallSnapshot,
-    EngineInstallStatus, EngineVersionChange, EngineVersionEntry, EngineVersionList,
-    EngineVersionSelection, ListEngineVersions, ReadEngineInstalls,
+    EngineInstallStatus, EngineIntegrity, EngineVersionChange, EngineVersionEntry,
+    EngineVersionList, EngineVersionSelection, ListEngineVersions, ReadEngineInstalls,
 };
 
 pub mod composer_state;

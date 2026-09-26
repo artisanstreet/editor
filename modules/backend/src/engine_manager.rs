@@ -20,12 +20,13 @@ use std::{
 };
 
 use artisan_domain::{
-    EngineInstallPhase, EngineInstallSnapshot, EngineInstallStatus, EngineVersionEntry,
-    EngineVersionList,
+    EngineInstallPhase, EngineInstallSnapshot, EngineInstallStatus, EngineIntegrity,
+    EngineVersionEntry, EngineVersionList,
 };
 use artisan_native_engine::{
     EngineInspection, EngineOperations, EngineSelection, EngineVersion, HttpsTransport,
-    InstallError, InstallProgress, ManagedEngine, ManagedEngineAuthority, ReleaseTransport,
+    InstallError, InstallProgress, Integrity, ManagedEngine, ManagedEngineAuthority,
+    ReleaseTransport, read_trust_records, record_for,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -436,6 +437,8 @@ fn observe(
         Ok(EngineInspection::Ready(generation)) => Some(generation.version().to_string()),
         _ => None,
     };
+    let (integrity, trusted_since) =
+        trust_of(authority, root.as_deref(), active_version.as_deref());
     let (phase, reason) = match (&inspection, activity) {
         (Ok(EngineInspection::UnsupportedPlatform(reason)), _) => (
             EngineInstallPhase::Unsupported,
@@ -484,6 +487,33 @@ fn observe(
         },
         reason,
         overridden: std::env::var_os(engine.override_env()).is_some_and(|value| !value.is_empty()),
+        integrity,
+        trusted_since,
+        vendor_version_list: authority
+            .plan()
+            .is_ok_and(|plan| artisan_native_engine::versions_listed(plan.feed)),
+    }
+}
+
+/// The integrity mode of `authority`'s engine and, for trust on first
+/// download, when the active version's hash was recorded.
+fn trust_of(
+    authority: ManagedEngineAuthority,
+    engine_root: Option<&Path>,
+    active_version: Option<&str>,
+) -> (EngineIntegrity, Option<String>) {
+    match authority.plan().map(|plan| plan.integrity) {
+        Ok(Integrity::TrustOnFirstDownload) => {
+            let since = engine_root.zip(active_version).and_then(|(root, version)| {
+                let records = read_trust_records(root, authority.engine()).ok()?;
+                let record = record_for(&records, version, authority.platform())?;
+                Some(artisan_domain::iso_millis(
+                    i64::try_from(record.first_seen_at_ms).unwrap_or(i64::MAX),
+                ))
+            });
+            (EngineIntegrity::TrustOnFirstDownload, since)
+        }
+        Ok(Integrity::VendorDigest) | Err(_) => (EngineIntegrity::VendorChecksum, None),
     }
 }
 

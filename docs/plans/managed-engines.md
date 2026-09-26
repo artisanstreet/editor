@@ -25,10 +25,12 @@ a systemd drop-in (`ARTISAN_CODEX_EXECUTABLE`).
 - Each engine has a code-level compatibility floor. The Forge never installs, selects, or runs a
   version below it. Capability checks (for example Claude thinking display) stay version and
   capability based.
-- Integrity is mandatory. The digest comes from the vendor manifest or the registry's published
-  integrity at resolution time and the download is verified against it before anything is
-  extracted. A platform without a vendor-published digest is unsupported; unverified bytes are
-  never installed.
+- Integrity is mandatory, in one of two modes per catalog entry (see "Integrity modes").
+  `VendorDigest` (Claude, Codex, OpenCode2): the digest comes from the vendor manifest or the
+  registry's published integrity at resolution time and the download is verified against it
+  before anything is extracted. `TrustOnFirstDownload` (Grok, Cursor): the vendor publishes no
+  digest, so the first HTTPS download of each version is hashed and recorded, and every later
+  download of that version must match.
 - The Forge checks for a newer `latest` at startup and every 6 hours (bounded requests, one
   engine at a time). A newer version is installed in the background as a new generation and
   activated when no process is using the engine; running processes keep their generation.
@@ -51,8 +53,8 @@ a systemd drop-in (`ARTISAN_CODEX_EXECUTABLE`).
 | Claude Code | `https://downloads.claude.ai/claude-code-releases/latest` | npm `@anthropic-ai/claude-code` versions (official Anthropic package, same version numbers) | `…/claude-code-releases/<v>/<platform>/claude[.exe]` single native binary | SHA-256 + size from `…/<v>/manifest.json` `platforms.<platform>` | 2.1.220 | linux-x64, linux-arm64, win32-x64, darwin-arm64, darwin-x64 |
 | Codex | npm dist-tag `latest` of `@openai/codex` | npm `@openai/codex` stable `X.Y.Z` versions | npm `@openai/codex@<v>-<platform>` tarball, full `package/` tree | npm `dist.integrity` (SHA-512) of the platform package | 0.142.5 | linux-x64, linux-arm64, win32-x64, darwin-arm64, darwin-x64 |
 | OpenCode2 | npm dist-tag `beta` of `@opencode-ai/cli-windows-x64` | npm versions `0.0.0-beta-N` | npm tarball member `package/bin/opencode2.exe` | npm `dist.integrity` (SHA-512) | 0.0.0-beta-17778 | win32-x64 |
-| Grok Build | `https://x.ai/cli/stable` | — | `https://x.ai/cli/grok-<v>-<platform>` | none published | — | unsupported: xAI publishes no digest for the binary |
-| Cursor Agent | version embedded in `https://cursor.com/install` | — | `https://downloads.cursor.com/lab/<v>/<os>/<arch>/agent-cli-package.tar.gz` | none published | — | unsupported: Cursor publishes no digest for the package |
+| Grok Build | `https://x.ai/cli/stable` | none published: latest plus versions this Forge downloaded before | `https://x.ai/cli/grok-<v>-<platform>[.exe]` single binary (`linux-x86_64`, `linux-aarch64`, `windows-x86_64`, `macos-aarch64`, `macos-x86_64`) | trust on first download (SHA-256 + size recorded) | none | linux-x64, linux-arm64, win32-x64, darwin-arm64, darwin-x64 |
+| Cursor Agent | release named in the package URL of `https://cursor.com/install` | none published: latest plus versions this Forge downloaded before | `https://downloads.cursor.com/lab/<v>/<os>/<arch>/agent-cli-package.tar.gz`, `dist-package/` tree, entry `cursor-agent` | trust on first download | none | linux-x64, linux-arm64, darwin-arm64, darwin-x64; Windows ships only a zip, which Artisan does not install yet |
 
 Provenance (researched 2026-09-26):
 
@@ -60,7 +62,7 @@ Provenance (researched 2026-09-26):
   `downloads.claude.ai/claude-code-releases/{latest,<v>/manifest.json,<v>/<platform>/claude}` and
   verify the manifest SHA-256. At research time `latest` was 2.1.283 and `stable` 2.1.274;
   2.1.282 `linux-x64` was `3afe8535…61eed3`, 238767288 bytes. The native binary self-updates
-  unless `DISABLE_AUTOUPDATER=1`; the Forge sets it.
+  unless disabled; the Forge sets `DISABLE_UPDATES=1`.
 - Codex: `@openai/codex` publishes per-platform builds as npm versions `<v>-<platform>` (the
   `optionalDependencies` of the main package). `0.156.0-linux-x64` integrity
   `sha512-/PX399IS…YaTrA==`, 148509615 bytes, entry `vendor/x86_64-unknown-linux-musl/bin/codex`
@@ -69,10 +71,39 @@ Provenance (researched 2026-09-26):
   npm registry serves the same builds without redirects and with SHA-512 integrity.
 - OpenCode2: `@opencode-ai/cli-windows-x64`, dist-tag `beta` (`latest` is the V1 `opencode`
   line and is never used). `0.0.0-beta-19271` still ships `package/bin/opencode2.exe`.
-- Grok Build: `https://x.ai/cli/install.sh` downloads `grok-<v>-<platform>` without any digest;
-  `.sha256`/`.sig` sidecars do not exist (404). Only its Windows git payload has a sidecar.
-- Cursor Agent: `https://cursor.com/install` pipes the package straight into `tar`; no digest,
-  manifest, or sidecar is published (403 on every probe). No official npm package exists.
+- Grok Build: `https://x.ai/cli/install.sh` (and `install.ps1`) read `https://x.ai/cli/stable`
+  (1.0.41 at research time) and download `https://x.ai/cli/grok-<v>-<platform>` without any
+  digest; `.sha256`/`.sig` sidecars do not exist (404). The artifact is served without redirects.
+  The installer's Windows extras (a git payload and hook executables) are not installed.
+- Cursor Agent: `https://cursor.com/install` pipes
+  `https://downloads.cursor.com/lab/<v>/<os>/<arch>/agent-cli-package.tar.gz` straight into
+  `tar --strip-components=1` (2026.09.26-dd393fe at research time: 182876559 bytes, 579 regular
+  files and directories below `dist-package/`, entry `cursor-agent`, a bash launcher for the
+  bundled `node`). `install.ps1` downloads `windows/<arch>/agent-cli-package.zip`. No digest,
+  manifest, or sidecar is published (403 on every probe), and no official npm package exists.
+
+## Integrity modes
+
+Owner decision, 2026-09-26: "Trust their download over HTTPS and record the hash we get the
+first time." Rationale: Grok and Cursor publish no checksums, and managing them (fixed
+environment, managed launch, versioning) is worth more than leaving them on `PATH`; recording
+the first download at least guarantees that a version never silently changes afterwards.
+
+- `VendorDigest` (Claude Code, Codex, OpenCode2): unchanged.
+- `TrustOnFirstDownload` (Grok Build, Cursor Agent): HTTPS only with normal TLS verification
+  (plain HTTP is refused; redirects are not followed), from the URL the vendor's official
+  installer uses. The SHA-256 and size of the exact downloaded bytes are recorded in
+  `toolchain/<engine>/trust.json` as (version, platform, url, sha256, size, first seen). Any
+  later download of the same version and platform (reinstall, repair, reselecting a pruned
+  version) must match the record or fails with `trust_mismatch`; the record is never
+  overwritten. A new version gets its own record. The installed executable is then verified on
+  every launch like any other generation.
+- Neither vendor publishes a version list: `latest` comes from the installer's own source, and
+  the version picker offers the current release plus every version this Forge downloaded
+  before (status carries `vendorVersionList = false` and Settings says so).
+- The weaker guarantee is visible: `ae engine list|status` prints "verified by vendor checksum"
+  or "trusted on first download (hash recorded <date>)", and Settings shows the same on the
+  engine's Installation section.
 
 ## Layout
 
@@ -175,7 +206,8 @@ variables; `artisan_native_engine::build_environment`):
   `NODE_EXTRA_CA_CERTS`), Windows loader essentials (`SYSTEMROOT`, `WINDIR`, `COMSPEC`,
   `PATHEXT`, `PROGRAMDATA`, `PROGRAMFILES`, processor variables), and only the engine's own
   credential variables when the operator set them on the Forge (`ANTHROPIC_API_KEY`,
-  `CLAUDE_CODE_OAUTH_TOKEN` for Claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for Codex);
+  `CLAUDE_CODE_OAUTH_TOKEN` for Claude; `OPENAI_API_KEY`, `CODEX_API_KEY` for Codex;
+  `XAI_API_KEY` for Grok; `CURSOR_API_KEY` for Cursor);
 - vendor self-update is disabled: `DISABLE_UPDATES=1` for Claude (Anthropic's documented switch
   for distributing Claude Code through your own channel).
 
@@ -217,16 +249,17 @@ an OS boundary automatically.
 
 ## Known gaps
 
-- Grok Build and Cursor Agent are unsupported everywhere: their vendors publish no checksums
-  (verified 2026-09-26). They resolve only through the developer override until a verifiable
-  source exists.
+- Grok Build and Cursor Agent are trusted on first download (weaker than a vendor checksum; the
+  first download of each version is not independently verified). Cursor on Windows is
+  unsupported until zip packages can be installed. Neither vendor documents a switch to turn off
+  its CLI's own self-update; Grok is launched with `--no-auto-update` where it accepts it.
 - `OpenCode2` stays Windows x64 only (its harness integration is certified there); the beta npm
   channel also publishes Linux builds.
-- The run-dispatch version probes in `native_run_dispatch/claim.rs` (owned by another work
-  stream) spawn `--version` with the Forge's inherited environment; they resolve only managed
-  executables, but should adopt `LaunchTarget::environment` when that file is next changed.
 - The native readiness probes in `claude/probe.rs`, `codex/probe.rs`, `grok/probe.rs`, and
-  `cursor/probe.rs` have no production caller; they still inherit their caller's environment.
+  `cursor/probe.rs` take a bare program path; they apply the managed environment when the
+  program is a managed engine, and keep the caller's environment only for test fixtures.
+- Grok runs carry no use lease yet (its launch capability predates the managed seat), so a Grok
+  switch can activate while a Grok run is live.
 - `Choose version` lists the npm version history (Claude uses the official
   `@anthropic-ai/claude-code` package for the list, and its native manifest for the artifact);
   a listed version without a native build fails with `feed_platform_missing`.

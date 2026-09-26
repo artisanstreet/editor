@@ -2,9 +2,8 @@
 //!
 //! The executable is the Forge-managed Grok generation (see
 //! `crate::engine_core`) or the absolute `ARTISAN_GROK_EXECUTABLE` developer
-//! override; `PATH` is never searched. xAI publishes no digest for its
-//! binaries, so no managed Grok generation exists today and only the
-//! override can resolve.
+//! override; `PATH` is never searched. xAI publishes no digest, so the Forge
+//! installs Grok with trust on first download.
 
 use std::path::{Path, PathBuf};
 

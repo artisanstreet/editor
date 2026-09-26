@@ -2,9 +2,8 @@
 //!
 //! The executable is the Forge-managed Cursor generation (see
 //! `crate::engine_core`) or the absolute `ARTISAN_CURSOR_EXECUTABLE`
-//! developer override; `PATH` is never searched. Cursor publishes no digest
-//! for its agent package, so no managed Cursor generation exists today and
-//! only the override can resolve.
+//! developer override; `PATH` is never searched. Cursor publishes no digest,
+//! so the Forge installs its agent package with trust on first download.
 
 use std::path::{Path, PathBuf};
 

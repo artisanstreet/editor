@@ -2757,6 +2757,17 @@ struct EngineInstallStatus {
   reason @9 :Text;
   # A developer override replaces the managed executable.
   overridden @10 :Bool;
+  # How downloads are verified: a vendor checksum, or trust on first
+  # download with the recorded date of the active version (ISO-8601).
+  integrity @11 :EngineIntegrity;
+  trustedSince @12 :Text;
+  # Whether the vendor publishes a version list.
+  vendorVersionList @13 :Bool;
+}
+
+enum EngineIntegrity {
+  vendorChecksum @0;
+  trustOnFirstDownload @1;
 }
 
 # Every managed engine's status, at most 16.

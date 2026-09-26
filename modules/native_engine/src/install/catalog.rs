@@ -99,9 +99,8 @@ impl ManagedEngine {
             Self::Claude => claude_distribution(platform),
             Self::Codex => codex_distribution(platform),
             Self::OpenCode2 => opencode2_distribution(platform),
-            Self::Grok | Self::Cursor => {
-                Distribution::Unsupported(UnsupportedReason::NoVendorDigest)
-            }
+            Self::Grok => grok_distribution(platform),
+            Self::Cursor => cursor_distribution(platform),
         }
     }
 }
@@ -189,11 +188,11 @@ impl HostPlatform {
 /// Why an engine cannot be managed on a platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedReason {
-    /// The vendor publishes no digest for its binaries, so they cannot be
-    /// verified before installation.
-    NoVendorDigest,
     /// The vendor publishes no build for this platform.
     NoVendorBuild,
+    /// The vendor ships this platform in an archive format Artisan does not
+    /// install yet.
+    ArchiveFormat,
 }
 
 impl UnsupportedReason {
@@ -201,8 +200,8 @@ impl UnsupportedReason {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
-            Self::NoVendorDigest => "no_vendor_digest",
             Self::NoVendorBuild => "no_vendor_build",
+            Self::ArchiveFormat => "archive_format",
         }
     }
 
@@ -210,10 +209,10 @@ impl UnsupportedReason {
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
-            Self::NoVendorDigest => {
-                "the vendor publishes no checksum for its binaries, so Artisan cannot verify them"
-            }
             Self::NoVendorBuild => "the vendor publishes no build for this platform",
+            Self::ArchiveFormat => {
+                "the vendor ships this platform as a zip archive, which Artisan does not install yet"
+            }
         }
     }
 }
@@ -229,11 +228,36 @@ pub enum Distribution {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ArtifactPlan {
     pub feed: Feed,
+    /// How downloads are verified.
+    pub integrity: Integrity,
     pub layout: Layout,
     /// Maximum accepted download size in bytes.
     pub download_bound_bytes: u64,
     /// Maximum total expanded archive size in bytes.
     pub expanded_bound_bytes: u64,
+}
+
+/// How an engine's downloads are verified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Integrity {
+    /// Against a digest the vendor publishes for each artifact.
+    VendorDigest,
+    /// The vendor publishes no digest: the first HTTPS download of an exact
+    /// version and platform records its SHA-256 and size, and every later
+    /// download of that version must match the record (owner decision
+    /// 2026-09-26).
+    TrustOnFirstDownload,
+}
+
+impl Integrity {
+    /// Returns the stable classification.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::VendorDigest => "vendor_checksum",
+            Self::TrustOnFirstDownload => "trust_on_first_download",
+        }
+    }
 }
 
 /// Where versions, artifact locations, and digests are published.
@@ -256,6 +280,20 @@ pub enum Feed {
         /// build (`@openai/codex@0.156.0-linux-x64`).
         platform_suffix: &'static str,
         versions: VersionFilter,
+    },
+    /// xAI's release bucket used by `x.ai/cli/install.sh`: `<base>/stable`
+    /// names the version, `<base>/grok-<v>-<platform>[.exe]` is the binary.
+    /// No digests and no version listing are published.
+    GrokReleases {
+        platform_key: &'static str,
+        binary: &'static str,
+    },
+    /// Cursor's release bucket used by `cursor.com/install`: the installer
+    /// script names the version, `<base>/<v>/<os>/<arch>/agent-cli-package.tar.gz`
+    /// is the package. No digests and no version listing are published.
+    CursorReleases {
+        os: &'static str,
+        arch: &'static str,
     },
 }
 
@@ -344,6 +382,7 @@ const fn claude_distribution(platform: HostPlatform) -> Distribution {
             platform_key,
             binary,
         },
+        integrity: Integrity::VendorDigest,
         layout: Layout::SingleBinary { binary },
         download_bound_bytes: 512 * MIB,
         expanded_bound_bytes: 512 * MIB,
@@ -393,6 +432,7 @@ const fn codex_distribution(platform: HostPlatform) -> Distribution {
             platform_suffix,
             versions: VersionFilter::Releases,
         },
+        integrity: Integrity::VendorDigest,
         layout: Layout::TarTree {
             strip: "package/",
             entry,
@@ -412,6 +452,7 @@ const fn opencode2_distribution(platform: HostPlatform) -> Distribution {
                 platform_suffix: "",
                 versions: VersionFilter::Numbered("beta-"),
             },
+            integrity: Integrity::VendorDigest,
             layout: Layout::TarMember {
                 member: "package/bin/opencode2.exe",
                 binary: "opencode2.exe",
@@ -421,6 +462,55 @@ const fn opencode2_distribution(platform: HostPlatform) -> Distribution {
         }),
         _ => Distribution::Unsupported(UnsupportedReason::NoVendorBuild),
     }
+}
+
+const fn grok_distribution(platform: HostPlatform) -> Distribution {
+    let (platform_key, binary) = match platform {
+        HostPlatform::LinuxX64 | HostPlatform::LinuxX64Musl => ("linux-x86_64", "grok"),
+        HostPlatform::LinuxArm64 | HostPlatform::LinuxArm64Musl => ("linux-aarch64", "grok"),
+        HostPlatform::WindowsX64 => ("windows-x86_64", "grok.exe"),
+        HostPlatform::MacArm64 => ("macos-aarch64", "grok"),
+        HostPlatform::MacX64 => ("macos-x86_64", "grok"),
+        HostPlatform::WindowsArm64 | HostPlatform::Other => {
+            return Distribution::Unsupported(UnsupportedReason::NoVendorBuild);
+        }
+    };
+    Distribution::Supported(ArtifactPlan {
+        feed: Feed::GrokReleases {
+            platform_key,
+            binary,
+        },
+        integrity: Integrity::TrustOnFirstDownload,
+        layout: Layout::SingleBinary { binary },
+        download_bound_bytes: 512 * MIB,
+        expanded_bound_bytes: 512 * MIB,
+    })
+}
+
+const fn cursor_distribution(platform: HostPlatform) -> Distribution {
+    let (os, arch) = match platform {
+        HostPlatform::LinuxX64 | HostPlatform::LinuxX64Musl => ("linux", "x64"),
+        HostPlatform::LinuxArm64 | HostPlatform::LinuxArm64Musl => ("linux", "arm64"),
+        HostPlatform::MacArm64 => ("darwin", "arm64"),
+        HostPlatform::MacX64 => ("darwin", "x64"),
+        HostPlatform::WindowsX64 | HostPlatform::WindowsArm64 => {
+            return Distribution::Unsupported(UnsupportedReason::ArchiveFormat);
+        }
+        HostPlatform::Other => {
+            return Distribution::Unsupported(UnsupportedReason::NoVendorBuild);
+        }
+    };
+    Distribution::Supported(ArtifactPlan {
+        feed: Feed::CursorReleases { os, arch },
+        integrity: Integrity::TrustOnFirstDownload,
+        layout: Layout::TarTree {
+            strip: "dist-package/",
+            entry: "cursor-agent",
+            tool_dirs: &[],
+        },
+        download_bound_bytes: 512 * MIB,
+        expanded_bound_bytes: 1024 * MIB,
+    })
 }
 
 #[cfg(test)]
@@ -459,7 +549,23 @@ mod tests {
                                 assert!(package.starts_with('@'));
                                 assert!(!dist_tag.is_empty());
                             }
+                            Feed::GrokReleases { platform_key, .. } => {
+                                assert_eq!(engine, ManagedEngine::Grok);
+                                assert!(!platform_key.is_empty());
+                            }
+                            Feed::CursorReleases { os, arch } => {
+                                assert_eq!(engine, ManagedEngine::Cursor);
+                                assert!(!os.is_empty() && !arch.is_empty());
+                            }
                         }
+                        assert_eq!(
+                            plan.integrity,
+                            if matches!(engine, ManagedEngine::Grok | ManagedEngine::Cursor) {
+                                Integrity::TrustOnFirstDownload
+                            } else {
+                                Integrity::VendorDigest
+                            }
+                        );
                     }
                     Distribution::Unsupported(reason) => {
                         assert!(!reason.code().is_empty());
@@ -471,15 +577,20 @@ mod tests {
     }
 
     #[test]
-    fn grok_and_cursor_are_unsupported_because_no_digest_is_published() {
+    fn grok_and_cursor_are_trusted_on_first_download_where_they_ship_a_tarball_or_binary() {
         for engine in [ManagedEngine::Grok, ManagedEngine::Cursor] {
-            for platform in HostPlatform::ALL {
-                assert_eq!(
-                    engine.distribution(platform),
-                    Distribution::Unsupported(UnsupportedReason::NoVendorDigest)
-                );
-            }
+            assert!(matches!(
+                engine.distribution(HostPlatform::LinuxX64),
+                Distribution::Supported(ArtifactPlan {
+                    integrity: Integrity::TrustOnFirstDownload,
+                    ..
+                })
+            ));
         }
+        assert_eq!(
+            ManagedEngine::Cursor.distribution(HostPlatform::WindowsX64),
+            Distribution::Unsupported(UnsupportedReason::ArchiveFormat)
+        );
     }
 
     #[test]

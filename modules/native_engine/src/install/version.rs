@@ -35,9 +35,7 @@ impl EngineVersion {
         let mut numbers = [0_u64; 3];
         for number in &mut numbers {
             let part = parts.next()?;
-            if part.is_empty()
-                || !part.bytes().all(|byte| byte.is_ascii_digit())
-                || (part.len() > 1 && part.starts_with('0'))
+            if part.is_empty() || part.len() > 20 || !part.bytes().all(|byte| byte.is_ascii_digit())
             {
                 return None;
             }
@@ -180,7 +178,6 @@ mod tests {
             "v2.1.282",
             "2.1.282+build",
             "2.1.x",
-            "02.1.0",
             "2.1.0-",
             "2.1.0-a b",
             " 2.1.0",
@@ -197,6 +194,8 @@ mod tests {
         assert!(version("0.0.0-beta-19271") > version("0.0.0-beta-17778"));
         assert!(version("0.0.0-beta-10000") > version("0.0.0-beta-9999"));
         assert!(version("0.158.0-alpha.10") > version("0.158.0-alpha.9"));
+        // Cursor publishes calendar versions with zero-padded parts.
+        assert!(version("2026.09.26-dd393fe") > version("2026.9.25-ffffff0"));
         assert_eq!(
             version("1.0.0").cmp(&version("1.0.0")),
             std::cmp::Ordering::Equal

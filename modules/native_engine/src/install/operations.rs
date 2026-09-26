@@ -13,14 +13,15 @@ use super::{
     archive::ArchiveError,
     authority::ManagedEngineAuthority,
     feed::{
-        FeedError, ReleaseArtifact, latest_request, parse_latest, parse_release, parse_versions,
-        release_request, versions_request,
+        FeedError, ReleaseArtifact, direct_release, latest_request, parse_latest, parse_release,
+        parse_versions, release_request, versions_request,
     },
     pipeline::{install_artifact, prune_generations},
     selection::EngineSelection,
     spec::{EngineIdle, ManagedInstallLock, ManagedInstallLockError, ManagedInstallPaths},
     state::{ManagedGeneration, ManagedToolchainState},
     transport::{ReleaseTransport, TransportError},
+    trust::read_trust_records,
     version::EngineVersion,
 };
 
@@ -49,6 +50,7 @@ pub enum InstallError {
     Feed(FeedError),
     Transport(TransportError),
     IntegrityMismatch,
+    TrustMismatch,
     Archive(ArchiveError),
     ExecutableInvalid,
     GenerationUnavailable,
@@ -75,6 +77,7 @@ impl InstallError {
             Self::Feed(error) => error.code(),
             Self::Transport(error) => error.code(),
             Self::IntegrityMismatch => "integrity_mismatch",
+            Self::TrustMismatch => "trust_mismatch",
             Self::Archive(error) => error.code(),
             Self::ExecutableInvalid => "executable_invalid",
             Self::GenerationUnavailable => "generation_unavailable",
@@ -163,19 +166,26 @@ impl<'a> EngineOperations<'a> {
         parse_latest(plan.feed, &bytes).map_err(InstallError::Feed)
     }
 
-    /// Lists the vendor's versions, newest first, with local status.
+    /// Lists the vendor's versions, newest first, with local status. A
+    /// vendor without a version listing yields its current release plus every
+    /// version this Forge downloaded before.
     ///
     /// # Errors
     ///
     /// Returns [`InstallError`] when the listing is unreachable or invalid.
     pub fn list_versions(&self) -> Result<Vec<VersionListing>, InstallError> {
         let plan = self.plan()?;
-        let bytes = self
-            .transport
-            .fetch(&versions_request(plan.feed))
-            .map_err(InstallError::Transport)?;
-        let versions = parse_versions(plan.feed, &bytes).map_err(InstallError::Feed)?;
         let state = self.read_state()?;
+        let versions = match versions_request(plan.feed) {
+            Some(request) => {
+                let bytes = self
+                    .transport
+                    .fetch(&request)
+                    .map_err(InstallError::Transport)?;
+                parse_versions(plan.feed, &bytes).map_err(InstallError::Feed)?
+            }
+            None => self.seen_versions(state.as_ref())?,
+        };
         Ok(versions
             .into_iter()
             .map(|version| VersionListing {
@@ -403,11 +413,44 @@ impl<'a> EngineOperations<'a> {
         })
     }
 
+    /// The current release plus every version downloaded before, newest
+    /// first, for a vendor without a version listing.
+    fn seen_versions(
+        &self,
+        state: Option<&ManagedToolchainState>,
+    ) -> Result<Vec<EngineVersion>, InstallError> {
+        let paths = self.paths()?;
+        let records = read_trust_records(paths.engine_root(), self.authority.engine())
+            .map_err(|_| InstallError::StateInvalid)?;
+        let mut versions: Vec<EngineVersion> = records
+            .iter()
+            .filter(|record| record.platform == self.authority.platform().label())
+            .map(|record| record.version.as_str())
+            .chain(
+                state
+                    .into_iter()
+                    .flat_map(ManagedToolchainState::directories_versions),
+            )
+            .filter_map(EngineVersion::parse)
+            .collect();
+        if let Ok(latest) = self.latest_version() {
+            versions.push(latest);
+        }
+        versions.sort_by(|left, right| right.cmp(left));
+        versions.dedup();
+        versions.truncate(super::feed::MAX_LISTED_VERSIONS);
+        Ok(versions)
+    }
+
     fn release(&self, version: &EngineVersion) -> Result<ReleaseArtifact, InstallError> {
         let plan = self.plan()?;
+        let Some(request) = release_request(plan.feed, version) else {
+            return direct_release(plan.feed, version)
+                .ok_or(InstallError::Feed(FeedError::PlatformMissing));
+        };
         let bytes = self
             .transport
-            .fetch(&release_request(plan.feed, version))
+            .fetch(&request)
             .map_err(InstallError::Transport)?;
         parse_release(plan.feed, version, &bytes).map_err(InstallError::Feed)
     }

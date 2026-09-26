@@ -48,6 +48,17 @@ impl EngineInstallPhase {
     }
 }
 
+/// How an engine's downloads are verified.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum EngineIntegrity {
+    /// Against a checksum the vendor publishes.
+    #[default]
+    VendorChecksum,
+    /// The vendor publishes no checksum: the first HTTPS download of each
+    /// version was hashed and recorded, and later downloads must match.
+    TrustOnFirstDownload,
+}
+
 /// One engine's install status.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct EngineInstallStatus {
@@ -71,6 +82,14 @@ pub struct EngineInstallStatus {
     pub reason: Option<String>,
     /// A developer override replaces the managed executable.
     pub overridden: bool,
+    /// How downloads of this engine are verified.
+    pub integrity: EngineIntegrity,
+    /// When the active version's hash was first recorded (ISO-8601), for
+    /// trust-on-first-download engines.
+    pub trusted_since: Option<String>,
+    /// Whether the vendor publishes a version list; without one the Forge
+    /// offers the current release and versions it downloaded before.
+    pub vendor_version_list: bool,
 }
 
 impl EngineInstallStatus {
@@ -105,6 +124,13 @@ impl EngineInstallStatus {
         .flatten()
         {
             validate_token(version, ENGINE_VERSION_MAX_BYTES).ok_or(EngineInstallError::Version)?;
+        }
+        if self
+            .trusted_since
+            .as_ref()
+            .is_some_and(|since| since.len() > 64 || since.chars().any(char::is_control))
+        {
+            return Err(EngineInstallError::Reason);
         }
         if self.progress_percent.is_some_and(|percent| percent > 100) {
             return Err(EngineInstallError::Progress);
@@ -341,6 +367,9 @@ mod tests {
             progress_percent: None,
             reason: None,
             overridden: false,
+            integrity: EngineIntegrity::VendorChecksum,
+            trusted_since: None,
+            vendor_version_list: true,
         }
     }
 

@@ -23,6 +23,9 @@ use super::{
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 const NPM_REGISTRY: &str = "https://registry.npmjs.org";
 const CLAUDE_NPM_PACKAGE: &str = "@anthropic-ai/claude-code";
+const GROK_RELEASES: &str = "https://x.ai/cli";
+const CURSOR_INSTALLER: &str = "https://cursor.com/install";
+const CURSOR_RELEASES: &str = "https://downloads.cursor.com/lab";
 
 /// Maximum bytes accepted for a latest-version pointer or dist-tags document.
 pub const MAX_POINTER_BYTES: u64 = 64 * 1024;
@@ -49,6 +52,9 @@ pub enum ArtifactDigest {
     Sha256([u8; 32]),
     /// SHA-512 of the downloaded bytes (npm `dist.integrity`).
     Sha512([u8; 64]),
+    /// No vendor digest: the first download records its SHA-256 and size,
+    /// and every later download of the same version must match them.
+    TrustOnFirstDownload,
 }
 
 /// One resolved, digest-bearing release artifact.
@@ -104,6 +110,16 @@ pub fn latest_request(feed: Feed) -> FeedRequest {
             accept: Some("application/json"),
             bound_bytes: MAX_POINTER_BYTES,
         },
+        Feed::GrokReleases { .. } => FeedRequest {
+            url: format!("{GROK_RELEASES}/stable"),
+            accept: None,
+            bound_bytes: MAX_POINTER_BYTES,
+        },
+        Feed::CursorReleases { .. } => FeedRequest {
+            url: CURSOR_INSTALLER.to_owned(),
+            accept: None,
+            bound_bytes: MAX_POINTER_BYTES,
+        },
     }
 }
 
@@ -138,13 +154,28 @@ pub fn parse_latest(feed: Feed, bytes: &[u8]) -> Result<EngineVersion, FeedError
             }
             Ok(version)
         }
+        Feed::GrokReleases { .. } => {
+            let text = std::str::from_utf8(bytes).map_err(|_| FeedError::Malformed)?;
+            EngineVersion::parse(text.trim()).ok_or(FeedError::VersionInvalid)
+        }
+        Feed::CursorReleases { .. } => {
+            // The official installer script names its release in the
+            // package URL it downloads.
+            let text = std::str::from_utf8(bytes).map_err(|_| FeedError::Malformed)?;
+            let marker = format!("{CURSOR_RELEASES}/");
+            let start = text.find(&marker).ok_or(FeedError::VersionInvalid)? + marker.len();
+            let version = text[start..].split('/').next().unwrap_or_default();
+            EngineVersion::parse(version).ok_or(FeedError::VersionInvalid)
+        }
     }
 }
 
-/// Returns the request for the release document of one exact version.
+/// Returns the request for the release document of one exact version, or
+/// `None` when the vendor publishes none (see [`direct_release`]).
 #[must_use]
-pub fn release_request(feed: Feed, version: &EngineVersion) -> FeedRequest {
-    match feed {
+pub fn release_request(feed: Feed, version: &EngineVersion) -> Option<FeedRequest> {
+    Some(match feed {
+        Feed::GrokReleases { .. } | Feed::CursorReleases { .. } => return None,
         Feed::ClaudeReleases { .. } => FeedRequest {
             url: format!("{CLAUDE_RELEASES}/{version}/manifest.json"),
             accept: None,
@@ -162,7 +193,40 @@ pub fn release_request(feed: Feed, version: &EngineVersion) -> FeedRequest {
             accept: Some("application/json"),
             bound_bytes: MAX_RELEASE_DOCUMENT_BYTES,
         },
-    }
+    })
+}
+
+/// Returns the artifact of one exact version for a vendor that publishes no
+/// release document: the URL its official installer downloads, verified by
+/// trust on first download.
+#[must_use]
+pub fn direct_release(feed: Feed, version: &EngineVersion) -> Option<ReleaseArtifact> {
+    let url = match feed {
+        Feed::GrokReleases {
+            platform_key,
+            binary,
+        } => {
+            let suffix = if std::path::Path::new(binary)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+            {
+                ".exe"
+            } else {
+                ""
+            };
+            format!("{GROK_RELEASES}/grok-{version}-{platform_key}{suffix}")
+        }
+        Feed::CursorReleases { os, arch } => {
+            format!("{CURSOR_RELEASES}/{version}/{os}/{arch}/agent-cli-package.tar.gz")
+        }
+        Feed::ClaudeReleases { .. } | Feed::Npm { .. } => return None,
+    };
+    Some(ReleaseArtifact {
+        version: version.clone(),
+        url,
+        digest: ArtifactDigest::TrustOnFirstDownload,
+        size_bytes: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -264,21 +328,32 @@ pub fn parse_release(
                 size_bytes: None,
             })
         }
+        Feed::GrokReleases { .. } | Feed::CursorReleases { .. } => {
+            direct_release(feed, version).ok_or(FeedError::PlatformMissing)
+        }
     }
 }
 
-/// Returns the request listing the vendor's published versions.
+/// Returns whether the vendor publishes a version list.
 #[must_use]
-pub fn versions_request(feed: Feed) -> FeedRequest {
+pub const fn versions_listed(feed: Feed) -> bool {
+    matches!(feed, Feed::ClaudeReleases { .. } | Feed::Npm { .. })
+}
+
+/// Returns the request listing the vendor's published versions, or `None`
+/// when the vendor publishes no listing.
+#[must_use]
+pub fn versions_request(feed: Feed) -> Option<FeedRequest> {
     let package = match feed {
         Feed::ClaudeReleases { .. } => CLAUDE_NPM_PACKAGE,
         Feed::Npm { package, .. } => package,
+        Feed::GrokReleases { .. } | Feed::CursorReleases { .. } => return None,
     };
-    FeedRequest {
+    Some(FeedRequest {
         url: format!("{NPM_REGISTRY}/{}", encode_package(package)),
         accept: Some("application/vnd.npm.install-v1+json"),
         bound_bytes: MAX_LISTING_BYTES,
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -327,6 +402,7 @@ pub fn parse_versions(feed: Feed, bytes: &[u8]) -> Result<Vec<EngineVersion>, Fe
     let filter = match feed {
         Feed::ClaudeReleases { .. } => VersionFilter::Releases,
         Feed::Npm { versions, .. } => versions,
+        Feed::GrokReleases { .. } | Feed::CursorReleases { .. } => return Ok(Vec::new()),
     };
     let packument: NpmPackument =
         serde_json::from_slice(bytes).map_err(|_| FeedError::Malformed)?;
@@ -386,7 +462,7 @@ mod tests {
         assert!(parse_latest(feed, b"<html>").is_err());
         let wanted = version("2.1.282");
         assert_eq!(
-            release_request(feed, &wanted).url,
+            release_request(feed, &wanted).unwrap().url,
             "https://downloads.claude.ai/claude-code-releases/2.1.282/manifest.json"
         );
         let manifest = br#"{"version":"2.1.282","platforms":{"linux-x64":{"binary":"claude","checksum":"3afe8535c0cc33f0e24f7b25dab7a1727b8b592196f8496a8bc302ba2161eed3","size":238767288}}}"#;
@@ -437,7 +513,7 @@ mod tests {
         assert_eq!(parse_latest(feed, tags).unwrap().as_str(), "0.157.1");
         let wanted = version("0.156.0");
         assert_eq!(
-            release_request(feed, &wanted).url,
+            release_request(feed, &wanted).unwrap().url,
             "https://registry.npmjs.org/@openai%2fcodex/0.156.0-linux-x64"
         );
         let document = br#"{"version":"0.156.0-linux-x64","dist":{"tarball":"https://registry.npmjs.org/@openai/codex/-/codex-0.156.0-linux-x64.tgz","integrity":"sha512-/PX399ISB715skgBBOtOX5aqLxmPQhYC7wDasZnAJhRrtzt3qgs6kjSnimN9T8OFKv4LDAp+uJdN896tQYaTrA=="}}"#;
@@ -476,7 +552,7 @@ mod tests {
     fn version_listing_is_channel_filtered_newest_first_and_bounded() {
         let feed = feed(ManagedEngine::Codex, HostPlatform::LinuxX64);
         assert_eq!(
-            versions_request(feed).accept,
+            versions_request(feed).unwrap().accept,
             Some("application/vnd.npm.install-v1+json")
         );
         let mut listing = String::from(r#"{"name":"@openai/codex","versions":{"#);
@@ -496,7 +572,7 @@ mod tests {
 
         let claude = feed_for_claude();
         assert_eq!(
-            versions_request(claude).url,
+            versions_request(claude).unwrap().url,
             "https://registry.npmjs.org/@anthropic-ai%2fclaude-code"
         );
     }

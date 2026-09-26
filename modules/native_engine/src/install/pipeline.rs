@@ -21,12 +21,13 @@ use crate::io as native_files;
 use super::{
     archive::{ArchiveError, Extraction, extract_gzip_tar, measure},
     authority::ManagedEngineAuthority,
-    catalog::{ArtifactPlan, Layout},
+    catalog::{ArtifactPlan, HostPlatform, Layout, ManagedEngine},
     feed::{ArtifactDigest, ReleaseArtifact},
     operations::{InstallError, InstallProgress},
     spec::{ManagedInstallLock, ManagedInstallPaths},
     state::ManagedGeneration,
     transport::{ReleaseTransport, TransportError},
+    trust::{TrustError, check_or_record},
 };
 
 const STAGING_PREFIX: &str = "staging-";
@@ -50,6 +51,11 @@ pub(crate) fn install_artifact(
     }
     cleanup_staging(paths, lock)?;
     let staging = StagingDirectory::create(paths, lock)?;
+    let trust = TrustScope {
+        engine_root: paths.engine_root(),
+        engine: authority.engine(),
+        platform: authority.platform(),
+    };
     let entry = staging.path.join(plan.layout.entry());
     match plan.layout {
         Layout::SingleBinary { .. } => {
@@ -58,13 +64,14 @@ pub(crate) fn install_artifact(
                 .write(true)
                 .open(&entry)
                 .map_err(|_| InstallError::GenerationUnavailable)?;
-            download_verified(transport, artifact, &plan, &mut file, progress)?;
+            download_verified(transport, artifact, &plan, &trust, &mut file, progress)?;
             file.sync_all()
                 .map_err(|_| InstallError::GenerationUnavailable)?;
             make_executable(&entry)?;
         }
         Layout::TarMember { member, .. } => {
-            let mut archive = download_archive(paths, transport, artifact, &plan, progress)?;
+            let mut archive =
+                download_archive(paths, transport, artifact, &plan, &trust, progress)?;
             progress(InstallProgress::Extracting);
             extract_gzip_tar(
                 BufReader::new(archive.as_file_mut()),
@@ -78,7 +85,8 @@ pub(crate) fn install_artifact(
             make_executable(&entry)?;
         }
         Layout::TarTree { strip, .. } => {
-            let mut archive = download_archive(paths, transport, artifact, &plan, progress)?;
+            let mut archive =
+                download_archive(paths, transport, artifact, &plan, &trust, progress)?;
             progress(InstallProgress::Extracting);
             extract_gzip_tar(
                 BufReader::new(archive.as_file_mut()),
@@ -121,6 +129,7 @@ fn download_archive(
     transport: &dyn ReleaseTransport,
     artifact: &ReleaseArtifact,
     plan: &ArtifactPlan,
+    trust: &TrustScope<'_>,
     progress: &dyn Fn(InstallProgress),
 ) -> Result<tempfile::NamedTempFile, InstallError> {
     let mut archive = Builder::new()
@@ -131,7 +140,14 @@ fn download_archive(
     if archive.path().parent() != Some(paths.versions_root()) {
         return Err(InstallError::GenerationUnavailable);
     }
-    download_verified(transport, artifact, plan, archive.as_file_mut(), progress)?;
+    download_verified(
+        transport,
+        artifact,
+        plan,
+        trust,
+        archive.as_file_mut(),
+        progress,
+    )?;
     archive
         .as_file()
         .sync_all()
@@ -149,6 +165,7 @@ fn download_verified(
     transport: &dyn ReleaseTransport,
     artifact: &ReleaseArtifact,
     plan: &ArtifactPlan,
+    trust: &TrustScope<'_>,
     sink: &mut dyn Write,
     progress: &dyn Fn(InstallProgress),
 ) -> Result<(), InstallError> {
@@ -187,6 +204,10 @@ fn download_verified(
     let matches = match artifact.digest {
         ArtifactDigest::Sha256(expected) => writer.sha256.finalize()[..] == expected[..],
         ArtifactDigest::Sha512(expected) => writer.sha512.finalize()[..] == expected[..],
+        ArtifactDigest::TrustOnFirstDownload => {
+            let sha256 = hex_lower(&writer.sha256.finalize());
+            return trust.check(artifact, &sha256, total);
+        }
     };
     if matches {
         Ok(())
@@ -399,4 +420,37 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
         result.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     result
+}
+
+/// Where a trust-on-first-download record of this install lives.
+struct TrustScope<'a> {
+    engine_root: &'a Path,
+    engine: ManagedEngine,
+    platform: HostPlatform,
+}
+
+impl TrustScope<'_> {
+    /// Checks a vendor-digest-free download against its first-download
+    /// record, recording it the first time. A mismatch keeps the record.
+    fn check(
+        &self,
+        artifact: &ReleaseArtifact,
+        sha256: &str,
+        size: u64,
+    ) -> Result<(), InstallError> {
+        check_or_record(
+            self.engine_root,
+            self.engine,
+            self.platform,
+            &artifact.version,
+            &artifact.url,
+            sha256,
+            size,
+        )
+        .map(|_| ())
+        .map_err(|error| match error {
+            TrustError::Mismatch => InstallError::TrustMismatch,
+            TrustError::Store(_) => InstallError::StateInvalid,
+        })
+    }
 }

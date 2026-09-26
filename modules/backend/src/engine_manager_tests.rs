@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io::Write, sync::Mutex, time::Duration};
 
-use artisan_domain::EngineVersionSelection;
+use artisan_domain::{EngineIntegrity, EngineVersionSelection};
 use artisan_native_engine::{Distribution, Feed, FeedRequest, HostPlatform, TransportError};
 use sha2::{Digest, Sha256};
 
@@ -126,11 +126,65 @@ fn installs_latest_at_start_and_reports_every_engine() {
     assert!(!status.update_available());
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.engines().len(), ManagedEngine::ALL.len());
+    let claude = snapshot.engine("claude").unwrap();
+    assert_eq!(claude.integrity, EngineIntegrity::VendorChecksum);
+    assert!(claude.vendor_version_list);
     for engine in ["grok", "cursor"] {
         let status = snapshot.engine(engine).unwrap();
-        assert_eq!(status.phase, EngineInstallPhase::Unsupported);
-        assert!(status.reason.as_deref().unwrap().contains("checksum"));
+        assert_eq!(status.integrity, EngineIntegrity::TrustOnFirstDownload);
+        if status.phase != EngineInstallPhase::Unsupported {
+            assert!(!status.vendor_version_list);
+        }
     }
+}
+
+#[test]
+fn trusted_engines_report_when_their_hash_was_recorded() {
+    let Distribution::Supported(plan) = ManagedEngine::Grok.distribution(HostPlatform::current())
+    else {
+        return;
+    };
+    let Feed::GrokReleases {
+        platform_key,
+        binary,
+    } = plan.feed
+    else {
+        return;
+    };
+    let suffix = if std::path::Path::new(binary)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        ".exe"
+    } else {
+        ""
+    };
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("forge.db");
+    let vendor = Arc::new(Vendor::default());
+    {
+        let mut documents = vendor.documents.lock().unwrap();
+        documents.insert("https://x.ai/cli/stable".to_owned(), b"1.0.41".to_vec());
+        documents.insert(
+            format!("https://x.ai/cli/grok-1.0.41-{platform_key}{suffix}"),
+            b"grok 1.0.41".to_vec(),
+        );
+    }
+    let manager = EngineManager::start_with(&database, Some(vendor), UPDATE_INTERVAL, || {});
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        let status = manager.snapshot().engine("grok").cloned().unwrap();
+        if status.phase == EngineInstallPhase::Ready {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "grok never became ready: {status:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.integrity, EngineIntegrity::TrustOnFirstDownload);
+    assert!(status.trusted_since.unwrap().ends_with('Z'));
 }
 
 #[test]

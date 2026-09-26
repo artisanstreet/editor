@@ -425,8 +425,11 @@ fn unsupported_engines_never_touch_the_network() {
     let root = tempfile::tempdir().unwrap();
     let database = database(root.path());
     let vendor = FixtureVendor::default();
-    for engine in [ManagedEngine::Grok, ManagedEngine::Cursor] {
-        let authority = ManagedEngineAuthority::for_platform(engine, HostPlatform::LinuxX64);
+    for (engine, platform) in [
+        (ManagedEngine::Cursor, HostPlatform::WindowsX64),
+        (ManagedEngine::OpenCode2, HostPlatform::LinuxX64),
+    ] {
+        let authority = ManagedEngineAuthority::for_platform(engine, platform);
         let operations = EngineOperations::new(authority, &database, &vendor);
         assert_eq!(
             operations.ensure_selected(&|_| {}),
@@ -438,4 +441,108 @@ fn unsupported_engines_never_touch_the_network() {
         ));
     }
     assert!(vendor.requested().is_empty());
+}
+
+const GROK: &str = "https://x.ai/cli";
+
+fn grok() -> ManagedEngineAuthority {
+    ManagedEngineAuthority::for_platform(ManagedEngine::Grok, HostPlatform::LinuxX64)
+}
+
+fn grok_vendor(latest: &str, binaries: &[(&str, &[u8])]) -> FixtureVendor {
+    let mut vendor = FixtureVendor::default().with(&format!("{GROK}/stable"), latest);
+    for (version, bytes) in binaries {
+        vendor = vendor.with(&format!("{GROK}/grok-{version}-linux-x86_64"), *bytes);
+    }
+    vendor
+}
+
+#[test]
+fn trust_on_first_download_records_the_hash_and_enforces_it_on_reinstall() {
+    let root = tempfile::tempdir().unwrap();
+    let database = database(root.path());
+    let engine_root = root.path().join("toolchain/grok");
+    let first = grok_vendor("1.0.41\n", &[("1.0.41", b"grok 1.0.41")]);
+    EngineOperations::new(grok(), &database, &first)
+        .ensure_selected(&|_| {})
+        .unwrap();
+    assert_eq!(active_version(grok(), &database), "1.0.41");
+    let records =
+        crate::engine_core::read_trust_records(&engine_root, ManagedEngine::Grok).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].sha256, hex(&Sha256::digest(b"grok 1.0.41")));
+    assert_eq!(records[0].url, "https://x.ai/cli/grok-1.0.41-linux-x86_64");
+
+    // A repair downloads the same version again: identical bytes pass.
+    let reinstall = || {
+        fs::remove_file(engine_root.join("state.json")).unwrap();
+        fs::remove_dir_all(engine_root.join("versions")).unwrap();
+    };
+    reinstall();
+    EngineOperations::new(grok(), &database, &first)
+        .ensure_selected(&|_| {})
+        .unwrap();
+    assert_eq!(active_version(grok(), &database), "1.0.41");
+
+    // Different bytes for the same version fail and keep the record.
+    reinstall();
+    let tampered = grok_vendor("1.0.41", &[("1.0.41", b"grok 1.0.4X")]);
+    assert_eq!(
+        EngineOperations::new(grok(), &database, &tampered).ensure_selected(&|_| {}),
+        Err(InstallError::TrustMismatch)
+    );
+    let kept = crate::engine_core::read_trust_records(&engine_root, ManagedEngine::Grok).unwrap();
+    assert_eq!(kept, records);
+
+    // A new version gets its own first-seen record, and the picker lists
+    // the current release plus every version seen before.
+    let next = grok_vendor("1.0.42", &[("1.0.42", b"grok 1.0.42")]);
+    let operations = EngineOperations::new(grok(), &database, &next);
+    operations.ensure_selected(&|_| {}).unwrap();
+    assert_eq!(
+        crate::engine_core::read_trust_records(&engine_root, ManagedEngine::Grok)
+            .unwrap()
+            .len(),
+        2
+    );
+    let listed: Vec<String> = operations
+        .list_versions()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.version.to_string())
+        .collect();
+    assert_eq!(listed, ["1.0.42", "1.0.41"]);
+}
+
+#[test]
+fn cursor_latest_comes_from_the_official_installer_script() {
+    let root = tempfile::tempdir().unwrap();
+    let database = database(root.path());
+    let tarball = crate::engine_core::archive_fixtures::tar_gzip_with_modes(&[
+        ("dist-package/", b"".as_slice(), b'5', 0o755),
+        (
+            "dist-package/cursor-agent",
+            b"#!/bin/sh\n".as_slice(),
+            b'0',
+            0o755,
+        ),
+        ("dist-package/index.js", b"//".as_slice(), b'0', 0o644),
+    ]);
+    let vendor = FixtureVendor::default()
+        .with(
+            "https://cursor.com/install",
+            "DOWNLOAD_URL=\"https://downloads.cursor.com/lab/2026.09.26-dd393fe/${OS}/${ARCH}/agent-cli-package.tar.gz\"\n",
+        )
+        .with(
+            "https://downloads.cursor.com/lab/2026.09.26-dd393fe/linux/x64/agent-cli-package.tar.gz",
+            tarball,
+        );
+    let cursor =
+        ManagedEngineAuthority::for_platform(ManagedEngine::Cursor, HostPlatform::LinuxX64);
+    EngineOperations::new(cursor, &database, &vendor)
+        .ensure_selected(&|_| {})
+        .unwrap();
+    let resolved = cursor.resolve_active(&database).unwrap();
+    assert_eq!(resolved.version().as_str(), "2026.09.26-dd393fe");
+    assert!(resolved.executable_path().ends_with("cursor-agent"));
 }

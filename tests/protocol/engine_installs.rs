@@ -5,8 +5,9 @@ use std::error::Error;
 
 use artisan_domain::{
     ChangeEngineVersion, EngineInstallPhase, EngineInstallSnapshot, EngineInstallStatus,
-    EngineVersionChange, EngineVersionEntry, EngineVersionList, EngineVersionSelection, Event,
-    ListEngineVersions, Query, ReadEngineInstalls, RequestId, UnixMillis,
+    EngineIntegrity, EngineVersionChange, EngineVersionEntry, EngineVersionList,
+    EngineVersionSelection, Event, ListEngineVersions, Query, ReadEngineInstalls, RequestId,
+    UnixMillis,
 };
 use artisan_protocol::{
     ClientRequest, EventCursor, FrameId, ProtocolVersion, ResponsePayload, ServerEvent,
@@ -37,6 +38,9 @@ fn snapshot() -> Result<EngineInstallSnapshot, Box<dyn Error>> {
             progress_percent: Some(42),
             reason: None,
             overridden: false,
+            integrity: EngineIntegrity::VendorChecksum,
+            trusted_since: None,
+            vendor_version_list: true,
         },
         EngineInstallStatus {
             engine_id: "grok".into(),
@@ -49,6 +53,9 @@ fn snapshot() -> Result<EngineInstallSnapshot, Box<dyn Error>> {
             progress_percent: None,
             reason: Some("Grok Build is not managed here.".into()),
             overridden: true,
+            integrity: EngineIntegrity::TrustOnFirstDownload,
+            trusted_since: Some("2026-09-26T09:30:00.000Z".into()),
+            vendor_version_list: false,
         },
         EngineInstallStatus {
             engine_id: "codex".into(),
@@ -61,6 +68,9 @@ fn snapshot() -> Result<EngineInstallSnapshot, Box<dyn Error>> {
             progress_percent: Some(0),
             reason: None,
             overridden: false,
+            integrity: EngineIntegrity::VendorChecksum,
+            trusted_since: None,
+            vendor_version_list: true,
         },
     ])?)
 }

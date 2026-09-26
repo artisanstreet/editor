@@ -72,6 +72,7 @@ impl SettingsScreen {
                 &install.selection_copy(),
                 Some(actions.into_any_element()),
             ),
+            Self::install_note(theme, install.integrity_copy()),
         ];
         if let Some(failure) = &install.request_failure {
             blocks.push(Self::install_note(theme, failure.clone()));

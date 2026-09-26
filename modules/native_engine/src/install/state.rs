@@ -211,6 +211,14 @@ impl ManagedToolchainState {
             .map(|generation| generation.directory.as_str())
     }
 
+    /// Returns the versions of every generation the state references.
+    pub fn directories_versions(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(&self.active)
+            .chain(&self.previous)
+            .chain(&self.pending)
+            .map(|generation| generation.version.as_str())
+    }
+
     /// Returns the retained generation for an exact version, preferring the
     /// active one, then pending, then the most recent previous.
     #[must_use]

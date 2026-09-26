@@ -7,8 +7,8 @@ use super::*;
 use artisan_domain::engine_install::{ENGINE_INSTALL_MAX_ENGINES, ENGINE_VERSION_LIST_MAX};
 use artisan_domain::{
     ChangeEngineVersion, EngineInstallError, EngineInstallPhase, EngineInstallSnapshot,
-    EngineInstallStatus, EngineVersionChange, EngineVersionEntry, EngineVersionList,
-    EngineVersionSelection, ListEngineVersions, ReadEngineInstalls,
+    EngineInstallStatus, EngineIntegrity, EngineVersionChange, EngineVersionEntry,
+    EngineVersionList, EngineVersionSelection, ListEngineVersions, ReadEngineInstalls,
 };
 
 use crate::artisan_capnp::{engine_install_snapshot, engine_version_change, engine_version_list};
@@ -109,6 +109,14 @@ pub(crate) fn encode_engine_install_snapshot(
         encoded.set_progress_percent(status.progress_percent.unwrap_or_default());
         encoded.set_reason(status.reason.as_deref().unwrap_or_default());
         encoded.set_overridden(status.overridden);
+        encoded.set_integrity(match status.integrity {
+            EngineIntegrity::VendorChecksum => artisan_capnp::EngineIntegrity::VendorChecksum,
+            EngineIntegrity::TrustOnFirstDownload => {
+                artisan_capnp::EngineIntegrity::TrustOnFirstDownload
+            }
+        });
+        encoded.set_trusted_since(status.trusted_since.as_deref().unwrap_or_default());
+        encoded.set_vendor_version_list(status.vendor_version_list);
     }
     Ok(())
 }
@@ -153,6 +161,16 @@ pub(crate) fn decode_engine_install_snapshot(
                     .then(|| status.get_progress_percent()),
                 reason: optional(status.get_reason(), "engineInstalls.reason")?,
                 overridden: status.get_overridden(),
+                integrity: match status.get_integrity()? {
+                    artisan_capnp::EngineIntegrity::VendorChecksum => {
+                        EngineIntegrity::VendorChecksum
+                    }
+                    artisan_capnp::EngineIntegrity::TrustOnFirstDownload => {
+                        EngineIntegrity::TrustOnFirstDownload
+                    }
+                },
+                trusted_since: optional(status.get_trusted_since(), "engineInstalls.trustedSince")?,
+                vendor_version_list: status.get_vendor_version_list(),
             })
         })
         .collect::<Result<Vec<_>, ProtocolDecodeError>>()?;
