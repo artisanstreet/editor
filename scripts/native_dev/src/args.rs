@@ -1,26 +1,79 @@
-//! Command-line parsing for the native dev runner.
+//! Command-line parsing for the dev runner.
 //!
-//! Unknown commands and flags fail closed with usage text, so a typo never
-//! installs half a payload.
+//! `nix run .#dev` runs the Linux runner with the user's arguments. Inside
+//! WSL it drives the Windows half by running the cross-built Windows runner
+//! with the internal `editor` command group. Unknown commands and flags fail
+//! closed with usage text, so a typo never installs half a build.
 
 use std::{ffi::OsString, path::PathBuf};
 
-use crate::error::DevError;
+use crate::{error::DevError, nix::Stage};
 
 /// Default number of inactive dev versions kept for rollback.
 pub const DEFAULT_KEEP: usize = 3;
 
-/// What the runner was asked to do.
+/// What to do with the dev installations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
-    /// Install the payload and launch (or relaunch) the dev Editor.
+    /// Build, install, and launch (or relaunch) the dev Editor.
     Run,
-    /// Install the payload without launching.
+    /// Build and install without launching the Editor.
     Stage,
-    /// Print the dev root, active version, and build identity.
+    /// Print the dev installations, active versions, and build identities.
     Where,
     /// Remove superseded dev versions.
     Prune,
+}
+
+/// Where the Editor runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorPlatform {
+    /// The Windows build, through WSL interop.
+    Windows,
+    /// The Linux build, from the same installation as the Forge.
+    Linux,
+}
+
+/// A `nix run .#dev` invocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DevArgs {
+    /// Requested command.
+    pub command: Command,
+    /// Build stage.
+    pub stage: Stage,
+    /// Editor platform; `None` picks Windows inside WSL, Linux otherwise.
+    pub editor: Option<EditorPlatform>,
+    /// Linux installation root; defaults to the per-user `Artisan Street Dev`.
+    pub root: Option<PathBuf>,
+    /// Windows installation root (a Windows path); defaults to
+    /// `%LOCALAPPDATA%\Artisan Street Dev`.
+    pub windows_root: Option<OsString>,
+    /// Forge listening address (`IP:PORT` or `auto:PORT`).
+    pub listen: Option<String>,
+    /// Machine name the Forge's invitation carries.
+    pub host_name: Option<String>,
+    /// Inactive versions kept after an install or prune.
+    pub keep: usize,
+    /// Follow the launched Editor until it exits.
+    pub attach: bool,
+}
+
+/// The internal Editor half, run on the Editor's platform.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorArgs {
+    /// Requested command.
+    pub command: Command,
+    /// Editor installation root; defaults to the per-user `Artisan Street Dev`.
+    pub root: Option<PathBuf>,
+    /// Payload to install (`run` and `stage`); absent when the Forge's
+    /// installation already holds the Editor.
+    pub payload: Option<PathBuf>,
+    /// Host invitation to register (`run` and `stage`).
+    pub invitation: Option<PathBuf>,
+    /// Inactive versions kept after an install or prune.
+    pub keep: usize,
+    /// Follow the launched Editor until it exits.
+    pub attach: bool,
 }
 
 /// What the argument parser decided.
@@ -28,108 +81,160 @@ pub enum Command {
 pub enum Action {
     /// Print usage text.
     Help,
-    /// Execute one command.
+    /// Build and deploy both halves.
     Execute(DevArgs),
+    /// Deploy the Editor half on this platform.
+    Editor(EditorArgs),
 }
 
-/// Parsed `dev` invocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DevArgs {
-    /// Requested command.
-    pub command: Command,
-    /// Explicit development root; defaults to the per-user `Artisan Street Dev`.
-    pub root: Option<PathBuf>,
-    /// Nix-built payload to install (`run` and `stage`).
-    pub payload: Option<PathBuf>,
-    /// Inactive versions kept after an install or prune.
-    pub keep: usize,
-    /// Follow the launched Editor until it exits instead of returning once it
-    /// confirms startup. A detached runner is what lets the next run replace
-    /// the runner itself on Windows, where a running executable is locked.
-    pub attach: bool,
+fn usage_error(reason: String) -> DevError {
+    DevError::Usage { reason }
 }
 
-impl DevArgs {
-    /// Parses one argv slice (without the program name).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DevError::Usage`] for unknown commands, unknown flags,
-    /// missing and malformed values, or `run`/`stage` without a payload.
-    pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
-        let mut options = Self {
-            command: Command::Run,
-            root: None,
-            payload: None,
-            keep: DEFAULT_KEEP,
-            attach: false,
-        };
-        let usage = |reason: String| DevError::Usage { reason };
-        let mut rest = argv.iter().peekable();
-        if let Some(first) = rest
-            .peek()
-            .map(|value| value.to_string_lossy().into_owned())
-            && !first.starts_with('-')
-        {
-            options.command = match first.as_str() {
-                "run" => Command::Run,
-                "stage" => Command::Stage,
-                "where" => Command::Where,
-                "prune" => Command::Prune,
-                other => return Err(usage(format!("unknown command `{other}`"))),
-            };
-            rest.next();
-        }
-        while let Some(flag) = rest.next() {
-            let flag = flag.to_string_lossy();
-            let mut value = |name: &str| {
-                rest.next()
-                    .ok_or_else(|| usage(format!("{name} requires a value")))
-            };
-            match flag.as_ref() {
-                "-h" | "--help" => return Ok(Action::Help),
-                "--root" => options.root = Some(PathBuf::from(value("--root")?)),
-                "--payload" => options.payload = Some(PathBuf::from(value("--payload")?)),
-                "--attach" => options.attach = true,
-                "--keep" => {
-                    options.keep = value("--keep")?
-                        .to_string_lossy()
-                        .parse()
-                        .map_err(|_| usage("--keep requires a number".to_owned()))?;
-                }
-                unknown => return Err(usage(format!("unknown flag `{unknown}`"))),
-            }
-        }
-        if matches!(options.command, Command::Run | Command::Stage) && options.payload.is_none() {
-            return Err(usage(
-                "run and stage install a Nix-built payload: pass --payload (or use `nix run .#dev`)"
-                    .to_owned(),
-            ));
-        }
-        Ok(Action::Execute(options))
+fn command(name: &str) -> Result<Command, DevError> {
+    match name {
+        "run" => Ok(Command::Run),
+        "stage" => Ok(Command::Stage),
+        "where" => Ok(Command::Where),
+        "prune" => Ok(Command::Prune),
+        other => Err(usage_error(format!("unknown command `{other}`"))),
     }
+}
+
+/// Parses one argv slice (without the program name).
+///
+/// # Errors
+///
+/// Returns [`DevError::Usage`] for unknown commands and flags, missing or
+/// malformed values, and an `editor run|stage` without payload or
+/// invitation.
+pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
+    let mut words = argv.iter().peekable();
+    let first = words
+        .peek()
+        .map(|word| word.to_string_lossy().into_owned())
+        .filter(|word| !word.starts_with('-'));
+    if first.as_deref() == Some("editor") {
+        words.next();
+        let name = words
+            .next()
+            .ok_or_else(|| usage_error("editor needs a command".to_owned()))?;
+        return parse_editor(command(&name.to_string_lossy())?, words);
+    }
+    let mut options = DevArgs {
+        command: Command::Run,
+        stage: Stage::Debug,
+        editor: None,
+        root: None,
+        windows_root: None,
+        listen: None,
+        host_name: None,
+        keep: DEFAULT_KEEP,
+        attach: false,
+    };
+    if let Some(name) = first {
+        options.command = command(&name)?;
+        words.next();
+    }
+    while let Some(flag) = words.next() {
+        let mut value = |name: &str| {
+            words
+                .next()
+                .cloned()
+                .ok_or_else(|| usage_error(format!("{name} requires a value")))
+        };
+        match flag.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(Action::Help),
+            "--debug" => options.stage = Stage::Debug,
+            "--production" => options.stage = Stage::Production,
+            "--windows" => options.editor = Some(EditorPlatform::Windows),
+            "--linux" => options.editor = Some(EditorPlatform::Linux),
+            "--root" => options.root = Some(value("--root")?.into()),
+            "--windows-root" => options.windows_root = Some(value("--windows-root")?),
+            "--listen" => options.listen = Some(text(value("--listen")?, "--listen")?),
+            "--host-name" => options.host_name = Some(text(value("--host-name")?, "--host-name")?),
+            "--keep" => options.keep = keep(&value("--keep")?)?,
+            "--attach" => options.attach = true,
+            unknown => return Err(usage_error(format!("unknown flag `{unknown}`"))),
+        }
+    }
+    Ok(Action::Execute(options))
+}
+
+fn parse_editor<'a>(
+    command: Command,
+    mut words: impl Iterator<Item = &'a OsString>,
+) -> Result<Action, DevError> {
+    let mut options = EditorArgs {
+        command,
+        root: None,
+        payload: None,
+        invitation: None,
+        keep: DEFAULT_KEEP,
+        attach: false,
+    };
+    while let Some(flag) = words.next() {
+        let mut value = |name: &str| {
+            words
+                .next()
+                .cloned()
+                .ok_or_else(|| usage_error(format!("{name} requires a value")))
+        };
+        match flag.to_string_lossy().as_ref() {
+            "--root" => options.root = Some(value("--root")?.into()),
+            "--payload" => options.payload = Some(value("--payload")?.into()),
+            "--invitation" => options.invitation = Some(value("--invitation")?.into()),
+            "--keep" => options.keep = keep(&value("--keep")?)?,
+            "--attach" => options.attach = true,
+            unknown => return Err(usage_error(format!("unknown flag `{unknown}`"))),
+        }
+    }
+    if matches!(options.command, Command::Run | Command::Stage) && options.invitation.is_none() {
+        return Err(usage_error(
+            "editor run and stage register a host: pass --invitation".to_owned(),
+        ));
+    }
+    Ok(Action::Editor(options))
+}
+
+fn keep(value: &OsString) -> Result<usize, DevError> {
+    value
+        .to_string_lossy()
+        .parse()
+        .map_err(|_| usage_error("--keep requires a number".to_owned()))
+}
+
+fn text(value: OsString, name: &str) -> Result<String, DevError> {
+    value
+        .into_string()
+        .map_err(|_| usage_error(format!("{name} must be valid Unicode")))
 }
 
 /// Usage text for `--help`.
 #[must_use]
 pub fn usage() -> &'static str {
-    "usage: dev [run|stage] --payload PATH [--root PATH] [--keep N] [--attach]\n\
-     \x20      dev [where|prune] [--root PATH] [--keep N]\n\
+    "usage: nix run .#dev -- [run|stage|where|prune] [options]\n\
      \n\
-     Installs a Nix-built payload as a signed dev-channel release into the\n\
-     per-user `Artisan Street Dev` installation through the same installer code\n\
-     releases use, and (for `run`) launches the dev Editor, closing any previous\n\
-     dev Editor first. Normally driven by `nix run .#dev`, which builds the\n\
-     payload first.\n\
+     Builds the Debug (or Production) stage with Nix and deploys both halves\n\
+     through the shipping installer: the Linux installation, whose Forge runs\n\
+     as the systemd user service artisan-forge-dev.service and publishes a\n\
+     host invitation, and the Editor, registered with that host and launched.\n\
+     Inside WSL the Editor is the Windows build, installed into\n\
+     %LOCALAPPDATA%\\Artisan Street Dev through WSL interop. Rerunning\n\
+     retires the running Forge and Editor the way an update does.\n\
      \n\
-     run             install and launch or relaunch (default)\n\
-     stage           install without launching\n\
-     where           print the dev root, active version, and build identity\n\
-     prune           remove superseded dev versions\n\
+     run                 build, install, and launch or relaunch (default)\n\
+     stage               build and install; the Forge runs, the Editor is not launched\n\
+     where               print the installations, versions, and build identities\n\
+     prune               remove superseded versions\n\
      \n\
-     --payload PATH  Nix-built payload (bin/ and resources/build-info.json)\n\
-     --root PATH     development installation root (default: per-user\n\
-     \x20               `Artisan Street Dev`, or ARTISAN_DEV_ROOT)\n\
-     --keep N        inactive versions kept for rollback (default: 3)\n\
-     --attach        follow the launched Editor until it exits"
+     --production        the Production stage instead of Debug\n\
+     --windows|--linux   Editor platform (default: Windows inside WSL, else Linux)\n\
+     --root PATH         Linux installation root (default: $XDG_DATA_HOME/Artisan Street Dev)\n\
+     --windows-root PATH Windows installation root (default: %LOCALAPPDATA%\\Artisan Street Dev)\n\
+     --listen ADDRESS    Forge address, IP:PORT or auto:PORT (default: auto:4433 in WSL,\n\
+     \x20                   127.0.0.1:4433 otherwise)\n\
+     --host-name NAME    machine name Editors show (default: the WSL distribution or host name)\n\
+     --keep N            inactive versions kept for rollback (default: 3)\n\
+     --attach            follow the launched Editor until it exits"
 }

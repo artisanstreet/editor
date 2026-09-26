@@ -66,8 +66,9 @@ pub fn sign_payload(
 /// Installs the signed payload into the dev root as a `dev`-channel release.
 ///
 /// A running dev Editor is closed and its Forge stopped first, exactly as a
-/// release update retires superseded instances; PATH, shortcuts, and the
-/// `artisan://` handler stay with the real installation.
+/// release update retires superseded instances. Shortcuts and the
+/// `artisan://` handler stay with the real installation; `register_path`
+/// links the permanent `ae` onto the user's PATH (`~/.local/bin` on Linux).
 ///
 /// # Errors
 ///
@@ -77,6 +78,7 @@ pub fn install_payload(
     payload: &Path,
     manifests: &Path,
     signer: &LocalSigner,
+    register_path: bool,
 ) -> Result<(), DevError> {
     let platform = Platform::detect().map_err(DevError::Install)?;
     let options = InstallOptions {
@@ -93,7 +95,7 @@ pub fn install_payload(
         integrations: InstallIntegrationOptions {
             register_protocol: false,
             register_shortcuts: false,
-            register_path: false,
+            register_path,
         },
         retirement: Some(RetirementPolicy {
             force: false,

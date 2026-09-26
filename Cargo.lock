@@ -649,9 +649,14 @@ version = "0.0.0"
 dependencies = [
  "ae-installer",
  "artisan-build-info",
+ "artisan-database",
  "artisan-editor-cli",
+ "base64 0.22.1",
+ "clap",
  "fs2",
+ "sea-orm",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
 ]

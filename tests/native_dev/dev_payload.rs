@@ -63,7 +63,7 @@ fn install(paths: &DevPaths, payload: &Path) -> BuildInfo {
     let signer = LocalSigner::load_or_create(&paths.home).expect("local key");
     let manifests = paths.runner_dir().join("manifest");
     sign_payload(payload, &manifests, &identity, &signer).expect("signs");
-    install_payload(paths, payload, &manifests, &signer).expect("installs");
+    install_payload(paths, payload, &manifests, &signer, false).expect("installs");
     identity
 }
 
