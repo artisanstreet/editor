@@ -221,13 +221,14 @@ impl NativeApplication {
                 return;
             }
         };
+        let scope = artisan_domain::ComposerDraftScope::Thread(thread_id);
         let flight = NativeMessageFlight {
-            thread_id: thread_id.clone(),
+            scope: scope.clone(),
             request_id,
             token,
         };
         self.launch_message_flight(flight, cx);
-        self.begin_draft_submission(&thread_id, body, cx);
+        self.begin_draft_submission(&scope, body, cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }
@@ -276,8 +277,7 @@ impl NativeApplication {
 
     pub(super) fn retain_message_flight(&mut self, cx: &mut Context<Self>) {
         if let Some(flight) = self.message_flight.take() {
-            let scope = artisan_domain::ComposerDraftScope::Thread(flight.thread_id.clone());
-            self.end_draft_submission(&scope);
+            self.end_draft_submission(&flight.scope);
             self.finish_composer_submission(flight.token, DraftDisposition::Retained, cx);
         }
         self.sync_composer_availability(cx);
@@ -311,9 +311,9 @@ impl NativeApplication {
         let Some(flight) = self.message_flight.as_ref() else {
             return;
         };
-        if self.selected_thread.as_ref() != Some(&flight.thread_id)
-            || receipt.thread_id != flight.thread_id
-            || receipt.request_id != flight.request_id
+        let thread_scope = artisan_domain::ComposerDraftScope::Thread(receipt.thread_id.clone());
+        if self.selected_thread.as_ref() != Some(&receipt.thread_id)
+            || !flight.answers(&thread_scope, &receipt.request_id)
             || !matches!(
                 receipt.disposition,
                 artisan_domain::ReceiptDisposition::Accepted
@@ -338,17 +338,23 @@ impl NativeApplication {
 
     pub(super) fn handle_message_failure(
         &mut self,
-        thread_id: &ThreadId,
+        scope: &artisan_domain::ComposerDraftScope,
         request_id: &RequestId,
         failure: ServiceFailure,
         cx: &mut Context<Self>,
     ) {
         self.settle_message_flight_hold(Some(request_id));
-        let matches_active = self.message_flight.as_ref().is_some_and(|flight| {
-            &flight.thread_id == thread_id
-                && &flight.request_id == request_id
-                && self.selected_thread.as_ref() == Some(thread_id)
-        });
+        let shown = match scope {
+            artisan_domain::ComposerDraftScope::Thread(thread) => {
+                self.selected_thread.as_ref() == Some(thread)
+            }
+            artisan_domain::ComposerDraftScope::Project(_) => true,
+        };
+        let matches_active = shown
+            && self
+                .message_flight
+                .as_ref()
+                .is_some_and(|flight| flight.answers(scope, request_id));
         if !matches_active {
             return;
         }
@@ -370,15 +376,16 @@ impl NativeApplication {
     /// it is worded.
     pub(super) fn handle_message_refused(
         &mut self,
-        thread_id: &ThreadId,
+        scope: &artisan_domain::ComposerDraftScope,
         request_id: &RequestId,
         refusal: &artisan_domain::SubmissionRefusal,
         cx: &mut Context<Self>,
     ) {
         self.settle_message_flight_hold(Some(request_id));
-        let matches_active = self.message_flight.as_ref().is_some_and(|flight| {
-            &flight.thread_id == thread_id && &flight.request_id == request_id
-        });
+        let matches_active = self
+            .message_flight
+            .as_ref()
+            .is_some_and(|flight| flight.answers(scope, request_id));
         if !matches_active {
             return;
         }

@@ -551,18 +551,18 @@ pub enum NativeTransportEvent {
     MessageQueued(QueueMessageReceipt),
     /// A draft submission failed; the draft stays in the composer.
     MessageFailed {
-        thread_id: ThreadId,
+        scope: artisan_domain::ComposerDraftScope,
         request_id: RequestId,
         failure: ServiceFailure,
     },
     /// The Forge refused a draft submission because the draft is at another
     /// revision; nothing was queued.
     MessageStale {
-        /// Thread whose draft was submitted.
-        thread_id: ThreadId,
+        /// Scope whose draft was submitted.
+        scope: artisan_domain::ComposerDraftScope,
         /// The refused submission.
         request_id: RequestId,
-        /// The thread's current draft revision.
+        /// The scope's current draft revision.
         current_revision: Option<artisan_domain::ComposerDraftRevision>,
     },
     /// Authoritative thread-settings read failure with its load fence.

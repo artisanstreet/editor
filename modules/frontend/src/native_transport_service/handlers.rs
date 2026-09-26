@@ -463,23 +463,26 @@ pub(super) async fn queue_first_message(
     publish(events, NativeTransportEvent::FirstMessageQueued(receipt))
 }
 
-/// Sends one thread's composer draft at the revision its body was stored
-/// under. The Forge's answer names the message (the first submission's
-/// message when this revision was already sent) or refuses a stale revision.
+/// Sends one composer draft at the revision its body was stored under: a
+/// thread's, or a project's new-task draft whose send creates its thread.
+/// The Forge's answer names the thread and message (the first submission's
+/// when this revision was already sent) or refuses a stale revision.
 pub(super) async fn submit_composer_draft(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
     command: SubmitComposerDraft,
 ) -> Result<(), ServiceFailure> {
-    let thread_id = command.thread_id.clone();
+    let scope = command.scope.clone();
     let request_id = command.request_id.clone();
     let failed = |failure| NativeTransportEvent::MessageFailed {
-        thread_id: thread_id.clone(),
+        scope: scope.clone(),
         request_id: request_id.clone(),
         failure,
     };
-    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+    if let artisan_domain::ComposerDraftScope::Thread(thread_id) = &scope
+        && known_thread_for_queue(&runtime.known_threads, thread_id).is_err()
+    {
         return publish(
             events,
             failed(ServiceFailure::invalid(ServiceFailureStage::Request)),
@@ -490,7 +493,7 @@ pub(super) async fn submit_composer_draft(
         Err(failure) => return publish(events, failed(failure)),
     };
     let expected = ExpectedResponse::DraftSubmitted {
-        thread_id: thread_id.clone(),
+        scope: scope.clone(),
         request_id: request_id.clone(),
     };
     let submitted = match durable_save_request(runtime, frames, &mutation, expected).await {
@@ -503,9 +506,9 @@ pub(super) async fn submit_composer_draft(
         }
         Err(error) => return publish(events, failed(error.into())),
     };
-    let scope = artisan_domain::ComposerDraftScope::Thread(thread_id.clone());
     match submitted.outcome {
         artisan_domain::DraftSubmissionOutcome::Queued {
+            thread_id,
             message_id,
             disposition,
             cleared_revision,
@@ -538,7 +541,7 @@ pub(super) async fn submit_composer_draft(
         artisan_domain::DraftSubmissionOutcome::Stale { current_revision } => publish(
             events,
             NativeTransportEvent::MessageStale {
-                thread_id,
+                scope,
                 request_id,
                 current_revision,
             },
@@ -546,7 +549,7 @@ pub(super) async fn submit_composer_draft(
         artisan_domain::DraftSubmissionOutcome::Refused(refusal) => publish(
             events,
             NativeTransportEvent::ForgeDecision(ForgeDecisionEvent::SendRefused {
-                thread_id,
+                scope,
                 request_id,
                 refusal,
             }),

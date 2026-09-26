@@ -43,9 +43,22 @@ pub(super) enum NativeViewState {
 /// flight ends at the correlated receipt or failure; the connection hold
 /// that covers it lives beside it on the application.
 pub(super) struct NativeMessageFlight {
-    pub(super) thread_id: ThreadId,
+    /// The draft being sent: a thread's, or a project's new-task draft whose
+    /// send creates its thread.
+    pub(super) scope: artisan_domain::ComposerDraftScope,
     pub(super) request_id: RequestId,
     pub(super) token: SubmissionToken,
+}
+
+impl NativeMessageFlight {
+    /// Whether an answer about `scope` and `request_id` is this flight's.
+    pub(super) fn answers(
+        &self,
+        scope: &artisan_domain::ComposerDraftScope,
+        request_id: &RequestId,
+    ) -> bool {
+        &self.scope == scope && &self.request_id == request_id
+    }
 }
 
 #[derive(Clone, Copy)]

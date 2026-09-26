@@ -9,8 +9,8 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use artisan_database::{Repository, RepositoryError};
-use artisan_domain::{EngineProfileId, ThreadId};
+use artisan_database::RepositoryError;
+use artisan_domain::{EngineProfileId, RootPath};
 use artisan_native_engine::NativeOpenCode2Authority;
 use thiserror::Error;
 
@@ -69,28 +69,23 @@ pub(crate) enum ComposerCatalogServiceError {
 #[derive(Clone)]
 pub(crate) struct ComposerCatalogService {
     owner: EngineCatalogClient,
-    repository: Repository,
     database: PathBuf,
     cache: Arc<tokio::sync::Mutex<Option<(tokio::time::Instant, CatalogResult)>>>,
 }
 
 impl ComposerCatalogService {
     /// Creates a service bound to the process-owned catalog owner and database.
-    pub(crate) fn new(
-        owner: EngineCatalogClient,
-        repository: Repository,
-        database: PathBuf,
-    ) -> Self {
+    pub(crate) fn new(owner: EngineCatalogClient, database: PathBuf) -> Self {
         Self {
             owner,
-            repository,
             database,
             cache: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
-    /// Discovers the catalog for the exact durable thread root and registered
-    /// engine profile.
+    /// Discovers the catalog for a project root (the scope of a thread's
+    /// project, or of a project whose new task has no thread yet) and a
+    /// registered engine profile.
     ///
     /// The cache lock is held only while checking or replacing the bounded
     /// in-memory entry. In particular, it is released before owner admission,
@@ -103,14 +98,9 @@ impl ComposerCatalogService {
     /// payload, executable, or process detail.
     pub(crate) async fn discover(
         &self,
-        thread: &ThreadId,
+        root: RootPath,
         profile: &EngineProfileId,
     ) -> Result<CatalogResult, ComposerCatalogServiceError> {
-        let root = self
-            .repository
-            .read_thread_project_root(thread)
-            .await
-            .map_err(|error| classify_scope_repository_error(&error))?;
         let authority = NativeOpenCode2Authority::new();
         let launch = authority
             .resolve_profile_launch(&self.database, profile)
@@ -185,7 +175,10 @@ impl ComposerCatalogService {
     }
 }
 
-fn classify_scope_repository_error(error: &RepositoryError) -> ComposerCatalogServiceError {
+/// The catalog error for a failed read of a thread's or project's root.
+pub(crate) fn classify_scope_repository_error(
+    error: &RepositoryError,
+) -> ComposerCatalogServiceError {
     match error {
         RepositoryError::ThreadNotFound { .. } => ComposerCatalogServiceError::ThreadUnknown,
         RepositoryError::ProjectNotFound { .. } => ComposerCatalogServiceError::ProjectUnknown,

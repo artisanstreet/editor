@@ -22,6 +22,8 @@ use artisan_domain::{
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, RunLiveStatus, ServerResponse};
 
+use crate::composer_catalog_handler::CatalogSubject;
+
 use super::failures::{outcome, repository_failure};
 use super::{RequestHandler, origin_clock_failure};
 
@@ -190,7 +192,7 @@ impl RequestHandler {
             .map_err(|error| repository_failure(&error, request_id))?;
         let resolution = self
             .resolve_selection(
-                &query.thread_id,
+                CatalogSubject::Thread(&query.thread_id),
                 &query.selection,
                 saved
                     .as_ref()
@@ -251,9 +253,9 @@ impl RequestHandler {
     pub(super) async fn admit_submission(
         &self,
         request_id: &RequestId,
+        thread: &ThreadId,
         submit: &SubmitComposerDraft,
     ) -> Result<SubmissionAdmission, ProtocolFailure> {
-        let thread = &submit.thread_id;
         if self
             .repository
             .composer_draft_submitted(thread, submit.draft_revision)
@@ -278,7 +280,7 @@ impl RequestHandler {
             // A starting run refuses before any catalog work.
             (_, Some((_, RunLiveStatus::Queued, _))) | (None, _) => None,
             (Some(selection), _) => Some(
-                self.resolve_selection(thread, selection, saved_config)
+                self.resolve_selection(CatalogSubject::Thread(thread), selection, saved_config)
                     .await,
             ),
         };
@@ -342,9 +344,11 @@ impl RequestHandler {
             })
     }
 
-    async fn resolve_selection(
+    /// Resolves a selection against the catalog the Forge serves for
+    /// `subject` and its `previous` configuration.
+    pub(super) async fn resolve_selection(
         &self,
-        thread: &ThreadId,
+        subject: CatalogSubject<'_>,
         selection: &CatalogSelection,
         previous: Option<&EngineRunConfig>,
     ) -> Result<ResolvedSelection, SubmissionRefusal> {
@@ -356,7 +360,7 @@ impl RequestHandler {
             self.composer_catalog.as_ref(),
             self.account_usage.as_deref(),
             &self.repository,
-            thread,
+            subject,
             &profile,
         )
         .await

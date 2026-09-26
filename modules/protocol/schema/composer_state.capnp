@@ -356,9 +356,11 @@ struct FailedMessageRecovered {
 # the parent Response union carries composerDraftSubmitted @38.
 # ---------------------------------------------------------------------------
 
-# Queues the thread's composer draft at exactly draftRevision. The parent
-# request id only correlates the answer; the submission's identity is the
-# thread and draft revision.
+# Queues a composer draft at exactly draftRevision: the thread's draft
+# (threadId), or a project's new-task draft (projectId, threadId empty),
+# whose submission creates the thread it is queued in. Exactly one of the
+# two is nonempty. The parent request id only correlates the answer; the
+# submission's identity is the draft scope and revision.
 struct SubmitComposerDraftRequest {
   threadId @0 :Text;
   draftRevision @1 :UInt64;
@@ -368,6 +370,8 @@ struct SubmitComposerDraftRequest {
   # The model the user selected for this send; a null pointer sends with the
   # thread's saved configuration. The Forge resolves, saves, and admits it.
   selection @3 :CatalogSelection;
+  # Appended: the project whose new-task draft is sent.
+  projectId @4 :Text;
 }
 
 # The draft is the queued message messageId; the draft is empty at
@@ -378,9 +382,14 @@ struct DraftSubmissionQueued {
   clearedRevision @2 :UInt64;
   # The thread's engine configuration revision after admission.
   engineConfigRevision @3 :UInt64;
+  # Appended: the thread the message is queued in. For a project draft it is
+  # the thread the submission created; for a thread draft it repeats
+  # ComposerDraftSubmitted.threadId.
+  threadId @4 :Text;
 }
 
-# requestId must equal the parent Response.requestId.
+# requestId must equal the parent Response.requestId. Exactly one of
+# threadId and projectId names the submitted draft's scope.
 struct ComposerDraftSubmitted {
   requestId @0 :Text;
   threadId @1 :Text;
@@ -388,11 +397,13 @@ struct ComposerDraftSubmitted {
   union {
     queued @3 :DraftSubmissionQueued;
     # The stored draft is at another revision; nothing was queued. Zero
-    # means the thread has no draft.
+    # means the scope has no draft.
     stale @4 :UInt64;
     # The Forge refused the send; nothing was queued.
     refused @5 :SubmissionRefusal;
   }
+  # Appended: the project whose new-task draft was submitted.
+  projectId @6 :Text;
 }
 
 # ---------------------------------------------------------------------------

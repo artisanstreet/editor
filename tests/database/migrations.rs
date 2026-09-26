@@ -40,6 +40,7 @@ const ATTACHMENT_SOURCES_MIGRATION: &str = "m20260928_000018_composer_attachment
 const USER_PREFERENCES_MIGRATION: &str = "m20260929_000019_user_preferences";
 const CHUNKED_ATTACHMENTS_MIGRATION: &str = "m20260930_000020_chunked_composer_attachments";
 const ITEM_THREAD_INDEX_MIGRATION: &str = "m20261001_000021_conversation_item_thread_index";
+const PROJECT_DRAFT_SUBMISSIONS_MIGRATION: &str = "m20261002_000022_project_draft_submissions";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -126,7 +127,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        21
+        22
     );
     first
         .execute_unprepared(
@@ -160,7 +161,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        21
+        22
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -235,7 +236,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             ATTACHMENT_SOURCES_MIGRATION.to_string(),
             USER_PREFERENCES_MIGRATION.to_string(),
             CHUNKED_ATTACHMENTS_MIGRATION.to_string(),
-            ITEM_THREAD_INDEX_MIGRATION.to_string()
+            ITEM_THREAD_INDEX_MIGRATION.to_string(),
+            PROJECT_DRAFT_SUBMISSIONS_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -998,7 +1000,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        21
+        22
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1113,7 +1115,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        21,
+        22,
         "migration must record every version exactly once"
     );
     assert_eq!(

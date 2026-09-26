@@ -18,12 +18,11 @@ impl NativeApplication {
     /// its current body is saved first when the Forge has not stored it.
     pub(super) fn begin_draft_submission(
         &mut self,
-        thread_id: &ThreadId,
+        scope: &ComposerDraftScope,
         body: crate::composer_draft_sync::DraftBody,
         cx: &mut Context<Self>,
     ) {
-        let scope = ComposerDraftScope::Thread(thread_id.clone());
-        let save = self.composer_drafts.sync.begin_submit(&scope, body);
+        let save = self.composer_drafts.sync.begin_submit(scope, body);
         self.submit_draft_save(save);
         self.drive_draft_submission(cx);
     }
@@ -33,7 +32,7 @@ impl NativeApplication {
         let Some(flight) = self.message_flight.as_ref() else {
             return;
         };
-        let scope = ComposerDraftScope::Thread(flight.thread_id.clone());
+        let scope = flight.scope.clone();
         if !self.composer_drafts.sync.is_submitting(&scope) {
             return;
         }
@@ -48,7 +47,7 @@ impl NativeApplication {
         };
         let command = SubmitComposerDraft {
             request_id: flight.request_id.clone(),
-            thread_id: flight.thread_id.clone(),
+            scope: scope.clone(),
             draft_revision,
             selection: self.displayed_selection(cx),
         };
@@ -73,21 +72,21 @@ impl NativeApplication {
     /// again; Send then names the revision that save is given.
     pub(super) fn handle_message_stale(
         &mut self,
-        thread_id: &ThreadId,
+        scope: &ComposerDraftScope,
         request_id: &RequestId,
         current_revision: Option<ComposerDraftRevision>,
         cx: &mut Context<Self>,
     ) {
         self.settle_message_flight_hold(Some(request_id));
-        let matches = self.message_flight.as_ref().is_some_and(|flight| {
-            &flight.thread_id == thread_id && &flight.request_id == request_id
-        });
+        let matches = self
+            .message_flight
+            .as_ref()
+            .is_some_and(|flight| flight.answers(scope, request_id));
         if !matches {
             return;
         }
-        let scope = ComposerDraftScope::Thread(thread_id.clone());
         if let Some(revision) = current_revision {
-            self.composer_drafts.sync.observe_revision(&scope, revision);
+            self.composer_drafts.sync.observe_revision(scope, revision);
         }
         self.fail_waiting_flight(
             invalid_service_failure(),
@@ -97,7 +96,7 @@ impl NativeApplication {
             ),
             cx,
         );
-        self.resave_composer_draft(&scope, cx);
+        self.resave_composer_draft(scope, cx);
     }
 
     fn fail_waiting_flight(

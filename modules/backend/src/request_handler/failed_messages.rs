@@ -32,7 +32,11 @@ impl RequestHandler {
             Command::WithdrawQueuedMessage(withdraw) => &withdraw.thread_id,
             Command::RetryFailedMessage(retry) => &retry.target.thread_id,
             Command::RecoverFailedMessage(recover) => &recover.target.thread_id,
-            Command::SubmitComposerDraft(submit) => &submit.thread_id,
+            // A new task's thread has no subscriber yet.
+            Command::SubmitComposerDraft(submit) => match &submit.scope {
+                artisan_domain::ComposerDraftScope::Thread(thread_id) => thread_id,
+                artisan_domain::ComposerDraftScope::Project(_) => return,
+            },
             _ => return,
         };
         if let Some(notifier) = &self.conversation_commit_notifier {

@@ -65,8 +65,8 @@ pub use repository::RecentThreadsFingerprint;
 
 pub use repository::{
     COMPOSER_ATTACHMENT_UNREFERENCED_GRACE_MS, ComposerDraftRepositoryError,
-    ComposerDraftSaveOutcome, DraftSubmission, DraftSubmissionError, SaveComposerDraftInput,
-    SubmitComposerDraftInput,
+    ComposerDraftSaveOutcome, DraftSubmission, DraftSubmissionError, ProjectDraftSubmission,
+    SaveComposerDraftInput, SubmitComposerDraftInput, SubmitProjectDraftInput,
 };
 
 pub use repository::ComposerAttachmentChunkOutcome;

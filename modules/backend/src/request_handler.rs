@@ -1319,6 +1319,9 @@ mod failed_messages;
 #[path = "request_handler/draft_submission.rs"]
 mod draft_submission;
 
+#[path = "request_handler/project_draft_submission.rs"]
+mod project_draft_submission;
+
 #[path = "request_handler/engine_config.rs"]
 mod engine_config;
 

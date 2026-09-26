@@ -301,7 +301,10 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
                 .message_flight
                 .as_ref()
                 .expect("unheld first send");
-            assert_eq!(flight.thread_id, thread_id);
+            assert_eq!(
+                flight.scope,
+                artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+            );
             assert!(application.composer_model_run_error.is_none());
             // The authoritative acknowledgment only seats the durable
             // configuration; it neither creates nor continues the send.
@@ -321,8 +324,8 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
                     .message_flight
                     .as_ref()
                     .expect("send unaffected by ack")
-                    .thread_id,
-                thread_id
+                    .scope,
+                artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
             );
         });
     });
@@ -350,7 +353,10 @@ fn explicit_policy_selection_saves_proactively_and_sends_without_hold(cx: &mut T
             _ => None,
         })
         .expect("unheld explicit send must queue its message");
-    assert_eq!(queued.thread_id, thread_id);
+    assert_eq!(
+        queued.scope,
+        artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+    );
     assert!(
         queued.draft_revision.get() > 0,
         "the send names its stored draft"
@@ -424,7 +430,10 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
             let save_request = admitted_save_request(application);
             // The send queued immediately, before any acknowledgment.
             let flight = application.message_flight.as_ref().expect("unheld flight");
-            assert_eq!(flight.thread_id, thread_id);
+            assert_eq!(
+                flight.scope,
+                artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+            );
             (retained, save_request)
         })
     });
@@ -446,7 +455,10 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
                 .message_flight
                 .as_ref()
                 .expect("send unaffected by ack");
-            assert_eq!(flight.thread_id, thread_id);
+            assert_eq!(
+                flight.scope,
+                artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+            );
             assert!(application.engine_settings.authoritative_config().is_some());
             assert!(application.composer_model_run_error.is_none());
             assert_eq!(application.composer.read(cx).draft(), "");
@@ -475,7 +487,10 @@ fn save_ack_seats_config_without_touching_the_unheld_send(cx: &mut TestAppContex
             _ => None,
         })
         .expect("unheld first send must queue its message");
-    assert_eq!(queued.thread_id, thread_id);
+    assert_eq!(
+        queued.scope,
+        artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+    );
     assert!(
         queued.draft_revision.get() > 0,
         "the send names its stored draft"
@@ -505,7 +520,10 @@ fn save_failure_does_not_hold_the_first_send(cx: &mut TestAppContext) {
                 .message_flight
                 .as_ref()
                 .expect("send not held by save failure");
-            assert_eq!(flight.thread_id, thread_id);
+            assert_eq!(
+                flight.scope,
+                artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+            );
             assert!(application.composer.read(cx).is_submitting());
             assert_eq!(application.composer.read(cx).draft(), "");
         });
@@ -556,7 +574,10 @@ fn a_send_during_a_live_run_leaves_the_steer_to_the_forge(cx: &mut TestAppContex
             _ => None,
         })
         .expect("the send reaches the Forge");
-    assert_eq!(queued.thread_id, thread_id);
+    assert_eq!(
+        queued.scope,
+        artisan_domain::ComposerDraftScope::Thread(thread_id.clone())
+    );
     assert!(queued.selection.is_some());
 }
 

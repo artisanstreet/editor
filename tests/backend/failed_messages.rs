@@ -35,7 +35,7 @@ use crate::{
 
 static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
-struct TemporaryDatabase {
+pub(super) struct TemporaryDatabase {
     directory: PathBuf,
 }
 
@@ -45,7 +45,7 @@ impl Drop for TemporaryDatabase {
     }
 }
 
-async fn storage(label: &str) -> (TemporaryDatabase, ForgeStorage) {
+pub(super) async fn storage(label: &str) -> (TemporaryDatabase, ForgeStorage) {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
         "artisan-forge-failed-messages-{label}-{}-{sequence}",
@@ -81,7 +81,7 @@ impl CommandOrigin for CountingOrigin {
     }
 }
 
-fn request(value: &str) -> RequestId {
+pub(super) fn request(value: &str) -> RequestId {
     RequestId::parse(value).unwrap()
 }
 
@@ -89,7 +89,7 @@ fn thread() -> ThreadId {
     ThreadId::parse("thread-failed").unwrap()
 }
 
-fn engine_config() -> EngineRunConfig {
+pub(super) fn engine_config() -> EngineRunConfig {
     let one = FiniteMillis::new(1).unwrap();
     let runtime = EngineRuntimeControls::new(EngineRuntimeControlsInput {
         attempt_budget: FiniteMillis::new(100).unwrap(),
@@ -136,7 +136,7 @@ fn payload() -> QueueMessagePayload {
 }
 
 /// A configured thread with one queued message `message-1`.
-async fn seed(repository: &Repository) -> FailedMessageTarget {
+pub(super) async fn seed(repository: &Repository) -> FailedMessageTarget {
     repository
         .attach_project(AttachProjectInput {
             request_id: request("attach"),
@@ -209,7 +209,7 @@ async fn fail_first(repository: &Repository) {
         .unwrap();
 }
 
-fn handler(storage: &ForgeStorage) -> RequestHandler {
+pub(super) fn handler(storage: &ForgeStorage) -> RequestHandler {
     RequestHandler::with_origin(
         storage.repository().clone(),
         Box::new(CountingOrigin::default()),
@@ -445,7 +445,7 @@ async fn a_draft_resubmitted_after_a_lost_answer_is_queued_once() {
 
     let submit = |request_id: &str, draft_revision| SubmitComposerDraft {
         request_id: request(request_id),
-        thread_id: thread(),
+        scope: ComposerDraftScope::Thread(thread()),
         draft_revision,
         selection: None,
     };
@@ -545,7 +545,7 @@ async fn a_send_without_a_model_on_an_unconfigured_thread_is_refused_as_data() {
     };
     let submit = SubmitComposerDraft {
         request_id: request("submit-unconfigured"),
-        thread_id: unconfigured.clone(),
+        scope: ComposerDraftScope::Thread(unconfigured.clone()),
         draft_revision: saved.revision,
         selection: None,
     };
@@ -635,7 +635,7 @@ async fn submit_draft(
 ) -> DraftSubmissionOutcome {
     let submit = SubmitComposerDraft {
         request_id: request("submit-picked"),
-        thread_id: thread(),
+        scope: ComposerDraftScope::Thread(thread()),
         draft_revision: revision,
         selection: None,
     };
