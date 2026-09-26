@@ -232,3 +232,44 @@ fn refused_admission_releases_the_hold() {
     );
     assert!(service.holds().status().is_idle());
 }
+
+#[test]
+fn a_parked_first_batch_is_forwarded_once_its_subscription_started() {
+    let mut service = ServiceRuntime::new_for_batch_tests();
+    let thread = ThreadId::parse("parked-thread").expect("thread");
+    // A fresh subscribe has no baseline until its response is read.
+    service.custody.on_subscribe(thread.clone(), None);
+    let (_delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(1);
+    let (event_tx, event_rx) = sync_channel::<NativeTransportEvent>(4);
+    service.deliveries.attach(delivery_rx, event_tx);
+    service.deliveries.parked = Some(PrivateDelivery::Batch(batch(&thread, 5, 6)));
+    assert!(
+        service
+            .deliveries
+            .forward_parked_if_ready(&mut service.custody)
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "no baseline yet: it stays parked"
+    );
+    assert!(service.deliveries.parked.is_some());
+
+    // The response is read: the subscription starts at the snapshot cursor.
+    service
+        .custody
+        .on_subscribe(thread.clone(), Some(ConversationCursor::new(5)));
+    assert!(
+        service
+            .deliveries
+            .forward_parked_if_ready(&mut service.custody)
+    );
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(NativeTransportEvent::PatchBatch(forwarded)) if forwarded.to_cursor() == ConversationCursor::new(6)
+    ));
+    assert!(service.deliveries.parked.is_none());
+    assert_eq!(
+        service.custody.received_cursor(),
+        Some(ConversationCursor::new(6))
+    );
+}

@@ -32,7 +32,7 @@ use super::*;
 pub(super) struct DeliveryInbox {
     pub(super) receiver: Option<tokio::sync::mpsc::Receiver<PrivateDelivery>>,
     events: Option<SyncSender<NativeTransportEvent>>,
-    parked: Option<PrivateDelivery>,
+    pub(super) parked: Option<PrivateDelivery>,
 }
 
 impl DeliveryInbox {
@@ -51,6 +51,24 @@ impl DeliveryInbox {
         if let Some(events) = self.events.as_ref() {
             let _ = publish(events, event);
         }
+    }
+
+    /// Forwards the parked delivery once custody lets it continue. Returns
+    /// `false` only when the application bridge has closed.
+    pub(super) fn forward_parked_if_ready(&mut self, custody: &mut SubscriptionCustody) -> bool {
+        let Some(events) = self.events.as_ref() else {
+            return true;
+        };
+        if !self
+            .parked
+            .as_ref()
+            .is_some_and(|parked| forwards_without_recovery(custody, parked))
+        {
+            return true;
+        }
+        self.parked
+            .take()
+            .is_none_or(|parked| forward_delivery(custody, events, parked).is_ok())
     }
 
     /// The next delivery for the command loop: the parked one first. A closed
@@ -324,6 +342,13 @@ impl ServiceRuntime {
         let mut request = std::pin::pin!(request);
         let inbox = &mut self.deliveries;
         let custody = &mut self.custody;
+        // A delivery parked during an earlier request of the same handler
+        // (the first batch of a subscription whose response was still being
+        // read) may continue the cursor by now; forward it rather than stop
+        // reading for this request too.
+        if !inbox.forward_parked_if_ready(custody) {
+            return request.await;
+        }
         loop {
             let (Some(receiver), Some(events), None) = (
                 inbox.receiver.as_mut(),
