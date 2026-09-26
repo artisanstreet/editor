@@ -390,14 +390,29 @@ What the Editor keeps after step 7, and why each is not Forge state:
 | State | Where | Why it stays |
 | --- | --- | --- |
 | FPS limit, FPS overlay, "reopen last host" hint | Editor pool (`editor_settings`) | Device-local presentation, or needed before any Forge connection exists |
-| Host invitations, TLS pins, reconnect capabilities | Credentials module | Connection bootstrap material, neither pool |
-| Machine menu memo (name, home, subtitle, avatar seed per host) | `native_hosts/catalog.rs` | Presentation cache rebuilt from the credential store on every refresh; the local tile's avatar seed is the local machine's name |
+| Host invitations, TLS pins, reconnect capabilities | Credentials module | Connection bootstrap material, neither pool. The Editor has no built-in host: a window opens the reopen hint's host (resolved to its current registration), else the first registered host, else offers to add one; only `cargo dev` (`ARTISAN_DEV_OWNED_FORGE=1`) and `ARTISAN_DEV_FORGE_HOME` connect to a Forge on this machine |
+| Machine menu memo (name, home, subtitle, avatar seed per host) | `native_hosts/catalog.rs` | Presentation cache rebuilt from the credential store on every refresh |
 | Composer view: text being typed, undo and redo, thumbnails, the per-scope save chain | `native_composer*`, `composer_draft_sync.rs` | View history and in-flight saves; the Forge draft is the stored copy |
 | Last draft revision the Forge reported per scope | `composer_draft_sync.rs` | Echo of Forge data, so a send names the revision it saved |
 | Listings, catalogs, usage rows, preferences, outbox and transcript projections | Application and view state | Renders of Forge data, replaced by each read or push and dropped on switch |
 | Selection, scroll, focus, open menus, animations | View state | Ephemeral view state |
 | Connection holds and in-flight request ids | Transport | Liveness of work in flight, not stored |
 | Dev startup receipt, frame capture | Opt-in development writers | Development tooling, allowed by the file-write guard |
+
+Connection upkeep (after step 7):
+
+- The Forge serves a connection in order and pushes after each response, so it can be mid-way
+  through a long push when the Editor's next request arrives. The Editor forwards pushes while
+  any request waits (`ServiceRuntime::exchange`); before, a thread's history push could fill the
+  delivery channel and the stream window and stall both sides until the Forge's 30 s send limit
+  dropped the connection.
+- A reconnect's cancel-and-join of the delivery task no longer waits on a full delivery channel.
+- A draft save lost with the connection releases its hold and becomes unsent text, saved again
+  (latest wins) when the service reports `Reconnected`; a host switch's drain is bounded.
+- The service reports the host registration it resolved to (`HostHome`); the window's home, label
+  and reopen hint follow it, so a newer incarnation that retired the opened one is not shown as
+  "Unavailable host".
+- The built-in "This computer" host is removed: the machine menu lists registered hosts only.
 
 Still pulled rather than pushed (cadence only, the data is the Forge's): the sidebar re-reads its
 project's thread listing every 1.5 s, and the host catalog is read again every five minutes and
