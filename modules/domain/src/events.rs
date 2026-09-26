@@ -19,8 +19,8 @@ use crate::model::{ProjectSummary, QueuedMessage, ThreadSummary};
 use crate::observation::Observation;
 use crate::time::UnixMillis;
 use crate::{
-    EngineUsageSnapshot, MessageOutbox, RunId, RunUsageResult, ThreadId, ThreadTitle, TurnId,
-    UserPreferences,
+    EngineUsageSnapshot, MessageOutbox, RecentThreadListing, RunId, RunUsageResult, ThreadId,
+    ThreadTitle, TurnId, UserPreferences,
 };
 
 /// One directory attach completed and its project identity was minted.
@@ -85,6 +85,9 @@ pub enum Event {
     ThreadRetitled(ThreadRetitled),
     /// A subscribed thread's live run reported new usage.
     RunUsage(RunUsageResult),
+    /// The recent threads across every project changed; pushed to a
+    /// connection that read them.
+    RecentThreads(RecentThreadListing),
 }
 
 /// A subscribed thread's display title changed: the generated title was

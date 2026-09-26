@@ -249,6 +249,22 @@ struct ThreadList {
   threads @0 :List(ThreadSummary);
 }
 
+# One recently active thread with the Forge-resolved line shown beneath its
+# title: the repository the project publishes to (`owner/repo`, with the
+# branch of a linked worktree) or the project's display name.
+struct RecentThread {
+  thread @0 :ThreadSummary;
+
+  # At most 256 UTF-8 bytes, nonblank.
+  subtitle @1 :Text;
+}
+
+# Recently active threads across every attached project, newest activity
+# first. Bounded to at most 100 rows by owned conversion.
+struct RecentThreadList {
+  threads @0 :List(RecentThread);
+}
+
 # Answer to an attached-project listing request. Losslessly mirrors the
 # domain's bounded `ProjectListing`: complete `Project` rows -- the exact row
 # shape carried by AttachProjectResult and the projectAttached event -- in
@@ -878,6 +894,10 @@ struct Request {
     # Builds the configuration a manual settings document describes for a
     # thread, without saving it. Fresh ordinal, existing ordinals frozen.
     resolveEngineConfiguration @45 :ResolveEngineConfigurationRequest;
+
+    # The recent threads across every project; the connection then receives
+    # their changes as recentThreads events. Fresh ordinal.
+    readRecentThreads @46 :Void;
   }
 }
 
@@ -982,6 +1002,9 @@ struct Response {
 
     # Answer to resolveEngineConfiguration. Fresh ordinal.
     engineConfigurationResolved @43 :EngineConfigurationResolution;
+
+    # Answer to readRecentThreads. Fresh ordinal.
+    recentThreads @44 :RecentThreadList;
   }
 }
 
@@ -1090,6 +1113,11 @@ struct Event {
     # The live run's latest usage report on a subscribed thread, pushed
     # whenever it changes (replaces the Editor's polling). Fresh member @9.
     runUsage @9 :ComposerState.RunUsageResult;
+
+    # The recent threads across every project, pushed whenever they change
+    # to a connection that read them (replaces the Editor's listing
+    # polling). Fresh member @10.
+    recentThreads @10 :RecentThreadList;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first

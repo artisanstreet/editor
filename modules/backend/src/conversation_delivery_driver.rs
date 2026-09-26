@@ -9,7 +9,9 @@
 //! Beside each subscription's patches, observations, outbox, and display
 //! title, the driver pushes connection-scoped host state (every engine's
 //! usage with its readiness, the user's preferences) whenever the
-//! notifier's host-state revision moves; only a changed value is sent.
+//! notifier's host-state revision moves, and, once the connection read them,
+//! the recent threads across every project whenever they change; only a
+//! changed value is sent.
 
 #![forbid(unsafe_code)]
 
@@ -40,6 +42,11 @@ use crate::conversation_delivery_writer::{
 };
 use crate::request_handler::{ActivatedConversationSubscription, ConversationConnectionContext};
 
+#[path = "conversation_delivery_driver/recent_threads.rs"]
+mod recent_threads;
+use recent_threads::DeliveredRecentThreads;
+pub(crate) use recent_threads::RequestFollowUp;
+
 /// One serialized conversation delivery owner for an authenticated
 /// connection.
 #[derive(Debug)]
@@ -56,6 +63,9 @@ pub(crate) struct ConversationDeliveryDriver {
     run_usage: BTreeMap<ThreadId, RunUsageResult>,
     /// The connection-scoped host state last pushed.
     host: DeliveredHostState,
+    /// The recent threads last served or pushed, once the connection read
+    /// them.
+    recent: Option<DeliveredRecentThreads>,
 }
 
 /// The host state last pushed to this connection and the host-state
@@ -98,6 +108,7 @@ impl ConversationDeliveryDriver {
             titles: BTreeMap::new(),
             run_usage: BTreeMap::new(),
             host: DeliveredHostState::default(),
+            recent: None,
         }
     }
 
@@ -134,8 +145,17 @@ impl ConversationDeliveryDriver {
     where
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
-        if let Some(thread_id) = outcome.stopped_thread {
+        if let Some(thread_id) = outcome.follow_up.stopped_thread {
             self.forget(&thread_id);
+        }
+        if let Some(listing) = outcome.follow_up.recent_threads {
+            // The read is what the Editor now shows; anything that changed
+            // since it was read is pushed below.
+            self.recent = Some(DeliveredRecentThreads {
+                fingerprint: None,
+                subtitle_generation: self.context.subtitle_generation(),
+                listing,
+            });
         }
 
         if let Some(subscription) = outcome.activation {
@@ -157,7 +177,8 @@ impl ConversationDeliveryDriver {
         }
         // Every request looks for a host-state change; the first one also
         // pushes the current usage.
-        self.deliver_host_state(stamp, limit, cancel).await
+        self.deliver_host_state(stamp, limit, cancel).await?;
+        self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
     fn forget(&mut self, thread_id: &ThreadId) {
@@ -200,7 +221,8 @@ impl ConversationDeliveryDriver {
                 .await?;
             self.active.insert(thread_id, subscription);
         }
-        self.deliver_host_state(stamp, limit, cancel).await
+        self.deliver_host_state(stamp, limit, cancel).await?;
+        self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
     /// Pushes the latest usage report of a subscribed thread's live run when
@@ -533,6 +555,7 @@ impl ConversationDeliveryDriver {
         self.outboxes.clear();
         self.titles.clear();
         self.run_usage.clear();
+        self.recent = None;
         writer_result
     }
 

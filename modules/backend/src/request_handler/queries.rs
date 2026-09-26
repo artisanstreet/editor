@@ -344,6 +344,7 @@ impl RequestHandler {
                 .await
             }
             Query::ReadUserPreferences(_) => self.read_user_preferences_outcome(request_id).await,
+            Query::ReadRecentThreads(_) => self.recent_threads_outcome(request_id).await,
             Query::ResolveEngineConfiguration(query) => {
                 Ok(self.resolve_engine_configuration_outcome(request_id, query))
             }

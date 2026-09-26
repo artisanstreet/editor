@@ -145,6 +145,9 @@ pub(crate) fn encode_event(
             usage,
         )
         .map_err(|_| ProtocolEncodeError::ComposerState)?,
+        Event::RecentThreads(listing) => {
+            encode_recent_threads(builder.reborrow().init_recent_threads(), listing)?;
+        }
     }
     Ok(())
 }
@@ -383,6 +386,9 @@ pub(crate) fn decode_event(
         event::Which::RunUsage(usage) => Event::RunUsage(
             crate::composer_state_codec::decode_run_usage_result(usage?)?,
         ),
+        event::Which::RecentThreads(listing) => {
+            Event::RecentThreads(decode_recent_threads(listing?)?)
+        }
     };
     Ok(ServerEvent { cursor, event })
 }

@@ -488,4 +488,6 @@ pub enum Query {
     ReadUserPreferences(ReadUserPreferences),
     /// See [`ResolveEngineConfiguration`](crate::ResolveEngineConfiguration).
     ResolveEngineConfiguration(crate::ResolveEngineConfiguration),
+    /// See [`ReadRecentThreads`](crate::ReadRecentThreads).
+    ReadRecentThreads(crate::ReadRecentThreads),
 }

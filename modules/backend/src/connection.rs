@@ -51,7 +51,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::time::Duration;
 
-use artisan_domain::{ConversationRequest, RequestId, ThreadId, UnixMillis};
+use artisan_domain::{RequestId, UnixMillis};
 use artisan_protocol::{
     ClientRequest, ConnectionId, ErrorCode, ErrorDetail, FrameId, ProtocolFailure, ProtocolVersion,
     ResponsePayload, ServerResponse, Welcome, WireEnvelope, WireEnvelopeBody,
@@ -64,7 +64,7 @@ use artisan_transport::{
 use quinn::{ClosedStream, Connection, ConnectionError, RecvStream, SendStream, VarInt};
 use thiserror::Error;
 
-use crate::conversation_delivery_driver::ConversationDeliveryDriver;
+use crate::conversation_delivery_driver::{ConversationDeliveryDriver, RequestFollowUp};
 use crate::conversation_subscription_registry::ActivateError;
 use crate::credential_authority::{
     CredentialAuthenticationError, CredentialAuthority, CredentialEntropyError,
@@ -209,7 +209,7 @@ pub enum DeliveryStageError {
 #[derive(Debug)]
 pub(crate) struct RequestDispatchOutcome {
     pub(crate) activation: Option<ActivatedConversationSubscription>,
-    pub(crate) stopped_thread: Option<ThreadId>,
+    pub(crate) follow_up: RequestFollowUp,
 }
 
 /// Terminal result of the connection-owned service loop, retaining the local
@@ -905,12 +905,6 @@ async fn drive_request_stream(
     let receipt = dispatch_server_request_with_receipt(send, recv, |incoming| async move {
         let request_id = incoming.request_id;
         let request = incoming.request;
-        let stopped_thread = match &request {
-            ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe)) => {
-                Some(unsubscribe.thread_id.clone())
-            }
-            _ => None,
-        };
         let (answered, receipt) = match request {
             ClientRequest::Lifecycle(_request) if !lifecycle_witness.supported => (
                 Err(unsupported_feature_failure(&request_id)),
@@ -942,12 +936,10 @@ async fn drive_request_stream(
                         .await
                         .into_parts(),
                 };
+                let follow_up = RequestFollowUp::after(&request, &answered);
                 (
                     answered,
-                    PostResponseReceipt::Handler {
-                        receipt,
-                        stopped_thread,
-                    },
+                    PostResponseReceipt::Handler { receipt, follow_up },
                 )
             }
         };
@@ -982,10 +974,7 @@ async fn complete_request_receipt(
     // finished send side, even when activation later fails or is cancelled.
     streams.mark_send_finished();
     match receipt {
-        PostResponseReceipt::Handler {
-            receipt,
-            stopped_thread,
-        } => {
+        PostResponseReceipt::Handler { receipt, follow_up } => {
             let activation = match context {
                 Some(context) => {
                     handler
@@ -996,14 +985,14 @@ async fn complete_request_receipt(
             };
             Ok(RequestDispatchOutcome {
                 activation,
-                stopped_thread,
+                follow_up,
             })
         }
         PostResponseReceipt::Lifecycle(receipt) => {
             complete_lifecycle_receipt(streams, receipt, cancel).await?;
             Ok(RequestDispatchOutcome {
                 activation: None,
-                stopped_thread: None,
+                follow_up: RequestFollowUp::default(),
             })
         }
     }
@@ -1038,7 +1027,7 @@ fn unsupported_feature_failure(request_id: &RequestId) -> ProtocolFailure {
 enum PostResponseReceipt {
     Handler {
         receipt: RequestHandlerReceipt,
-        stopped_thread: Option<ThreadId>,
+        follow_up: RequestFollowUp,
     },
     Lifecycle(LifecycleControlReceipt),
 }

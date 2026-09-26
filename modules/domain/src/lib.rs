@@ -222,6 +222,11 @@ pub use manual_engine_configuration::{
     MAX_MANUAL_CONFIGURATION_LINES, ManualEngineConfiguration, ResolveEngineConfiguration,
 };
 
+pub mod recent_threads;
+pub use recent_threads::{
+    RECENT_THREADS_MAX, ReadRecentThreads, RecentThread, RecentThreadListing,
+};
+
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,

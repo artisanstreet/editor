@@ -193,6 +193,7 @@ pub(crate) struct ConversationConnectionContext {
     notifier: ConversationCommitNotifier,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     run_cancellation: Option<RunCancellationRegistry>,
+    project_subtitles: Option<crate::project_subtitles::ProjectSubtitles>,
     /// Held from this connection's first handled request: an Editor
     /// observing usage (lifecycle requests never reach the handler).
     usage_observer: std::sync::OnceLock<crate::account_usage_service::UsageObserver>,
@@ -365,6 +366,7 @@ pub struct RequestHandler {
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
     project_repository: Option<crate::project_repository_service::ProjectRepositoryService>,
+    project_subtitles: Option<crate::project_subtitles::ProjectSubtitles>,
 }
 
 impl fmt::Debug for RequestHandler {
@@ -499,6 +501,7 @@ impl RequestHandler {
             account_usage: None,
             rich_link_resolver: None,
             project_repository: None,
+            project_subtitles: None,
         }
     }
 
@@ -526,6 +529,7 @@ impl RequestHandler {
             account_usage: None,
             rich_link_resolver: None,
             project_repository: None,
+            project_subtitles: None,
         }
     }
 
@@ -554,6 +558,7 @@ impl RequestHandler {
             account_usage: None,
             rich_link_resolver: None,
             project_repository: None,
+            project_subtitles: None,
         }
     }
 
@@ -636,12 +641,16 @@ impl RequestHandler {
     /// demand and owns no persisted state. Without it,
     /// `QueryProjectRepository` answers the established
     /// unsupported-capability failure instead of fabricating repository
-    /// facts.
+    /// facts, and recent threads show their projects' display names. The
+    /// subtitle cache every connection shares observes through it.
     #[must_use]
     pub fn with_project_repository_service(
         mut self,
         service: crate::project_repository_service::ProjectRepositoryService,
     ) -> Self {
+        self.project_subtitles = Some(crate::project_subtitles::ProjectSubtitles::new(
+            service.clone(),
+        ));
         self.project_repository = Some(service);
         self
     }
@@ -680,6 +689,7 @@ impl RequestHandler {
             notifier: self.conversation_commit_notifier.clone()?,
             account_usage: self.account_usage.clone(),
             run_cancellation: self.run_cancellation.clone(),
+            project_subtitles: self.project_subtitles.clone(),
             usage_observer: std::sync::OnceLock::new(),
         };
         Some(context)
@@ -1317,6 +1327,9 @@ mod attach_project;
 
 #[path = "request_handler/queries.rs"]
 mod queries;
+
+#[path = "request_handler/recent_threads.rs"]
+mod recent_threads;
 
 #[path = "request_handler/failures.rs"]
 mod failures;
