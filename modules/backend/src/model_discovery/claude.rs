@@ -10,7 +10,7 @@
 //! published row. Rows never leave this process except through the catalogue
 //! itself, and their order is always the provider's, never re-sorted here.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -28,9 +28,12 @@ const SURFACE: &str = "cc";
 
 /// Probes Claude; `None` when neither the published document nor a served
 /// cache is readable.
-pub(super) async fn discover_claude() -> Option<Vec<DiscoveredModel>> {
+pub(super) async fn discover_claude(home: Option<PathBuf>) -> Option<Vec<DiscoveredModel>> {
     let published = fetch_published().await;
-    let served = read_served_cache().await;
+    let served = match home {
+        Some(home) => read_served_cache(&home).await,
+        None => None,
+    };
     let rows = merge_rows(published.as_ref(), served.as_ref());
     (!rows.is_empty()).then_some(rows)
 }
@@ -282,8 +285,8 @@ fn map_thinking(value: &Value, runtime: &Value) -> DiscoveredThinking {
 
 /// Reads the most recently fetched served `*-cc.json` cache the CLI wrote,
 /// which is the list its picker currently shows for the signed-in account.
-async fn read_served_cache() -> Option<Value> {
-    let directory = claude_cache_directory()?;
+async fn read_served_cache(home: &Path) -> Option<Value> {
+    let directory = home.join(".claude").join("cache").join("model-catalog");
     let mut entries = tokio::fs::read_dir(&directory).await.ok()?;
     let mut newest: Option<(u64, Value)> = None;
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -313,24 +316,6 @@ async fn read_served_cache() -> Option<Value> {
         }
     }
     newest.map(|(_, value)| value)
-}
-
-fn claude_cache_directory() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("CLAUDE_CONFIG_DIR") {
-        let home = home.trim();
-        if !home.is_empty() {
-            return Some(PathBuf::from(home).join("cache").join("model-catalog"));
-        }
-    }
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    (!home.trim().is_empty()).then(|| {
-        PathBuf::from(home)
-            .join(".claude")
-            .join("cache")
-            .join("model-catalog")
-    })
 }
 
 #[cfg(test)]

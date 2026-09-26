@@ -1116,7 +1116,7 @@ async fn fixture_kill_tree_reaps_bounded_without_orphaned_pipes() {
             OsString::from("echo READY; sleep 3 & sleep 30"),
         ],
     );
-    let mut child = spawn_acp_child(program, &args, None).expect("acp child spawns");
+    let mut child = spawn_acp_child(program, &args, None, None).expect("acp child spawns");
     let pipes = child.take_pipes().expect("acp pipes");
     let mut reader = BufReader::new(pipes.stdout);
     let mut line = String::new();
@@ -1168,7 +1168,7 @@ async fn acp_zero_budget_settles_the_quarantine_path_bounded() {
         OsStr::new("sh"),
         vec![OsString::from("-c"), OsString::from("sleep 30")],
     );
-    let mut child = spawn_acp_child(program, &args, None).expect("acp child spawns");
+    let mut child = spawn_acp_child(program, &args, None, None).expect("acp child spawns");
     // Lifeline closed up front, exactly like the executor teardown.
     drop(child.take_pipes());
     let settled = tokio::time::timeout(

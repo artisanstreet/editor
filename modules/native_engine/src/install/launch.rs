@@ -335,9 +335,13 @@ pub fn engine_home(state_root: &Path, engine: ManagedEngine) -> PathBuf {
     state_root.join("toolchain").join(engine.id()).join("home")
 }
 
+/// Creates `<state>/toolchain/<engine>/home` (private) and its two managed
+/// ancestors; the Forge state directory itself must already exist.
 fn prepare_home(home: &Path) -> Result<(), ManagedEngineError> {
-    if let Some(parent) = home.parent() {
-        native_files::ensure_directory(parent).map_err(|_| ManagedEngineError::Io)?;
+    let engine_root = home.parent().ok_or(ManagedEngineError::UnsafePath)?;
+    let toolchain = engine_root.parent().ok_or(ManagedEngineError::UnsafePath)?;
+    for directory in [toolchain, engine_root] {
+        native_files::ensure_directory(directory).map_err(|_| ManagedEngineError::Io)?;
     }
     native_files::ensure_private_directory(home).map_err(|_| ManagedEngineError::UnsafePath)
 }

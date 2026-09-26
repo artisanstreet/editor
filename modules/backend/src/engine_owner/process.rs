@@ -485,23 +485,19 @@ pub(crate) fn spawn_configured_engine(
 ///
 /// Extends (never forks) the owner custody contract: the executable is the
 /// verified capability path, argv is exactly `app-server --stdio`, and the
-/// working directory is the exact project root. The environment is inherited
-/// ambiently so the child runs as the same authenticated Codex account the
-/// backend usage probes observe: an explicit ambient `CODEX_HOME` selects
-/// that account, otherwise Codex resolves its default user home. No managed
-/// private home is ever seated here; the previous managed-home override
-/// pointed at a directory that does not exist and broke dispatch for the
-/// ambient authenticated account. This mirrors the established Claude
-/// and usage-probe convention (`{ ...process.env }` plus explicit overrides
-/// only). Executable/version certification stays on the capability and
-/// revalidation remains the last authority operation before the child is
-/// created. Per-thread isolation is the separate child plus its project-root
-/// working directory, not a separate account home.
+/// working directory is the exact project root. The environment is exactly
+/// the launch's Forge-owned environment: the child runs as the account
+/// signed in under the managed `CODEX_HOME`, never an ambient one.
+/// Executable/version certification stays on the capability and revalidation
+/// remains the last authority operation before the child is created.
 pub(crate) fn spawn_codex_engine(
     launch: &artisan_native_engine::VerifiedCodexLaunch,
     project_root: &RootPath,
 ) -> io::Result<EngineChild> {
-    let command = codex_engine_command(launch.executable_path(), project_root);
+    let mut command = codex_engine_command(launch.executable_path(), project_root);
+    command
+        .env_clear()
+        .envs(launch.environment().iter().cloned());
 
     launch
         .revalidate()
@@ -509,16 +505,10 @@ pub(crate) fn spawn_codex_engine(
     EngineChild::spawn(command, true)
 }
 
-/// Builds the Codex app-server command with the ambient account environment.
-///
-/// The command carries the verified executable, exactly
+/// Builds the Codex app-server command: the verified executable, exactly
 /// `app-server --stdio`, the project-root working directory, and piped
-/// stdio. The environment is deliberately left inherited: the child observes
-/// the same ambient/explicit `CODEX_HOME` account as the backend usage
-/// probes, and loader essentials (`PATH`, `SYSTEMROOT`) travel untouched.
-/// No `CODEX_HOME` override is ever inserted here; inserting one would seat
-/// dispatch at a managed home that does not exist instead of the
-/// authenticated ambient account.
+/// stdio. The caller replaces the environment with the launch's explicit
+/// Forge-owned environment (`CODEX_HOME` in the managed engine home).
 fn codex_engine_command(executable: &Path, project_root: &RootPath) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(executable);
     command
@@ -549,6 +539,9 @@ pub(crate) fn spawn_claude_engine(
 ) -> io::Result<EngineChild> {
     let mut command = tokio::process::Command::new(launch.executable_path());
     command.current_dir(Path::new(project_root.as_str()));
+    command
+        .env_clear()
+        .envs(launch.environment().iter().cloned());
     command.args(args);
     command
         .stdin(Stdio::piped())

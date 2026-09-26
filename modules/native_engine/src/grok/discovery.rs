@@ -1,22 +1,18 @@
-//! Grok Build CLI executable discovery.
+//! Grok Build CLI executable resolution and version parsing.
 //!
-//! Precedence mirrors the TypeScript engine (`executable: "grok"` default in
-//! `modules/engines/src/grok/engine.ts`) plus the sibling Codex worker
-//! override convention (`ARTISAN_CODEX_EXECUTABLE` in
-//! `modules/engines/src/codex/executable.ts`):
-//!
-//! 1. explicit `ARTISAN_GROK_EXECUTABLE` override (verbatim, spaces intact);
-//! 2. normal installation/`PATH` resolution.
-//!
-//! This module performs no process spawns and reads the live environment only
-//! through [`resolve_live`]; everything else takes fixture inputs so tests
-//! never touch the host.
+//! The executable is the Forge-managed Grok generation (see
+//! `crate::engine_core`) or the absolute `ARTISAN_GROK_EXECUTABLE` developer
+//! override; `PATH` is never searched. xAI publishes no digest for its
+//! binaries, so no managed Grok generation exists today and only the
+//! override can resolve.
 
 use std::path::{Path, PathBuf};
 
-/// Native override convention mirroring the sibling Codex/Claude workers.
-/// A non-blank value here wins over every lookup below.
-pub const GROK_EXECUTABLE_ENV: &str = "ARTISAN_GROK_EXECUTABLE";
+use crate::engine_core::{LaunchSource, ManagedEngine, resolve_launch_target};
+
+/// The developer override: an absolute executable path, reported as an
+/// override in engine status.
+pub const GROK_EXECUTABLE_ENV: &str = ManagedEngine::Grok.override_env();
 
 /// Default Grok Build binary name from the TypeScript engine definition.
 pub const GROK_BINARY_NAME: &str = "grok";
@@ -28,15 +24,14 @@ pub const GROK_VERSION_ARGS: &[&str] = &["--version"];
 /// Non-billable auth probe arguments from the TypeScript Grok definition.
 pub const GROK_AUTH_PROBE_ARGS: &[&str] = &["--no-auto-update", "models"];
 
-/// Where a resolved Grok binary came from. Override and `PATH` lookup stay
-/// distinct so later packets can explain the selection.
+/// Where a resolved Grok binary came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrokResolveSource {
     ExplicitOverride,
-    PathLookup,
+    Managed,
 }
 
-/// A Grok binary resolved through [`resolve_grok_binary`] or [`resolve_live`].
+/// A Grok binary resolved through [`resolve_live`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedGrokBinary {
     path: PathBuf,
@@ -50,87 +45,25 @@ impl ResolvedGrokBinary {
         &self.path
     }
 
-    /// Returns whether the path came from the explicit override or `PATH`.
+    /// Returns whether the path is the managed generation or the override.
     #[must_use]
     pub const fn source(&self) -> GrokResolveSource {
         self.source
     }
 }
 
-/// Candidate binary file names for the host platform.
-fn candidate_binary_names() -> &'static [&'static str] {
-    #[cfg(windows)]
-    {
-        &["grok.exe", "grok"]
-    }
-    #[cfg(not(windows))]
-    {
-        &["grok"]
-    }
-}
-
-/// Trims an explicit override value. Blank values fall through to `PATH`
-/// lookup instead of producing an empty path.
-#[must_use]
-pub fn explicit_override(raw: Option<&str>) -> Option<PathBuf> {
-    raw.map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// Searches `PATH`-style directories for the Grok binary. Candidate paths
-/// containing spaces flow through untouched as [`PathBuf`] (no splitting or
-/// quoting); the first existing candidate wins.
-pub fn find_grok_on_path(
-    path_var: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let path_var = path_var.filter(|value| !value.trim().is_empty())?;
-    for directory in std::env::split_paths(path_var) {
-        if directory.as_os_str().is_empty() {
-            continue;
-        }
-        for name in candidate_binary_names() {
-            let candidate = directory.join(name);
-            if exists(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Resolves the Grok binary from fixture inputs: the explicit override wins;
-/// otherwise normal installation/`PATH` resolution applies. Returns `None`
-/// when no binary is found (the live probe reports this as not installed,
+/// Resolves the Grok binary for the registered Forge. Returns `None` when
+/// Grok is not installed (the live probe reports this as not installed,
 /// never as authenticated).
 #[must_use]
-pub fn resolve_grok_binary(
-    override_raw: Option<&str>,
-    path_var: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<ResolvedGrokBinary> {
-    if let Some(path) = explicit_override(override_raw) {
-        return Some(ResolvedGrokBinary {
-            path,
-            source: GrokResolveSource::ExplicitOverride,
-        });
-    }
-    find_grok_on_path(path_var, exists).map(|path| ResolvedGrokBinary {
-        path,
-        source: GrokResolveSource::PathLookup,
-    })
-}
-
-/// Resolves the Grok binary from the live process environment
-/// (`ARTISAN_GROK_EXECUTABLE`, then `PATH` with a filesystem existence
-/// check). Returns `None` when no `grok` CLI is installed.
-#[must_use]
 pub fn resolve_live() -> Option<ResolvedGrokBinary> {
-    let override_raw = std::env::var(GROK_EXECUTABLE_ENV).ok();
-    let path_var = std::env::var_os("PATH").and_then(|value| value.into_string().ok());
-    resolve_grok_binary(override_raw.as_deref(), path_var.as_deref(), |path| {
-        path.is_file()
+    let target = resolve_launch_target(ManagedEngine::Grok).ok()?;
+    Some(ResolvedGrokBinary {
+        path: target.executable().to_path_buf(),
+        source: match target.source() {
+            LaunchSource::Managed => GrokResolveSource::Managed,
+            LaunchSource::Override => GrokResolveSource::ExplicitOverride,
+        },
     })
 }
 

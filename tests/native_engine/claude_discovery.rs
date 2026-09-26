@@ -1,17 +1,16 @@
-//! Integration coverage for Claude executable discovery.
+//! Integration coverage for Claude executable selection.
 //!
-//! Exercises the public `artisan_native_engine::claude` discovery API:
-//! override precedence, blank handling, byte bounds, `PATH` search order,
-//! verbatim paths with spaces, and the live missing-binary spawn failure.
+//! Exercises the public  discovery API:
+//! override precedence, blank handling, byte bounds, verbatim paths with
+//! spaces, the managed-only fallback (never ), and the live
+//! missing-binary spawn failure.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use artisan_native_engine::claude::{
-    CLAUDE_DEFAULT_COMMAND, ClaudeDiscoveryError, ClaudeExecutableSource, ClaudeProbeOptions,
-    ClaudeProbeRunner, candidate_file_names, discover_claude_executable, search_path_for,
-    select_override_value,
+    CLAUDE_EXECUTABLE_ENV_VAR, ClaudeDiscoveryError, ClaudeExecutableSource, ClaudeProbeOptions,
+    ClaudeProbeRunner, discover_claude_executable, select_override_value,
 };
 
 #[test]
@@ -41,30 +40,13 @@ fn overlong_override_is_rejected_without_a_path() {
 }
 
 #[test]
-fn candidate_names_cover_the_console_binary() {
-    assert!(candidate_file_names().contains(&CLAUDE_DEFAULT_COMMAND));
-    if cfg!(windows) {
-        assert!(candidate_file_names().contains(&"claude.exe"));
+fn without_a_managed_install_claude_is_not_resolved_from_path() {
+    if std::env::var_os(CLAUDE_EXECUTABLE_ENV_VAR).is_none() {
+        assert_eq!(
+            discover_claude_executable(None),
+            Err(ClaudeDiscoveryError::NotInstalled)
+        );
     }
-}
-
-#[test]
-fn path_search_is_ordered_and_space_safe() {
-    let spaced = PathBuf::from("D:\\Tools\\Claude Home\\bin");
-    let plain = PathBuf::from("D:\\Tools\\bin");
-    let want = spaced.join("claude.exe");
-    let found = search_path_for(
-        [plain.clone(), spaced.clone()],
-        &["claude.exe", "claude"],
-        |path| path == want.as_path(),
-    );
-    assert_eq!(found, Some(spaced.join("claude.exe")));
-
-    let missing = search_path_for([plain], &["claude"], |_| false);
-    assert_eq!(missing, None);
-
-    let skipped_empty = search_path_for([PathBuf::new()], &["claude"], |_| true);
-    assert_eq!(skipped_empty, None);
 }
 
 #[test]

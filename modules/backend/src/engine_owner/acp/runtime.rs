@@ -148,9 +148,10 @@ impl AcpChild {
 
 /// Spawns one ACP agent with piped stdio and no shell.
 ///
-/// The environment is inherited (PATH resolution plus ambient auth),
-/// mirroring the TypeScript factory's `env: process.env` evidence; no
-/// command interpreter is ever inserted between the caller and the agent.
+/// With `environment` the child starts from exactly that environment (the
+/// Forge-owned engine environment); `None` inherits the caller's and is used
+/// only by fixtures. No command interpreter is ever inserted between the
+/// caller and the agent.
 ///
 /// # Errors
 ///
@@ -160,8 +161,12 @@ pub(crate) fn spawn_acp_child(
     program: &OsStr,
     args: &[OsString],
     cwd: Option<&Path>,
+    environment: Option<&[(OsString, OsString)]>,
 ) -> io::Result<AcpChild> {
     let mut command = tokio::process::Command::new(program);
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment.iter().cloned());
+    }
     for arg in args {
         command.arg(arg);
     }

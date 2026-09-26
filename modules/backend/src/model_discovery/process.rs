@@ -1,9 +1,9 @@
 //! Bounded subprocess execution for discovery probes.
 //!
 //! Every probe spawns one finite command, captures bounded stdout/stderr,
-//! and enforces a single deadline with kill-and-reap. Arguments are never
-//! reinterpreted by a command interpreter; only Windows `.cmd`/`.bat` shims
-//! are launched through `cmd.exe` because they are not executable images.
+//! and enforces a single deadline with kill-and-reap. The program is always a
+//! Forge-managed executable spawned with its explicit environment; arguments
+//! are never reinterpreted by a command interpreter.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -24,12 +24,14 @@ pub(crate) struct BoundedOutput {
 /// Returns `None` when the command cannot be spawned, exceeds the deadline,
 /// or produces undecodable output beyond the bound.
 pub(crate) async fn run_bounded(
-    program: &str,
+    program: &super::EngineProgram,
     args: &[&str],
     timeout: Duration,
     max_bytes: usize,
 ) -> Option<BoundedOutput> {
-    let mut child = command_for(program)
+    let mut child = Command::new(&program.executable)
+        .env_clear()
+        .envs(program.environment.iter().cloned())
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -82,21 +84,5 @@ where
             return Err(());
         }
         buffer.extend_from_slice(&chunk[..read]);
-    }
-}
-
-/// Builds the process command, routing Windows batch shims through `cmd.exe`.
-fn command_for(program: &str) -> Command {
-    let is_batch = std::path::Path::new(program)
-        .extension()
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-        });
-    if cfg!(windows) && is_batch {
-        let mut command = Command::new("cmd.exe");
-        command.arg("/C").arg(program);
-        command
-    } else {
-        Command::new(program)
     }
 }

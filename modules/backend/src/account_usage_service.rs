@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -46,7 +47,7 @@ use artisan_native_engine::account_usage::{ProviderUsage, UsageReaderError};
 use tokio::task::JoinSet;
 
 use super::account_usage_cursor::{CursorUsageConfig, CursorUsageError, read_cursor_usage};
-use artisan_native_engine::{ClaudeUsageConfig, CliLaunch, CodexUsageConfig};
+use artisan_native_engine::{ClaudeUsageConfig, CodexUsageConfig};
 
 /// Freshness window for cached per-engine reports (180 seconds).
 ///
@@ -62,6 +63,7 @@ pub const ACCOUNT_USAGE_PER_ENGINE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const READ_TIMED_OUT: &str = "engine usage read timed out";
 const READ_FAILED: &str = "engine usage read failed";
+const NOT_INSTALLED: &str = "engine is not installed on this Forge";
 const UNREPRESENTABLE_READ: &str = "provider usage could not be represented";
 const UNKNOWN_ENGINE: &str = "unknown engine id";
 const GROK_UNSUPPORTED: &str = "Grok Build exposes no account-usage surface.";
@@ -217,17 +219,29 @@ pub trait AccountUsageReader: fmt::Debug + Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>>;
 }
 
+/// Where a usage reader's CLI comes from.
+#[derive(Clone, Debug)]
+pub enum UsageLaunch<C> {
+    /// A fixed configuration (tests and fixtures).
+    Fixed(C),
+    /// The Forge-managed engine of this database, resolved at every read so
+    /// installs, updates, and rollbacks apply without a restart.
+    Managed(PathBuf),
+}
+
 /// Bounded Codex `account/rateLimits/read` roster reader.
 #[derive(Clone, Debug)]
 pub struct CodexAccountUsageReader {
-    config: CodexUsageConfig,
+    launch: UsageLaunch<CodexUsageConfig>,
 }
 
 impl CodexAccountUsageReader {
     /// Creates a Codex roster reader from its CLI configuration.
     #[must_use]
     pub fn new(config: CodexUsageConfig) -> Self {
-        Self { config }
+        Self {
+            launch: UsageLaunch::Fixed(config),
+        }
     }
 }
 
@@ -243,12 +257,18 @@ impl AccountUsageReader for CodexAccountUsageReader {
     fn read(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>> {
-        let config = self.config.clone();
+        let launch = self.launch.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || artisan_native_engine::read_codex_usage(&config))
-                .await
-                .map_err(|_| ReaderFailure::unavailable(READ_FAILED))?
-                .map_err(ReaderFailure::from)
+            tokio::task::spawn_blocking(move || {
+                let config = match launch {
+                    UsageLaunch::Fixed(config) => config,
+                    UsageLaunch::Managed(database) => CodexUsageConfig::managed(&database)
+                        .map_err(|_| ReaderFailure::unavailable(NOT_INSTALLED))?,
+                };
+                artisan_native_engine::read_codex_usage(&config).map_err(ReaderFailure::from)
+            })
+            .await
+            .map_err(|_| ReaderFailure::unavailable(READ_FAILED))?
         })
     }
 }
@@ -256,14 +276,16 @@ impl AccountUsageReader for CodexAccountUsageReader {
 /// Bounded `claude -p /usage` roster reader.
 #[derive(Clone, Debug)]
 pub struct ClaudeAccountUsageReader {
-    config: ClaudeUsageConfig,
+    launch: UsageLaunch<ClaudeUsageConfig>,
 }
 
 impl ClaudeAccountUsageReader {
     /// Creates a Claude roster reader from its CLI configuration.
     #[must_use]
     pub fn new(config: ClaudeUsageConfig) -> Self {
-        Self { config }
+        Self {
+            launch: UsageLaunch::Fixed(config),
+        }
     }
 }
 
@@ -279,12 +301,18 @@ impl AccountUsageReader for ClaudeAccountUsageReader {
     fn read(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>> {
-        let config = self.config.clone();
+        let launch = self.launch.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || artisan_native_engine::read_claude_usage(&config))
-                .await
-                .map_err(|_| ReaderFailure::unavailable(READ_FAILED))?
-                .map_err(ReaderFailure::from)
+            tokio::task::spawn_blocking(move || {
+                let config = match launch {
+                    UsageLaunch::Fixed(config) => config,
+                    UsageLaunch::Managed(database) => ClaudeUsageConfig::managed(&database)
+                        .map_err(|_| ReaderFailure::unavailable(NOT_INSTALLED))?,
+                };
+                artisan_native_engine::read_claude_usage(&config).map_err(ReaderFailure::from)
+            })
+            .await
+            .map_err(|_| ReaderFailure::unavailable(READ_FAILED))?
         })
     }
 }
@@ -398,15 +426,15 @@ impl AccountUsageService {
     /// Creates the production roster: Codex, Claude, Cursor, then the
     /// unsupported Grok Build and `OpenCode` entries.
     #[must_use]
-    pub fn with_defaults(codex: &CliLaunch, claude: &CliLaunch, cursor: CursorUsageConfig) -> Self {
+    pub fn with_defaults(database_path: &Path, cursor: CursorUsageConfig) -> Self {
         Self::with_readers(
             vec![
-                Arc::new(CodexAccountUsageReader::new(CodexUsageConfig::launched(
-                    codex,
-                ))) as Arc<dyn AccountUsageReader>,
-                Arc::new(ClaudeAccountUsageReader::new(ClaudeUsageConfig::launched(
-                    claude,
-                ))) as Arc<dyn AccountUsageReader>,
+                Arc::new(CodexAccountUsageReader {
+                    launch: UsageLaunch::Managed(database_path.to_path_buf()),
+                }) as Arc<dyn AccountUsageReader>,
+                Arc::new(ClaudeAccountUsageReader {
+                    launch: UsageLaunch::Managed(database_path.to_path_buf()),
+                }) as Arc<dyn AccountUsageReader>,
                 Arc::new(CursorAccountUsageReader::new(cursor)) as Arc<dyn AccountUsageReader>,
                 Arc::new(UnsupportedAccountUsageReader::new(
                     "grok",

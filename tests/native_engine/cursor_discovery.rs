@@ -1,136 +1,15 @@
-//! Cursor executable discovery precedence and version-parsing fixtures.
-//!
-//! Registration (controller-owned, not part of this packet):
-//! `modules/native_engine/Cargo.toml` gains a `rust_test` target for
-//! `cursor_discovery.rs` depending on `//modules/native_engine:native_engine`,
-//! plus a Cargo `[[test]] cursor_discovery` entry in
-//! `modules/native_engine/Cargo.toml`.
+//! Cursor resolution and version-parsing fixtures. The executable is only
+//! ever the Forge-managed generation or the absolute developer override;
+//! `PATH` is never searched.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
-use artisan_native_engine::cursor::{
-    CursorResolveSource, explicit_override, find_cursor_on_path, parse_cursor_version,
-    resolve_cursor_binary,
-};
-
-fn existence(existing: &[&str]) -> HashMap<PathBuf, bool> {
-    existing
-        .iter()
-        .map(|path| (PathBuf::from(path), true))
-        .collect()
-}
-
-fn exists(map: &HashMap<PathBuf, bool>) -> impl Fn(&Path) -> bool + '_ {
-    move |path| map.get(path).copied().unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn path_var(directories: &[&str]) -> String {
-    directories.join(";")
-}
-
-#[cfg(not(windows))]
-fn path_var(directories: &[&str]) -> String {
-    directories.join(":")
-}
+use artisan_native_engine::cursor::{CURSOR_EXECUTABLE_ENV, parse_cursor_version, resolve_live};
 
 #[test]
-fn explicit_override_wins_verbatim_with_spaces() {
-    let configured = "C:\\Program Files\\Custom Tools\\cursor-agent.exe";
-    let map = existence(&["C:\\Tools\\cursor-agent.exe"]);
-    let resolved = resolve_cursor_binary(
-        Some(&format!("  {configured}  ")),
-        Some(&path_var(&["C:\\Tools"])),
-        exists(&map),
-    )
-    .unwrap();
-    assert_eq!(resolved.path(), Path::new(configured));
-    assert_eq!(resolved.source(), CursorResolveSource::ExplicitOverride);
-}
-
-#[test]
-fn blank_override_falls_through_to_path_lookup() {
-    let candidate = if cfg!(windows) {
-        "C:\\Tools\\cursor-agent.exe"
-    } else {
-        "/opt/cursor/cursor-agent"
-    };
-    let map = existence(&[candidate]);
-    let resolved = resolve_cursor_binary(
-        Some("   "),
-        Some(&path_var(&[if cfg!(windows) {
-            "C:\\Tools"
-        } else {
-            "/opt/cursor"
-        }])),
-        exists(&map),
-    )
-    .unwrap();
-    assert_eq!(resolved.path(), Path::new(candidate));
-    assert_eq!(resolved.source(), CursorResolveSource::PathLookup);
-    assert_eq!(explicit_override(Some("  ")), None);
-    assert_eq!(explicit_override(None), None);
-}
-
-#[test]
-fn cursor_agent_is_preferred_over_agent_names() {
-    let (directory, preferred, fallback) = if cfg!(windows) {
-        (
-            "C:\\Tools",
-            "C:\\Tools\\cursor-agent.exe",
-            "C:\\Tools\\agent.cmd",
-        )
-    } else {
-        (
-            "/opt/cursor",
-            "/opt/cursor/cursor-agent",
-            "/opt/cursor/agent",
-        )
-    };
-    let map = existence(&[preferred, fallback]);
-    let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
-    assert_eq!(resolved.path(), Path::new(preferred));
-}
-
-#[test]
-fn typescript_default_agent_names_resolve_as_fallback() {
-    let (directory, fallback) = if cfg!(windows) {
-        ("C:\\Tools", "C:\\Tools\\agent.cmd")
-    } else {
-        ("/opt/cursor", "/opt/cursor/agent")
-    };
-    let map = existence(&[fallback]);
-    let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
-    assert_eq!(resolved.path(), Path::new(fallback));
-    assert_eq!(resolved.source(), CursorResolveSource::PathLookup);
-}
-
-#[test]
-fn paths_containing_spaces_resolve_without_quoting() {
-    let (directory, candidate) = if cfg!(windows) {
-        (
-            "D:\\My Tools\\Cursor Bin",
-            "D:\\My Tools\\Cursor Bin\\cursor-agent.exe",
-        )
-    } else {
-        ("/opt/cursor code", "/opt/cursor code/cursor-agent")
-    };
-    let map = existence(&[candidate]);
-    let resolved =
-        resolve_cursor_binary(None, Some(&path_var(&[directory])), exists(&map)).unwrap();
-    assert_eq!(resolved.path(), Path::new(candidate));
-}
-
-#[test]
-fn missing_everything_reports_no_binary() {
-    let map = existence(&[]);
-    assert!(resolve_cursor_binary(None, Some(&path_var(&["C:\\Tools"])), exists(&map)).is_none());
-    assert!(resolve_cursor_binary(None, None, exists(&map)).is_none());
-    assert!(resolve_cursor_binary(None, Some("   "), exists(&map)).is_none());
-    assert!(find_cursor_on_path(Some(&path_var(&["C:\\Tools"])), exists(&map)).is_none());
+fn without_a_managed_install_cursor_is_not_resolved_from_path() {
+    assert_eq!(CURSOR_EXECUTABLE_ENV, "ARTISAN_CURSOR_EXECUTABLE");
+    if std::env::var_os(CURSOR_EXECUTABLE_ENV).is_none() {
+        assert!(resolve_live().is_none());
+    }
 }
 
 #[test]

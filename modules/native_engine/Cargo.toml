@@ -25,10 +25,6 @@ winapi-util.workspace = true
 workspace = true
 
 [[test]]
-name = "codex_discovery"
-path = "../../tests/native_engine/codex_discovery.rs"
-
-[[test]]
 name = "codex_probe"
 path = "../../tests/native_engine/codex_probe.rs"
 

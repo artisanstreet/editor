@@ -90,10 +90,18 @@ pub(super) async fn execute_grok_turn(
     };
     let definition = grok_runtime::GrokSettings::definition();
     let argv = (definition.build_args)(&settings.launch_args());
+    let Some(environment) =
+        artisan_native_engine::resolve_launch_target(artisan_native_engine::ManagedEngine::Grok)
+            .and_then(|target| target.environment())
+            .ok()
+    else {
+        return request.fail(EngineOperationError::SpawnFailed);
+    };
     let Ok(mut child) = acp_core::spawn_acp_child(
         launch.executable_path().as_os_str(),
         &argv,
         Some(std::path::Path::new(request.input.project_root.as_str())),
+        Some(&environment),
     ) else {
         return request.fail(EngineOperationError::SpawnFailed);
     };

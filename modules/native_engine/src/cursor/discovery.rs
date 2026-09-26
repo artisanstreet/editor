@@ -1,24 +1,18 @@
-//! Cursor (`cursor-agent` / `agent`) executable discovery.
+//! Cursor (`cursor-agent`) executable resolution and version parsing.
 //!
-//! Precedence mirrors the TypeScript engine (`executable: "agent.cmd"` on
-//! win32, `"agent"` elsewhere in `modules/engines/src/cursor/engine.ts`)
-//! plus the sibling worker override convention (`ARTISAN_CODEX_EXECUTABLE`
-//! in `modules/engines/src/codex/executable.ts`, also used by the Claude and
-//! Grok workers):
-//!
-//! 1. explicit `ARTISAN_CURSOR_EXECUTABLE` override (verbatim, spaces intact);
-//! 2. normal installation/`PATH` resolution, preferring `cursor-agent` and
-//!    falling back to the TypeScript default `agent` names.
-//!
-//! This module performs no process spawns and reads the live environment only
-//! through [`resolve_live`]; everything else takes fixture inputs so tests
-//! never touch the host.
+//! The executable is the Forge-managed Cursor generation (see
+//! `crate::engine_core`) or the absolute `ARTISAN_CURSOR_EXECUTABLE`
+//! developer override; `PATH` is never searched. Cursor publishes no digest
+//! for its agent package, so no managed Cursor generation exists today and
+//! only the override can resolve.
 
 use std::path::{Path, PathBuf};
 
-/// Native override convention mirroring the sibling Codex/Claude/Grok
-/// workers. A non-blank value here wins over every lookup below.
-pub const CURSOR_EXECUTABLE_ENV: &str = "ARTISAN_CURSOR_EXECUTABLE";
+use crate::engine_core::{LaunchSource, ManagedEngine, resolve_launch_target};
+
+/// The developer override: an absolute executable path, reported as an
+/// override in engine status.
+pub const CURSOR_EXECUTABLE_ENV: &str = ManagedEngine::Cursor.override_env();
 
 /// Installed binary name named by the worker contract.
 pub const CURSOR_BINARY_NAME: &str = "cursor-agent";
@@ -31,16 +25,14 @@ pub const CURSOR_VERSION_ARGS: &[&str] = &["--version"];
 /// (`auth_probe_args: ["status"]` in `modules/engines/src/cursor/engine.ts`).
 pub const CURSOR_AUTH_PROBE_ARGS: &[&str] = &["status"];
 
-/// Where a resolved Cursor binary came from. Override and `PATH` lookup stay
-/// distinct so later packets can explain the selection.
+/// Where a resolved Cursor binary came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorResolveSource {
     ExplicitOverride,
-    PathLookup,
+    Managed,
 }
 
-/// A Cursor binary resolved through [`resolve_cursor_binary`] or
-/// [`resolve_live`].
+/// A Cursor binary resolved through [`resolve_live`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCursorBinary {
     path: PathBuf,
@@ -54,98 +46,24 @@ impl ResolvedCursorBinary {
         &self.path
     }
 
-    /// Returns whether the path came from the explicit override or `PATH`.
+    /// Returns whether the path is the managed generation or the override.
     #[must_use]
     pub const fn source(&self) -> CursorResolveSource {
         self.source
     }
 }
 
-/// Candidate binary file names for the host platform, in lookup order.
-///
-/// `cursor-agent` leads per the worker contract; the trailing `agent` names
-/// are the TypeScript default executable (`agent.cmd` on Windows, `agent`
-/// elsewhere in `modules/engines/src/cursor/engine.ts`).
-fn candidate_binary_names() -> &'static [&'static str] {
-    #[cfg(windows)]
-    {
-        &[
-            "cursor-agent.exe",
-            "cursor-agent",
-            "agent.cmd",
-            "agent.exe",
-            "agent",
-        ]
-    }
-    #[cfg(not(windows))]
-    {
-        &["cursor-agent", "agent"]
-    }
-}
-
-/// Trims an explicit override value. Blank values fall through to `PATH`
-/// lookup instead of producing an empty path.
-#[must_use]
-pub fn explicit_override(raw: Option<&str>) -> Option<PathBuf> {
-    raw.map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// Searches `PATH`-style directories for the Cursor binary. Candidate paths
-/// containing spaces flow through untouched as [`PathBuf`] (no splitting or
-/// quoting); the first existing candidate wins.
-#[must_use]
-pub fn find_cursor_on_path(
-    path_var: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    let path_var = path_var.filter(|value| !value.trim().is_empty())?;
-    for directory in std::env::split_paths(path_var) {
-        if directory.as_os_str().is_empty() {
-            continue;
-        }
-        for name in candidate_binary_names() {
-            let candidate = directory.join(name);
-            if exists(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-/// Resolves the Cursor binary from fixture inputs: the explicit override
-/// wins; otherwise normal installation/`PATH` resolution applies. Returns
-/// `None` when no binary is found (the live probe reports this as not
-/// installed, never as authenticated).
-#[must_use]
-pub fn resolve_cursor_binary(
-    override_raw: Option<&str>,
-    path_var: Option<&str>,
-    exists: impl Fn(&Path) -> bool,
-) -> Option<ResolvedCursorBinary> {
-    if let Some(path) = explicit_override(override_raw) {
-        return Some(ResolvedCursorBinary {
-            path,
-            source: CursorResolveSource::ExplicitOverride,
-        });
-    }
-    find_cursor_on_path(path_var, exists).map(|path| ResolvedCursorBinary {
-        path,
-        source: CursorResolveSource::PathLookup,
-    })
-}
-
-/// Resolves the Cursor binary from the live process environment
-/// (`ARTISAN_CURSOR_EXECUTABLE`, then `PATH` with a filesystem existence
-/// check). Returns `None` when no Cursor CLI is installed.
+/// Resolves the Cursor binary for the registered Forge. Returns `None` when
+/// Cursor is not installed.
 #[must_use]
 pub fn resolve_live() -> Option<ResolvedCursorBinary> {
-    let override_raw = std::env::var(CURSOR_EXECUTABLE_ENV).ok();
-    let path_var = std::env::var_os("PATH").and_then(|value| value.into_string().ok());
-    resolve_cursor_binary(override_raw.as_deref(), path_var.as_deref(), |path| {
-        path.is_file()
+    let target = resolve_launch_target(ManagedEngine::Cursor).ok()?;
+    Some(ResolvedCursorBinary {
+        path: target.executable().to_path_buf(),
+        source: match target.source() {
+            LaunchSource::Managed => CursorResolveSource::Managed,
+            LaunchSource::Override => CursorResolveSource::ExplicitOverride,
+        },
     })
 }
 

@@ -33,8 +33,7 @@ pub mod probe;
 
 pub use discovery::{
     GROK_AUTH_PROBE_ARGS, GROK_BINARY_NAME, GROK_EXECUTABLE_ENV, GROK_VERSION_ARGS,
-    GrokResolveSource, ResolvedGrokBinary, explicit_override, find_grok_on_path,
-    parse_grok_version, resolve_grok_binary, resolve_live,
+    GrokResolveSource, ResolvedGrokBinary, parse_grok_version, resolve_live,
 };
 pub use probe::{
     BoundedChildOutput, DEFAULT_AUTH_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_VERSION_TIMEOUT,

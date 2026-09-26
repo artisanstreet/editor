@@ -486,7 +486,7 @@ async fn slow_agent_handshake_deadline_kill_with_custody() {
         Duration::from_secs(5),
     )
     .expect("test bounds hold");
-    let Ok(mut child) = spawn_acp_child(program.as_os_str(), &args, None) else {
+    let Ok(mut child) = spawn_acp_child(program.as_os_str(), &args, None, None) else {
         eprintln!("SKIP: idle child spawn unavailable");
         return;
     };
@@ -526,7 +526,7 @@ fn spawn_missing_executable_fails_without_shell() {
     };
     assert!(
         matches!(
-            spawn_acp_child(OsStr::new(missing), &[], None),
+            spawn_acp_child(OsStr::new(missing), &[], None, None),
             Err(error) if error.kind() == io::ErrorKind::NotFound
         ),
         "missing executable"

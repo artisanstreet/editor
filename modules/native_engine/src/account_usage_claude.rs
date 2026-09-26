@@ -7,14 +7,15 @@
 //! deadline with kill plus reap, then parse the session and weekly lines
 //! from the embedded result text.
 
+use std::ffi::OsString;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::CliLaunch;
+use crate::engine_core::{ManagedEngine, ManagedEngineError, resolve_launch_target_in};
 use artisan_domain::{EngineUsageWindow, EngineUsageWindowKind, clamp_percent_used, utc_ymd};
 
 use super::account_usage::{
@@ -32,13 +33,13 @@ pub const CLAUDE_USAGE_ARGS: &[&str] = &["-p", "/usage", "--output-format", "jso
 /// Configures one external Claude CLI account-usage read.
 #[derive(Clone, Debug)]
 pub struct ClaudeUsageConfig {
-    /// Provider executable (absolute path or PATH-resolved name).
+    /// Provider executable: the Forge-managed generation (or a fixture).
     pub executable: PathBuf,
     /// Extra arguments before the usage arguments.
     pub executable_args: Vec<String>,
-    /// Interpreter prefix placed between the program and `executable_args`
-    /// (from [`CliLaunch`], empty for direct launches).
-    pub prefix_args: Vec<String>,
+    /// Complete child environment. When set the child starts from an empty
+    /// environment; `None` inherits the caller's (fixtures only).
+    pub environment: Option<Vec<(OsString, OsString)>>,
     /// Extra environment for the spawned child (fixture seam).
     pub spawn_env: Vec<(String, String)>,
     /// Caps the whole spawn-read-wait sequence.
@@ -54,19 +55,27 @@ impl ClaudeUsageConfig {
         Self {
             executable,
             executable_args: Vec::new(),
-            prefix_args: Vec::new(),
+            environment: None,
             spawn_env: Vec::new(),
             timeout: CLAUDE_USAGE_TIMEOUT,
             max_bytes: CLAUDE_USAGE_MAX_BYTES,
         }
     }
 
-    /// Creates a read configuration from one resolved CLI launch.
-    #[must_use]
-    pub fn launched(launch: &CliLaunch) -> Self {
-        let mut config = Self::new(launch.program.clone());
-        config.prefix_args.clone_from(&launch.prefix_args);
-        config
+    /// Resolves the Forge-managed Claude executable and its explicit
+    /// environment for the Forge database.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedEngineError`] when Claude is not installed or fails
+    /// verification.
+    pub fn managed(database_path: &Path) -> Result<Self, ManagedEngineError> {
+        let target = resolve_launch_target_in(ManagedEngine::Claude, database_path, &|name| {
+            std::env::var_os(name)
+        })?;
+        let mut config = Self::new(target.executable().to_path_buf());
+        config.environment = Some(target.environment()?);
+        Ok(config)
     }
 }
 
@@ -79,10 +88,12 @@ impl ClaudeUsageConfig {
 /// carries no usable window.
 pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, UsageReaderError> {
     let deadline = Instant::now() + config.timeout;
-    let mut argv = config.prefix_args.clone();
-    argv.extend(config.executable_args.iter().cloned());
+    let mut argv = config.executable_args.clone();
     argv.extend(CLAUDE_USAGE_ARGS.iter().map(|arg| (*arg).to_owned()));
     let mut command = Command::new(&config.executable);
+    if let Some(environment) = &config.environment {
+        command.env_clear().envs(environment.iter().cloned());
+    }
     command
         .args(&argv)
         .envs(config.spawn_env.iter().map(|(key, value)| (key, value)))

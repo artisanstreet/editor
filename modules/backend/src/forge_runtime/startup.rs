@@ -341,6 +341,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
         cancel,
         native_run,
     } = config;
+    artisan_native_engine::register_managed_database(&database);
     let custody =
         ForgeProcessCustody::acquire(&custody_path).map_err(ForgeRuntimeError::Custody)?;
 
@@ -672,15 +673,14 @@ async fn run_with_handler(
     let handler = handler.with_composer_catalog(
         crate::composer_catalog_service::ComposerCatalogService::new(
             native_dispatcher.catalog_client(),
-            database,
+            database.clone(),
         ),
     );
     // The Forge keeps usage fresh while an Editor is connected and pushes
     // every change; Editors never schedule usage reads.
     let usage = Arc::new(
         crate::account_usage_service::AccountUsageService::with_defaults(
-            &artisan_native_engine::resolve_codex_cli(),
-            &artisan_native_engine::resolve_claude_cli(),
+            &database,
             crate::account_usage_cursor::CursorUsageConfig::new(),
         )
         .with_host_state_notifier(notifier.clone()),
