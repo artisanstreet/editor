@@ -64,7 +64,7 @@ fn failed_send_keeps_the_draft_and_offers_no_local_retry(cx: &mut TestAppContext
                 .clone();
             application.handle_service_event(
                 NativeTransportEvent::MessageFailed {
-                    thread_id: thread_id.clone(),
+                    scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                     request_id,
                     failure: message_failure(),
                 },
@@ -367,7 +367,7 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
                 })
                 .expect("first begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: thread_id.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
                 token,
             });
@@ -399,7 +399,7 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
                 })
                 .expect("second begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: thread_id.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-second").expect("request"),
                 token,
             });
@@ -448,7 +448,7 @@ fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: thread_id.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
                 token,
             });
@@ -484,13 +484,13 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: thread_id.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-failure").expect("request"),
                 token,
             });
             application.handle_service_event(
                 NativeTransportEvent::MessageFailed {
-                    thread_id: thread_id.clone(),
+                    scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                     request_id: artisan_domain::RequestId::parse("request-failure")
                         .expect("request"),
                     failure: ServiceFailure {
@@ -516,7 +516,7 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
                 })
                 .expect("second begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: thread_id.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
                 token,
             });
@@ -550,7 +550,7 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
                 })
                 .expect("begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: old_thread.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(old_thread.clone()),
                 request_id: artisan_domain::RequestId::parse("request-transition")
                     .expect("request"),
                 token,
@@ -586,7 +586,7 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
                 })
                 .expect("shutdown begin");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: old_thread,
+                scope: artisan_domain::ComposerDraftScope::Thread(old_thread),
                 request_id: artisan_domain::RequestId::parse("request-shutdown").expect("request"),
                 token,
             });

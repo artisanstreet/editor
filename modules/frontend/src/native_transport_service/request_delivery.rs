@@ -625,9 +625,6 @@ pub(super) async fn command_loop_with_delivery(
                         composer_operations::set_model_favorite(runtime, frames, events, *command)
                             .await?;
                     }
-                    NativeTransportCommand::QueueFirstMessage(command) => {
-                        queue_first_message(runtime, frames, events, *command).await?;
-                    }
                     NativeTransportCommand::SubmitComposerDraft(command) => {
                         submit_composer_draft(runtime, frames, events, *command).await?;
                     }

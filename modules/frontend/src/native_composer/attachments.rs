@@ -111,8 +111,8 @@ impl NativeComposer {
         (current == *snapshot).then_some(current)
     }
 
-    /// Enables the future typed attachment submission path. The current
-    /// `QueueFirstMessage` caller deliberately does not invoke this seam.
+    /// Enables attachment delivery: a send names the stored draft, whose
+    /// uploaded images the Forge resolves.
     pub(crate) fn set_attachment_delivery_enabled(
         &mut self,
         enabled: bool,

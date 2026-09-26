@@ -248,9 +248,6 @@ impl NativeApplication {
             } => {
                 self.handle_engine_settings_failed(thread_id, generation, failure, cx);
             }
-            // Legacy first-message results never settle a draft submission.
-            NativeTransportEvent::FirstMessageQueued(_)
-            | NativeTransportEvent::FirstMessageFailed { .. } => {}
             // Answer receipts and failures settle their row gates through the
             // existing transport pairing policy.
             NativeTransportEvent::ApprovalAnswered { .. }
@@ -261,16 +258,16 @@ impl NativeApplication {
                 self.handle_message_receipt(receipt, cx);
             }
             NativeTransportEvent::MessageStale {
-                thread_id,
+                scope,
                 request_id,
                 current_revision,
-            } => self.handle_message_stale(&thread_id, &request_id, current_revision, cx),
+            } => self.handle_message_stale(&scope, &request_id, current_revision, cx),
             NativeTransportEvent::MessageFailed {
-                thread_id,
+                scope,
                 request_id,
                 failure,
             } => {
-                self.handle_message_failure(&thread_id, &request_id, failure, cx);
+                self.handle_message_failure(&scope, &request_id, failure, cx);
             }
             NativeTransportEvent::ConversationSubscriptionStarted {
                 thread_id,

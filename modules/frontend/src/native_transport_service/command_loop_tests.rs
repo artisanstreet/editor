@@ -9,9 +9,8 @@ use super::{
     command_loop_with_delivery,
 };
 use artisan_domain::{
-    ConversationCursor, ConversationLifecycle, ConversationPatch, MessageBody, PatchBatch, PatchId,
-    PatchSequence, QueueFirstMessage, RequestId, Revision, ThreadId, TurnId, TurnOrdinal,
-    UnixMillis,
+    ConversationCursor, ConversationLifecycle, ConversationPatch, PatchBatch, PatchId,
+    PatchSequence, RequestId, Revision, ThreadId, TurnId, TurnOrdinal, UnixMillis,
 };
 use std::{
     sync::mpsc::{Receiver, SyncSender, sync_channel},
@@ -135,10 +134,13 @@ fn run_loop(
 }
 
 fn unknown_thread_message(request: &str) -> NativeTransportCommand {
-    NativeTransportCommand::QueueFirstMessage(Box::new(QueueFirstMessage {
+    NativeTransportCommand::SubmitComposerDraft(Box::new(artisan_domain::SubmitComposerDraft {
         request_id: RequestId::parse(request).expect("request"),
-        thread_id: ThreadId::parse("unknown-hold-thread").expect("thread"),
-        body: MessageBody::parse("held message").expect("body"),
+        scope: artisan_domain::ComposerDraftScope::Thread(
+            ThreadId::parse("unknown-hold-thread").expect("thread"),
+        ),
+        draft_revision: artisan_domain::ComposerDraftRevision::new(1).expect("revision"),
+        selection: None,
     }))
 }
 
@@ -167,10 +169,7 @@ fn held_command_keeps_the_connection_busy_until_its_handler_returns() {
     let reply = event_rx
         .recv_timeout(Duration::from_secs(5))
         .expect("handler reply");
-    assert!(matches!(
-        reply,
-        NativeTransportEvent::FirstMessageFailed { .. }
-    ));
+    assert!(matches!(reply, NativeTransportEvent::MessageFailed { .. }));
     wait_until(|| holds.status().is_idle());
 
     holds.seal();

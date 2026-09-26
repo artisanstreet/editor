@@ -164,6 +164,9 @@ mod impl_profile_menu;
 #[path = "native_application/impl_message_flight.rs"]
 mod impl_message_flight;
 
+#[path = "native_application/new_task_send.rs"]
+mod new_task_send;
+
 #[path = "native_application/impl_service_events.rs"]
 mod impl_service_events;
 

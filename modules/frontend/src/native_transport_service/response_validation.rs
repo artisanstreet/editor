@@ -64,12 +64,8 @@ pub(super) enum ExpectedResponse {
         thread_id: ThreadId,
         request_id: RequestId,
     },
-    FirstMessageQueued {
-        thread_id: ThreadId,
-        request_id: RequestId,
-    },
     DraftSubmitted {
-        thread_id: ThreadId,
+        scope: artisan_domain::ComposerDraftScope,
         request_id: RequestId,
     },
     ApprovalAnswered {
@@ -303,21 +299,9 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::ThreadEngineConfigSet(result))
         }
         (
-            ExpectedResponse::FirstMessageQueued {
-                thread_id,
-                request_id,
-            },
-            ResponsePayload::FirstMessageQueued(receipt),
-        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
-            Ok(ResponsePayload::FirstMessageQueued(receipt))
-        }
-        (
-            ExpectedResponse::DraftSubmitted {
-                thread_id,
-                request_id,
-            },
+            ExpectedResponse::DraftSubmitted { scope, request_id },
             ResponsePayload::ComposerDraftSubmitted(submitted),
-        ) if submitted.thread_id == thread_id && submitted.request_id == request_id => {
+        ) if submitted.scope == scope && submitted.request_id == request_id => {
             Ok(ResponsePayload::ComposerDraftSubmitted(submitted))
         }
         (

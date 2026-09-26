@@ -64,7 +64,7 @@ fn resending_after_a_lost_answer_names_the_same_draft_revision(cx: &mut TestAppC
             // The connection drops before the Forge's answer arrives.
             application.handle_service_event(
                 NativeTransportEvent::MessageFailed {
-                    thread_id: thread_id.clone(),
+                    scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                     request_id: first.clone(),
                     failure: message_failure(),
                 },
@@ -142,7 +142,7 @@ fn send_waits_for_the_save_that_stores_its_body(cx: &mut TestAppContext) {
             let sent = submissions(&commands.borrow());
             assert_eq!(sent.len(), 1);
             assert_eq!(sent[0].draft_revision, revision);
-            assert_eq!(sent[0].thread_id, thread_id);
+            assert_eq!(sent[0].scope, ComposerDraftScope::Thread(thread_id.clone()));
             assert_eq!(
                 saves(application).last().map(|(_, text)| text.as_str()),
                 Some("next")
@@ -170,7 +170,7 @@ fn a_stale_answer_keeps_the_draft_and_saves_it_again(cx: &mut TestAppContext) {
             let before = saves(application).len();
             application.handle_service_event(
                 NativeTransportEvent::MessageStale {
-                    thread_id: thread_id.clone(),
+                    scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                     request_id,
                     current_revision: Some(ComposerDraftRevision::new(95).expect("revision")),
                 },
@@ -194,3 +194,6 @@ fn a_stale_answer_keeps_the_draft_and_saves_it_again(cx: &mut TestAppContext) {
         });
     });
 }
+
+#[path = "new_thread_send.rs"]
+mod new_thread_send;

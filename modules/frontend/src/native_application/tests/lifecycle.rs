@@ -525,7 +525,7 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
                 })
                 .expect("message flight");
             application.message_flight = Some(NativeMessageFlight {
-                thread_id: source.clone(),
+                scope: artisan_domain::ComposerDraftScope::Thread(source.clone()),
                 request_id: request("message-stopped"),
                 token,
             });

@@ -632,7 +632,6 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ReadAccountUsage { .. } => "ReadAccountUsage",
             Self::SetThreadEngineConfig(_) => "SetThreadEngineConfig",
             Self::SetModelFavorite(_) => "SetModelFavorite",
-            Self::QueueFirstMessage(_) => "QueueFirstMessage",
             Self::SubmitComposerDraft(_) => "SubmitComposerDraft",
             Self::ResolveRichLink { .. } => "ResolveRichLink",
             Self::QueryProjectRepository { .. } => "QueryProjectRepository",

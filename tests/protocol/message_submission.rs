@@ -5,13 +5,13 @@
 
 use artisan_domain::{
     AuthoredText, CatalogOptionId, CatalogSelection, Command, ComposerDraftRevision,
-    ComposerDraftSubmitted, DispatchError, DraftSubmissionOutcome, EngineConfigRevision, EngineId,
-    EngineProfileId, Event, FailedMessageListing, FailedMessageRecovered, FailedMessageRetried,
-    FailedMessageRetryOutcome, FailedMessageSummary, FailedMessageTarget, MessageId, MessageOutbox,
-    ModelFavoriteId, QueuedMessageListOrder, QueuedMessageListing, QueuedMessageState,
-    QueuedMessageSummary, ReceiptDisposition, RecoverFailedMessage, RequestId, RetryFailedMessage,
-    SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft, ThreadId, UnixMillis,
-    WithdrawQueuedMessageCommand,
+    ComposerDraftScope, ComposerDraftSubmitted, DispatchError, DraftSubmissionOutcome,
+    EngineConfigRevision, EngineId, EngineProfileId, Event, FailedMessageListing,
+    FailedMessageRecovered, FailedMessageRetried, FailedMessageRetryOutcome, FailedMessageSummary,
+    FailedMessageTarget, MessageId, MessageOutbox, ModelFavoriteId, ProjectId,
+    QueuedMessageListOrder, QueuedMessageListing, QueuedMessageState, QueuedMessageSummary,
+    ReceiptDisposition, RecoverFailedMessage, RequestId, RetryFailedMessage, SubmissionRefusal,
+    SubmissionRefusalKind, SubmitComposerDraft, ThreadId, UnixMillis, WithdrawQueuedMessageCommand,
 };
 use artisan_protocol::{
     ClientRequest, EventCursor, FrameId, ProtocolVersion, ResponsePayload, ServerEvent,
@@ -247,40 +247,94 @@ fn draft_submission_names_the_revision_and_the_users_selection() {
         context_window: Some(CatalogOptionId::parse("standard").unwrap()),
         permission: Some(CatalogOptionId::parse("autonomous").unwrap()),
     };
-    for selection in [None, Some(selection)] {
-        round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
-            Command::SubmitComposerDraft(SubmitComposerDraft {
-                request_id: request_id(),
-                thread_id: thread(),
-                draft_revision: ComposerDraftRevision::new(4).unwrap(),
-                selection,
-            }),
-        )));
+    for scope in [thread_scope(), project_scope()] {
+        for selection in [None, Some(selection.clone())] {
+            round_trip(WireEnvelopeBody::Request(ClientRequest::Command(
+                Command::SubmitComposerDraft(SubmitComposerDraft {
+                    request_id: request_id(),
+                    scope: scope.clone(),
+                    draft_revision: ComposerDraftRevision::new(4).unwrap(),
+                    selection,
+                }),
+            )));
+        }
+    }
+}
+
+fn thread_scope() -> ComposerDraftScope {
+    ComposerDraftScope::Thread(thread())
+}
+
+fn project_scope() -> ComposerDraftScope {
+    ComposerDraftScope::Project(ProjectId::parse("new-task-project").unwrap())
+}
+
+fn submitted(
+    request_id: RequestId,
+    scope: ComposerDraftScope,
+    outcome: DraftSubmissionOutcome,
+) -> WireEnvelopeBody {
+    response(ResponsePayload::ComposerDraftSubmitted(
+        ComposerDraftSubmitted {
+            request_id,
+            scope,
+            draft_revision: ComposerDraftRevision::new(4).unwrap(),
+            outcome,
+        },
+    ))
+}
+
+fn queued_in(thread_id: ThreadId, disposition: ReceiptDisposition) -> DraftSubmissionOutcome {
+    DraftSubmissionOutcome::Queued {
+        thread_id,
+        message_id: MessageId::parse("queued-message").unwrap(),
+        disposition,
+        cleared_revision: ComposerDraftRevision::new(5).unwrap(),
+        engine_config_revision: EngineConfigRevision::new(3).unwrap(),
     }
 }
 
 #[test]
-fn draft_submission_answers_round_trip_and_correlate() {
-    let answer = |request_id, outcome| {
-        response(ResponsePayload::ComposerDraftSubmitted(
-            ComposerDraftSubmitted {
-                request_id,
-                thread_id: thread(),
-                draft_revision: ComposerDraftRevision::new(4).unwrap(),
-                outcome,
-            },
-        ))
-    };
+fn project_draft_submission_answers_name_the_created_thread() {
+    let created = ThreadId::parse("created-thread").unwrap();
     for disposition in [ReceiptDisposition::Accepted, ReceiptDisposition::Duplicate] {
-        round_trip(answer(
+        round_trip(submitted(
             request_id(),
-            DraftSubmissionOutcome::Queued {
-                message_id: MessageId::parse("queued-message").unwrap(),
-                disposition,
-                cleared_revision: ComposerDraftRevision::new(5).unwrap(),
-                engine_config_revision: EngineConfigRevision::new(3).unwrap(),
-            },
+            project_scope(),
+            queued_in(created.clone(), disposition),
         ));
+    }
+    for outcome in [
+        DraftSubmissionOutcome::Stale {
+            current_revision: Some(ComposerDraftRevision::new(9).unwrap()),
+        },
+        DraftSubmissionOutcome::Refused(
+            SubmissionRefusal::new(SubmissionRefusalKind::NoSelection, "Choose a model.").unwrap(),
+        ),
+    ] {
+        round_trip(submitted(request_id(), project_scope(), outcome));
+    }
+}
+
+#[test]
+fn a_thread_draft_answer_cannot_name_another_thread() {
+    let body = submitted(
+        request_id(),
+        thread_scope(),
+        queued_in(
+            ThreadId::parse("another-thread").unwrap(),
+            ReceiptDisposition::Accepted,
+        ),
+    );
+    let bytes = encode_envelope(&envelope(body)).expect("encode");
+    assert!(decode_envelope(&bytes).is_err());
+}
+
+#[test]
+fn draft_submission_answers_round_trip_and_correlate() {
+    let answer = |request_id, outcome| submitted(request_id, thread_scope(), outcome);
+    for disposition in [ReceiptDisposition::Accepted, ReceiptDisposition::Duplicate] {
+        round_trip(answer(request_id(), queued_in(thread(), disposition)));
     }
     for kind in [
         SubmissionRefusalKind::InvalidSelection,

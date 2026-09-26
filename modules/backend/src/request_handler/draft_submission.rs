@@ -1,4 +1,6 @@
-//! Sending a thread's composer draft as a message.
+//! Sending a thread's composer draft as a message. A project's new-task
+//! draft, whose submission creates its thread, is sent by
+//! [`super::project_draft_submission`].
 //!
 //! The Forge first admits the send (see [`super::model_selection`]): it may
 //! refuse it with a typed reason, save the configuration the send's
@@ -11,9 +13,9 @@
 
 use artisan_database::{DraftSubmission, DraftSubmissionError, SubmitComposerDraftInput};
 use artisan_domain::{
-    ComposerDraftScope, ComposerDraftSubmitted, DraftSubmissionOutcome, ImageAttachment, MessageId,
-    QueueMessage, ReceiptDisposition, RequestId, RunId, SubmissionRefusal, SubmissionRefusalKind,
-    SubmitComposerDraft,
+    ComposerDraftRevision, ComposerDraftScope, ComposerDraftSubmitted, DraftSubmissionOutcome,
+    ImageAttachment, MessageId, QueueMessage, ReceiptDisposition, RequestId, RunId,
+    SubmissionRefusal, SubmissionRefusalKind, SubmitComposerDraft, ThreadId,
 };
 use artisan_protocol::{
     ErrorCode, ProtocolFailure, QueueMessageReceipt, ResponsePayload, ServerResponse,
@@ -27,20 +29,38 @@ use super::{
 };
 
 impl RequestHandler {
-    /// Queues the thread's draft at the named revision, or answers the
-    /// message an earlier submission of that revision queued.
+    /// Queues the draft at the named revision, or answers the message an
+    /// earlier submission of that revision queued.
     pub(super) async fn submit_composer_draft_outcome(
         &self,
         request_id: &RequestId,
         submit: &SubmitComposerDraft,
     ) -> Result<ServerResponse, ProtocolFailure> {
-        let (steer_run_id, images) = match self.prepare_submission(request_id, submit).await? {
-            Ok(prepared) => prepared,
-            Err(refusal) => {
-                let refused = DraftSubmissionOutcome::Refused(refusal);
-                return Ok(submitted(request_id, submit, refused));
+        match &submit.scope {
+            ComposerDraftScope::Thread(thread) => {
+                self.submit_thread_draft(request_id, thread, submit).await
             }
-        };
+            ComposerDraftScope::Project(project) => {
+                self.submit_project_draft(request_id, project, submit).await
+            }
+        }
+    }
+
+    /// Queues the thread's draft at the named revision.
+    async fn submit_thread_draft(
+        &self,
+        request_id: &RequestId,
+        thread: &ThreadId,
+        submit: &SubmitComposerDraft,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        let (steer_run_id, images) =
+            match self.prepare_submission(request_id, thread, submit).await? {
+                Ok(prepared) => prepared,
+                Err(refusal) => {
+                    let refused = DraftSubmissionOutcome::Refused(refusal);
+                    return Ok(submitted(request_id, submit, refused));
+                }
+            };
         let identity = self
             .origin
             .mint_identity()
@@ -55,7 +75,7 @@ impl RequestHandler {
             .repository
             .submit_composer_draft(SubmitComposerDraftInput {
                 request_id: submit.request_id.clone(),
-                thread_id: submit.thread_id.clone(),
+                thread_id: thread.clone(),
                 draft_revision: submit.draft_revision,
                 message_id,
                 steer_run_id,
@@ -79,14 +99,7 @@ impl RequestHandler {
                     DraftSubmissionOutcome::Stale { current_revision },
                 ));
             }
-            DraftSubmission::Empty => {
-                return Err(typed_failure(
-                    ErrorCode::InvalidInput,
-                    "composer draft has neither text nor images",
-                    false,
-                    request_id,
-                ));
-            }
+            DraftSubmission::Empty => return Err(empty_draft_failure(request_id)),
         };
         // The message's own correlation id and stored steer target settle
         // the steer, exactly as a replayed queue-message request would.
@@ -115,13 +128,12 @@ impl RequestHandler {
         if !matches!(settled.payload, ResponsePayload::MessageQueued(_)) {
             return Ok(settled);
         }
-        let engine_config_revision = self
-            .engine_config_revision(request_id, &submit.thread_id)
-            .await?;
+        let engine_config_revision = self.engine_config_revision(request_id, thread).await?;
         Ok(submitted(
             request_id,
             submit,
             DraftSubmissionOutcome::Queued {
+                thread_id: result.thread_id,
                 message_id: result.message_id,
                 disposition,
                 cleared_revision,
@@ -137,10 +149,12 @@ impl RequestHandler {
     async fn prepare_submission(
         &self,
         request_id: &RequestId,
+        thread: &ThreadId,
         submit: &SubmitComposerDraft,
     ) -> Result<Result<(Option<RunId>, Vec<ImageAttachment>), SubmissionRefusal>, ProtocolFailure>
     {
-        let (steer_run_id, engine) = match self.admit_submission(request_id, submit).await? {
+        let (steer_run_id, engine) = match self.admit_submission(request_id, thread, submit).await?
+        {
             SubmissionAdmission::Admitted {
                 steer_run_id,
                 engine,
@@ -151,7 +165,7 @@ impl RequestHandler {
             return Ok(Ok((steer_run_id, Vec::new())));
         };
         Ok(self
-            .fitted_draft_images(request_id, submit, engine)
+            .fitted_draft_images(request_id, &submit.scope, submit.draft_revision, engine)
             .await?
             .map(|images| (steer_run_id, images)))
     }
@@ -159,19 +173,19 @@ impl RequestHandler {
     /// The submitted revision's picked images fitted to `engine`, in order,
     /// or the refusal naming the image the engine cannot take. A draft at
     /// another revision fits nothing: the repository answers it as stale.
-    async fn fitted_draft_images(
+    pub(super) async fn fitted_draft_images(
         &self,
         request_id: &RequestId,
-        submit: &SubmitComposerDraft,
+        scope: &ComposerDraftScope,
+        draft_revision: ComposerDraftRevision,
         engine: artisan_domain::EngineId,
     ) -> Result<Result<Vec<ImageAttachment>, SubmissionRefusal>, ProtocolFailure> {
-        let scope = ComposerDraftScope::Thread(submit.thread_id.clone());
         let draft = self
             .repository
-            .read_composer_draft(&scope)
+            .read_composer_draft(scope)
             .await
             .map_err(|error| draft_failure(&error, request_id))?;
-        let Some(draft) = draft.filter(|draft| draft.revision() == submit.draft_revision) else {
+        let Some(draft) = draft.filter(|draft| draft.revision() == draft_revision) else {
             return Ok(Ok(Vec::new()));
         };
         if draft.attachments().is_empty() {
@@ -197,7 +211,18 @@ impl RequestHandler {
     }
 }
 
-fn submitted(
+/// A submitted draft that has neither text nor images.
+pub(super) fn empty_draft_failure(request_id: &RequestId) -> ProtocolFailure {
+    typed_failure(
+        ErrorCode::InvalidInput,
+        "composer draft has neither text nor images",
+        false,
+        request_id,
+    )
+}
+
+/// The answer to `submit`.
+pub(super) fn submitted(
     request_id: &RequestId,
     submit: &SubmitComposerDraft,
     outcome_value: DraftSubmissionOutcome,
@@ -206,7 +231,7 @@ fn submitted(
         request_id,
         ResponsePayload::ComposerDraftSubmitted(ComposerDraftSubmitted {
             request_id: request_id.clone(),
-            thread_id: submit.thread_id.clone(),
+            scope: submit.scope.clone(),
             draft_revision: submit.draft_revision,
             outcome: outcome_value,
         }),

@@ -250,7 +250,7 @@ async fn record_submission(
 
 /// The message an earlier submission of the same revision queued, as a
 /// duplicate carrying its original correlation id and steer target.
-async fn replay(
+pub(super) async fn replay(
     database: &impl ConnectionTrait,
     thread_id: &ThreadId,
     message_id: MessageId,

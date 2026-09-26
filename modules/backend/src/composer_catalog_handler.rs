@@ -14,7 +14,8 @@ use artisan_database::{
     ModelFavoritesRepositoryError, Repository, SetModelFavoriteInput, SetModelFavoriteResult,
 };
 use artisan_domain::{
-    EngineProfileId, ReadComposerCatalog, RequestId, SetModelFavorite, ThreadId, UnixMillis,
+    EngineProfileId, ProjectId, ReadComposerCatalog, RequestId, SetModelFavorite, ThreadId,
+    UnixMillis,
 };
 use artisan_protocol::{
     CatalogSnapshotWire, ComposerCatalogResult, ErrorCode, ErrorDetail,
@@ -100,7 +101,7 @@ pub(crate) async fn read_composer_catalog(
         service,
         usage,
         repository,
-        query.thread_id(),
+        CatalogSubject::Thread(query.thread_id()),
         query.profile_id(),
     )
     .await
@@ -117,16 +118,27 @@ pub(crate) async fn read_composer_catalog(
     ))
 }
 
-/// The thread-scoped catalog as the Forge serves it: discovery merged with
-/// durable favorites, with the Forge's account readiness applied.
+/// What a served catalog is scoped to: a thread's composer, or a project's
+/// new-task composer whose thread does not exist yet. Both are discovered in
+/// the project's root.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CatalogSubject<'a> {
+    /// An existing thread.
+    Thread(&'a ThreadId),
+    /// A project's new task.
+    Project(&'a ProjectId),
+}
+
+/// The scoped catalog as the Forge serves it: discovery merged with durable
+/// favorites, with the Forge's account readiness applied.
 pub(crate) async fn served_catalog(
     service: Option<&ComposerCatalogService>,
     usage: Option<&AccountUsageService>,
     repository: &Repository,
-    thread: &ThreadId,
+    subject: CatalogSubject<'_>,
     profile: &EngineProfileId,
 ) -> Result<artisan_catalog::NativeModelCatalog, ComposerCatalogHandlerError> {
-    let catalog = current_catalog(service, repository, thread, profile).await?;
+    let catalog = current_catalog(service, repository, subject, profile).await?;
     Ok(crate::account_readiness::catalog_with_account_readiness(
         catalog, usage,
     ))
@@ -201,7 +213,7 @@ pub(crate) async fn prepare_model_favorite(
     let catalog = current_catalog(
         service,
         repository,
-        command.thread_id(),
+        CatalogSubject::Thread(command.thread_id()),
         command.profile_id(),
     )
     .await?;
@@ -274,11 +286,18 @@ pub(crate) fn favorites_error(
 async fn current_catalog(
     service: Option<&ComposerCatalogService>,
     repository: &Repository,
-    thread: &ThreadId,
+    subject: CatalogSubject<'_>,
     profile: &EngineProfileId,
 ) -> Result<artisan_catalog::NativeModelCatalog, ComposerCatalogHandlerError> {
     let service = service.ok_or(ComposerCatalogHandlerError::CapabilityUnavailable)?;
-    let result = match service.discover(thread, profile).await {
+    let root = match subject {
+        CatalogSubject::Thread(thread) => repository.read_thread_project_root(thread).await,
+        CatalogSubject::Project(project) => repository.read_project_root(project.clone()).await,
+    }
+    .map_err(|error| {
+        service_error(crate::composer_catalog_service::classify_scope_repository_error(&error))
+    })?;
+    let result = match service.discover(root.clone(), profile).await {
         Ok(result) => Some(result),
         // A thread without a registered OpenCode2 profile still gets a usable
         // catalogue: whatever host discovery has warmed. This is the shape
@@ -310,10 +329,6 @@ async fn current_catalog(
     }
     .map_err(|_| ComposerCatalogHandlerError::InvalidCatalog)?;
     if catalog.scope.is_none() {
-        let root = repository
-            .read_thread_project_root(thread)
-            .await
-            .map_err(|_| ComposerCatalogHandlerError::CatalogPersistence)?;
         catalog.scope = Some(artisan_catalog::NativeCatalogScope {
             profile_id: profile.as_str().to_owned(),
             working_directory: root.as_str().to_owned(),

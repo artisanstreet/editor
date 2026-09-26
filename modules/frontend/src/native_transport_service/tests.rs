@@ -14,29 +14,27 @@ use super::{
     ServiceFailureCategory, StartupError, ThreadSelectionDecision, approval_stable_mutation,
     attach_mutation, build_reconnect_binding, contains_exact_project, contains_exact_thread,
     create_command_values, create_mutation, draft_submission_mutation,
-    engine_config_stable_mutation, finite_duration, first_message_stable_mutation,
-    known_thread_for_queue, make_request_frame, payload_health_decision,
-    project_repository_request, project_request, question_stable_mutation, reconnect_hello,
-    rich_link_request, session_needs_reconnect, snapshot_request, thread_engine_settings_request,
-    thread_selection_decision, threads_request, try_send_command, validate_readiness,
-    validate_response_family,
+    engine_config_stable_mutation, finite_duration, known_thread_for_queue, make_request_frame,
+    payload_health_decision, project_repository_request, project_request, question_stable_mutation,
+    reconnect_hello, rich_link_request, session_needs_reconnect, snapshot_request,
+    thread_engine_settings_request, thread_selection_decision, threads_request, try_send_command,
+    validate_readiness, validate_response_family,
 };
 use artisan_domain::UnixMillis;
 use artisan_domain::{
     AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor,
     ConversationQueryBounds, ConversationSnapshot, CreateThread, DirectoryId, DisplayName,
-    EngineProfileId, ListProjectThreads, MessageBody, ModelFavoriteId, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, QueueFirstMessage, ReceiptDisposition, RequestId,
-    RootPath, SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
+    EngineProfileId, ListProjectThreads, ModelFavoriteId, ProjectId, ProjectListing,
+    ProjectSummary, Query, QueryTurnCount, ReceiptDisposition, RequestId, RootPath,
+    SetThreadEngineConfig, ThreadId, ThreadListing, ThreadSummary, ThreadTitle,
 };
 use artisan_editor_cli::payload::PayloadHealth;
 use artisan_protocol::{
     CatalogSnapshotWire, ClientRequest, ComposerCatalogResult, DirectoryPickOutcome, ErrorCode,
-    FirstMessageReceipt, HelloCredential, ModelFavoritesSnapshot, ProjectRepository,
-    ProjectRepositoryEntry, ProjectRepositoryQueryResult, ProtocolVersion,
-    RECONNECT_CAPABILITY_BYTES, ReconnectCapability, RegisteredEngineProfilesResult,
-    ResponsePayload, SetModelFavoriteReceipt, SetThreadEngineConfigResult, WireEnvelopeBody,
-    encode_envelope,
+    HelloCredential, ModelFavoritesSnapshot, ProjectRepository, ProjectRepositoryEntry,
+    ProjectRepositoryQueryResult, ProtocolVersion, RECONNECT_CAPABILITY_BYTES, ReconnectCapability,
+    RegisteredEngineProfilesResult, ResponsePayload, SetModelFavoriteReceipt,
+    SetThreadEngineConfigResult, WireEnvelopeBody, encode_envelope,
 };
 use artisan_transport::{
     ClientRequestError, DeadlineError, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
@@ -278,70 +276,6 @@ fn response_families_cover_intake_mutations_and_reject_cross_family_payloads() {
 }
 
 #[test]
-fn first_message_response_family_requires_exact_request_and_thread() {
-    let thread_id = ThreadId::parse("thread-a").expect("thread");
-    let other_thread_id = ThreadId::parse("thread-b").expect("thread");
-    let request_id = RequestId::parse("native-message-a").expect("request");
-    let other_request_id = RequestId::parse("native-message-b").expect("request");
-    let receipt = FirstMessageReceipt {
-        request_id: request_id.clone(),
-        message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
-        thread_id: thread_id.clone(),
-        disposition: ReceiptDisposition::Accepted,
-    };
-    let expected = ExpectedResponse::FirstMessageQueued {
-        thread_id: thread_id.clone(),
-        request_id: request_id.clone(),
-    };
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::FirstMessageQueued(receipt.clone())
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                disposition: ReceiptDisposition::Duplicate,
-                ..receipt.clone()
-            })
-        )
-        .is_ok()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                request_id: other_request_id,
-                ..receipt.clone()
-            })
-        )
-        .is_err()
-    );
-    assert!(
-        validate_response_family(
-            expected.clone(),
-            ResponsePayload::FirstMessageQueued(FirstMessageReceipt {
-                thread_id: other_thread_id,
-                ..receipt.clone()
-            })
-        )
-        .is_err()
-    );
-    assert!(
-        validate_response_family(
-            expected,
-            ResponsePayload::ProjectListing(
-                ProjectListing::new(vec![project("project-a", "A")]).expect("projects"),
-            )
-        )
-        .is_err()
-    );
-}
-
-#[test]
 fn draft_submission_response_family_requires_exact_request_and_thread() {
     let thread_id = ThreadId::parse("thread-a").expect("thread");
     let other_thread_id = ThreadId::parse("thread-b").expect("thread");
@@ -349,9 +283,10 @@ fn draft_submission_response_family_requires_exact_request_and_thread() {
     let other_request_id = RequestId::parse("native-message-b").expect("request");
     let submitted = artisan_domain::ComposerDraftSubmitted {
         request_id: request_id.clone(),
-        thread_id: thread_id.clone(),
+        scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
         draft_revision: artisan_domain::ComposerDraftRevision::new(3).expect("revision"),
         outcome: artisan_domain::DraftSubmissionOutcome::Queued {
+            thread_id: thread_id.clone(),
             message_id: artisan_domain::MessageId::parse("message-a").expect("message"),
             disposition: ReceiptDisposition::Accepted,
             cleared_revision: artisan_domain::ComposerDraftRevision::new(4).expect("revision"),
@@ -359,7 +294,7 @@ fn draft_submission_response_family_requires_exact_request_and_thread() {
         },
     };
     let expected = ExpectedResponse::DraftSubmitted {
-        thread_id: thread_id.clone(),
+        scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
         request_id: request_id.clone(),
     };
     let answer = |submitted| ResponsePayload::ComposerDraftSubmitted(submitted);
@@ -377,7 +312,7 @@ fn draft_submission_response_family_requires_exact_request_and_thread() {
     };
     assert!(validate_response_family(expected.clone(), answer(other_request)).is_err());
     let other_thread = artisan_domain::ComposerDraftSubmitted {
-        thread_id: other_thread_id,
+        scope: artisan_domain::ComposerDraftScope::Thread(other_thread_id),
         ..submitted
     };
     assert!(validate_response_family(expected.clone(), answer(other_thread)).is_err());
@@ -444,7 +379,7 @@ fn draft_submission_retry_keeps_its_wire_bytes_and_names_no_body() {
     let thread_id = ThreadId::parse("thread-image").expect("thread");
     let command = artisan_domain::SubmitComposerDraft {
         request_id: request_id.clone(),
-        thread_id: thread_id.clone(),
+        scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
         draft_revision: artisan_domain::ComposerDraftRevision::new(7).expect("revision"),
         selection: None,
     };
@@ -461,40 +396,6 @@ fn draft_submission_retry_keeps_its_wire_bytes_and_names_no_body() {
         retry.body,
         WireEnvelopeBody::Request(ClientRequest::Command(Command::SubmitComposerDraft(sent)))
             if sent == command
-    ));
-}
-
-#[test]
-fn first_message_stable_retry_keeps_every_wire_byte_and_identity() {
-    let request_id = RequestId::parse("native-message-stable").expect("request");
-    let thread_id = ThreadId::parse("thread-a").expect("thread");
-    let body = MessageBody::parse("  hello\n世界  ").expect("body");
-    let mutation = first_message_stable_mutation(QueueFirstMessage {
-        request_id: request_id.clone(),
-        thread_id: thread_id.clone(),
-        body: body.clone(),
-    })
-    .expect("stable mutation");
-    let (first, first_id) = mutation
-        .envelope(ProtocolVersion::V1)
-        .expect("first envelope");
-    let (retry, retry_id) = mutation
-        .envelope(ProtocolVersion::V1)
-        .expect("retry envelope");
-    assert_eq!(first_id, request_id);
-    assert_eq!(retry_id, request_id);
-    assert_eq!(first.frame_id, retry.frame_id);
-    assert_eq!(first.sent_at, retry.sent_at);
-    assert_eq!(
-        encode_envelope(&first).expect("first bytes"),
-        encode_envelope(&retry).expect("retry bytes")
-    );
-    assert!(matches!(
-        first.body,
-        WireEnvelopeBody::Request(ClientRequest::Command(Command::QueueFirstMessage(command)))
-            if command.request_id == request_id
-                && command.thread_id == thread_id
-                && command.body == body
     ));
 }
 
@@ -638,15 +539,20 @@ fn unknown_first_message_thread_is_rejected_before_forge_admission() {
 }
 
 #[test]
-fn command_debug_for_body_bearing_queue_is_variant_only() {
-    let command = NativeTransportCommand::QueueFirstMessage(Box::new(QueueFirstMessage {
-        request_id: RequestId::parse("native-message-redacted").expect("request"),
-        thread_id: ThreadId::parse("thread-a").expect("thread"),
-        body: MessageBody::parse("secret message text").expect("body"),
-    }));
+fn command_debug_for_a_draft_submission_is_variant_only() {
+    let command = NativeTransportCommand::SubmitComposerDraft(Box::new(
+        artisan_domain::SubmitComposerDraft {
+            request_id: RequestId::parse("native-message-redacted").expect("request"),
+            scope: artisan_domain::ComposerDraftScope::Project(
+                ProjectId::parse("secret-project").expect("project"),
+            ),
+            draft_revision: artisan_domain::ComposerDraftRevision::new(3).expect("revision"),
+            selection: None,
+        },
+    ));
     let diagnostic = format!("{command:?}");
-    assert_eq!(diagnostic, "NativeTransportCommand::QueueFirstMessage");
-    assert!(!diagnostic.contains("secret message text"));
+    assert_eq!(diagnostic, "NativeTransportCommand::SubmitComposerDraft");
+    assert!(!diagnostic.contains("secret-project"));
 }
 
 #[test]

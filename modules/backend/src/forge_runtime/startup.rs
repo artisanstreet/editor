@@ -672,7 +672,6 @@ async fn run_with_handler(
     let handler = handler.with_composer_catalog(
         crate::composer_catalog_service::ComposerCatalogService::new(
             native_dispatcher.catalog_client(),
-            app.repository().clone(),
             database,
         ),
     );

@@ -79,11 +79,11 @@ pub(super) fn refuse_send(
         .message_flight
         .as_ref()
         .expect("a send in flight");
-    let (thread_id, request_id) = (flight.thread_id.clone(), flight.request_id.clone());
+    let (scope, request_id) = (flight.scope.clone(), flight.request_id.clone());
     application.handle_service_event(
         NativeTransportEvent::ForgeDecision(
             crate::native_transport_service::ForgeDecisionEvent::SendRefused {
-                thread_id,
+                scope,
                 request_id,
                 refusal: artisan_domain::SubmissionRefusal::new(kind, message).expect("refusal"),
             },

@@ -70,10 +70,10 @@ impl NativeApplication {
                 );
             }
             ForgeDecisionEvent::SendRefused {
-                thread_id,
+                scope,
                 request_id,
                 refusal,
-            } => return self.handle_message_refused(&thread_id, &request_id, &refusal, cx),
+            } => return self.handle_message_refused(&scope, &request_id, &refusal, cx),
             ForgeDecisionEvent::SendAdmitted {
                 thread_id,
                 engine_config_revision,

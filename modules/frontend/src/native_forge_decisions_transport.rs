@@ -56,8 +56,8 @@ pub enum ForgeDecisionEvent {
     },
     /// The Forge refused a draft submission; nothing was queued.
     SendRefused {
-        /// Thread of the send.
-        thread_id: ThreadId,
+        /// Draft scope of the send.
+        scope: artisan_domain::ComposerDraftScope,
         /// The send's request identity.
         request_id: RequestId,
         /// The typed refusal with its message.

@@ -746,7 +746,7 @@ fn prepare_thread_switch_fixture(
         })
         .expect("message flight");
     application.message_flight = Some(NativeMessageFlight {
-        thread_id: source.clone(),
+        scope: artisan_domain::ComposerDraftScope::Thread(source.clone()),
         request_id: request("message-switch"),
         token,
     });

@@ -401,6 +401,32 @@ Implemented (after step 7), recent threads in the sidebar:
   error says why. A working thread shows the rail's trailing state dot (and "working" in its
   accessible description) without leaving its chronological group.
 
+Implemented (after step 7), sending from the new-thread screen:
+
+- Regression: step 5 made every send a thread-scoped `SubmitComposerDraft`, so Send on the
+  new-thread screen (no thread yet, the composer on `ComposerDraftScope::Project`) returned
+  without doing anything and its button looked disabled.
+- Protocol: `SubmitComposerDraft` names a `ComposerDraftScope` instead of a thread; on the wire
+  `SubmitComposerDraftRequest.projectId` (@4) and `ComposerDraftSubmitted.projectId` (@6) are
+  appended beside `threadId` (exactly one is nonempty), and `DraftSubmissionQueued.threadId`
+  (@4) names the thread the message is queued in.
+- Forge: submitting a project draft admits it like a thread draft with no saved configuration
+  and no live run (the selection is resolved against the catalog served for the project root and
+  must be runnable; without one the default configuration is used; otherwise the typed refusals
+  of step 6), fits its images, and then, in one transaction, creates the thread already
+  configured, queues the draft as its first message, records the submission under (project,
+  draft revision) (migration `m20261002_000022_project_draft_submissions`) and empties the
+  project draft. A repeated revision answers the same thread and message as a duplicate and
+  creates nothing; another revision is `Stale`; an empty draft is refused.
+- Editor: Send submits whichever draft the screen shows (the open thread's, a draft thread's on
+  the new-thread screen, or the project's) through the same save-then-submit flow, so a
+  resubmission after a lost answer names the same revision. The answer names the created
+  thread, which opens like a chosen recent thread; its subscription brings the outbox row.
+  Send is never a silent no-op: without a project it says so and keeps the draft.
+- `QueueFirstMessage` is no longer sent by the Editor (its command, events and handler are
+  removed); the Forge keeps the command because its capnp ordinals are frozen and its
+  repository tests still cover the durable first-message admission.
+
 ## 5. Forge resilience prerequisites
 
 - A single failing request must not end the Forge serve loop; fail that connection only.

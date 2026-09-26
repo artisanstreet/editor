@@ -11,6 +11,7 @@ mod first_message;
 mod message_dispatch;
 mod observation_ledger;
 mod project_catalog;
+mod project_draft_submission;
 mod project_threads;
 mod queue_message;
 mod recent_threads;
@@ -50,6 +51,7 @@ pub use message_dispatch::{
     DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
     RequeueMessageDispatch, TransitionedMessageDispatch,
 };
+pub use project_draft_submission::{ProjectDraftSubmission, SubmitProjectDraftInput};
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
@@ -237,6 +239,19 @@ impl Repository {
         thread_id: &ThreadId,
     ) -> Result<RootPath, RepositoryError> {
         let project_id = self.read_thread_project(thread_id).await?;
+        self.read_project_root(project_id).await
+    }
+
+    /// Reads the persisted root of an attached project.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryError`] if the project is missing, its root is
+    /// corrupt, or a database query fails.
+    pub async fn read_project_root(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<RootPath, RepositoryError> {
         let project = entities::attached_project::Entity::find_by_id(project_id.as_str())
             .one(&self.database)
             .await
