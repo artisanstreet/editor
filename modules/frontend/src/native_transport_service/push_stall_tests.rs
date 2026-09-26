@@ -347,13 +347,9 @@ fn a_request_sent_during_a_long_push_is_answered_without_a_send_stall() {
                 outcome.recv_timeout(WATCHDOG)
             );
         }
-        if let Some(cancel) = service.delivery_cancel.take() {
-            cancel.cancel();
-        }
-        if let Some(join) = service.delivery_join.take() {
-            let _ = join.await;
-        }
-        drop(service);
+        // The service's own teardown: stop the delivery task, then drain the
+        // session so the Forge observes the close.
+        assert!(service.cleanup().await.is_ok(), "clean teardown");
     });
     drop(event_tx);
     let forge_outcome = outcome.recv_timeout(WATCHDOG).expect("forge outcome");
@@ -405,7 +401,7 @@ fn cancelling_the_delivery_task_ends_it_even_when_its_channel_is_full() {
             "a reconnect's cancel and join must not wait for a full channel"
         );
         drop(parked_receiver);
-        drop(service);
+        assert!(service.cleanup().await.is_ok(), "clean teardown");
     });
     let _ = outcome.recv_timeout(WATCHDOG);
     forge.join().expect("forge thread");
