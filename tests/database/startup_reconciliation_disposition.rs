@@ -3,9 +3,10 @@ use artisan_database::entities::{
 };
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
-    ClaimedMessageDispatch, ExpiredLeaseRecovery, ProviderBindingBytes, QueueFirstMessageInput,
-    Repository, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
-    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    ClaimedMessageDispatch, DispatchFailureReason, ExpiredLeaseRecovery, FailUnstartedRun,
+    FailUnstartedRunOutcome, ProviderBindingBytes, QueueFirstMessageInput, Repository,
+    RunErrorCode, RunErrorMessage, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput,
+    SqliteConfig, StartupReconciliationDisposition, StartupReconciliationDispositionError,
     StartupReconciliationDispositionOutcome, StartupReconciliationQuery, StartupRunLifecycle,
     connect,
 };
@@ -1667,4 +1668,161 @@ async fn live_lease_expiry_records_its_own_reason_and_replays() {
         StartupReconciliationDispositionOutcome::SkippedMoved
     );
     assert_eq!(fetch_all(&database).await, after);
+}
+
+fn unstarted_texts() -> (RunErrorCode, RunErrorMessage, DispatchFailureReason) {
+    (
+        RunErrorCode::parse("provider_start_timeout".to_owned()).expect("code"),
+        RunErrorMessage::parse("Claude did not start within 120 s.".to_owned()).expect("message"),
+        DispatchFailureReason::parse("Claude did not start within 120 s.").expect("reason"),
+    )
+}
+
+#[tokio::test]
+async fn unstarted_run_fails_live_with_its_launch_error() {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (claimed, receipt, start_key, creds) = queue_claim_launch(
+        &repository,
+        &database,
+        "thread-1",
+        "message-1",
+        "run-1",
+        "turn-1",
+    )
+    .await;
+    let before = fetch_all(&database).await;
+    let (code, message, reason) = unstarted_texts();
+    let turn_patch = PatchId::parse("turn-patch-unstarted").expect("p");
+    let outcome = repository
+        .fail_unstarted_run(FailUnstartedRun {
+            claimed: &claimed,
+            receipt: &receipt,
+            run_start_key: &start_key,
+            credentials: &creds,
+            operated_at: UnixMillis::from_millis(BOUND_AT_MS),
+            turn_patch_id: &turn_patch,
+            error_code: &code,
+            error_message: &message,
+            dispatch_reason: &reason,
+        })
+        .await
+        .expect("unstarted failure");
+    assert_eq!(outcome, FailUnstartedRunOutcome::Failed);
+
+    let after = fetch_all(&database).await;
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == "message-1")
+        .expect("dispatch");
+    assert_eq!(dispatch.state, DispatchState::Failed);
+    assert_eq!(
+        dispatch.last_error.as_deref(),
+        Some("Claude did not start within 120 s.")
+    );
+    assert!(dispatch.lease_owner.is_none());
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-1")
+        .expect("run");
+    assert_eq!(run.lifecycle, AssistantRunLifecycle::Failed);
+    assert_eq!(run.error_code.as_deref(), Some("provider_start_timeout"));
+    assert_eq!(run.terminal_at_ms, Some(BOUND_AT_MS));
+    assert!(run.owner.is_none() && run.lease.is_none() && run.claim_token.is_none());
+    assert!(run.provider_binding.is_none());
+    let turn = after
+        .turns
+        .iter()
+        .find(|t| t.turn_id == "turn-1")
+        .expect("turn");
+    assert_eq!(turn.lifecycle, EntityLifecycle::Failed);
+    assert_eq!(after.patches.len(), before.patches.len() + 1);
+    let patch = after
+        .patches
+        .iter()
+        .find(|p| p.patch_id == "turn-patch-unstarted")
+        .expect("turn patch");
+    assert_eq!(patch.kind, ConversationPatchKind::TurnLifecycle);
+    assert_eq!(patch.lifecycle, Some(EntityLifecycle::Failed));
+    assert_eq!(patch.revision, turn.revision);
+
+    // Nothing is left for lease-expiry recovery to report as unknown.
+    let query = StartupReconciliationQuery::new(UnixMillis::from_millis(10_000), 10).expect("q");
+    assert!(
+        repository
+            .list_startup_reconciliation_candidates(query)
+            .await
+            .expect("candidates")
+            .is_empty()
+    );
+    // A replay finds the pair settled and changes nothing.
+    assert_eq!(
+        repository
+            .fail_unstarted_run(FailUnstartedRun {
+                claimed: &claimed,
+                receipt: &receipt,
+                run_start_key: &start_key,
+                credentials: &creds,
+                operated_at: UnixMillis::from_millis(BOUND_AT_MS),
+                turn_patch_id: &turn_patch,
+                error_code: &code,
+                error_message: &message,
+                dispatch_reason: &reason,
+            })
+            .await
+            .expect("replay"),
+        FailUnstartedRunOutcome::Moved
+    );
+    assert_eq!(fetch_all(&database).await, after);
+}
+
+#[tokio::test]
+async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (claimed, receipt, start_key, creds) = queue_claim_launch(
+        &repository,
+        &database,
+        "thread-1",
+        "message-1",
+        "run-1",
+        "turn-1",
+    )
+    .await;
+    let (code, message, reason) = unstarted_texts();
+    let turn_patch = PatchId::parse("turn-patch-unstarted").expect("p");
+    let command = |operated_at_ms: i64| FailUnstartedRun {
+        claimed: &claimed,
+        receipt: &receipt,
+        run_start_key: &start_key,
+        credentials: &creds,
+        operated_at: UnixMillis::from_millis(operated_at_ms),
+        turn_patch_id: &turn_patch,
+        error_code: &code,
+        error_message: &message,
+        dispatch_reason: &reason,
+    };
+    let before = fetch_all(&database).await;
+    // A lapsed lease belongs to recovery, not to this dispatcher.
+    assert_eq!(
+        repository
+            .fail_unstarted_run(command(LEASE_EXPIRES_AT_MS))
+            .await
+            .expect("expired attempt"),
+        FailUnstartedRunOutcome::Moved
+    );
+    assert_eq!(fetch_all(&database).await, before);
+
+    let _bound = bind_running(&repository, &claimed, &receipt, &start_key, &creds).await;
+    let bound = fetch_all(&database).await;
+    assert_eq!(
+        repository
+            .fail_unstarted_run(command(BATCH_AT_MS))
+            .await
+            .expect("bound attempt"),
+        FailUnstartedRunOutcome::Moved
+    );
+    assert_eq!(fetch_all(&database).await, bound);
 }

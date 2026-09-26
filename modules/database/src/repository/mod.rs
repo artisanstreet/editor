@@ -67,9 +67,9 @@ pub use run_interaction::{
     StoredInteractionReceipt,
 };
 pub use run_launch::{
-    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, ProjectSteeredMessage,
-    ProjectSteeredMessageOutcome, RunLaunchCredentials, RunLaunchError, RunStartKey,
-    SteeredMessageReceipt,
+    FailUnstartedRun, FailUnstartedRunOutcome, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    LaunchedRunReceipt, ProjectSteeredMessage, ProjectSteeredMessageOutcome, RunLaunchCredentials,
+    RunLaunchError, RunStartKey, SteeredMessageReceipt,
 };
 pub use run_observation::terminal::{
     AuxiliaryTerminalError, CancelRun, CancelRunError, CancelRunOutcome, CompleteRun,

@@ -7,12 +7,13 @@
 //! state, two shared renderer ordinals, the initial pending turn, the
 //! completed user item, two initial replay patches, and the `launching`
 //! assistant-run row commit together or not at all. There is deliberately
-//! no separate public mark-running step and no launch-failure or requeue API
-//! in this slice: a NULL provider binding is NOT proof that no external
-//! effect occurred, and a failed run paired with a requeued dispatch would
-//! contradict the permanent unique origin indexes. Unknown external
-//! outcomes, recovery, and provider binding are later explicit transaction
-//! designs.
+//! no separate public mark-running step and no requeue API: a NULL provider
+//! binding alone is NOT proof that no external effect occurred, and a failed
+//! run paired with a requeued dispatch would contradict the permanent unique
+//! origin indexes. Only the live dispatcher, after it has torn down a
+//! provider that never started, may fail the pair terminally
+//! ([`crate::Repository::fail_unstarted_run`]); unknown outcomes stay with
+//! lease-expiry recovery.
 //!
 //! Every input is borrowed so a caller whose transaction outcome is unknown
 //! may retry the identical call with the same identities, start key, and
@@ -24,6 +25,7 @@
 mod launch;
 mod replay;
 mod steered;
+mod unstarted;
 
 use artisan_domain::{MessageId, PatchId, RunId};
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
@@ -40,6 +42,7 @@ use super::{RepositoryError, database_error, negative_counter};
 
 pub use launch::{LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt};
 pub use steered::{ProjectSteeredMessage, ProjectSteeredMessageOutcome, SteeredMessageReceipt};
+pub use unstarted::{FailUnstartedRun, FailUnstartedRunOutcome};
 
 /// Exact byte length of every run-launch capability and of the start key.
 pub(super) const RUN_CAPABILITY_BYTES: usize = 32;
