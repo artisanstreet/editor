@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 #[cfg(test)]
 use super::super::observation::TerminalObservation;
-use super::super::observation::{EngineObservation, TerminalState, chunk_text};
+use super::super::observation::{EngineObservation, TerminalState, TextSnapshot, chunk_text};
 
 use super::content::ClaudeAssistantContent;
 use super::launch::ClaudeThinkingDisplay;
@@ -20,6 +20,7 @@ use super::protocol::{
     ClaudeApprovalRequest, ClaudeEvent, ClaudeQuestion, ClaudeQuestionRequest, ClaudeTurnError,
     user_message_line, write_line,
 };
+use super::text::{ClaudeTextLedger, ClaudeTextSettlement};
 use super::thinking::ClaudeThinkingTracker;
 use super::usage::{ClaudeUsageScope, project_usage_sample};
 
@@ -101,7 +102,8 @@ fn child_transcript_row(
 /// transcript frames project validated transcript rows; both accumulate for
 /// the consumer drain without ever reaching the root turn. Thinking
 /// estimates stay plumbing; thinking stretches project through the run-local
-/// [`ClaudeThinkingTracker`].
+/// [`ClaudeThinkingTracker`] and assistant text settles through the
+/// [`ClaudeTextLedger`].
 #[derive(Debug, Default)]
 pub(crate) struct ClaudePendingTracker {
     approvals: HashMap<String, ClaudeApprovalRequest>,
@@ -111,6 +113,7 @@ pub(crate) struct ClaudePendingTracker {
     subagent_rows: Vec<Observation>,
     thinking_tokens: Option<u64>,
     thinking: ClaudeThinkingTracker,
+    text: ClaudeTextLedger,
     permission_denials: usize,
     stream_message_id: Option<String>,
     init_seen: bool,
@@ -334,6 +337,14 @@ pub(crate) enum ClaudeApplyOutcome {
     Terminal(TerminalState),
 }
 
+fn message_phase(phase: &str) -> artisan_domain::AssistantMessagePhase {
+    match phase {
+        "commentary" => artisan_domain::AssistantMessagePhase::Commentary,
+        "final" => artisan_domain::AssistantMessagePhase::Final,
+        _ => artisan_domain::AssistantMessagePhase::Unspecified,
+    }
+}
+
 /// Chunks one text part onto the shared vocabulary with its verbatim phase.
 ///
 /// The current stream message id (when announced) becomes the explicit part
@@ -347,11 +358,7 @@ async fn emit_text(
     delta: &str,
     phase: &str,
 ) -> Result<(), TerminalState> {
-    let phase = match phase {
-        "commentary" => artisan_domain::AssistantMessagePhase::Commentary,
-        "final" => artisan_domain::AssistantMessagePhase::Final,
-        _ => artisan_domain::AssistantMessagePhase::Unspecified,
-    };
+    let phase = message_phase(phase);
     let native_id = format!("claude:{frame_sequence}");
     for chunk in chunk_text(run_id, frame_sequence, &native_id, delta) {
         let chunk = chunk.with_phase(phase);
@@ -387,6 +394,54 @@ async fn emit_rows(
     Ok(())
 }
 
+/// Projects one buffered text block onto the message part it settles.
+///
+/// The buffered text is authoritative: streamed deltas that already equal it
+/// emit nothing (only a non-default phase re-attributes the part), a missing
+/// suffix appends, and diverging text replaces the whole message part as one
+/// snapshot. A replacement needs the part identity the deltas carried; a
+/// stream that never announced its message has none to correct.
+async fn settle_buffered_text(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    part_id: Option<&str>,
+    frame_sequence: u64,
+    settlement: ClaudeTextSettlement,
+    body: &str,
+    phase: &str,
+) -> Result<(), TerminalState> {
+    let replacement = match settlement {
+        ClaudeTextSettlement::Append(missing) => {
+            return emit_text(
+                observations,
+                run_id,
+                part_id,
+                frame_sequence,
+                &missing,
+                phase,
+            )
+            .await;
+        }
+        ClaudeTextSettlement::Settled if phase == "unspecified" => return Ok(()),
+        ClaudeTextSettlement::Settled => body.to_owned(),
+        ClaudeTextSettlement::Replace(body) => body,
+    };
+    let Some(part_id) = part_id else {
+        return Ok(());
+    };
+    let snapshot = TextSnapshot::new(
+        run_id.clone(),
+        frame_sequence,
+        part_id.to_owned(),
+        replacement,
+    )
+    .with_phase(message_phase(phase));
+    observations
+        .send(EngineObservation::TextSnapshot(snapshot))
+        .await
+        .map_err(|_| TerminalState::Interrupted)
+}
+
 /// Projects one buffered assistant frame: every supported part in provider
 /// order, then its usage sample exactly once.
 async fn apply_assistant_frame(
@@ -404,8 +459,18 @@ async fn apply_assistant_frame(
     for part in &frame.content {
         match part {
             ClaudeAssistantContent::Text { text, phase } => {
+                let settlement = tracker.text.buffered(frame.message_id.as_deref(), text);
                 let part_id = tracker.stream_message_id.as_deref();
-                emit_text(observations, run_id, part_id, frame_sequence, text, phase).await?;
+                settle_buffered_text(
+                    observations,
+                    run_id,
+                    part_id,
+                    frame_sequence,
+                    settlement,
+                    tracker.text.body(),
+                    phase,
+                )
+                .await?;
             }
             ClaudeAssistantContent::Thinking { text } => {
                 let rows =
@@ -468,6 +533,7 @@ pub(crate) async fn apply_event(
             continued
         }
         ClaudeEvent::MessageStart { message_id } => {
+            tracker.text.message_started(&message_id);
             tracker.stream_message_id = Some(message_id);
             tracker.thinking.message_started();
             continued
@@ -476,6 +542,7 @@ pub(crate) async fn apply_event(
             if active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
             }
+            tracker.text.streamed(&delta);
             let part_id = tracker.stream_message_id.as_deref();
             settle(emit_text(observations, run_id, part_id, frame_sequence, &delta, phase).await)
         }
