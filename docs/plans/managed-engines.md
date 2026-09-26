@@ -160,8 +160,9 @@ Everything lives beside the Forge database (the Forge state directory):
     .codex/               CODEX_HOME (Codex)
 ```
 
-`<forge state>` is the directory holding the Forge database (`~/.local/state/artisan-forge` on
-the WSL Forge, `/var/lib/artisan-forge` under the NixOS module). `OpenCode2` keeps its existing
+`<forge state>` is the directory holding the Forge database (`<installation>/data`, for the WSL
+dev Forge `~/.local/share/Artisan Street Dev/data`; `/var/lib/artisan-forge` under the NixOS
+module). `OpenCode2` keeps its existing
 `toolchain/opencode2` root; its format-1 `state.json` is still read.
 
 ## Resolution
@@ -254,12 +255,13 @@ variables; `artisan_native_engine::build_environment`):
 A managed engine starts without credentials. The account-usage reads run the managed CLI, so
 readiness reports `needs sign-in` (and `not ready` with "engine is not installed on this Forge"
 before the first install finishes). The owner signs in once per Forge host with the managed
-binary and exactly the environment the Forge uses:
+binary and exactly the environment the Forge uses; the installation's `ae` finds its own Forge
+(`--database PATH` selects another):
 
 ```sh
-ae engine login claude --database ~/.local/state/artisan-forge/forge.db
+ae engine login claude
 #   runs the managed `claude auth login` with the Forge CLAUDE_CONFIG_DIR
-ae engine login codex --database ~/.local/state/artisan-forge/forge.db -- --device-auth
+ae engine login codex -- --device-auth
 #   runs the managed `codex login --device-auth` with the Forge CODEX_HOME
 ```
 

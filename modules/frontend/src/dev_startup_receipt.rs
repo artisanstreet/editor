@@ -11,7 +11,7 @@
 //! categories, and paths are fixed or finite by construction.
 //!
 //! The receipt reports the first connection of this process, whichever host
-//! it opened (a registered host, or the owned dev Forge), and only that one:
+//! it opened (a registered host, or a manually started dev Forge), and only that one:
 //! later failures, reconnects, and host switches never rewrite it, so a
 //! runner that already removed it is not left a stale receipt.
 

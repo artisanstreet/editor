@@ -451,7 +451,7 @@ What the Editor keeps after step 7, and why each is not Forge state:
 | State | Where | Why it stays |
 | --- | --- | --- |
 | FPS limit, FPS overlay, "reopen last host" hint | Editor pool (`editor_settings`) | Device-local presentation, or needed before any Forge connection exists |
-| Host invitations, TLS pins, reconnect capabilities | Credentials module | Connection bootstrap material, neither pool. The Editor has no built-in host: a window opens the reopen hint's host (resolved to its current registration), else the first registered host, else offers to add one; only `cargo dev` (`ARTISAN_DEV_OWNED_FORGE=1`) and `ARTISAN_DEV_FORGE_HOME` connect to a Forge on this machine |
+| Host invitations, TLS pins, reconnect capabilities | Credentials module | Connection bootstrap material, neither pool. The Editor has no built-in host: a window opens the reopen hint's host (resolved to its current registration), else the first registered host, else offers to add one (`--host-home` opens one explicitly, which the dev runner uses); only `ARTISAN_DEV_FORGE_HOME` attaches to an unregistered Forge on this machine |
 | Machine menu memo (name, home, subtitle, avatar seed per host) | `native_hosts/catalog.rs` | Presentation cache rebuilt from the credential store on every refresh |
 | Composer view: text being typed, undo and redo, thumbnails, the per-scope save chain | `native_composer*`, `composer_draft_sync.rs` | View history and in-flight saves; the Forge draft is the stored copy |
 | Last draft revision the Forge reported per scope | `composer_draft_sync.rs` | Echo of Forge data, so a send names the revision it saved |

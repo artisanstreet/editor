@@ -15,46 +15,108 @@ Install Nix with flakes enabled on Linux/WSL, then from the checkout:
 nix run .#dev
 ```
 
-Nix builds the **Debug** stage payload for the current platform (inside WSL:
-Windows, cross-built with MinGW-w64), then the dev runner installs it as a
-signed `dev`-channel release into the per-user **Artisan Street Dev**
-installation through the shipping installer code and launches the installed
-Editor, which starts its owned Forge through the product APIs. The dev
-installation sits beside the real one (`$XDG_DATA_HOME/Artisan Street Dev`,
-`%LOCALAPPDATA%\Artisan Street Dev`), never inside it, and keeps its database,
-credentials, and instance identity across runs.
+`nix run .#dev` is the Rust dev runner (`scripts/native_dev`), not a wrapper
+script. It builds the **Debug** stage of the checkout with Nix and deploys the
+whole product through the shipping installer, in two halves:
 
-Running it again while the dev Editor is open retires it the way an update does
-and launches the new build, so every iteration exercises the real update path.
-Every build is a distinct version such as
-`0.0.0-dev.1284+g1a2b3c4d5e.dirty.n0123456789` (commit, dirty tree, and Nix
-output hash) and shows its channel and commit in the window title and under
-Settings → About.
+1. **Forge** (Linux). The Linux payload installs as a signed `dev`-channel
+   release into the per-user **Artisan Street Dev** installation
+   (`$XDG_DATA_HOME/Artisan Street Dev`, default `~/.local/share`), retiring
+   the running Forge the way an update does. The installed `ae` then
+   configures the Forge (`ae setup ... --autostart --listen auto:4433
+   --host-name <distribution>`) as the systemd user service
+   `artisan-forge-dev.service`, which runs `<root>/bin/ae start --foreground`,
+   and starts it (`ae start`). Once ready, the Forge publishes its private host
+   invitation at `<root>/host.json`. The installation links `ae` into
+   `~/.local/bin` (a new login shell puts it on `PATH`), so `ae status`,
+   `ae doctor`, and `ae engine login claude` work without flags.
+2. **Editor**. Inside WSL the Editor is the Windows build: the cross-built
+   Windows runner runs through WSL interop, installs the Windows payload into
+   `%LOCALAPPDATA%\Artisan Street Dev` (closing a running dev Editor first),
+   registers the Forge's invitation exactly as **Add host from invitation…**
+   does, and launches the installed Editor on that host. Outside WSL the Linux
+   installation already holds the Editor, which is launched the same way.
+
+Both installations sit beside the real ones, never inside them, and keep their
+data across runs. Running `nix run .#dev` again upgrades both in place through
+the real update path, so every iteration exercises it. Every build is a
+distinct version such as `0.0.0-dev.1284+g1a2b3c4d5e.dirty.n0123456789`
+(commit, dirty tree, and Nix output hash) and shows its channel and commit in
+the window title and under Settings → About.
 
 ```sh
-nix run .#dev                        # Debug stage: build, install, launch or relaunch
-nix run .#dev -- --production        # Production stage
-nix run .#dev -- stage               # build and install without launching
-nix run .#dev -- where               # dev root, active version, build identity
-nix run .#dev -- prune --keep 1      # drop superseded dev versions
-nix run .#dev -- --linux             # the Linux build, also inside WSL
-nix run .#dev -- --root /abs/path    # a separate dev installation
-nix run .#dev -- --attach            # stay attached until the Editor exits
+nix run .#dev                          # Debug stage: build, deploy, launch or relaunch
+nix run .#dev -- --production          # Production stage
+nix run .#dev -- stage                 # build and deploy; the Forge runs, the Editor is not launched
+nix run .#dev -- where                 # both installations, active versions, the service
+nix run .#dev -- prune --keep 1        # drop superseded versions on both sides
+nix run .#dev -- --linux               # the Linux Editor (WSLg), also inside WSL
+nix run .#dev -- --attach              # stay attached until the Editor exits
+nix run .#dev -- --listen auto:4533 --host-name 'Ubuntu scratch'   # Forge address and name
+nix run .#dev -- --root /abs/Linux/root --windows-root 'C:\abs\Windows\root'  # separate installations
 ```
 
-`nix run .#dev` returns once the Editor writes its startup receipt, which it does
-after its first host connection completes the initial queries, whichever host
-it opened (a registered host, or the owned dev Forge when none is registered);
-without a receipt it stops the Editor and fails after 90 seconds. In a terminal
-the Editor keeps writing to it. When the run's output is not a terminal (an
-agent shell, `| tee`, CI) the Editor is detached from it, so the caller sees
-end-of-file when the runner returns: on Unix its output goes to
+The run returns once the Editor writes its startup receipt, which it does after
+its first connection to the dev host completes the initial queries; without a
+receipt it stops the Editor and fails after 90 seconds. In a terminal the
+Editor keeps writing to it. When the run's output is not a terminal (an agent
+shell, `| tee`, CI) the Editor is detached from it: on Unix its output goes to
 `<dev root>/.dev-runner/editor.log`; on Windows it is started through the shell
 and its output is not captured.
 
 Flakes see tracked files only: `git add -N` new source files before building
-(the app refuses to build while `.rs`, `.toml`, or `.nix` files are untracked).
-Previous versions stay installed for rollback (three by default, `--keep N`).
+(the runner refuses to build while `.rs`, `.toml`, or `.nix` files are
+untracked). Previous versions stay installed for rollback (three by default,
+`--keep N`). `nix`, `git`, and a systemd user manager (`systemctl --user`) are
+required; Linux support is systemd-only.
+
+### The dev Forge service
+
+```sh
+ae status
+ae doctor                                  # includes the service line
+systemctl --user status artisan-forge-dev.service
+journalctl --user -u artisan-forge-dev.service
+ae autostart --disable                     # stop the service and remove its unit
+```
+
+The unit is owned by the installation (`X-ArtisanInstallRoot=` names it):
+`ae setup --autostart` rewrites it and restarts a running Forge when the
+configuration changed, and never touches a unit of the same name it did not
+write. The Forge stops on SIGINT; a readiness receipt left by a Forge that was
+killed anyway is reconciled on the next start.
+
+A separate `--root` gets its own unit name derived from the root's path, and
+leaves the user environment alone: no `~/.local/bin/ae` link and no adoption
+of an old Forge. Use it, with `--windows-root`, `--listen`, and
+`--host-name`, for scratch deployments beside the real dev installation, and
+remove them with `<root>/bin/ae autostart --disable` and by deleting the roots.
+
+### Adopting a hand-deployed Forge
+
+Before the product owned its service, a Forge was deployed by hand
+(`scripts/install_forge_host.py`, since removed): `forge-host` from a pinned
+store path, a hand-written `~/.config/systemd/user/artisan-forge.service`, and
+its home in `~/.local/state/artisan-forge`. The first `nix run .#dev` for the
+default installation adopts it, once:
+
+- the old unit is stopped and disabled, and its custody lock proves the old
+  Forge is gone;
+- `forge.db` (with its WAL and shared memory) and `credentials/` are copied to
+  `~/.local/state/artisan-forge/adopted-backup/`;
+- the database is checkpointed, then the database, credentials (the host
+  identity the Windows Editor's registration trusts), custody, model catalog,
+  and the whole engine `toolchain/` move into the installation
+  (`data/forge.sqlite3`, `credentials/`, `custody/forge.lock`, `data/`);
+- the GC roots in `nix-roots/` are removed, and the unit, its drop-ins, and its
+  saved copies move into the backup (`adopted-backup/systemd/`);
+- a hand-added Artisan `ae` is removed from the Nix profile;
+- `ADOPTED.json` marks the old home as a backup; later runs skip it.
+
+The new service keeps the certificate, so the Windows Editor's existing
+registration of the host stays valid; the runner registers the new invitation
+path so the Editor refreshes from it. A machine without the old layout adopts
+nothing.
 
 ### Stages
 
@@ -82,12 +144,13 @@ For automatic activation, install direnv, add its hook to your shell, and run
 or launch the Editor. Configure nix-direnv on the host for cached activation.
 
 The shell defaults to two Cargo jobs. Override `CARGO_BUILD_JOBS` when appropriate.
-Nix builder concurrency is separate: on this WSL machine use `--max-jobs 1 --cores 2`.
+Nix builder concurrency is separate: on this WSL machine use `--max-jobs 2 --cores 3`
+(for example through `NIX_CONFIG`, which `nix run .#dev` passes to its build).
 
 ## Nix outputs
 
 Tools (`payload-manifest-generator`, `release-tool`, `capnp-codegen`,
-`forge-host`, `screen-demo`) build independently in Cargo's dev profile, each
+`forge-host` (the remote-host check's fixture), `screen-demo`) build independently in Cargo's dev profile, each
 against its own dependency graph.
 
 Release installers embed the public values in
