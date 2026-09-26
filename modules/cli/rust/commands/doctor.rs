@@ -93,7 +93,9 @@ pub(super) fn doctor(
             "protocol health is unavailable without a valid installation".to_owned(),
         ))
     };
-    let instance_state = instance::load(layout);
+    // The Forge instance is the native configuration `ae setup` writes and
+    // `ae start` runs, not the retired pre-native instance files.
+    let (instance_state, _) = inspect_native_instance(layout);
     // Payload drift (for example a development build copied over an installed
     // version) is reported, never repaired. Versions installed before payload
     // manifests existed stay honestly unverifiable without failing doctor.
@@ -109,7 +111,7 @@ pub(super) fn doctor(
     // explicit creator.
     let healthy = installation.is_ok()
         && protocol.is_ok()
-        && instance_state.is_ok()
+        && instance_state == "ok"
         && !matches!(payload_health, payload::PayloadHealth::Modified(_))
         && service
             .as_ref()
@@ -121,7 +123,7 @@ pub(super) fn doctor(
                 "healthy": healthy,
                 "installation": if installation.is_ok() { "ok" } else { "error" },
                 "protocol": if protocol.is_ok() { "ok" } else { "error" },
-                "instance": if instance_state.is_ok() { "ok" } else { "missing" },
+                "instance": instance_state,
                 "payload": payload_health.as_str(),
                 "payload_issues": match &payload_health {
                     payload::PayloadHealth::Modified(issues) => issues.clone(),
@@ -139,14 +141,10 @@ pub(super) fn doctor(
             "{}: artisan:// protocol",
             if protocol.is_ok() { "ok" } else { "error" }
         );
-        println!(
-            "{}: forge instance",
-            if instance_state.is_ok() {
-                "ok"
-            } else {
-                "error"
-            }
-        );
+        match instance_state {
+            "ok" => println!("ok: forge instance"),
+            state => println!("error: forge instance ({state}; run `ae setup`)"),
+        }
         match &payload_health {
             payload::PayloadHealth::Verified => println!("ok: version payload"),
             payload::PayloadHealth::Modified(issues) => {
