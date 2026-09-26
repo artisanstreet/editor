@@ -778,3 +778,46 @@ fn a_resolved_host_incarnation_becomes_the_session_home_and_reopen_hint(cx: &mut
         );
     });
 }
+
+#[gpui::test]
+fn a_window_opened_from_a_stale_hint_writes_the_resolved_incarnation_back(cx: &mut TestAppContext) {
+    // Startup already resolved the stale hint, so the window opens on the
+    // current registration while the stored hint still names the retired one.
+    let retired = PathBuf::from("/test/hosts/ubuntu-retired");
+    let resolved = PathBuf::from("/test/hosts/ubuntu-current");
+    cx.update(|cx| {
+        crate::editor_settings::install(
+            crate::editor_settings::get(cx)
+                .clone()
+                .with_reopen_host(Some(retired)),
+            None,
+            cx,
+        );
+    });
+    let service = Arc::new(NativeTransportService::completed_for_test(vec![
+        NativeTransportEvent::HostHome(resolved.clone()),
+    ]));
+    let opened = resolved.clone();
+    let (workspace, cx) = cx.add_window_view(move |window, cx| {
+        NativeWorkspace::new(Some(opened), Some(service), window, cx)
+    });
+    cx.run_until_parked();
+    let view = selected(&workspace, cx);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.poll_service(cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            workspace.read(cx).host.home.as_deref(),
+            Some(resolved.as_path())
+        );
+        assert_eq!(
+            crate::editor_settings::get(cx).reopen_host(),
+            Some(resolved.as_path()),
+            "the resolved registration replaces the retired hint"
+        );
+    });
+}

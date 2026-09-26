@@ -193,16 +193,20 @@ impl NativeApplication {
     /// replaces (and deletes) the registration the window was opened with.
     /// The window's home, label, and the reopen hint must follow it, or the
     /// connected host reads as unavailable.
+    ///
+    /// The resolution is always emitted, even when the window already opened
+    /// the resolved registration: startup resolves a stale reopen hint before
+    /// connecting, so only the workspace can tell that the stored hint still
+    /// names the retired one.
     pub(super) fn adopt_resolved_home(&mut self, home: PathBuf, cx: &mut Context<Self>) {
-        if self.machine_home.as_deref() == Some(home.as_path()) {
-            return;
+        if self.machine_home.as_deref() != Some(home.as_path()) {
+            self.machine_home = Some(home.clone());
+            self.machine_label = crate::native_hosts::label(Some(&home));
+            #[cfg(not(test))]
+            self.refresh_machines(cx);
+            cx.notify();
         }
-        self.machine_home = Some(home.clone());
-        self.machine_label = crate::native_hosts::label(Some(&home));
-        #[cfg(not(test))]
-        self.refresh_machines(cx);
         cx.emit(HostResolved(home));
-        cx.notify();
     }
 
     pub(super) fn dismiss_machine_submenu(&mut self) {

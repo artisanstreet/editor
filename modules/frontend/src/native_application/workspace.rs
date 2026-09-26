@@ -207,14 +207,22 @@ impl NativeWorkspace {
     /// The connection resolved its host to a newer registration: the
     /// session's home and the reopen hint follow it, so a relaunch opens the
     /// registration that exists rather than the one it replaced.
+    ///
+    /// The hint is compared on its own: a window opened from a stale hint
+    /// already holds the resolved home, yet the stored hint still names the
+    /// retired registration until this writes it back.
     fn adopt_resolved_home(&mut self, home: PathBuf, cx: &mut Context<Self>) {
-        let home = Some(home);
-        if self.host.home == home {
-            return;
+        if self.host.home.as_deref() != Some(home.as_path()) {
+            self.host.home = Some(home.clone());
+            cx.notify();
         }
-        self.host.home.clone_from(&home);
-        let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
-        cx.notify();
+        if crate::editor_settings::get(cx).reopen_host() != Some(home.as_path()) {
+            // Best-effort: a hint that cannot be saved must not disturb the
+            // connection.
+            let _ = crate::editor_settings::update(cx, |settings| {
+                settings.with_reopen_host(Some(home))
+            });
+        }
     }
 
     fn reopen_profile_menu(&self, window: &mut Window, cx: &mut Context<Self>) {
