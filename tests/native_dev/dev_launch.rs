@@ -47,7 +47,6 @@ fn receipt_env_and_schema_match_the_frontend_contract() {
         "ARTISAN_DEV_STARTUP_RECEIPT"
     );
     assert_eq!(native_dev::STARTUP_RECEIPT_SCHEMA, "artisan-dev-startup-v1");
-    assert_eq!(native_dev::OWNED_DEV_FORGE_ENV, "ARTISAN_DEV_OWNED_FORGE");
 }
 
 #[test]

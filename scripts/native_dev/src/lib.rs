@@ -40,9 +40,8 @@ pub use launch::{
 };
 pub use lock::DevLock;
 pub use paths::{
-    DEV_HOME_ENV, DEV_ROOT_ENV, DEV_ROOT_NAME, DevPaths, OWNED_DEV_FORGE_ENV,
-    STRIPPED_DEV_HOME_ENV, STRIPPED_DEV_READY_ENV, default_dev_root, exe_name, is_network_share,
-    resolve_dev_root,
+    DEV_HOME_ENV, DEV_ROOT_ENV, DEV_ROOT_NAME, DevPaths, STRIPPED_DEV_HOME_ENV,
+    STRIPPED_DEV_READY_ENV, default_dev_root, exe_name, is_network_share, resolve_dev_root,
 };
 pub use payload::{install_payload, payload_identity, sign_payload};
 pub use provision::{

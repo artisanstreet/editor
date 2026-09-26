@@ -21,10 +21,7 @@ use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
 
 use crate::{
     error::DevError,
-    paths::{
-        DEV_HOME_ENV, DevPaths, OWNED_DEV_FORGE_ENV, STRIPPED_DEV_HOME_ENV, STRIPPED_DEV_READY_ENV,
-        exe_name,
-    },
+    paths::{DEV_HOME_ENV, DevPaths, STRIPPED_DEV_HOME_ENV, STRIPPED_DEV_READY_ENV, exe_name},
 };
 
 /// Environment variable selecting the Editor's startup receipt file.
@@ -749,7 +746,6 @@ fn configure_editor_environment(
     command
         .env(DEV_HOME_ENV, home)
         .env(STARTUP_RECEIPT_ENV, receipt_path)
-        .env(OWNED_DEV_FORGE_ENV, "1")
         .env_remove(STRIPPED_DEV_HOME_ENV)
         .env_remove(STRIPPED_DEV_READY_ENV);
 }

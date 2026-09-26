@@ -249,39 +249,21 @@ pub fn try_send_command(
 pub(super) enum CustodyStep {
     SessionShutdown,
     ReconnectQuarantine,
-    LeaseShutdown,
     ReconnectRelease,
     Stopped,
 }
 
-pub(super) fn cleanup_plan(
-    has_session: bool,
-    has_reconnect_lease: bool,
-    has_lease: bool,
-) -> Vec<CustodyStep> {
-    let mut plan = Vec::with_capacity(5);
+pub(super) fn cleanup_plan(has_session: bool, has_reconnect_lease: bool) -> Vec<CustodyStep> {
+    let mut plan = Vec::with_capacity(4);
     if has_session {
         plan.push(CustodyStep::SessionShutdown);
     }
     if has_reconnect_lease {
         plan.push(CustodyStep::ReconnectQuarantine);
-    }
-    if has_lease {
-        plan.push(CustodyStep::LeaseShutdown);
-    }
-    if has_reconnect_lease {
         plan.push(CustodyStep::ReconnectRelease);
     }
     plan.push(CustodyStep::Stopped);
     plan
-}
-
-struct SessionMaterial {
-    certificate: CertificateDer<'static>,
-    target: LoopbackTarget,
-    pinned_identity: PinnedIdentity,
-    limits: ClientSessionLimits,
-    binding: ReconnectBinding,
 }
 
 impl ServiceRuntime {
@@ -291,8 +273,13 @@ impl ServiceRuntime {
         let pinned_identity = PinnedIdentity::from_certificate(&certificate);
         let target = LoopbackTarget::new("127.0.0.1:40123".parse().expect("loopback"))
             .expect("loopback target");
-        let binding = build_reconnect_binding([9u8; 16], target, pinned_identity, 19)
-            .expect("reconnect binding");
+        let binding = ReconnectBinding::new(
+            [9u8; 16],
+            target.addr().port(),
+            *pinned_identity.as_bytes(),
+            NonZeroU32::new(19).expect("pid"),
+        )
+        .expect("reconnect binding");
         Self {
             preserve_reconnect: false,
             session: None,
@@ -308,9 +295,7 @@ impl ServiceRuntime {
                 shutdown: Duration::from_secs(1),
                 admission_budget: 1,
             },
-            lease: None,
             cancel: CancelHandle::new(),
-            shutdown_grace: Duration::ZERO,
             known_threads: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
@@ -333,11 +318,7 @@ impl ServiceRuntime {
             let _ = join.await;
         }
         let mut failed = false;
-        for step in cleanup_plan(
-            self.session.is_some(),
-            self.reconnect_lease.is_some(),
-            self.lease.is_some(),
-        ) {
+        for step in cleanup_plan(self.session.is_some(), self.reconnect_lease.is_some()) {
             match step {
                 CustodyStep::SessionShutdown => {
                     if let Some(session) = self.session.take()
@@ -358,13 +339,6 @@ impl ServiceRuntime {
                             Ok(lease) => self.reconnect_lease = Some(lease),
                             Err(_) => failed = true,
                         }
-                    }
-                }
-                CustodyStep::LeaseShutdown => {
-                    if let Some(lease) = self.lease.take()
-                        && lease.shutdown(self.shutdown_grace).await.is_err()
-                    {
-                        failed = true;
                     }
                 }
                 CustodyStep::ReconnectRelease => drop(self.reconnect_lease.take()),
@@ -388,79 +362,11 @@ async fn start_native_service(
     if let Some(home) = home {
         return super::remote::start(home).await;
     }
-    if let Some(home) = dev_endpoint::dev_home_from_env() {
-        return start_dev_service(&home).await;
-    }
-    // Without a host, only the `cargo dev` runner's owned dev Forge remains;
-    // the shipping Editor never starts a Forge of its own.
-    if !dev_endpoint::owned_dev_forge_requested() {
-        return Err(StartupError::Stage(ServiceFailureStage::Instance));
-    }
-    let layout =
-        Layout::discover().map_err(|_| StartupError::Stage(ServiceFailureStage::Layout))?;
-    let manifest = InstallationManifest::load(&layout.manifest)
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Manifest))?;
-    if manifest.install_root != layout.root {
-        return Err(StartupError::Stage(ServiceFailureStage::Manifest));
-    }
-    match artisan_editor_cli::payload::verify(&manifest.version_root()) {
-        artisan_editor_cli::payload::PayloadHealth::Verified => {}
-        artisan_editor_cli::payload::PayloadHealth::Modified(_)
-        | artisan_editor_cli::payload::PayloadHealth::Unverifiable => {
-            return Err(StartupError::PayloadUnverified);
-        }
-    }
-    let config = NativeInstanceConfig::load_from_home(&layout.root)
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))?;
-    let credentials = load_client_credentials(&layout.root)
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Credentials))?;
-    let launch_spec = ForgeLaunchSpec::new(&manifest, &config, credentials.paths())
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Forge))?;
-    let lease = start_owned(&launch_spec)
-        .await
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Forge))?;
-    let mut frames = FrameFactory::new();
-    let runtime =
-        attach_to_owned_forge(lease, &layout.root, &config, credentials, &mut frames).await?;
-    Ok((runtime, frames))
-}
-
-async fn attach_to_owned_forge(
-    lease: ForgeProcessLease,
-    home: &Path,
-    config: &NativeInstanceConfig,
-    credentials: NativeClientCredentials,
-    frames: &mut FrameFactory,
-) -> Result<ServiceRuntime, StartupError> {
-    let result = establish_session(home, config, &lease, credentials, frames).await;
-    match result {
-        Ok((session, reconnect_lease, cancel, shutdown_grace, material)) => Ok(ServiceRuntime {
-            preserve_reconnect: false,
-            session: Some(session),
-            reconnect_lease: Some(reconnect_lease),
-            reconnect_binding: material.binding,
-            certificate: material.certificate,
-            target: material.target.into(),
-            pinned_identity: material.pinned_identity,
-            limits: material.limits,
-            lease: Some(lease),
-            cancel,
-            shutdown_grace,
-            known_threads: HashSet::new(),
-            intake: IntakeState::new(),
-            custody: SubscriptionCustody::new(),
-            delivery_cancel: None,
-            delivery_join: None,
-            delivery_tx: None,
-            deliveries: DeliveryInbox::default(),
-            resolved_home: None,
-        }),
-        Err(error) => {
-            let shutdown_grace =
-                finite_duration(config.listener().drain_timeout_ms()).unwrap_or(Duration::ZERO);
-            let _ = lease.shutdown(shutdown_grace).await;
-            Err(error)
-        }
+    // Without a host, only an explicitly requested development Forge on this
+    // machine remains; the Editor never starts a Forge of its own.
+    match dev_endpoint::dev_home_from_env() {
+        Some(home) => start_dev_service(&home).await,
+        None => Err(StartupError::Stage(ServiceFailureStage::Instance)),
     }
 }
 
@@ -469,9 +375,8 @@ async fn attach_to_owned_forge(
 ///
 /// The dev home shares credential files and the readiness receipt with the
 /// backend process. The QUIC handshake, bootstrap capability, reconnect
-/// store, and request surface are identical to the owned path; only process
-/// custody differs (there is no owned lease to shut down, so `lease` stays
-/// `None` and cleanup skips the lease step).
+/// store, and request surface are the ones a registered host uses; the
+/// Editor never owns the Forge process.
 async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory), StartupError> {
     if !home.is_absolute() {
         return Err(StartupError::Stage(ServiceFailureStage::Instance));
@@ -531,7 +436,6 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
         shutdown: finite_duration(dev_endpoint::DEV_SHUTDOWN_TIMEOUT_MS)?,
         admission_budget: dev_endpoint::DEV_ADMISSION_BUDGET,
     };
-    let shutdown_grace = limits.shutdown;
     let trusted_certificate = certificate.clone();
     let cancel = CancelHandle::new();
     let (session, welcome) =
@@ -561,9 +465,7 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             target: target.into(),
             pinned_identity,
             limits,
-            lease: None,
             cancel,
-            shutdown_grace,
             known_threads: HashSet::new(),
             intake: IntakeState::new(),
             custody: SubscriptionCustody::new(),
@@ -610,93 +512,6 @@ fn read_dev_readiness(path: &Path) -> Option<ForgeReadiness> {
         return None;
     }
     ForgeReadiness::from_json(&bytes).ok()
-}
-
-async fn establish_session(
-    home: &Path,
-    config: &NativeInstanceConfig,
-    lease: &ForgeProcessLease,
-    credentials: NativeClientCredentials,
-    frames: &mut FrameFactory,
-) -> Result<
-    (
-        ClientSession,
-        ReconnectSessionLease,
-        CancelHandle,
-        Duration,
-        SessionMaterial,
-    ),
-    StartupError,
-> {
-    let readiness_endpoint = lease.readiness().endpoint().to_owned();
-    let readiness_process_id = lease.readiness().pid();
-    let readiness_certificate_pin = lease.readiness().certificate_sha256().to_owned();
-    let (certificate, capability) = credentials.into_parts();
-    let pinned_identity = PinnedIdentity::from_certificate(&certificate);
-    let expected_pin = pinned_identity.to_hex();
-    let target = validate_readiness(
-        &readiness_endpoint,
-        readiness_process_id,
-        lease.pid(),
-        &readiness_certificate_pin,
-        &expected_pin,
-    )
-    .map_err(|_| StartupError::Stage(ServiceFailureStage::Readiness))?;
-    let binding =
-        build_reconnect_binding(config.instance_id(), target, pinned_identity, lease.pid())?;
-
-    let hello_stamp = frames.next()?;
-    let hello = WireEnvelope {
-        protocol_version: ProtocolVersion::V1,
-        frame_id: hello_stamp.frame_id,
-        sent_at: hello_stamp.sent_at,
-        body: WireEnvelopeBody::Hello(Hello {
-            supported_versions: VersionOffer::new(vec![1])
-                .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?,
-            credential: HelloCredential::Initial(capability),
-            supports_lifecycle_control: false,
-        }),
-    };
-    let listener = config.listener();
-    let limits = ClientSessionLimits {
-        connect: finite_duration(listener.admission_timeout_ms())?,
-        handshake: finite_duration(listener.handshake_timeout_ms())?,
-        request: finite_duration(listener.request_timeout_ms())?,
-        shutdown: finite_duration(listener.drain_timeout_ms())?,
-        admission_budget: usize::try_from(listener.requests_per_connection().get())
-            .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))?,
-    };
-    let trusted_certificate = certificate.clone();
-    let cancel = CancelHandle::new();
-    let (session, welcome) =
-        ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
-            .await
-            .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?;
-    let Ok(reconnect_store) = ReconnectCapabilityStore::from_home(home) else {
-        let _ = session.shutdown(&cancel).await;
-        return Err(StartupError::Stage(ServiceFailureStage::Credentials));
-    };
-    let Ok(reconnect_lease) = reconnect_store.initialize_owner_lease(
-        binding,
-        welcome.welcome.reconnect_capability,
-        RECONNECT_LOCK_TIMEOUT,
-    ) else {
-        let _ = session.shutdown(&cancel).await;
-        return Err(StartupError::Stage(ServiceFailureStage::Credentials));
-    };
-    Ok((
-        session,
-        reconnect_lease,
-        cancel,
-        limits.shutdown,
-        SessionMaterial {
-            certificate: trusted_certificate,
-            target,
-            pinned_identity,
-            limits,
-            binding,
-        },
-    ))
 }
 
 async fn service_main(
