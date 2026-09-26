@@ -38,8 +38,9 @@ pub enum InstallProgress {
     Activating,
 }
 
-/// Bounded, path- and URL-free failures of managed engine operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Bounded, host-path- and URL-free failures of managed engine operations.
+/// Archive failures carry the offending archive member and limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstallError {
     UnsupportedPlatform,
     BelowFloor,
@@ -64,7 +65,7 @@ pub enum InstallError {
 impl InstallError {
     /// Returns the stable classification.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::BelowFloor => "below_floor",
@@ -88,6 +89,23 @@ impl InstallError {
             Self::NoPreviousGeneration => "no_previous_generation",
         }
     }
+
+    /// Returns the classification with its specifics, for example
+    /// `too_many_entries: 632 entries, limit 512`.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Archive(error) => error.to_string(),
+            other => other.code().to_owned(),
+        }
+    }
+
+    /// Returns whether the failure is another holder of the install lock,
+    /// which is retried rather than reported.
+    #[must_use]
+    pub const fn is_lock_contention(&self) -> bool {
+        matches!(self, Self::Lock(_))
+    }
 }
 
 impl fmt::Display for InstallError {
@@ -95,7 +113,7 @@ impl fmt::Display for InstallError {
         write!(
             formatter,
             "managed engine operation failed: {}",
-            self.code()
+            self.detail()
         )
     }
 }
@@ -484,3 +502,7 @@ impl<'a> EngineOperations<'a> {
 #[cfg(test)]
 #[path = "operations_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "real_artifact_tests.rs"]
+mod real_artifact_tests;

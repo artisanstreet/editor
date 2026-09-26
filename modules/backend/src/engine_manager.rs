@@ -46,7 +46,7 @@ enum ManagerCommand {
 }
 
 /// A refused engine request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EngineManagerError {
     UnknownEngine,
     InvalidSelection,
@@ -56,7 +56,7 @@ pub(crate) enum EngineManagerError {
 
 impl EngineManagerError {
     /// Returns a presentation-ready, path-free reason.
-    pub(crate) const fn reason(self) -> &'static str {
+    pub(crate) const fn reason(&self) -> &'static str {
         match self {
             Self::UnknownEngine => "unknown engine",
             Self::InvalidSelection => {
@@ -349,7 +349,7 @@ fn finish(shared: &Shared, engine: ManagedEngine, result: Result<(), InstallErro
         // A lock failure means another process holds the install lock (for
         // example a live `OpenCode2` profile launch); the next pass retries.
         Ok(()) | Err(InstallError::Lock(_)) => Activity::Idle,
-        Err(error) => Activity::Failed(failure_reason(engine, error)),
+        Err(error) => Activity::Failed(failure_reason(engine, &error)),
     };
     shared.set_activity(engine, activity);
 }
@@ -393,7 +393,7 @@ fn list_versions(
     .map_err(|_| EngineManagerError::Unavailable)
 }
 
-fn failure_reason(engine: ManagedEngine, error: InstallError) -> String {
+fn failure_reason(engine: ManagedEngine, error: &InstallError) -> String {
     let what = match error {
         InstallError::Transport(_) | InstallError::Feed(_) => {
             "could not reach the vendor's release feed"

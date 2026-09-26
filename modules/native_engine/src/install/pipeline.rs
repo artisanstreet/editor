@@ -69,7 +69,11 @@ pub(crate) fn install_artifact(
                 .map_err(|_| InstallError::GenerationUnavailable)?;
             make_executable(&entry)?;
         }
-        Layout::TarMember { member, .. } => {
+        Layout::TarMember {
+            member,
+            archive: policy,
+            ..
+        } => {
             let mut archive =
                 download_archive(paths, transport, artifact, &plan, &trust, progress)?;
             progress(InstallProgress::Extracting);
@@ -79,12 +83,16 @@ pub(crate) fn install_artifact(
                     member,
                     target: &entry,
                 },
-                plan.expanded_bound_bytes,
+                &policy,
             )
             .map_err(InstallError::Archive)?;
             make_executable(&entry)?;
         }
-        Layout::TarTree { strip, .. } => {
+        Layout::TarTree {
+            strip,
+            archive: policy,
+            ..
+        } => {
             let mut archive =
                 download_archive(paths, transport, artifact, &plan, &trust, progress)?;
             progress(InstallProgress::Extracting);
@@ -94,7 +102,7 @@ pub(crate) fn install_artifact(
                     strip,
                     destination: &staging.path,
                 },
-                plan.expanded_bound_bytes,
+                &policy,
             )
             .map_err(InstallError::Archive)?;
         }
@@ -155,7 +163,7 @@ fn download_archive(
     archive
         .as_file_mut()
         .seek(SeekFrom::Start(0))
-        .map_err(|_| InstallError::Archive(ArchiveError::Invalid))?;
+        .map_err(|_| InstallError::GenerationUnavailable)?;
     Ok(archive)
 }
 

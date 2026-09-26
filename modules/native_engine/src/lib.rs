@@ -54,16 +54,16 @@ pub use codex_authority::{
     VerifiedCodexLaunch, compare_codex_versions,
 };
 pub use engine_core::{
-    ArchiveError, ArtifactDigest, ArtifactPlan, Distribution, EngineIdle, EngineInspection,
-    EngineOperations, EngineSelection, EngineUseLease, EngineVersion, Feed, FeedError, FeedRequest,
-    HostPlatform, HttpsTransport, InstallError, InstallProgress, LaunchSource, LaunchTarget,
-    Layout, MAX_PREVIOUS_GENERATIONS, ManagedEngine, ManagedEngineAuthority, ManagedEngineError,
-    ManagedGeneration, ManagedInstallLock, ManagedInstallLockError, ManagedInstallPathError,
-    ManagedInstallPaths, ManagedStateError, ManagedToolchainState, NativeOpenCode2Authority,
-    ReleaseArtifact, ReleaseTransport, ResolvedGeneration, SeatedLaunch, SwitchOutcome,
-    TransportError, UnsupportedReason, VersionFilter, VersionListing, build_environment,
-    engine_home, managed_database, register_managed_database, resolve_launch_target,
-    resolve_launch_target_in,
+    ArchiveEntryTypes, ArchiveError, ArchivePolicy, ArtifactDigest, ArtifactPlan, Distribution,
+    EngineIdle, EngineInspection, EngineOperations, EngineSelection, EngineUseLease, EngineVersion,
+    Feed, FeedError, FeedRequest, HostPlatform, HttpsTransport, InstallError, InstallProgress,
+    LaunchSource, LaunchTarget, Layout, MAX_PREVIOUS_GENERATIONS, ManagedEngine,
+    ManagedEngineAuthority, ManagedEngineError, ManagedGeneration, ManagedInstallLock,
+    ManagedInstallLockError, ManagedInstallPathError, ManagedInstallPaths, ManagedStateError,
+    ManagedToolchainState, NativeOpenCode2Authority, ReleaseArtifact, ReleaseTransport,
+    ResolvedGeneration, SeatedLaunch, SwitchOutcome, TransportError, UnsupportedReason,
+    VersionFilter, VersionListing, build_environment, engine_home, managed_database,
+    register_managed_database, resolve_launch_target, resolve_launch_target_in,
 };
 pub use engine_core::{
     Integrity, MAX_TRUST_RECORDS, TrustRecord, apply_managed_environment, managed_environment_for,

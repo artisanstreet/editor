@@ -50,8 +50,8 @@ mod version;
 pub use archive::ArchiveError;
 pub use authority::{EngineInspection, ManagedEngineAuthority, ResolvedGeneration};
 pub use catalog::{
-    ArtifactPlan, Distribution, Feed, HostPlatform, Integrity, Layout, ManagedEngine,
-    UnsupportedReason, VersionFilter,
+    ArchiveEntryTypes, ArchivePolicy, ArtifactPlan, Distribution, Feed, HostPlatform, Integrity,
+    Layout, ManagedEngine, UnsupportedReason, VersionFilter,
 };
 pub use feed::{ArtifactDigest, FeedError, FeedRequest, ReleaseArtifact, versions_listed};
 pub use launch::{
