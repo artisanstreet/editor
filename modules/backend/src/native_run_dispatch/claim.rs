@@ -201,98 +201,111 @@ async fn load_claim(
     // shared ACP row (no minimum CLI in the TypeScript evidence), Cursor has
     // no launch authority in C1 and requeues, and every other newly
     // representable engine requeues instead of running as another engine.
-    let launch = match settings.config().selection() {
-        EngineSelection::OpenCode2(selection) => match launch_mode {
-            ClaimLaunchMode::Configured => {
-                let profile_id = selection.profile_id();
-                let Ok(launch) = context
-                    .config
-                    .authority
-                    .resolve_profile_launch(context.database_path, profile_id)
-                else {
-                    context.requeue("engine profile unavailable").await;
-                    return None;
-                };
-                ResolvedLaunch::Configured(Box::new(launch))
-            }
-            #[cfg(test)]
-            ClaimLaunchMode::Fixture(fixture) => {
-                let configured_profile = selection.profile_id();
-                if configured_profile.as_str() != fixture.profile_id.as_str() {
-                    context.requeue("engine profile unavailable").await;
+    let launch =
+        match settings.config().selection() {
+            EngineSelection::OpenCode2(selection) => match launch_mode {
+                ClaimLaunchMode::Configured => {
+                    let profile_id = selection.profile_id();
+                    let Ok(launch) = context
+                        .config
+                        .authority
+                        .resolve_profile_launch(context.database_path, profile_id)
+                    else {
+                        context.requeue("engine profile unavailable").await;
+                        return None;
+                    };
+                    ResolvedLaunch::Configured(Box::new(launch))
+                }
+                #[cfg(test)]
+                ClaimLaunchMode::Fixture(fixture) => {
+                    let configured_profile = selection.profile_id();
+                    if configured_profile.as_str() != fixture.profile_id.as_str() {
+                        context.requeue("engine profile unavailable").await;
+                        return None;
+                    }
+                    ResolvedLaunch::Fixture(fixture)
+                }
+            },
+            EngineSelection::Codex(selection) => match launch_mode {
+                ClaimLaunchMode::Configured => {
+                    let launch =
+                        match resolve_codex_launch(context.database_path, selection.profile_id())
+                            .await
+                        {
+                            Ok(launch) => launch,
+                            Err(failure) => {
+                                context.requeue(failure.reason()).await;
+                                return None;
+                            }
+                        };
+                    ResolvedLaunch::Codex(Box::new(launch))
+                }
+                #[cfg(test)]
+                ClaimLaunchMode::Fixture(_) => {
+                    context.requeue("engine unavailable").await;
                     return None;
                 }
-                ResolvedLaunch::Fixture(fixture)
-            }
-        },
-        EngineSelection::Codex(selection) => match launch_mode {
-            ClaimLaunchMode::Configured => {
-                let Some(launch) =
-                    resolve_codex_launch(context.database_path, selection.profile_id()).await
-                else {
-                    context.requeue("engine profile unavailable").await;
+            },
+            EngineSelection::Claude(selection) => match launch_mode {
+                ClaimLaunchMode::Configured => {
+                    let launch =
+                        match resolve_claude_launch(context.database_path, selection.profile_id())
+                            .await
+                        {
+                            Ok(launch) => launch,
+                            Err(failure) => {
+                                context.requeue(failure.reason()).await;
+                                return None;
+                            }
+                        };
+                    ResolvedLaunch::Claude(Box::new(launch))
+                }
+                #[cfg(test)]
+                ClaimLaunchMode::Fixture(_) => {
+                    context.requeue("engine unavailable").await;
                     return None;
-                };
-                ResolvedLaunch::Codex(Box::new(launch))
-            }
-            #[cfg(test)]
-            ClaimLaunchMode::Fixture(_) => {
-                context.requeue("engine unavailable").await;
-                return None;
-            }
-        },
-        EngineSelection::Claude(selection) => match launch_mode {
-            ClaimLaunchMode::Configured => {
-                let Some(launch) =
-                    resolve_claude_launch(context.database_path, selection.profile_id()).await
-                else {
-                    context.requeue("engine profile unavailable").await;
+                }
+            },
+            EngineSelection::Grok(selection) => match launch_mode {
+                ClaimLaunchMode::Configured => {
+                    let launch =
+                        match resolve_grok_launch(context.database_path, selection.profile_id())
+                            .await
+                        {
+                            Ok(launch) => launch,
+                            Err(failure) => {
+                                context.requeue(failure.reason()).await;
+                                return None;
+                            }
+                        };
+                    ResolvedLaunch::Grok(Box::new(launch))
+                }
+                #[cfg(test)]
+                ClaimLaunchMode::Fixture(_) => {
+                    context.requeue("engine unavailable").await;
                     return None;
-                };
-                ResolvedLaunch::Claude(Box::new(launch))
-            }
-            #[cfg(test)]
-            ClaimLaunchMode::Fixture(_) => {
-                context.requeue("engine unavailable").await;
-                return None;
-            }
-        },
-        EngineSelection::Grok(selection) => match launch_mode {
-            ClaimLaunchMode::Configured => {
-                let Some(launch) =
-                    resolve_grok_launch(context.database_path, selection.profile_id()).await
-                else {
-                    context.requeue("engine profile unavailable").await;
+                }
+            },
+            EngineSelection::Cursor(selection) => match launch_mode {
+                ClaimLaunchMode::Configured => {
+                    // C1 owns the definition row but no launch authority yet: the
+                    // probe/authority packet resolves this. Requeue without
+                    // running as another engine.
+                    let Some(launch) =
+                        resolve_cursor_launch(context.database_path, selection.profile_id())
+                    else {
+                        context.requeue("engine profile unavailable").await;
+                        return None;
+                    };
+                    ResolvedLaunch::Cursor(Box::new(launch))
+                }
+                #[cfg(test)]
+                ClaimLaunchMode::Fixture(_) => {
+                    context.requeue("engine unavailable").await;
                     return None;
-                };
-                ResolvedLaunch::Grok(Box::new(launch))
-            }
-            #[cfg(test)]
-            ClaimLaunchMode::Fixture(_) => {
-                context.requeue("engine unavailable").await;
-                return None;
-            }
-        },
-        EngineSelection::Cursor(selection) => match launch_mode {
-            ClaimLaunchMode::Configured => {
-                // C1 owns the definition row but no launch authority yet: the
-                // probe/authority packet resolves this. Requeue without
-                // running as another engine.
-                let Some(launch) =
-                    resolve_cursor_launch(context.database_path, selection.profile_id())
-                else {
-                    context.requeue("engine profile unavailable").await;
-                    return None;
-                };
-                ResolvedLaunch::Cursor(Box::new(launch))
-            }
-            #[cfg(test)]
-            ClaimLaunchMode::Fixture(_) => {
-                context.requeue("engine unavailable").await;
-                return None;
-            }
-        },
-    };
+                }
+            },
+        };
     Some(LoadedClaim {
         context,
         payload,
@@ -1042,18 +1055,78 @@ async fn bind_with_retry(
     Err(last_error.expect("positive retry count always records a result"))
 }
 
+/// Why a managed engine's launch could not be resolved before a run.
+///
+/// Each cause maps to one fixed requeue reason: no path, OS message, or
+/// probe output ever reaches the dispatch row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaunchProbeFailure {
+    /// The Forge-managed install could not be resolved.
+    NotInstalled,
+    /// The managed launch environment could not be built.
+    EnvironmentUnavailable,
+    /// The executable does not exist.
+    ExecutableMissing,
+    /// The operating system refused to execute it.
+    ExecutableNotPermitted,
+    /// `--version` did not answer within its bound.
+    ProbeTimedOut,
+    /// `--version` failed or answered unreadably.
+    ProbeFailed,
+    /// The answered version is unparseable or older than the minimum.
+    VersionUnsupported,
+    /// The launch authority rejected the installation.
+    LaunchRejected,
+}
+
+impl LaunchProbeFailure {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::NotInstalled => "engine is not installed",
+            Self::EnvironmentUnavailable => "engine environment unavailable",
+            Self::ExecutableMissing => "engine executable not found",
+            Self::ExecutableNotPermitted => "engine executable is not permitted to run",
+            Self::ProbeTimedOut => "engine version probe timed out",
+            Self::ProbeFailed => "engine version probe failed",
+            Self::VersionUnsupported => "engine version is not supported",
+            Self::LaunchRejected => "engine installation failed verification",
+        }
+    }
+
+    fn from_spawn(error: &std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::ExecutableMissing,
+            std::io::ErrorKind::PermissionDenied => Self::ExecutableNotPermitted,
+            _ => Self::ProbeFailed,
+        }
+    }
+
+    /// Classifies a Claude/Codex authority refusal (identical shapes).
+    const fn from_authority(unsupported_version: bool, executable_unavailable: bool) -> Self {
+        if unsupported_version {
+            Self::VersionUnsupported
+        } else if executable_unavailable {
+            Self::ExecutableMissing
+        } else {
+            Self::LaunchRejected
+        }
+    }
+}
+
 /// Runs one bounded `--version` probe of the Forge-managed `engine` with its
-/// managed environment. Returns the probed stdout, or `None` when the engine
-/// is not installed, the probe times out, or it fails.
+/// managed environment. Returns the probed stdout, or the typed reason the
+/// engine is not installed, cannot run, or did not answer.
 async fn probe_managed_version(
     engine: artisan_native_engine::ManagedEngine,
     database_path: &Path,
-) -> Option<(std::path::PathBuf, String)> {
+) -> Result<(std::path::PathBuf, String), LaunchProbeFailure> {
     let target = artisan_native_engine::resolve_launch_target_in(engine, database_path, &|name| {
         std::env::var_os(name)
     })
-    .ok()?;
-    let environment = target.environment().ok()?;
+    .map_err(|_| LaunchProbeFailure::NotInstalled)?;
+    let environment = target
+        .environment()
+        .map_err(|_| LaunchProbeFailure::EnvironmentUnavailable)?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new(target.executable())
@@ -1066,61 +1139,74 @@ async fn probe_managed_version(
             .output(),
     )
     .await
-    .ok()?
-    .ok()?;
+    .map_err(|_| LaunchProbeFailure::ProbeTimedOut)?
+    .map_err(|error| LaunchProbeFailure::from_spawn(&error))?;
     if !output.status.success() {
-        return None;
+        return Err(LaunchProbeFailure::ProbeFailed);
     }
-    Some((
-        target.executable().to_path_buf(),
-        String::from_utf8(output.stdout).ok()?,
-    ))
+    let stdout = String::from_utf8(output.stdout).map_err(|_| LaunchProbeFailure::ProbeFailed)?;
+    Ok((target.executable().to_path_buf(), stdout))
 }
 
 /// Resolves one Codex profile into a verified launch with a bounded
 /// `--version` probe enforcing the minimum CLI at probe time.
 ///
-/// Returns `None` when the executable is unavailable, the probe times out or
-/// fails, or the version predates the minimum; the caller requeues the claim.
+/// Fails with the typed reason when the executable is unavailable, the probe
+/// times out or fails, or the version predates the minimum; the caller
+/// requeues the claim with that reason.
 async fn resolve_codex_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
-) -> Option<VerifiedCodexLaunch> {
+) -> Result<VerifiedCodexLaunch, LaunchProbeFailure> {
+    use artisan_native_engine::NativeCodexLaunchError as Refusal;
     let (_, stdout) =
         probe_managed_version(artisan_native_engine::ManagedEngine::Codex, database_path).await?;
     NativeCodexAuthority::new()
         .resolve_launch(database_path, profile_id, &stdout)
-        .ok()
+        .map_err(|error| {
+            LaunchProbeFailure::from_authority(
+                matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
+                matches!(error, Refusal::ExecutableUnavailable),
+            )
+        })
 }
 
 /// Resolves one Claude profile into a verified launch with a bounded
 /// `--version` probe enforcing the minimum CLI at probe time.
 ///
-/// Returns `None` when the executable is unavailable, the probe times out or
-/// fails, or the version predates the minimum; the caller requeues the claim.
+/// Fails with the typed reason when the executable is unavailable, the probe
+/// times out or fails, or the version predates the minimum; the caller
+/// requeues the claim with that reason.
 async fn resolve_claude_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
-) -> Option<VerifiedClaudeLaunch> {
+) -> Result<VerifiedClaudeLaunch, LaunchProbeFailure> {
+    use artisan_native_engine::NativeClaudeLaunchError as Refusal;
     let (_, stdout) =
         probe_managed_version(artisan_native_engine::ManagedEngine::Claude, database_path).await?;
     NativeClaudeAuthority::new()
         .resolve_launch(database_path, profile_id, &stdout)
-        .ok()
+        .map_err(|error| {
+            LaunchProbeFailure::from_authority(
+                matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
+                matches!(error, Refusal::ExecutableUnavailable),
+            )
+        })
 }
 
 /// Resolves one Grok profile into a probe-certified launch with a bounded
 /// `--version` probe parsed by the shared ACP row: the Forge-managed Grok (or
-/// its developer override) must answer with a parseable version. Returns
-/// `None` otherwise; the caller requeues the claim.
+/// its developer override) must answer with a parseable version. Fails with
+/// the typed reason otherwise; the caller requeues the claim with it.
 async fn resolve_grok_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
-) -> Option<GrokLaunch> {
+) -> Result<GrokLaunch, LaunchProbeFailure> {
     let (executable, stdout) =
         probe_managed_version(artisan_native_engine::ManagedEngine::Grok, database_path).await?;
-    let version = artisan_native_engine::grok::parse_grok_version(&stdout)?;
-    Some(GrokLaunch::new(executable, profile_id.clone(), version))
+    let version = artisan_native_engine::grok::parse_grok_version(&stdout)
+        .ok_or(LaunchProbeFailure::VersionUnsupported)?;
+    Ok(GrokLaunch::new(executable, profile_id.clone(), version))
 }
 /// Resolves one Cursor profile into a C1 launch.
 ///
