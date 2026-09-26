@@ -36,6 +36,14 @@ pub const STRIPPED_DEV_HOME_ENV: &str = "ARTISAN_DEV_FORGE_HOME";
 /// Companion override stripped alongside [`STRIPPED_DEV_HOME_ENV`].
 pub const STRIPPED_DEV_READY_ENV: &str = "ARTISAN_DEV_FORGE_READY_FILE";
 
+/// Asks the dev Editor to start and own the dev installation's Forge when it
+/// has no registered host. The shipping Editor has no built-in host and
+/// never starts a Forge itself; only this runner opts into one.
+///
+/// Must match `forge_dev_endpoint::OWNED_DEV_FORGE_ENV` in
+/// `modules/frontend`; the contract tests pin the literal on both sides.
+pub const OWNED_DEV_FORGE_ENV: &str = "ARTISAN_DEV_OWNED_FORGE";
+
 /// Runner-private directory inside the root.
 const RUNNER_DIRECTORY: &str = ".dev-runner";
 

@@ -63,9 +63,17 @@ impl NativeTransportService {
 
     /// Starts a connection for an explicitly selected host, independently of process arguments.
     ///
+    /// `None` connects to a development Forge on this machine and is only
+    /// admitted when one was requested; the Editor has no built-in host.
+    ///
     /// # Errors
-    /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be created.
+    /// Returns [`ServiceSpawnError::NoHost`] for `None` without a requested
+    /// development Forge, or [`ServiceSpawnError::Thread`] if the service
+    /// thread cannot be created.
     pub fn spawn_for_host(home: Option<std::path::PathBuf>) -> Result<Self, ServiceSpawnError> {
+        if home.is_none() && !dev_endpoint::local_dev_forge_requested() {
+            return Err(ServiceSpawnError::NoHost);
+        }
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
         let finished = Arc::new(AtomicBool::new(false));
@@ -382,6 +390,11 @@ async fn start_native_service(
     }
     if let Some(home) = dev_endpoint::dev_home_from_env() {
         return start_dev_service(&home).await;
+    }
+    // Without a host, only the `cargo dev` runner's owned dev Forge remains;
+    // the shipping Editor never starts a Forge of its own.
+    if !dev_endpoint::owned_dev_forge_requested() {
+        return Err(StartupError::Stage(ServiceFailureStage::Instance));
     }
     let layout =
         Layout::discover().map_err(|_| StartupError::Stage(ServiceFailureStage::Layout))?;

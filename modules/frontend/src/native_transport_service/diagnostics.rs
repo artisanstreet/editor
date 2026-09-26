@@ -238,6 +238,10 @@ pub enum ServiceSpawnError {
     /// The operating system refused the bounded service thread.
     #[error("native service thread could not be started")]
     Thread,
+    /// No host was selected and no development Forge on this machine was
+    /// requested: there is nothing to connect to.
+    #[error("no host is registered")]
+    NoHost,
 }
 
 /// Delivery frame flowing from the dedicated delivery task via the private bounded Tokio channel.

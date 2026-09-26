@@ -122,7 +122,7 @@ impl NativeApplication {
         let mut application = Self {
             machine_error: None,
             machine_home: None,
-            machine_label: "This computer".into(),
+            machine_label: crate::native_hosts::no_host_label().into(),
             machine_menu: impl_machines::MachineMenu::new(cx),
             host_switch: None,
             theme: ArtisanTheme::for_mode(ThemeMode::Dark),

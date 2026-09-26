@@ -1,18 +1,20 @@
-//! Development Forge endpoint policy for the native transport service.
+//! Development Forge policy for the native transport service.
 //!
-//! The shipping startup path launches a newly owned Forge from the installed
-//! payload and installation manifest. That path cannot work from a `cargo`
-//! checkout: there is no installed payload to verify. This module owns the
-//! narrow, explicitly opted-in development alternative used by
-//! `native_transport_service`: when `ARTISAN_DEV_FORGE_HOME` names an
-//! absolute scratch home, the service connects to the manually started dev
-//! Forge whose readiness receipt that home contains, reusing the exact QUIC
-//! handshake, credential files, and request surface as the owned path.
-//! Nothing here invents an RPC: the endpoint, certificate pin, bootstrap
-//! capability, and reconnect store are the same values the owned path uses.
+//! The shipping Editor has no Forge of its own: it connects to a registered
+//! host (see `native_hosts`). A window without a host may only use a Forge on
+//! this machine in development, through one of two explicit opt-ins:
 //!
-//! Activation is strictly opt-in: without the environment variable the
-//! module reports "not requested" and the owned path runs unchanged. A home
+//! - `ARTISAN_DEV_OWNED_FORGE=1`, set by the `cargo dev` runner: the service
+//!   starts and owns the dev installation's Forge from its installed payload
+//!   and manifest.
+//! - `ARTISAN_DEV_FORGE_HOME` naming an absolute scratch home: the service
+//!   connects to the manually started dev Forge whose readiness receipt that
+//!   home contains, reusing the exact QUIC handshake, credential files, and
+//!   request surface. Nothing here invents an RPC: the endpoint, certificate
+//!   pin, bootstrap capability, and reconnect store are the ones the Forge
+//!   published.
+//!
+//! Without either variable a window without a host offers to add one. A home
 //! containing `installation.json` is refused so a debug build can never
 //! mistake the real installation for a scratch home.
 
@@ -27,7 +29,7 @@ use std::{
 
 /// Environment variable selecting the dev Forge home.
 ///
-/// When unset or empty, the service uses the owned Forge path unchanged.
+/// When unset or empty, the manually started dev Forge is not used.
 /// When set, it must name an absolute scratch directory shared with the
 /// manually started dev Forge (credential files plus readiness receipt).
 pub const DEV_HOME_ENV: &str = "ARTISAN_DEV_FORGE_HOME";
@@ -82,6 +84,29 @@ pub fn dev_home_from_value(value: Option<&OsStr>) -> Option<PathBuf> {
 #[must_use]
 pub fn dev_home_from_env() -> Option<PathBuf> {
     dev_home_from_value(std::env::var_os(DEV_HOME_ENV).as_deref())
+}
+
+/// Set to `1` by the `cargo dev` runner: with no host selected, the Editor
+/// starts and owns the dev installation's Forge on this machine. The
+/// shipping Editor never starts a Forge of its own; it connects to a
+/// registered host.
+///
+/// Must match `native_dev::OWNED_DEV_FORGE_ENV`; the contract tests pin the
+/// literal on both sides.
+pub const OWNED_DEV_FORGE_ENV: &str = "ARTISAN_DEV_OWNED_FORGE";
+
+/// Whether the `cargo dev` runner asked for the owned dev Forge.
+#[must_use]
+pub fn owned_dev_forge_requested() -> bool {
+    std::env::var_os(OWNED_DEV_FORGE_ENV).is_some_and(|value| value == "1")
+}
+
+/// Whether a development Forge on this machine stands in for a registered
+/// host: the manually started dev Forge ([`DEV_HOME_ENV`]) or the runner's
+/// owned dev Forge ([`OWNED_DEV_FORGE_ENV`]).
+#[must_use]
+pub fn local_dev_forge_requested() -> bool {
+    dev_home_from_env().is_some() || owned_dev_forge_requested()
 }
 
 /// Reads [`DEV_READY_FILE_ENV`] from the process environment.
@@ -164,6 +189,7 @@ mod tests {
     #[test]
     fn env_contract_names_are_exact() {
         assert_eq!(DEV_HOME_ENV, "ARTISAN_DEV_FORGE_HOME");
+        assert_eq!(super::OWNED_DEV_FORGE_ENV, "ARTISAN_DEV_OWNED_FORGE");
         assert_eq!(DEV_READY_FILE_ENV, "ARTISAN_DEV_FORGE_READY_FILE");
     }
 

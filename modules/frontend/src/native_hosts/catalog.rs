@@ -29,7 +29,7 @@ pub(super) fn entries() -> Vec<(String, PathBuf)> {
 
 pub(crate) fn label(home: Option<&Path>) -> String {
     home.map_or_else(
-        || "This computer".into(),
+        || super::no_host_label().into(),
         |home| {
             catalog()
                 .read()
@@ -92,6 +92,22 @@ pub(crate) fn refresh(selected: Option<&Path>) {
     let mut cache = catalog().write().unwrap();
     cache.entries = entries;
     cache.details = details;
+}
+
+/// Names a registered home in the presentation memo, as a refresh would.
+#[cfg(test)]
+pub(crate) fn name_for_test(home: &Path, name: &str) {
+    catalog().write().unwrap().details.insert(
+        home.to_path_buf(),
+        (
+            name.to_owned(),
+            HostPresentation {
+                wsl_distribution: None,
+                subtitle: "192.0.2.1".into(),
+                avatar_seed: format!("seed-{name}"),
+            },
+        ),
+    );
 }
 
 #[cfg(test)]
