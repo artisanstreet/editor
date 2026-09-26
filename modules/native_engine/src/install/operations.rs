@@ -12,6 +12,7 @@ use std::{fmt, path::Path};
 use super::{
     archive::ArchiveError,
     authority::ManagedEngineAuthority,
+    failure::{clear_install_failure, record_install_failure},
     feed::{
         FeedError, ReleaseArtifact, direct_release, latest_request, parse_latest, parse_release,
         parse_versions, release_request, versions_request,
@@ -38,8 +39,9 @@ pub enum InstallProgress {
     Activating,
 }
 
-/// Bounded, path- and URL-free failures of managed engine operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Bounded, host-path- and URL-free failures of managed engine operations.
+/// Archive failures carry the offending archive member and limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InstallError {
     UnsupportedPlatform,
     BelowFloor,
@@ -64,7 +66,7 @@ pub enum InstallError {
 impl InstallError {
     /// Returns the stable classification.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::BelowFloor => "below_floor",
@@ -88,6 +90,23 @@ impl InstallError {
             Self::NoPreviousGeneration => "no_previous_generation",
         }
     }
+
+    /// Returns the classification with its specifics, for example
+    /// `too_many_entries: 632 entries, limit 512`.
+    #[must_use]
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Archive(error) => error.to_string(),
+            other => other.code().to_owned(),
+        }
+    }
+
+    /// Returns whether the failure is another holder of the install lock,
+    /// which is retried rather than reported.
+    #[must_use]
+    pub const fn is_lock_contention(&self) -> bool {
+        matches!(self, Self::Lock(_))
+    }
 }
 
 impl fmt::Display for InstallError {
@@ -95,7 +114,7 @@ impl fmt::Display for InstallError {
         write!(
             formatter,
             "managed engine operation failed: {}",
-            self.code()
+            self.detail()
         )
     }
 }
@@ -205,6 +224,11 @@ impl<'a> EngineOperations<'a> {
     /// version when it is not retained, then switches (or queues the switch
     /// until the engine is idle).
     ///
+    /// Every outcome is recorded: a failure (other than another holder of
+    /// the install lock) in the engine's failure record, which status
+    /// surfaces report and the Forge retries with backoff; a success clears
+    /// it.
+    ///
     /// # Errors
     ///
     /// Returns [`InstallError`] when the target cannot be resolved,
@@ -213,17 +237,52 @@ impl<'a> EngineOperations<'a> {
         &self,
         progress: &dyn Fn(InstallProgress),
     ) -> Result<SwitchOutcome, InstallError> {
+        let mut target = None;
+        let result = self.resolve_and_switch(progress, &mut target);
+        self.record_outcome(&result, target.as_ref());
+        result
+    }
+
+    fn resolve_and_switch(
+        &self,
+        progress: &dyn Fn(InstallProgress),
+        target: &mut Option<EngineVersion>,
+    ) -> Result<SwitchOutcome, InstallError> {
         let paths = self.paths()?;
         let selection = self
             .authority
             .read_selection(paths.engine_root())
             .map_err(|_| InstallError::StateInvalid)?;
         progress(InstallProgress::Resolving);
-        let target = match selection {
+        let version = match selection {
             EngineSelection::Latest => self.latest_version()?,
             EngineSelection::Held(version) => version,
         };
-        self.switch_to(&paths, &target, progress)
+        self.switch_to(&paths, target.insert(version), progress)
+    }
+
+    /// Best effort: a record that cannot be written never masks the
+    /// install's own outcome.
+    fn record_outcome(
+        &self,
+        result: &Result<SwitchOutcome, InstallError>,
+        target: Option<&EngineVersion>,
+    ) {
+        let Ok(paths) = self.paths() else {
+            return;
+        };
+        let engine = self.authority.engine();
+        match result {
+            Ok(_) => {
+                let _ = clear_install_failure(paths.engine_root(), engine);
+            }
+            Err(error) if error.is_lock_contention() => {}
+            Err(error) => {
+                if paths.prepare().is_ok() {
+                    let _ = record_install_failure(paths.engine_root(), engine, error, target);
+                }
+            }
+        }
     }
 
     /// Persists `selection` and makes it active.
@@ -484,3 +543,7 @@ impl<'a> EngineOperations<'a> {
 #[cfg(test)]
 #[path = "operations_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "real_artifact_tests.rs"]
+mod real_artifact_tests;
