@@ -67,9 +67,9 @@ pub use run_interaction::{
     StoredInteractionReceipt,
 };
 pub use run_launch::{
-    LaunchClaimedRun, LaunchClaimedRunOutcome, LaunchedRunReceipt, ProjectSteeredMessage,
-    ProjectSteeredMessageOutcome, RunLaunchCredentials, RunLaunchError, RunStartKey,
-    SteeredMessageReceipt,
+    FailUnstartedRun, FailUnstartedRunOutcome, LaunchClaimedRun, LaunchClaimedRunOutcome,
+    LaunchedRunReceipt, ProjectSteeredMessage, ProjectSteeredMessageOutcome, RunLaunchCredentials,
+    RunLaunchError, RunStartKey, SteeredMessageReceipt,
 };
 pub use run_observation::terminal::{
     AuxiliaryTerminalError, CancelRun, CancelRunError, CancelRunOutcome, CompleteRun,
@@ -86,8 +86,8 @@ pub use run_observation::{
     validate_observation_engine,
 };
 pub use startup_reconciliation::{
-    StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
-    StartupReconciliationQuery, StartupRunLifecycle,
+    ExpiredLeaseRecovery, StartupReconciliationCandidate, StartupReconciliationCandidates,
+    StartupReconciliationError, StartupReconciliationQuery, StartupRunLifecycle,
 };
 pub use startup_reconciliation_disposition::{
     StartupReconciliationDisposition, StartupReconciliationDispositionError,

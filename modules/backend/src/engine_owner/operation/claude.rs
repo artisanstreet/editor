@@ -31,7 +31,6 @@ use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::finish_configured_start;
 use super::turn_common::finish_turn_result;
-use super::turn_common::phase_deadline;
 use super::turn_common::wait_for_authorization;
 
 /// Executes one finite Claude turn over `claude -p --output-format stream-json`.
@@ -178,14 +177,17 @@ pub(super) async fn execute_claude_turn(
     // init-event gate ---------------------------------------------------------
     // The CLI speaks first: the bind authorization gate opens only after the
     // exact spawned session announces itself. Pre-init lines that are not
-    // init are not replayed; a wrong session fails closed.
+    // init are not replayed; a wrong session fails closed. A cold CLI can
+    // take well over the prompt budget before `system/init` (plugin sync,
+    // credential refresh), so startup is bounded by the attempt deadline and
+    // the dispatcher's explicit launch deadline, which cancels this turn.
     let mut line = String::new();
     loop {
         line.clear();
         if read_claude_line(
             &mut reader,
             &mut line,
-            phase_deadline(runtime.limits.prompt, request.deadline),
+            request.deadline,
             shutdown,
             &request.control,
         )

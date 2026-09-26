@@ -1,7 +1,8 @@
-//! Durable startup recovery pages and owner shutdown settling.
+//! Durable live recovery pages and owner shutdown settling.
 //!
-//! The dispatcher sweeps startup reconciliation between claims, fails
-//! orphaned steered rows once at startup, and keeps shutting the single owner
+//! The dispatcher sweeps expired leases between claims with the live
+//! lease-expiry disposition (never labelled startup reconciliation, which
+//! only the Forge startup pass records), and keeps shutting the single owner
 //! down until custody settles. Every function here reads dispatcher policy or
 //! the injected notifier and returns to the claim loop.
 
@@ -62,7 +63,8 @@ async fn perform_live_recovery_page(
     crate::startup_reconciliation_sweep::StartupReconciliationSweepReport,
     Box<crate::startup_reconciliation_sweep::StartupReconciliationSweepError>,
 > {
-    let input = StartupReconciliationSweepInput::new(operated_at, 64).map_err(Box::new)?;
+    let input =
+        StartupReconciliationSweepInput::live_lease_expiry(operated_at, 64).map_err(Box::new)?;
     let mut source = LiveRecoveryPatchSource {
         notifier: config.conversation_commit_notifier(),
     };

@@ -4,9 +4,10 @@
 //! read the queued payload and captured engine settings, resolve the engine
 //! launch, register cancellation, launch the durable run, admit the owner
 //! turn, bind the provider session, and consume the bound turn to terminal
-//! settlement. Every early exit requeues or fails the claim through the same
-//! bounded database commands; custody is returned to the loop only when an
-//! owner child is still unresolved.
+//! settlement, all under one continuous lease heartbeat. Every early exit
+//! requeues or fails the claim through the same bounded database commands; a
+//! provider that never starts fails its launched run with a typed reason.
+//! Custody is returned to the loop only when an owner child is unresolved.
 
 use std::path::Path;
 use std::time::Duration;
@@ -44,6 +45,7 @@ use crate::{
     run_interaction::{RunInteractionAck, RunInteractionEnvelope},
 };
 
+use super::claim_lease::{ClaimLease, drive_with_claim_lease};
 use super::dispatch_policy::{
     LaunchAuthority, PromptAuthorization, SettingsLoadDecision, classify_launch_result,
     classify_settings_load, continuation_incompatible_reason, continuation_unavailable_reason,
@@ -53,12 +55,14 @@ use super::dispatch_support::{
     add_duration, at_or_after, mint_item_id, mint_patch_id, mint_run_capabilities, mint_run_id,
     mint_turn_id, wall_clock,
 };
+use super::start_failure::{
+    ProviderStart, StartFailure, await_provider_start, settle_unstarted_claim,
+};
 use super::turn::{TurnConsumptionContext, consume_turn, is_unresolved_reap};
 use super::{
     BoundClaim, ClaimCustody, ClaimExecution, ClaimIds, ClaimLaunchMode, LaunchedClaim,
     LoadedClaim, NativeRunDispatcherConfig, PROVIDER_BINDING_VERSION, PreparedClaim,
     ResolvedLaunch, RetainedActivity, binding_bytes_vec, binding_matches_bytes,
-    drive_turn_with_lease_heartbeat,
 };
 
 pub(super) async fn execute_claim(
@@ -70,7 +74,24 @@ pub(super) async fn execute_claim(
         context.requeue("dispatcher stopping").await;
         return None;
     }
-    let loaded = load_claim(context, launch_mode).await?;
+    // One heartbeat keeps the lease alive from claim to settlement: provider
+    // startup alone may outlast the lease, and an unrenewed lease is reaped
+    // by live recovery as an unknown outcome while this dispatcher owns it.
+    let (repository, origin, lease) = (context.repository, context.origin, context.lease);
+    let claim = Box::pin(run_claim(context, launch_mode));
+    match drive_with_claim_lease(repository, origin, lease, claim).await {
+        ClaimCustody::Released => None,
+        ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
+            _activity: activity_lease,
+            _cancellation: cancellation,
+        }),
+    }
+}
+
+async fn run_claim(context: ClaimExecution<'_>, launch_mode: ClaimLaunchMode) -> ClaimCustody {
+    let Some(loaded) = load_claim(context, launch_mode).await else {
+        return ClaimCustody::Released;
+    };
     let ids = match mint_claim_ids(
         loaded.context.origin,
         loaded.context.claimed.updated_at,
@@ -79,14 +100,14 @@ pub(super) async fn execute_claim(
         Ok(ids) => ids,
         Err(reason) => {
             loaded.context.requeue(reason).await;
-            return None;
+            return ClaimCustody::Released;
         }
     };
     let continuation = match resolve_continuation(&loaded, &ids).await {
         Ok(continuation) => continuation,
         Err(reason) => {
             loaded.context.fail(reason).await;
-            return None;
+            return ClaimCustody::Released;
         }
     };
     let Ok(cancellation) = loaded
@@ -95,36 +116,20 @@ pub(super) async fn execute_claim(
         .register_exclusive(loaded.payload.thread_id.clone(), ids.run_id.clone())
     else {
         loaded.context.requeue("run cancellation unavailable").await;
-        return None;
+        return ClaimCustody::Released;
     };
-    let launched = launch_claim(loaded, ids, cancellation, continuation).await?;
+    let Some(launched) = launch_claim(loaded, ids, cancellation, continuation).await else {
+        return ClaimCustody::Released;
+    };
     let (prepared, custody) = admit_claim(launched).await;
     let Some(prepared) = prepared else {
-        return match custody {
-            ClaimCustody::Released => None,
-            ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-                _activity: activity_lease,
-                _cancellation: cancellation,
-            }),
-        };
+        return custody;
     };
     let (bound, custody) = bind_claim(prepared).await;
     let Some(bound) = bound else {
-        return match custody {
-            ClaimCustody::Released => None,
-            ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-                _activity: activity_lease,
-                _cancellation: cancellation,
-            }),
-        };
+        return custody;
     };
-    match Box::pin(consume_bound_claim(bound)).await {
-        ClaimCustody::Released => None,
-        ClaimCustody::Retained(cancellation) => Some(RetainedActivity {
-            _activity: activity_lease,
-            _cancellation: cancellation,
-        }),
-    }
+    Box::pin(consume_bound_claim(bound)).await
 }
 
 #[expect(
@@ -295,174 +300,38 @@ async fn load_claim(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "sequential validation of one continuation payload; each early return maps to a distinct refusal"
-)]
+/// Resolves the provider session the new run continues, if any.
+///
+/// Every engine resumes only its own durable provider session: the lookup is
+/// scoped to the selected engine tag and profile, and the owner reopens the
+/// session only after that engine's continuation gate (same engine, explicit
+/// target model, minimum CLI). Incompatible or ambiguous history fails
+/// closed; a fresh session starts only when the thread has no history, which
+/// includes runs that never reached their provider.
 async fn resolve_continuation(
     claim: &LoadedClaim<'_>,
     ids: &ClaimIds,
 ) -> Result<Option<EngineContinuation>, &'static str> {
-    #[cfg(test)]
-    if matches!(&claim.launch, ResolvedLaunch::Fixture(_)) {
-        return Ok(None);
-    }
-    // Codex resumes its durable provider thread: the lookup is scoped to the
-    // codex engine tag and the selecting profile, and the owner reopens the
-    // same thread through `thread/resume` only after the X3 gate (same
-    // engine, explicit target model, CLI >= 0.145.0). Incompatible bindings
-    // fail closed; a fresh thread starts only with no history.
-    if matches!(&claim.launch, ResolvedLaunch::Codex(_)) {
-        let EngineSelection::Codex(selection) = claim.settings.config().selection() else {
-            return Err("engine unavailable");
-        };
-        let profile_id = selection.profile_id().clone();
-        let lookup = claim
-            .context
-            .repository
-            .read_session_continuation(SessionContinuationQuery {
-                thread_id: claim.payload.thread_id.clone(),
-                engine_id: EngineId::Codex,
-                profile_id,
-                exclude_run_id: Some(ids.run_id.clone()),
-            })
-            .await
-            .map_err(|_| "provider continuation lookup failed")?;
-        return match lookup {
-            SessionContinuationLookup::NoHistory => Ok(None),
-            SessionContinuationLookup::Usable(continuation) => {
-                EngineContinuation::new(continuation.session_id.as_str().to_owned())
-                    .map(Some)
-                    .ok_or("provider continuation corrupt")
-            }
-            SessionContinuationLookup::Unavailable(unavailable) => {
-                Err(continuation_unavailable_reason(&unavailable))
-            }
-            SessionContinuationLookup::Incompatible(incompatible) => {
-                Err(continuation_incompatible_reason(&incompatible))
-            }
-        };
-    }
-    // Grok resumes its durable provider conversation: the lookup is scoped
-    // to the grok engine tag and the selecting profile, and the owner
-    // reopens the same conversation through `session/load` only after the
-    // G3 gate (same engine, explicit target model, recorded CLI version).
-    // Incompatible bindings fail closed; a fresh conversation starts only
-    // with no history.
-    if matches!(&claim.launch, ResolvedLaunch::Grok(_)) {
-        let EngineSelection::Grok(selection) = claim.settings.config().selection() else {
-            return Err("engine unavailable");
-        };
-        let profile_id = selection.profile_id().clone();
-        let lookup = claim
-            .context
-            .repository
-            .read_session_continuation(SessionContinuationQuery {
-                thread_id: claim.payload.thread_id.clone(),
-                engine_id: EngineId::Grok,
-                profile_id,
-                exclude_run_id: Some(ids.run_id.clone()),
-            })
-            .await
-            .map_err(|_| "provider continuation lookup failed")?;
-        return match lookup {
-            SessionContinuationLookup::NoHistory => Ok(None),
-            SessionContinuationLookup::Usable(continuation) => {
-                EngineContinuation::new(continuation.session_id.as_str().to_owned())
-                    .map(Some)
-                    .ok_or("provider continuation corrupt")
-            }
-            SessionContinuationLookup::Unavailable(unavailable) => {
-                Err(continuation_unavailable_reason(&unavailable))
-            }
-            SessionContinuationLookup::Incompatible(incompatible) => {
-                Err(continuation_incompatible_reason(&incompatible))
-            }
-        };
-    }
-    // Claude resumes its durable native session: the lookup is scoped to the
-    // Claude engine tag and the selecting profile, and the owner reopens the
-    // same session through `--resume` only after the L3 gate (same engine,
-    // explicit target model, CLI >= 2.1.220). Incompatible bindings fail
-    // closed; a fresh session starts only with no history.
-    if matches!(&claim.launch, ResolvedLaunch::Claude(_)) {
-        let EngineSelection::Claude(selection) = claim.settings.config().selection() else {
-            return Err("engine unavailable");
-        };
-        let profile_id = selection.profile_id().clone();
-        let lookup = claim
-            .context
-            .repository
-            .read_session_continuation(SessionContinuationQuery {
-                thread_id: claim.payload.thread_id.clone(),
-                engine_id: EngineId::Claude,
-                profile_id,
-                exclude_run_id: Some(ids.run_id.clone()),
-            })
-            .await
-            .map_err(|_| "provider continuation lookup failed")?;
-        return match lookup {
-            SessionContinuationLookup::NoHistory => Ok(None),
-            SessionContinuationLookup::Usable(continuation) => {
-                EngineContinuation::new(continuation.session_id.as_str().to_owned())
-                    .map(Some)
-                    .ok_or("provider continuation corrupt")
-            }
-            SessionContinuationLookup::Unavailable(unavailable) => {
-                Err(continuation_unavailable_reason(&unavailable))
-            }
-            SessionContinuationLookup::Incompatible(incompatible) => {
-                Err(continuation_incompatible_reason(&incompatible))
-            }
-        };
-    }
-    // Cursor resumes its durable ACP session: the lookup is scoped to the
-    // cursor engine tag and the selecting profile, and the owner reopens the
-    // same session through `session/load` only after the C3 gate (same
-    // engine, explicit target model, CLI >= 2026.08.11-e8db854). Incompatible
-    // bindings fail closed; a fresh session starts only with no history.
-    if matches!(&claim.launch, ResolvedLaunch::Cursor(_)) {
-        let EngineSelection::Cursor(selection) = claim.settings.config().selection() else {
-            return Err("engine unavailable");
-        };
-        let profile_id = selection.profile_id().clone();
-        let lookup = claim
-            .context
-            .repository
-            .read_session_continuation(SessionContinuationQuery {
-                thread_id: claim.payload.thread_id.clone(),
-                engine_id: EngineId::Cursor,
-                profile_id,
-                exclude_run_id: Some(ids.run_id.clone()),
-            })
-            .await
-            .map_err(|_| "provider continuation lookup failed")?;
-        return match lookup {
-            SessionContinuationLookup::NoHistory => Ok(None),
-            SessionContinuationLookup::Usable(continuation) => {
-                EngineContinuation::new(continuation.session_id.as_str().to_owned())
-                    .map(Some)
-                    .ok_or("provider continuation corrupt")
-            }
-            SessionContinuationLookup::Unavailable(unavailable) => {
-                Err(continuation_unavailable_reason(&unavailable))
-            }
-            SessionContinuationLookup::Incompatible(incompatible) => {
-                Err(continuation_incompatible_reason(&incompatible))
-            }
-        };
-    }
-    let EngineSelection::OpenCode2(selection) = claim.settings.config().selection() else {
-        return Err("engine unavailable");
+    let selection = claim.settings.config().selection();
+    let launch_engine = match &claim.launch {
+        ResolvedLaunch::Configured(_) => EngineId::OpenCode2,
+        ResolvedLaunch::Codex(_) => EngineId::Codex,
+        ResolvedLaunch::Claude(_) => EngineId::Claude,
+        ResolvedLaunch::Cursor(_) => EngineId::Cursor,
+        ResolvedLaunch::Grok(_) => EngineId::Grok,
+        #[cfg(test)]
+        ResolvedLaunch::Fixture(_) => return Ok(None),
     };
-    let profile_id = selection.profile_id().clone();
+    if selection.engine_id() != launch_engine {
+        return Err("engine unavailable");
+    }
     let lookup = claim
         .context
         .repository
         .read_session_continuation(SessionContinuationQuery {
             thread_id: claim.payload.thread_id.clone(),
-            engine_id: EngineId::OpenCode2,
-            profile_id,
+            engine_id: launch_engine,
+            profile_id: selection.profile_id().clone(),
             exclude_run_id: Some(ids.run_id.clone()),
         })
         .await
@@ -531,14 +400,19 @@ fn fixture_claim_ids() -> Result<(RunId, TurnId, ItemId, PatchId, PatchId), &'st
 
 pub(super) async fn launch_claim(
     loaded: LoadedClaim<'_>,
-    ids: ClaimIds,
+    mut ids: ClaimIds,
     cancellation: RunCancellationLease,
     continuation: Option<EngineContinuation>,
 ) -> Option<LaunchedClaim<'_>> {
+    // Launch fences the exact lease window: hold it so the heartbeat cannot
+    // move it mid-command, and stamp no earlier than a renewal while leased.
+    let lease: &ClaimLease = loaded.context.lease;
+    let mut window = lease.hold().await;
+    ids.operated_at = ids.operated_at.max(window.updated_at);
     let launch_result = launch_with_retry(
         loaded.context.repository,
         LaunchClaimedRun {
-            claimed: &loaded.context.claimed,
+            claimed: &window,
             run_id: &ids.run_id,
             turn_id: &ids.turn_id,
             item_id: &ids.item_id,
@@ -552,6 +426,11 @@ pub(super) async fn launch_claim(
         loaded.context.config.max_command_retries,
     )
     .await;
+    if matches!(launch_result, Ok(LaunchClaimedRunOutcome::Started(_))) {
+        let lease_expires_at = window.lease_expires_at;
+        ClaimLease::record(&mut window, lease_expires_at, ids.operated_at);
+    }
+    drop(window);
     let receipt = match classify_launch_result(&launch_result) {
         LaunchAuthority::Started => {
             // The Started receipt durably projected the user turn/item:
@@ -620,6 +499,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     let stream_after = context.config.stream_after;
     let control_capacity = context.config.queue_capacity.get();
     let run_cancel = cancellation.cancel_handle();
+    let engine = settings.config().selection().engine_id();
     let turn_result = match launch {
         ResolvedLaunch::Configured(launch) => context.owner.admit_turn(
             EngineTurnInput {
@@ -718,35 +598,29 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
         ),
     };
     let Ok(mut turn) = turn_result else {
+        let failure = StartFailure::NotAdmitted;
+        settle_unstarted_claim(&context, &ids, &receipt, engine, &failure).await;
         return (None, ClaimCustody::Released);
     };
-    let preparation = tokio::select! {
-        biased;
-        result = turn.prepare() => Ok(result),
-        () = run_cancel.wait() => Err(()),
-    };
-    let (session_result, cancellation_observed) = match preparation {
-        Ok(result) => (result, run_cancel.is_cancelled()),
-        Err(()) => {
-            // The lease signal wins without dropping the AcceptedTurn. Keep
-            // setup alive long enough to obtain the session needed for the
-            // durable bind, then cancel before authorization. This preserves
-            // a user-cancelled terminal path instead of leaving an unbound
-            // launching row for interruption recovery.
-            (turn.prepare().await, true)
+    let launch_deadline = context.config.launch_deadline;
+    let session = match await_provider_start(&mut turn, &run_cancel, launch_deadline).await {
+        ProviderStart::Started { session, stopped } => {
+            if stopped {
+                turn.cancel();
+            }
+            session
+        }
+        ProviderStart::Failed(failure) => {
+            let unresolved = abandon_turn(turn, context.stop, context.process_cancel).await;
+            settle_unstarted_claim(&context, &ids, &receipt, engine, &failure).await;
+            let custody = if unresolved {
+                ClaimCustody::Retained(cancellation)
+            } else {
+                ClaimCustody::Released
+            };
+            return (None, custody);
         }
     };
-    let Ok(session) = session_result else {
-        let custody = if is_unresolved_reap(&turn.finish().await) {
-            ClaimCustody::Retained(cancellation)
-        } else {
-            ClaimCustody::Released
-        };
-        return (None, custody);
-    };
-    if cancellation_observed {
-        turn.cancel();
-    }
     (
         Some(PreparedClaim {
             context,
@@ -854,8 +728,11 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             },
         );
     };
+    // Bind fences the exact lease window the heartbeat renews.
+    let lease: &ClaimLease = context.lease;
+    let window = lease.hold().await;
     let bind_command = || BindRunProvider {
-        claimed: &context.claimed,
+        claimed: &window,
         receipt: &receipt,
         run_start_key: &ids.run_start_key,
         credentials: &ids.credentials,
@@ -884,6 +761,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             .await
         }
     };
+    drop(window);
     let (bound, already_bound) = match bind_result {
         Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
         Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
@@ -973,38 +851,23 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         Err(_) => (None, None),
     };
     let mut inbox = inbox;
-    // A provider turn can legitimately outlive the original claim window (a
-    // slow tool call, a long response). The heartbeat below keeps the dispatch
-    // lease alive for the whole turn so the recovery sweep cannot reap work
-    // this dispatcher still owns, and so the terminal settlement still passes
-    // its lease fence instead of leaving an unknown-outcome run behind.
-    let custody_unresolved = {
-        let turn = consume_turn(
-            TurnConsumptionContext {
-                repository: context.repository,
-                config: context.config,
-                origin: context.origin,
-                stop: context.stop,
-                process_cancel: context.process_cancel,
-                run_cancel: run_cancel.as_ref(),
-            },
-            turn,
-            scope,
-            engine,
-            inbox.as_mut(),
-        );
-        // Keep the dispatch lease alive for the whole turn: a slow tool call
-        // or long response must not be reaped mid-flight, and the terminal
-        // settlement must still pass its lease fence afterwards.
-        Box::pin(drive_turn_with_lease_heartbeat(
-            context.repository,
-            context.origin,
-            &context.claimed,
-            context.config.claim_lease,
-            turn,
-        ))
-        .await
-    };
+    // The claim heartbeat keeps the lease alive for the whole turn, so a
+    // slow tool call is not reaped and settlement passes its lease fence.
+    let custody_unresolved = Box::pin(consume_turn(
+        TurnConsumptionContext {
+            repository: context.repository,
+            config: context.config,
+            origin: context.origin,
+            stop: context.stop,
+            process_cancel: context.process_cancel,
+            run_cancel: run_cancel.as_ref(),
+        },
+        turn,
+        scope,
+        engine,
+        inbox.as_mut(),
+    ))
+    .await;
     if let Some(receiver) = inbox.as_mut() {
         drain_interactions(receiver);
     }

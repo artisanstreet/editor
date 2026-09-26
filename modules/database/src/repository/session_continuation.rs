@@ -7,7 +7,7 @@
 //! repair rows, create a side table, or expose provider binding bytes.
 
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
+    ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 use serde::Deserialize;
 
@@ -17,6 +17,12 @@ use crate::engine_run_config;
 use crate::entities::{self, AssistantRunLifecycle};
 
 use super::{Repository, RepositoryError, corrupt_data, database_error};
+
+mod durable_facts;
+mod never_started;
+
+use durable_facts::read_durable_facts;
+use never_started::never_started;
 
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const SESSION_ID_MAX_BYTES: usize = 256;
@@ -44,7 +50,8 @@ pub struct SessionContinuationQuery {
 )]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionContinuationLookup {
-    /// There are no historical run rows after applying the exclusion.
+    /// No historical run reached its provider after applying the exclusion
+    /// and stepping over never-started runs.
     NoHistory,
     /// A settled, compatible provider binding and its durable facts are safe
     /// for the caller to offer to the HTTP resume leaf.
@@ -61,7 +68,8 @@ pub enum SessionContinuationUnavailableReason {
     /// A queued, launching, running, waiting, or cancellation-requested run
     /// may still produce external effects.
     ActiveRun,
-    /// A settled run has no complete provider binding tuple.
+    /// A settled run committed output yet has no provider binding tuple.
+    /// Unbound runs without output never started and are not history.
     UnboundSettledRun,
     /// An interrupted run has an ambiguous external outcome.
     AmbiguousRun,
@@ -264,10 +272,16 @@ impl Repository {
     /// engine/profile scope.
     ///
     /// Rows are ordered by immutable creation time descending and then by run
-    /// id descending.  A newer active, unbound, ambiguous, or incompatible
-    /// row is returned as an explicit disposition and never skipped in favour
-    /// of an older conversation.  The only intentional skip is
-    /// `exclude_run_id`, which is the caller's current newly-launched run.
+    /// id descending.  A newer active, ambiguous, or incompatible row is
+    /// returned as an explicit disposition and never skipped in favour of an
+    /// older conversation.  Two skips are intentional: `exclude_run_id`,
+    /// which is the caller's current newly-launched run, and settled runs
+    /// that never started (no provider binding, no committed output). A
+    /// never-started run left no provider conversation, so it is not
+    /// history: with nothing older the lookup is [`NoHistory`] on any
+    /// engine, and otherwise the next older run decides under these rules.
+    ///
+    /// [`NoHistory`]: SessionContinuationLookup::NoHistory
     ///
     /// The read is transactionally consistent across the run, checkpoint,
     /// receipts, and thread sequence row.  It never mutates or repairs any
@@ -308,25 +322,48 @@ async fn read_session_continuation<C: ConnectionTrait>(
     database: &C,
     query: &SessionContinuationQuery,
 ) -> Result<SessionContinuationLookup, RepositoryError> {
-    let mut candidates = entities::assistant_run::Entity::find()
-        .filter(entities::assistant_run::Column::ThreadId.eq(query.thread_id.as_str()));
-    if let Some(exclude_run_id) = &query.exclude_run_id {
-        candidates =
-            candidates.filter(entities::assistant_run::Column::RunId.ne(exclude_run_id.as_str()));
+    // Only the newest run that ever reached its provider may decide
+    // continuation. A settled run that never bound a provider session and
+    // never committed output left no provider-side conversation behind: the
+    // thread is still effectively new at that point, so the run is stepped
+    // over and the next older run (if any) decides under the normal rules.
+    // Each step is one indexed read; nothing caps the thread's lifetime.
+    let mut older_than: Option<(i64, String)> = None;
+    loop {
+        let mut candidates = entities::assistant_run::Entity::find()
+            .filter(entities::assistant_run::Column::ThreadId.eq(query.thread_id.as_str()));
+        if let Some(exclude_run_id) = &query.exclude_run_id {
+            candidates = candidates
+                .filter(entities::assistant_run::Column::RunId.ne(exclude_run_id.as_str()));
+        }
+        if let Some((created_at_ms, run_id)) = &older_than {
+            candidates = candidates.filter(
+                Condition::any()
+                    .add(entities::assistant_run::Column::CreatedAtMs.lt(*created_at_ms))
+                    .add(
+                        Condition::all()
+                            .add(entities::assistant_run::Column::CreatedAtMs.eq(*created_at_ms))
+                            .add(entities::assistant_run::Column::RunId.lt(run_id.as_str())),
+                    ),
+            );
+        }
+        let candidate = candidates
+            .order_by_desc(entities::assistant_run::Column::CreatedAtMs)
+            .order_by_desc(entities::assistant_run::Column::RunId)
+            .one(database)
+            .await
+            .map_err(|source| database_error("read session-continuation candidate", source))?;
+        let Some(row) = candidate else {
+            return Ok(SessionContinuationLookup::NoHistory);
+        };
+        let run_id = parse_run_id(&row.run_id)?;
+        validate_run_row(&row, query)?;
+        if never_started(database, &row, &run_id).await? {
+            older_than = Some((row.created_at_ms, row.run_id));
+            continue;
+        }
+        return inspect_candidate(database, query, row, run_id).await;
     }
-    // Only the newest non-excluded run may decide continuation. Reading
-    // older rows adds no authority and must not cap the thread's lifetime.
-    let candidate = candidates
-        .order_by_desc(entities::assistant_run::Column::CreatedAtMs)
-        .order_by_desc(entities::assistant_run::Column::RunId)
-        .one(database)
-        .await
-        .map_err(|source| database_error("read session-continuation candidate", source))?;
-    let Some(row) = candidate else {
-        return Ok(SessionContinuationLookup::NoHistory);
-    };
-    let run_id = parse_run_id(&row.run_id)?;
-    inspect_candidate(database, query, row, run_id).await
 }
 
 async fn inspect_candidate<C: ConnectionTrait>(
@@ -335,8 +372,6 @@ async fn inspect_candidate<C: ConnectionTrait>(
     run: entities::assistant_run::Model,
     run_id: RunId,
 ) -> Result<SessionContinuationLookup, RepositoryError> {
-    validate_run_row(&run, query)?;
-
     match &run.lifecycle {
         AssistantRunLifecycle::Queued
         | AssistantRunLifecycle::Launching
@@ -636,138 +671,6 @@ fn decode_binding(
         session_id,
         profile_id: profile,
     })
-}
-
-#[expect(
-    clippy::too_many_lines,
-    reason = "keeps the four dependent reads of one continuation snapshot in a single linear \
-              sequence; extraction would split the transaction locals"
-)]
-async fn read_durable_facts<C: ConnectionTrait>(
-    database: &C,
-    run: &entities::assistant_run::Model,
-    run_id: &RunId,
-) -> Result<
-    (
-        Option<SessionContinuationCheckpoint>,
-        SessionContinuationSequence,
-    ),
-    RepositoryError,
-> {
-    let checkpoint = entities::run_checkpoint::Entity::find_by_id(run_id.as_str())
-        .one(database)
-        .await
-        .map_err(|source| database_error("read continuation checkpoint", source))?;
-    let receipt = entities::run_batch_receipt::Entity::find()
-        .filter(entities::run_batch_receipt::Column::RunId.eq(run_id.as_str()))
-        .order_by_desc(entities::run_batch_receipt::Column::BatchSequence)
-        .one(database)
-        .await
-        .map_err(|source| database_error("read continuation batch receipt", source))?;
-    let state = entities::conversation_state::Entity::find_by_id(run.thread_id.as_str())
-        .one(database)
-        .await
-        .map_err(|source| database_error("read continuation thread sequence", source))?;
-
-    if let Some(state) = &state
-        && state.last_patch_sequence < 0
-    {
-        return Err(corrupt_data(
-            "conversation_state",
-            "last_patch_sequence",
-            "conversation patch sequence is negative",
-        ));
-    }
-    if let Some(receipt) = &receipt {
-        if !receipt.committed {
-            return Err(corrupt_data(
-                "run_batch_receipts",
-                "committed",
-                "uncommitted receipt is not a durable sequence fact",
-            ));
-        }
-        if receipt.generation != run.generation || receipt.batch_sequence <= 0 {
-            return Err(corrupt_data(
-                "run_batch_receipts",
-                "generation",
-                "receipt generation or sequence is incompatible with its run",
-            ));
-        }
-    }
-
-    let checkpoint_facts = if let Some(row) = checkpoint {
-        if row.generation != run.generation
-            || row.last_batch_sequence < 0
-            || row.updated_at_ms < run.created_at_ms
-            || row.updated_at_ms > run.updated_at_ms
-        {
-            return Err(corrupt_data(
-                "run_checkpoints",
-                "generation",
-                "checkpoint facts are outside the run fence",
-            ));
-        }
-        let has_version = row.engine_checkpoint_version.is_some();
-        let has_blob = row.engine_checkpoint_blob.is_some();
-        if has_version != has_blob
-            || row
-                .engine_checkpoint_version
-                .is_some_and(|version| version <= 0)
-            || row
-                .engine_checkpoint_blob
-                .as_ref()
-                .is_some_and(|blob| blob.as_slice().is_empty() || blob.as_slice().len() > 262_144)
-        {
-            return Err(corrupt_data(
-                "run_checkpoints",
-                "engine_checkpoint_blob",
-                "checkpoint payload tuple is invalid",
-            ));
-        }
-        if let Some(receipt) = &receipt {
-            if row.last_batch_sequence != receipt.batch_sequence {
-                return Err(corrupt_data(
-                    "run_checkpoints",
-                    "last_batch_sequence",
-                    "checkpoint and receipt sequences disagree",
-                ));
-            }
-        } else if row.last_batch_sequence != 0 {
-            return Err(corrupt_data(
-                "run_checkpoints",
-                "last_batch_sequence",
-                "checkpoint has no corresponding batch receipt",
-            ));
-        }
-        Some(SessionContinuationCheckpoint {
-            generation: row.generation,
-            last_batch_sequence: row.last_batch_sequence,
-            engine_checkpoint_version: row.engine_checkpoint_version,
-            has_engine_checkpoint: has_blob,
-            updated_at: UnixMillis::from_millis(row.updated_at_ms),
-        })
-    } else {
-        if receipt.is_some() {
-            return Err(corrupt_data(
-                "run_checkpoints",
-                "run_id",
-                "batch receipt exists without a checkpoint row",
-            ));
-        }
-        None
-    };
-
-    let last_batch_sequence = checkpoint_facts
-        .as_ref()
-        .map_or(0, |checkpoint| checkpoint.last_batch_sequence);
-    Ok((
-        checkpoint_facts,
-        SessionContinuationSequence {
-            last_batch_sequence,
-            last_committed_batch_sequence: receipt.map(|row| row.batch_sequence),
-            last_patch_sequence: state.map(|row| row.last_patch_sequence),
-        },
-    ))
 }
 
 fn parse_run_id(value: &str) -> Result<RunId, RepositoryError> {

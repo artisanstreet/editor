@@ -75,6 +75,8 @@ const FIXTURE_SESSION_ID: &str = "test-session";
 /// Fixed run id for the P4 SSE flow.
 #[cfg(test)]
 const FIXTURE_RUN_ID: &str = "fixture-run";
+/// Startup delay for `slow_start_then_terminal`.
+const SLOW_START_MS: u64 = 1_500;
 /// Watchdog bound.
 const WATCHDOG_SECS: u64 = 20;
 
@@ -111,6 +113,12 @@ fn main() {
         "hang_until_lifeline" => run_hang_until_lifeline(),
         "abrupt_child_exit_nonzero" => process::exit(ABRUPT_EXIT_CODE),
         "prompt_text_then_terminal" => run_prompt_text_then_terminal(),
+        "slow_start_then_terminal" => {
+            // A cold provider: silent well past a short claim lease before
+            // it announces readiness, then the ordinary prompt flow.
+            std::thread::sleep(Duration::from_millis(SLOW_START_MS));
+            run_prompt_text_then_terminal()
+        }
         "prompt_text_then_hold_after_first_delta" => run_prompt_text_then_hold_after_first_delta(),
         "descendant_holds_sentinel" => run_descendant_holds_sentinel(),
         _ => process::exit(SCENARIO_REFUSED_EXIT),
@@ -1011,6 +1019,7 @@ fn is_known_scenario(name: &str) -> bool {
             | "hang_until_lifeline"
             | "abrupt_child_exit_nonzero"
             | "prompt_text_then_terminal"
+            | "slow_start_then_terminal"
             | "prompt_text_then_hold_after_first_delta"
             | "descendant_holds_sentinel"
     )

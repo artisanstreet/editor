@@ -42,6 +42,8 @@ use crate::{
 mod assistant_commit;
 #[path = "native_run_dispatch/claim.rs"]
 mod claim;
+#[path = "native_run_dispatch/claim_lease.rs"]
+mod claim_lease;
 #[path = "native_run_dispatch/commit_retry.rs"]
 mod commit_retry;
 #[path = "native_run_dispatch/delta_coalescer.rs"]
@@ -57,6 +59,8 @@ mod message_parts;
 mod observation_commit;
 #[path = "native_run_dispatch/recovery.rs"]
 mod recovery;
+#[path = "native_run_dispatch/start_failure.rs"]
+mod start_failure;
 #[path = "native_run_dispatch/steer.rs"]
 mod steer;
 mod streaming_speed;
@@ -70,6 +74,7 @@ use assistant_commit::flush_pending_deltas;
 #[cfg(test)]
 use claim::launch_claim;
 use claim::{execute_claim, fail_claim, requeue_claim};
+use claim_lease::ClaimLease;
 pub(crate) use commit_retry::{CommitBatchRequest, commit_batch_with_retry};
 #[cfg(test)]
 pub(crate) use dispatch_policy::notify_after_commit;
@@ -80,8 +85,8 @@ pub(crate) use dispatch_policy::{
 };
 use dispatch_policy::{claim_failure_backoff, classify_claim_failure};
 use dispatch_support::{
-    add_duration, at_or_after, claim_renew_interval, mint_dispatch_owner, mint_item_id,
-    mint_patch_id, wait_for_next_claim, wall_clock,
+    add_duration, at_or_after, mint_dispatch_owner, mint_item_id, mint_patch_id,
+    wait_for_next_claim, wall_clock,
 };
 pub(crate) use dispatch_support::{binding_bytes_vec, binding_matches_bytes};
 #[cfg(test)]
@@ -131,6 +136,10 @@ pub enum NativeRunDispatcherConfigError {
 pub struct NativeRunDispatcherConfigInput {
     /// Maximum lease lifetime for one claimed message.
     pub claim_lease: Duration,
+    /// Deadline for a launched provider to start and announce its session.
+    /// Independent of `claim_lease`: the claim heartbeat keeps the lease
+    /// alive while a slow provider starts.
+    pub launch_deadline: Duration,
     /// Delay between claim attempts when no work is available.
     pub poll_interval: Duration,
     /// Delay before retrying a safely requeued message.
@@ -152,6 +161,7 @@ impl std::fmt::Debug for NativeRunDispatcherConfigInput {
         formatter
             .debug_struct("NativeRunDispatcherConfigInput")
             .field("claim_lease", &self.claim_lease)
+            .field("launch_deadline", &self.launch_deadline)
             .field("poll_interval", &self.poll_interval)
             .field("retry_backoff", &self.retry_backoff)
             .field("shutdown_budget", &self.shutdown_budget)
@@ -173,6 +183,7 @@ pub struct NativeRunDispatcherConfig {
     authority: NativeOpenCode2Authority,
     notifier: ConversationCommitNotifier,
     claim_lease: Duration,
+    launch_deadline: Duration,
     poll_interval: Duration,
     retry_backoff: Duration,
     shutdown_budget: Duration,
@@ -187,6 +198,7 @@ impl std::fmt::Debug for NativeRunDispatcherConfig {
         formatter
             .debug_struct("NativeRunDispatcherConfig")
             .field("claim_lease", &self.claim_lease)
+            .field("launch_deadline", &self.launch_deadline)
             .field("poll_interval", &self.poll_interval)
             .field("retry_backoff", &self.retry_backoff)
             .field("shutdown_budget", &self.shutdown_budget)
@@ -219,6 +231,7 @@ impl NativeRunDispatcherConfig {
     ) -> Result<Self, NativeRunDispatcherConfigError> {
         let NativeRunDispatcherConfigInput {
             claim_lease,
+            launch_deadline,
             poll_interval,
             retry_backoff,
             shutdown_budget,
@@ -227,7 +240,13 @@ impl NativeRunDispatcherConfig {
             prompt_delivery,
             stream_after,
         } = input;
-        for duration in [claim_lease, poll_interval, retry_backoff, shutdown_budget] {
+        for duration in [
+            claim_lease,
+            launch_deadline,
+            poll_interval,
+            retry_backoff,
+            shutdown_budget,
+        ] {
             if duration.is_zero() {
                 return Err(NativeRunDispatcherConfigError::ZeroDuration);
             }
@@ -251,6 +270,7 @@ impl NativeRunDispatcherConfig {
             authority,
             notifier,
             claim_lease,
+            launch_deadline,
             poll_interval,
             retry_backoff,
             shutdown_budget,
@@ -740,8 +760,10 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
                 continue;
             }
         };
+        let claim_lease = ClaimLease::new(&claimed, config.claim_lease);
         if let Some(lease) = Box::pin(execute_claim(
             ClaimExecution {
+                lease: &claim_lease,
                 repository: &repository,
                 database_path: Path::new(&database_path),
                 config: &config,
@@ -775,14 +797,10 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
     }
 }
 
-/// Runs one provider turn while heartbeating its dispatch lease.
-///
-/// The turn may legitimately outlive the original claim window, and the
-/// recovery sweep only ever runs between turns: without the heartbeat a turn
-/// that settles after its old expiry would be fenced out of its own
-/// settlement and reaped as an unknown outcome. A failed renewal is never
-/// fatal by itself; if the lease truly lapsed the recovery sweep owns the
-/// outcome exactly as before.
+/// Heartbeats a fresh lease for `claimed` around one turn, renewing once up
+/// front. Production claims heartbeat continuously from claim to settlement
+/// through [`claim_lease::drive_with_claim_lease`].
+#[cfg(test)]
 pub(crate) async fn drive_turn_with_lease_heartbeat<F>(
     repository: &Repository,
     origin: &SystemCommandOrigin,
@@ -793,50 +811,14 @@ pub(crate) async fn drive_turn_with_lease_heartbeat<F>(
 where
     F: std::future::Future,
 {
-    renew_claim_lease(repository, origin, claimed, claim_lease).await;
-    tokio::pin!(turn);
-    let renew_interval = claim_renew_interval(claim_lease);
-    let mut renew_at =
-        tokio::time::interval_at(tokio::time::Instant::now() + renew_interval, renew_interval);
-    renew_at.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tokio::select! {
-            output = &mut turn => break output,
-            () = async {
-                renew_at.tick().await;
-                // The turn may hold the SQLite writer across an await.
-                // Poll it while renewal waits for that same writer, so it
-                // can finish its transaction or react to cancellation.
-                renew_claim_lease(repository, origin, claimed, claim_lease).await;
-            } => {}
-        }
-    }
-}
-
-/// Best-effort renewal of the live dispatch lease.
-async fn renew_claim_lease(
-    repository: &Repository,
-    origin: &SystemCommandOrigin,
-    claimed: &ClaimedMessageDispatch,
-    claim_lease: Duration,
-) {
-    let Some(operated_at) = wall_clock(origin) else {
-        return;
-    };
-    let Some(lease_expires_at) = add_duration(operated_at, claim_lease) else {
-        return;
-    };
-    let _ = repository
-        .renew_message_dispatch_lease(
-            &claimed.message_id,
-            &claimed.owner,
-            operated_at,
-            lease_expires_at,
-        )
-        .await;
+    let lease = ClaimLease::new(claimed, claim_lease);
+    lease.renew(repository, origin).await;
+    claim_lease::drive_with_claim_lease(repository, origin, &lease, turn).await
 }
 
 struct ClaimExecution<'a> {
+    /// The claim's single lease heartbeat, shared by launch and bind.
+    lease: &'a ClaimLease,
     repository: &'a Repository,
     database_path: &'a Path,
     config: &'a NativeRunDispatcherConfig,

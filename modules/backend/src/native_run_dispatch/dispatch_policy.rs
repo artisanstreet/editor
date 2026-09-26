@@ -111,7 +111,7 @@ pub(crate) fn continuation_unavailable_reason(
             "provider continuation unavailable: another run is still active"
         }
         SessionContinuationUnavailableReason::UnboundSettledRun => {
-            "provider continuation unavailable: the prior run has no provider session"
+            "provider continuation unavailable: the prior run produced output without a provider session; start a new chat to continue"
         }
         SessionContinuationUnavailableReason::AmbiguousRun => {
             "provider continuation unavailable: the prior run was interrupted with unknown outcome; start a new chat to continue"
@@ -125,13 +125,15 @@ pub(crate) fn continuation_unavailable_reason(
 /// Precise, bounded dispatcher diagnostic for a scope-mismatched continuation.
 ///
 /// A mismatch fails closed: the dispatcher never resumes across engines or
-/// profiles and never starts silently on a fresh session here.
+/// profiles and never starts silently on a fresh session here. Only runs that
+/// reached their provider get this far (never-started runs are not history),
+/// so the engine refusal tells the reader how to proceed.
 pub(crate) fn continuation_incompatible_reason(
     incompatible: &SessionContinuationIncompatible,
 ) -> &'static str {
     match incompatible.reason {
         SessionContinuationIncompatibility::Engine => {
-            "provider continuation incompatible: the prior run used a different engine"
+            "provider continuation incompatible: this chat already has replies from another engine; switch back to that engine or start a new chat"
         }
         SessionContinuationIncompatibility::Profile => {
             "provider continuation incompatible: the prior run used a different profile"
@@ -368,7 +370,7 @@ mod continuation_reason_tests {
             continuation_unavailable_reason(&unavailable(
                 SessionContinuationUnavailableReason::UnboundSettledRun
             )),
-            "provider continuation unavailable: the prior run has no provider session"
+            "provider continuation unavailable: the prior run produced output without a provider session; start a new chat to continue"
         );
         assert_eq!(
             continuation_unavailable_reason(&unavailable(
@@ -384,7 +386,7 @@ mod continuation_reason_tests {
             continuation_incompatible_reason(&incompatible(
                 SessionContinuationIncompatibility::Engine
             )),
-            "provider continuation incompatible: the prior run used a different engine"
+            "provider continuation incompatible: this chat already has replies from another engine; switch back to that engine or start a new chat"
         );
         assert_eq!(
             continuation_incompatible_reason(&incompatible(
