@@ -393,6 +393,13 @@ Implemented (after step 7), recent threads in the sidebar:
   sidebar repaints when a row crosses an age boundary. The 1.5 s sidebar listing poll is
   removed: the selected project's listing (thread picker, command menu, opening a thread) is
   read again only when a pushed list shows one of its threads differently, once per list.
+- The project catalog is pushed the same way (`projectCatalog` Event @11): a connection that
+  listed the projects receives the catalog whenever a project is attached, renamed or removed,
+  so the Editor's project list is never stale. Choosing a recent thread is never a silent no-op:
+  a project not listed yet is listed again and the thread opens when it arrives; a busy view
+  opens it once settled; after 10 s, or when the Forge no longer lists the project, the window
+  error says why. A working thread shows the rail's trailing state dot (and "working" in its
+  accessible description) without leaving its chronological group.
 
 ## 5. Forge resilience prerequisites
 
