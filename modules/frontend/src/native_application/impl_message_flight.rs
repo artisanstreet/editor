@@ -11,12 +11,11 @@
 use super::*;
 
 impl NativeApplication {
+    /// Whether Send is offered: there is a draft to send (see
+    /// `submission_scope`), or the new-thread screen lacks a project and
+    /// pressing Send explains that.
     pub(super) fn message_submission_is_admissible(&self, cx: &App) -> bool {
-        matches!(self.route(), NativeRoute::Thread { project, thread }
-            if self.selected_project.as_ref() == Some(project)
-                && self.selected_thread.as_ref() == Some(thread))
-            && self.message_composer_visible(cx)
-            && !self.host_switch_pending()
+        self.submission_scope(cx).is_some() || self.new_task_lacks_project()
     }
 
     pub(super) fn project_picker_action_is_admissible(&self) -> bool {
@@ -170,16 +169,21 @@ impl NativeApplication {
     }
 
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
-        if !self.message_submission_is_admissible(cx) || self.message_flight.is_some() {
+        // The composer is locked while a send is in flight.
+        if self.message_flight.is_some() {
             return;
         }
         // The Forge admits the send: it refuses a still-starting run, resolves
         // and saves the model the send carries, and decides whether it steers
         // the live run. Its refusal arrives as data (`handle_message_refused`).
         self.composer_model_run_error = None;
-        let Some(thread_id) = self.selected_thread.clone() else {
+        let Some(scope) = self.submission_scope(cx) else {
+            self.refuse_unscoped_send(cx);
             return;
         };
+        if let artisan_domain::ComposerDraftScope::Project(project) = &scope {
+            self.bind_new_task_composer(project, cx);
+        }
         // The Forge sends the stored draft, so every image must be stored.
         if !self.composer.read(cx).unstored_attachments().is_empty() {
             self.message_failure = Some(NativeMessageFailure::new(ServiceFailure {
@@ -221,7 +225,6 @@ impl NativeApplication {
                 return;
             }
         };
-        let scope = artisan_domain::ComposerDraftScope::Thread(thread_id);
         let flight = NativeMessageFlight {
             scope: scope.clone(),
             request_id,
@@ -311,9 +314,16 @@ impl NativeApplication {
         let Some(flight) = self.message_flight.as_ref() else {
             return;
         };
-        let thread_scope = artisan_domain::ComposerDraftScope::Thread(receipt.thread_id.clone());
-        if self.selected_thread.as_ref() != Some(&receipt.thread_id)
-            || !flight.answers(&thread_scope, &receipt.request_id)
+        // A thread draft's message is queued in its own, shown thread; a
+        // project draft's in the thread its send created.
+        let queued_here = match &flight.scope {
+            artisan_domain::ComposerDraftScope::Thread(thread) => {
+                &receipt.thread_id == thread && self.selected_thread.as_ref() == Some(thread)
+            }
+            artisan_domain::ComposerDraftScope::Project(_) => true,
+        };
+        if !queued_here
+            || receipt.request_id != flight.request_id
             || !matches!(
                 receipt.disposition,
                 artisan_domain::ReceiptDisposition::Accepted
@@ -329,9 +339,11 @@ impl NativeApplication {
         // The Forge owns the message now: the composer clears, and the row
         // the transcript shows is the one its outbox carries.
         self.finish_composer_submission(flight.token, DraftDisposition::Accepted, cx);
+        let thread = receipt.thread_id.clone();
         self.message_receipt = Some(receipt);
         self.message_failure = None;
         self.message_failure_note = None;
+        self.open_sent_thread(&flight.scope, thread, cx);
         self.sync_composer_availability(cx);
         cx.notify();
     }

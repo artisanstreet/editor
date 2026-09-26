@@ -194,3 +194,6 @@ fn a_stale_answer_keeps_the_draft_and_saves_it_again(cx: &mut TestAppContext) {
         });
     });
 }
+
+#[path = "new_thread_send.rs"]
+mod new_thread_send;
