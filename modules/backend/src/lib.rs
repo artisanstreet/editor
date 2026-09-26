@@ -42,6 +42,8 @@ pub mod preview_service_policy;
 pub mod process_custody;
 pub mod product_telemetry_capture_policy;
 pub mod project_repository_service;
+pub mod project_subtitle_policy;
+pub mod project_subtitles;
 pub mod request_handler;
 pub mod run_cancellation;
 pub mod run_interaction;

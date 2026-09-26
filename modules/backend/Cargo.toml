@@ -110,6 +110,10 @@ name = "git_remote_url_policy"
 path = "../../tests/backend/git_remote_url_policy.rs"
 
 [[test]]
+name = "project_subtitle_policy"
+path = "../../tests/backend/project_subtitle_policy.rs"
+
+[[test]]
 name = "harness_config_registry_policy"
 path = "../../tests/backend/harness_config_registry_policy.rs"
 

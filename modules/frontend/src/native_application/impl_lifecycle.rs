@@ -120,7 +120,7 @@ impl NativeApplication {
             application.route_command_action(&menu, cx);
         });
         let mut application = Self {
-            machine_error: None,
+            window_error: None,
             machine_home: None,
             machine_label: crate::native_hosts::no_host_label().into(),
             machine_menu: impl_machines::MachineMenu::new(cx),
@@ -196,9 +196,7 @@ impl NativeApplication {
             picker_subscription: None,
             home_picker: None,
             home_picker_subscription: None,
-            sidebar_project_picker: None,
-            sidebar_project_picker_subscription: None,
-            project_navigation: impl_projects::ProjectNavigation::new(cx),
+            project_navigation: impl_projects::ProjectNavigation::default(),
             project_options: Vec::new(),
             selected_project: None,
             titlebar_repository: None,

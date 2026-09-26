@@ -126,6 +126,7 @@ pub mod project_picker;
 #[cfg(any(test, feature = "visual-proof"))]
 pub mod proof;
 pub mod reasoning_display;
+pub mod recent_thread_groups;
 pub mod relative_time;
 pub mod repository_mark;
 pub mod rich_link_titles;

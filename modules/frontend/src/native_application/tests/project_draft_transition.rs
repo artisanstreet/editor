@@ -142,9 +142,7 @@ enum DraftLocation {
     Home,
 }
 
-fn project_dropdown_moves_draft_and_image(cx: &mut TestAppContext, location: DraftLocation) {
-    use crate::home_project_picker::SIDEBAR_PROJECT_TRIGGER_SELECTOR;
-
+fn project_choice_moves_draft_and_image(cx: &mut TestAppContext, location: DraftLocation) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     let alpha = ProjectId::parse("draft-alpha").unwrap();
@@ -208,15 +206,13 @@ fn project_dropdown_moves_draft_and_image(cx: &mut TestAppContext, location: Dra
     cx.update(|_, app| {
         view.update(app, |application, cx| assert_image_draft(application, cx));
     });
-    let trigger = cx
-        .debug_bounds(SIDEBAR_PROJECT_TRIGGER_SELECTOR)
-        .expect("workspace selector");
-    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
-    cx.run_until_parked();
-    let row = cx
-        .debug_bounds("artisan-home-project-row-1")
-        .expect("Beta project row");
-    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    // Choosing a project (the new-task picker and the command menu both
+    // route here) carries the unsent prompt into a fresh task there.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.choose_project(beta.clone(), cx);
+        });
+    });
     cx.run_until_parked();
     cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -263,16 +259,16 @@ fn project_dropdown_moves_draft_and_image(cx: &mut TestAppContext, location: Dra
 }
 
 #[gpui::test]
-fn project_dropdown_moves_an_unsent_new_thread_draft_and_image(cx: &mut TestAppContext) {
-    project_dropdown_moves_draft_and_image(cx, DraftLocation::NewThread);
+fn project_choice_moves_an_unsent_new_thread_draft_and_image(cx: &mut TestAppContext) {
+    project_choice_moves_draft_and_image(cx, DraftLocation::NewThread);
 }
 
 #[gpui::test]
-fn project_dropdown_moves_an_unsent_existing_thread_draft_and_image(cx: &mut TestAppContext) {
-    project_dropdown_moves_draft_and_image(cx, DraftLocation::ExistingThread);
+fn project_choice_moves_an_unsent_existing_thread_draft_and_image(cx: &mut TestAppContext) {
+    project_choice_moves_draft_and_image(cx, DraftLocation::ExistingThread);
 }
 
 #[gpui::test]
-fn project_dropdown_moves_an_unsent_home_draft_and_image(cx: &mut TestAppContext) {
-    project_dropdown_moves_draft_and_image(cx, DraftLocation::Home);
+fn project_choice_moves_an_unsent_home_draft_and_image(cx: &mut TestAppContext) {
+    project_choice_moves_draft_and_image(cx, DraftLocation::Home);
 }

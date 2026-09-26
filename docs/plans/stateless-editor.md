@@ -366,6 +366,41 @@ Implemented (step 7), preferences and navigation, and the step 6 gaps:
   `QueueStoredMessage` fits its images to the thread's engine like a draft send, so it is no
   longer bound to 5 MiB per image.
 
+Implemented (after step 7), recent threads in the sidebar:
+
+- The sidebar no longer switches projects. Its project dropdown, the previous/next project
+  buttons, project cycling and their focus handles are removed from the Editor; the new-task
+  project picker on the home surface remains. The sidebar lists recent threads across every
+  project of the connected Forge, and choosing one opens it in its own project.
+- Forge: `Repository::list_recent_threads` reads one page of saved threads (assistant text
+  started) across projects, newest activity first (latest message, else last update), bounded
+  to 100 (`RECENT_THREADS_MAX`). Each row carries its thread summary (naming its project) and a
+  Forge-resolved subtitle (`project_subtitle_policy`): the default remote's repository path on
+  its host (`owner/repo`, nested groups kept, host omitted), with ` · <branch>` for a linked
+  worktree (detached: short commit, else the worktree directory); otherwise the project's
+  display name. `ProjectSubtitles` caches one repository observation per project root for every
+  connection, refreshed in the background when older than a minute, so a listing never waits on
+  Git; a changed observation wakes delivery. Migration `m20261001_000021` indexes
+  `conversation_items(thread_id, item_kind)`.
+- Protocol: `readRecentThreads` (Request @46) answers `recentThreads` (Response @44); the
+  `recentThreads` Event (@10) pushes the same `RecentThreadList`. A connection that read the
+  recent threads receives their changes: after every request and wake its delivery driver
+  compares a cheap fingerprint of the listing's inputs and the subtitle generation, re-reads
+  only when either moved, and pushes only a changed list.
+- Editor: the recent threads are read as the connection starts and after a reconnect, then
+  rendered as pushed. Grouping into Last 24 hours, Last 3 days, Last 30 days and Older is
+  presentation, a pure function of the list and the clock (`recent_thread_groups.rs`); the
+  sidebar repaints when a row crosses an age boundary. The 1.5 s sidebar listing poll is
+  removed: the selected project's listing (thread picker, command menu, opening a thread) is
+  read again only when a pushed list shows one of its threads differently, once per list.
+- The project catalog is pushed the same way (`projectCatalog` Event @11): a connection that
+  listed the projects receives the catalog whenever a project is attached, renamed or removed,
+  so the Editor's project list is never stale. Choosing a recent thread is never a silent no-op:
+  a project not listed yet is listed again and the thread opens when it arrives; a busy view
+  opens it once settled; after 10 s, or when the Forge no longer lists the project, the window
+  error says why. A working thread shows the rail's trailing state dot (and "working" in its
+  accessible description) without leaving its chronological group.
+
 ## 5. Forge resilience prerequisites
 
 - A single failing request must not end the Forge serve loop; fail that connection only.
@@ -395,6 +430,8 @@ What the Editor keeps after step 7, and why each is not Forge state:
 | Composer view: text being typed, undo and redo, thumbnails, the per-scope save chain | `native_composer*`, `composer_draft_sync.rs` | View history and in-flight saves; the Forge draft is the stored copy |
 | Last draft revision the Forge reported per scope | `composer_draft_sync.rs` | Echo of Forge data, so a send names the revision it saved |
 | Listings, catalogs, usage rows, preferences, outbox and transcript projections | Application and view state | Renders of Forge data, replaced by each read or push and dropped on switch |
+| Recent threads across projects, with their subtitles | Sidebar view state (`impl_sidebar_threads.rs`) | Render of the Forge's pushed list; the age groups are derived from it and the clock on each paint |
+| Selected project and its thread listing | Application state | Which project's threads the picker and command menu show; follows the opened thread. No sidebar project switcher or project cycling state remains |
 | Selection, scroll, focus, open menus, animations | View state | Ephemeral view state |
 | Connection holds and in-flight request ids | Transport | Liveness of work in flight, not stored |
 | Dev startup receipt, frame capture | Opt-in development writers | Development tooling, allowed by the file-write guard |
@@ -414,6 +451,7 @@ Connection upkeep (after step 7):
   "Unavailable host".
 - The built-in "This computer" host is removed: the machine menu lists registered hosts only.
 
-Still pulled rather than pushed (cadence only, the data is the Forge's): the sidebar re-reads its
-project's thread listing every 1.5 s, and the host catalog is read again every five minutes and
-when an engine's verdict changes.
+Still pulled rather than pushed (cadence only, the data is the Forge's): the host catalog is read
+again every five minutes and when an engine's verdict changes. The sidebar's 1.5 s listing poll
+is gone: recent threads are pushed, and the selected project's listing is read only when a push
+shows it changed.

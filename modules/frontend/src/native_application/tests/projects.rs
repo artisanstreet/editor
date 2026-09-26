@@ -64,7 +64,7 @@ pub(super) fn finish_project_transition(
 }
 
 #[gpui::test]
-fn project_arrows_keep_cycle_order_and_explicit_choices_promote(cx: &mut TestAppContext) {
+fn explicit_project_choices_promote_in_recent_order(cx: &mut TestAppContext) {
     let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, _) = command_sink([]);
     cx.update(|app| {
@@ -73,43 +73,23 @@ fn project_arrows_keep_cycle_order_and_explicit_choices_promote(cx: &mut TestApp
             application.project_options = workspace_projects();
             application.selected_project = Some(application.project_options[0].id.clone());
 
-            for expected in ["workspace-beta", "workspace-gamma", "workspace-alpha"] {
-                application.cycle_project(true, cx);
+            for (chosen, order) in [
+                (
+                    "workspace-beta",
+                    ["workspace-beta", "workspace-alpha", "workspace-gamma"],
+                ),
+                (
+                    "workspace-gamma",
+                    ["workspace-gamma", "workspace-beta", "workspace-alpha"],
+                ),
+            ] {
+                application.choose_project(ProjectId::parse(chosen).unwrap(), cx);
                 assert_eq!(
                     application.selected_project.as_ref().map(ProjectId::as_str),
-                    Some(expected)
+                    Some(chosen)
                 );
-                assert_eq!(
-                    project_ids(application),
-                    ["workspace-alpha", "workspace-beta", "workspace-gamma"]
-                );
+                assert_eq!(project_ids(application), order);
             }
-            application.cycle_project(false, cx);
-            assert_eq!(
-                application.selected_project.as_ref().map(ProjectId::as_str),
-                Some("workspace-gamma")
-            );
-
-            application
-                .select_project_from_sidebar(ProjectId::parse("workspace-beta").unwrap(), cx);
-            assert_eq!(
-                project_ids(application),
-                ["workspace-beta", "workspace-alpha", "workspace-gamma"]
-            );
-            application.cycle_project(true, cx);
-            assert_eq!(
-                application.selected_project.as_ref().map(ProjectId::as_str),
-                Some("workspace-alpha")
-            );
-            application.cycle_project(false, cx);
-            assert_eq!(
-                application.selected_project.as_ref().map(ProjectId::as_str),
-                Some("workspace-beta")
-            );
-            assert_eq!(
-                project_ids(application),
-                ["workspace-beta", "workspace-alpha", "workspace-gamma"]
-            );
         });
     });
 }
@@ -124,7 +104,7 @@ fn project_catalog_refresh_keeps_selection_and_recent_order(cx: &mut TestAppCont
             application.project_options = workspace_projects();
             application.selected_project = Some(application.project_options[0].id.clone());
             let beta = ProjectId::parse("workspace-beta").unwrap();
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
 
             let refreshed = ProjectListing::new(vec![
                 project("workspace-gamma", "Gamma renamed"),
@@ -234,17 +214,17 @@ fn switching_projects_with_an_empty_composer_restores_threads_and_dormant_drafts
             });
             assert_eq!(application.composer.read(cx).draft(), "");
 
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
             application.handle_threads(&beta, &beta_threads, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.composer.read(cx).draft(), "");
-            application.select_project_from_sidebar(alpha.clone(), cx);
+            application.choose_project(alpha.clone(), cx);
             application.handle_threads(&alpha, &alpha_threads, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.selected_thread, Some(remembered));
             assert_eq!(application.composer.read(cx).draft(), "");
 
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
             application.handle_threads(&beta, &beta_threads, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.composer.read(cx).draft(), "");
@@ -255,7 +235,7 @@ fn switching_projects_with_an_empty_composer_restores_threads_and_dormant_drafts
                 "Remaining conversation",
             )])
             .unwrap();
-            application.select_project_from_sidebar(alpha.clone(), cx);
+            application.choose_project(alpha.clone(), cx);
             application.handle_threads(&alpha, &remaining_alpha, cx);
             finish_project_transition(application, cx);
             assert_eq!(
@@ -319,13 +299,13 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
                 token,
             });
 
-            application.select_project_from_sidebar(beta.clone(), cx);
+            application.choose_project(beta.clone(), cx);
             application.handle_threads(&beta, &ThreadListing::new(vec![]).unwrap(), cx);
             application.handle_empty_threads(&beta, cx);
             finish_project_transition(application, cx);
             assert!(application.selected_thread.is_none());
             assert_eq!(application.composer.read(cx).draft(), "");
-            application.select_project_from_sidebar(alpha.clone(), cx);
+            application.choose_project(alpha.clone(), cx);
             application.handle_threads(&alpha, &listing, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.selected_thread, Some(source));
@@ -380,7 +360,7 @@ fn opening_a_project_remembers_the_previous_projects_last_thread(cx: &mut TestAp
             application.handle_intake_ready(&projects, beta, &beta_threads, target.clone(), cx);
             finish_project_transition(application, cx);
             assert_eq!(application.selected_thread, Some(target));
-            application.select_project_from_sidebar(alpha.clone(), cx);
+            application.choose_project(alpha.clone(), cx);
             application.handle_threads(&alpha, &alpha_threads, cx);
             finish_project_transition(application, cx);
             assert_eq!(application.selected_thread, Some(source));
@@ -432,7 +412,7 @@ fn project_switch_retires_full_scroll_queue_and_handles_either_reply_order(
                 )])
                 .unwrap();
 
-                application.select_project_from_sidebar(beta.clone(), cx);
+                application.choose_project(beta.clone(), cx);
                 assert_eq!(application.selected_thread, Some(source.clone()));
                 assert_eq!(application.conversation_host.as_ref(), Some(&source_host));
                 if listing_first {

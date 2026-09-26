@@ -309,7 +309,9 @@ type ProfileTipAnchor = Option<((String, String), HoverRect)>;
     reason = "independent window, sidebar, and profile flags are tracked separately by the paint tree; packing them would conflate distinct render states"
 )]
 pub struct NativeApplication {
-    machine_error: Option<String>,
+    /// A dismissible window-level error, such as a host that could not be
+    /// added or a recent thread that could not be opened.
+    window_error: Option<String>,
     machine_home: Option<std::path::PathBuf>,
     machine_label: String,
     machine_menu: impl_machines::MachineMenu,
@@ -407,8 +409,6 @@ pub struct NativeApplication {
     picker_subscription: Option<Subscription>,
     home_picker: Option<Entity<HomeProjectPickerView>>,
     home_picker_subscription: Option<Subscription>,
-    sidebar_project_picker: Option<Entity<HomeProjectPickerView>>,
-    sidebar_project_picker_subscription: Option<Subscription>,
     project_navigation: impl_projects::ProjectNavigation,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
@@ -496,6 +496,8 @@ mod composer_queue_application;
 
 #[path = "native_application/impl_projects.rs"]
 mod impl_projects;
+#[path = "native_application/impl_recent_threads.rs"]
+mod impl_recent_threads;
 #[path = "native_application/impl_sidebar_threads.rs"]
 mod impl_sidebar_threads;
 

@@ -33,6 +33,7 @@ pub(super) enum ExpectedResponse {
     RunStopped(artisan_domain::StopRun),
     Directory,
     Projects,
+    RecentThreads,
     AttachedProject,
     CreatedThread,
     Threads(ProjectId),
@@ -168,6 +169,9 @@ pub(super) fn validate_response_family(
         }
         (ExpectedResponse::Projects, ResponsePayload::ProjectListing(listing)) => {
             Ok(ResponsePayload::ProjectListing(listing))
+        }
+        (ExpectedResponse::RecentThreads, ResponsePayload::RecentThreads(listing)) => {
+            Ok(ResponsePayload::RecentThreads(listing))
         }
         (
             ExpectedResponse::AttachedProject,
@@ -393,6 +397,10 @@ pub enum HostStateEvent {
     ThreadRetitled(artisan_domain::ThreadRetitled),
     /// A subscribed thread's live run usage.
     RunUsage(artisan_domain::RunUsageResult),
+    /// The recent threads across every project.
+    RecentThreads(artisan_domain::RecentThreadListing),
+    /// The attached-project catalog.
+    ProjectCatalog(ProjectListing),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -429,6 +437,12 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::RunUsage(usage) => Ok(UniDelivery::HostState(
                 HostStateEvent::RunUsage(usage.clone()),
+            )),
+            artisan_domain::Event::RecentThreads(listing) => Ok(UniDelivery::HostState(
+                HostStateEvent::RecentThreads(listing.clone()),
+            )),
+            artisan_domain::Event::ProjectCatalog(listing) => Ok(UniDelivery::HostState(
+                HostStateEvent::ProjectCatalog(listing.clone()),
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)

@@ -25,6 +25,7 @@ pub(super) async fn load_initial_catalog(
         events,
         NativeTransportEvent::Preferences(PreferencesEvent::Loaded(preferences)),
     )?;
+    read_recent_threads(runtime, frames, events).await?;
     let payload = runtime
         .request(frames, project_request(), ExpectedResponse::Projects)
         .await?;
@@ -698,8 +699,30 @@ fn finish_engine_config_save(
     )
 }
 
+/// Reads the recent threads across every project. The read also asks the
+/// Forge to push their later changes on this connection.
+pub(super) async fn read_recent_threads(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let result = match runtime
+        .request(
+            frames,
+            query_request(Query::ReadRecentThreads(artisan_domain::ReadRecentThreads)),
+            ExpectedResponse::RecentThreads,
+        )
+        .await
+    {
+        Ok(ResponsePayload::RecentThreads(listing)) => Ok(listing),
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(failure) => Err(failure.into()),
+    };
+    publish(events, NativeTransportEvent::RecentThreads(result))
+}
+
 /// Refreshes only catalog data; it never publishes selection/empty-state events.
-pub(super) async fn read_sidebar_threads(
+pub(super) async fn refresh_threads(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
@@ -729,10 +752,29 @@ pub(super) async fn read_sidebar_threads(
     };
     publish(
         events,
-        NativeTransportEvent::SidebarThreads {
+        NativeTransportEvent::ThreadsRefreshed {
             project_id,
             generation,
             result,
         },
     )
+}
+
+/// Lists the attached projects again (after a reconnect, or when a recent
+/// thread names a project this Editor does not know). The listing also asks
+/// the Forge to push later catalog changes on this connection.
+pub(super) async fn read_projects(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+) -> Result<(), ServiceFailure> {
+    let result = match runtime
+        .request(frames, project_request(), ExpectedResponse::Projects)
+        .await
+    {
+        Ok(ResponsePayload::ProjectListing(listing)) => Ok(listing),
+        Ok(_) => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+        Err(failure) => Err(failure.into()),
+    };
+    publish(events, NativeTransportEvent::ProjectCatalog(result))
 }

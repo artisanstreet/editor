@@ -2096,3 +2096,266 @@ async fn live_run_usage_is_pushed_as_it_changes() -> Result<(), Box<dyn Error>> 
     app.shutdown().await?;
     Ok(())
 }
+
+/// Sends one request on its own stream and returns the correlated answer.
+async fn request_once(
+    connection: &Connection,
+    frame: &str,
+    request: ClientRequest,
+) -> Result<ResponsePayload, Box<dyn Error>> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    artisan_transport::send_envelope(
+        &mut send,
+        &WireEnvelope {
+            protocol_version: ProtocolVersion::V1,
+            frame_id: FrameId::parse(frame)?,
+            sent_at: UnixMillis::from_millis(40),
+            body: WireEnvelopeBody::Request(request),
+        },
+    )
+    .await?;
+    drop(send);
+    let answer = tokio::time::timeout(
+        TEST_DEADLINE,
+        artisan_transport::receive_envelope(&mut recv),
+    )
+    .await??;
+    let WireEnvelopeBody::Response(response) = answer.body else {
+        return Err("expected a correlated response".into());
+    };
+    Ok(response.payload)
+}
+
+fn pushed_recent_threads(
+    frame: WireEnvelope,
+) -> Result<artisan_domain::RecentThreadListing, Box<dyn Error>> {
+    let WireEnvelopeBody::Event(event) = frame.body else {
+        return Err("expected the recent threads event".into());
+    };
+    let Event::RecentThreads(listing) = event.event else {
+        return Err("expected recent threads".into());
+    };
+    Ok(listing)
+}
+
+/// A connection that read the recent threads receives them again whenever
+/// what they show changes: a thread whose assistant text started joins the
+/// listing, a newer message moves its activity, and a wake that changed
+/// nothing pushes nothing.
+#[tokio::test]
+async fn recent_threads_are_pushed_to_a_connection_that_read_them() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+        let read = request_once(
+            &connection,
+            "delivery-read-recent",
+            ClientRequest::Query(artisan_domain::Query::ReadRecentThreads(
+                artisan_domain::ReadRecentThreads,
+            )),
+        )
+        .await?;
+        let ResponsePayload::RecentThreads(listing) = read else {
+            return Err("expected the recent threads".into());
+        };
+        assert!(
+            listing.threads().is_empty(),
+            "a thread without assistant text is a draft"
+        );
+
+        commit_assistant_start(&repository, &seeded.run).await?;
+        let _ = notifier.publish(&thread_id);
+        let mut delivery = tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        let listing = pushed_recent_threads(receive_delivery_frame(&mut delivery).await?)?;
+        let [row] = listing.threads() else {
+            return Err("expected the started thread".into());
+        };
+        assert_eq!(row.thread.thread_id, thread_id);
+        assert_eq!(row.subtitle.as_str(), "Delivery");
+        assert_eq!(row.last_activity(), UnixMillis::from_millis(300));
+
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery),
+            )
+            .await
+            .is_err(),
+            "unchanged recent threads are not pushed again"
+        );
+
+        repository
+            .queue_message(artisan_database::QueueMessageInput {
+                request_id: RequestId::parse("delivery-recent-queue")?,
+                message_id: MessageId::parse("delivery-recent-message")?,
+                thread_id: thread_id.clone(),
+                payload: artisan_domain::QueueMessagePayload::text_only("follow up")?,
+                steer_run_id: None,
+                accepted_at: UnixMillis::from_millis(800),
+            })
+            .await?;
+        let _ = notifier.publish(&thread_id);
+        let listing = pushed_recent_threads(receive_delivery_frame(&mut delivery).await?)?;
+        assert_eq!(
+            listing.threads()[0].last_activity(),
+            UnixMillis::from_millis(800)
+        );
+        cancel.cancel();
+        drop(delivery);
+        drop(control_send);
+        drop(control_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery recent threads test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+/// A connection that listed the projects receives the catalog again when
+/// another client attaches one, and nothing when it did not change.
+#[tokio::test]
+async fn project_catalog_is_pushed_to_a_connection_that_listed_it() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    seed_project_thread_and_message(&repository).await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+        let listed = request_once(
+            &connection,
+            "delivery-list-projects",
+            ClientRequest::Query(artisan_domain::Query::ListAttachedProjects(
+                artisan_domain::ListAttachedProjects,
+            )),
+        )
+        .await?;
+        assert!(
+            matches!(listed, ResponsePayload::ProjectListing(ref listing) if listing.projects().len() == 1)
+        );
+
+        repository
+            .attach_project(AttachProjectInput {
+                request_id: RequestId::parse("delivery-second-project-request")?,
+                directory_id: artisan_domain::DirectoryId::parse("delivery-second-directory")?,
+                project_id: ProjectId::parse("delivery-second-project")?,
+                root_path: RootPath::parse("C:/repos/second")?,
+                display_name: DisplayName::parse("Second")?,
+                attached_at: UnixMillis::from_millis(950),
+            })
+            .await?;
+        notifier.wake_any();
+        let mut delivery = tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        let frame = receive_delivery_frame(&mut delivery).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the catalog event".into());
+        };
+        let Event::ProjectCatalog(catalog) = event.event else {
+            return Err("expected the project catalog".into());
+        };
+        assert!(
+            catalog
+                .projects()
+                .iter()
+                .any(|project| project.project_id.as_str() == "delivery-second-project")
+        );
+        notifier.wake_any();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery),
+            )
+            .await
+            .is_err(),
+            "an unchanged catalog is not pushed again"
+        );
+        cancel.cancel();
+        drop(delivery);
+        drop(control_send);
+        drop(control_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery project catalog test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}

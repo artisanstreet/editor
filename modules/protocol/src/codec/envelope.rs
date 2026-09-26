@@ -265,6 +265,9 @@ pub(crate) fn encode_request(
         | ClientRequest::Command(
             Command::RecordNavigation(_) | Command::ImportLegacyPreferences(_),
         ) => encode_user_preferences_request(builder, value)?,
+        ClientRequest::Query(Query::ReadRecentThreads(_)) => {
+            encode_recent_threads_request(builder);
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -351,6 +354,9 @@ pub(crate) fn encode_response_payload(
         }
         ResponsePayload::UserPreferences(_) | ResponsePayload::LegacyPreferencesImported(_) => {
             encode_user_preferences_response(builder, payload)?;
+        }
+        ResponsePayload::RecentThreads(listing) => {
+            encode_recent_threads(builder.reborrow().init_recent_threads(), listing)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -779,6 +785,7 @@ pub(crate) fn decode_request(
         | request::Which::ImportLegacyPreferences(_) => {
             decode_user_preferences_request(value, &request_id)
         }
+        request::Which::ReadRecentThreads(()) => Ok(decode_recent_threads_request()),
     }
 }
 
@@ -798,24 +805,7 @@ pub(crate) fn decode_response(
             ResponsePayload::DirectoryListing(decode_directory_listing(listing?)?)
         }
         response::Which::ProjectList(listing) => {
-            let projects = listing?.get_projects()?;
-            let project_count = projects.len() as usize;
-            if project_count > PROJECT_LISTING_MAX_PROJECTS {
-                return Err(ProtocolDecodeError::ProjectListing {
-                    source: ProjectListingError::TooManyProjects {
-                        count: project_count,
-                        maximum: PROJECT_LISTING_MAX_PROJECTS,
-                    },
-                });
-            }
-            let decoded = projects
-                .iter()
-                .map(decode_project)
-                .collect::<Result<Vec<_>, _>>()?;
-            ResponsePayload::ProjectListing(
-                ProjectListing::new(decoded)
-                    .map_err(|source| ProtocolDecodeError::ProjectListing { source })?,
-            )
+            ResponsePayload::ProjectListing(decode_project_list(listing?)?)
         }
         response::Which::AttachedProject(result) => {
             let result = result?;
@@ -936,6 +926,9 @@ pub(crate) fn decode_response(
         }
         response::Which::ProjectRepository(result) => {
             decode_project_repository_query_result(result?)?
+        }
+        response::Which::RecentThreads(listing) => {
+            ResponsePayload::RecentThreads(decode_recent_threads(listing?)?)
         }
     };
     Ok(ServerResponse {

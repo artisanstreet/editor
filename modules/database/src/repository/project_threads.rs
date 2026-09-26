@@ -311,6 +311,17 @@ impl Repository {
             .into_iter()
             .map(thread_summary)
             .collect::<Result<Vec<_>, _>>()?;
+        self.project_listed_threads(&mut summaries).await?;
+        ThreadListing::new(summaries).map_err(|source| RepositoryError::ThreadListing { source })
+    }
+
+    /// Fills the listed projections of stored thread rows: whether assistant
+    /// text started, the first message standing in for a placeholder title,
+    /// and the latest message time.
+    pub(super) async fn project_listed_threads(
+        &self,
+        summaries: &mut [ThreadSummary],
+    ) -> Result<(), RepositoryError> {
         if !summaries.is_empty() {
             let started = entities::conversation_item::Entity::find()
                 .select_only()
@@ -331,7 +342,7 @@ impl Repository {
                 .map_err(|source| database_error("list started threads", source))?
                 .into_iter()
                 .collect::<std::collections::HashSet<_>>();
-            for thread in &mut summaries {
+            for thread in summaries.iter_mut() {
                 thread.has_started_response = started.contains(thread.thread_id.as_str());
             }
 
@@ -351,7 +362,7 @@ impl Repository {
                 .all(&self.database)
                 .await
                 .map_err(|source| database_error("list initial thread messages", source))?;
-            for thread in &mut summaries {
+            for thread in summaries.iter_mut() {
                 if matches!(thread.title.as_str(), "New thread" | "New task")
                     && let Some(message) = initial_messages
                         .iter()
@@ -380,14 +391,14 @@ impl Repository {
                 .map_err(|source| database_error("list thread message recency", source))?
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
-            for thread in &mut summaries {
+            for thread in summaries.iter_mut() {
                 thread.last_message_at = latest
                     .get(thread.thread_id.as_str())
                     .copied()
                     .map(UnixMillis::from_millis);
             }
         }
-        ThreadListing::new(summaries).map_err(|source| RepositoryError::ThreadListing { source })
+        Ok(())
     }
 
     /// Reads one thread's display title exactly as [`Self::list_threads`]
@@ -674,7 +685,7 @@ pub(super) fn project_summary(
     })
 }
 
-fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, RepositoryError> {
+pub(super) fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, RepositoryError> {
     Ok(ThreadSummary {
         has_started_response: false,
         has_active_work: false,

@@ -13,6 +13,7 @@ mod observation_ledger;
 mod project_catalog;
 mod project_threads;
 mod queue_message;
+mod recent_threads;
 mod run_binding;
 mod run_interaction;
 mod run_launch;
@@ -53,6 +54,7 @@ pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
 pub use queue_message::{MessageImageRead, QueueMessageInput, QueueMessageResult};
+pub use recent_threads::RecentThreadsFingerprint;
 pub use run_binding::{
     BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, ProviderBindingBytes, RunBindingError,
 };

@@ -88,7 +88,7 @@ impl NativeApplication {
                 }
                 Err(error) => {
                     eprintln!("Host import failed: {error}");
-                    app.machine_error = Some("Could not add this host. Select a valid Forge invitation from a trusted machine.".into());
+                    app.window_error = Some("Could not add this host. Select a valid Forge invitation from a trusted machine.".into());
                     cx.notify();
                 }
             });

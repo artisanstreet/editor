@@ -122,6 +122,8 @@ pub enum ResponsePayload {
     UserPreferences(artisan_domain::UserPreferences),
     /// The Forge's answer to a one-time legacy preference import.
     LegacyPreferencesImported(artisan_domain::LegacyPreferencesImported),
+    /// The recent threads across every project, answering a read.
+    RecentThreads(artisan_domain::RecentThreadListing),
 }
 
 /// Successful response correlated to a client request frame.

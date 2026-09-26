@@ -61,7 +61,6 @@ impl NativeApplication {
         current: Option<ProjectId>,
         cx: &mut Context<Self>,
     ) {
-        self.install_sidebar_project_picker(options.clone(), current.clone(), cx);
         let picker = cx
             .new(|picker_cx| ProjectPickerView::new(options, current, ThemeMode::Dark, picker_cx));
         let subscription = cx.observe(&picker, |application, picker, cx| {
@@ -119,9 +118,6 @@ impl NativeApplication {
                 picker.set_disabled(disabled, picker_cx);
             });
         }
-        if let Some(picker) = self.sidebar_project_picker.clone() {
-            picker.update(cx, |picker, cx| picker.set_disabled(disabled, cx));
-        }
         if let Some(home_picker) = self.home_picker.clone() {
             home_picker.update(cx, |picker, picker_cx| {
                 picker.set_disabled(disabled, picker_cx);
@@ -129,9 +125,9 @@ impl NativeApplication {
         }
     }
 
-    /// Installs the home-surface inline switcher over the same catalog and
-    /// current project as the sidebar picker, observed through the shared
-    /// picker-action routing.
+    /// Installs the home-surface inline switcher (the new-task project
+    /// picker) over the project catalog and current project, observed
+    /// through the shared picker-action routing.
     pub(super) fn install_home_picker(
         &mut self,
         options: Vec<ProjectOption>,
@@ -378,7 +374,7 @@ impl NativeApplication {
         }
         match picker_route(action, &self.project_options) {
             Ok(PickerRoute::Select(project_id)) => {
-                self.select_project_from_sidebar(project_id, cx);
+                self.choose_project(project_id, cx);
             }
             Ok(PickerRoute::BeginProjectIntake) => {
                 self.submit_intake_command(cx);
