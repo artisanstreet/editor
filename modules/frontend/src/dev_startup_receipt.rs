@@ -9,12 +9,18 @@
 //! the Forge itself, so no bootstrap credential is ever consumed outside
 //! the owned session. Receipt content never carries secrets: stages,
 //! categories, and paths are fixed or finite by construction.
+//!
+//! The receipt reports the first connection of this process, whichever host
+//! it opened (a registered host, or the owned dev Forge), and only that one:
+//! later failures, reconnects, and host switches never rewrite it, so a
+//! runner that already removed it is not left a stale receipt.
 
 #![forbid(unsafe_code)]
 
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crate::native_transport_service::ServiceFailure;
@@ -32,6 +38,14 @@ pub const STARTUP_RECEIPT_SCHEMA: &str = "artisan-dev-startup-v1";
 
 /// Stage recorded when the initial authenticated queries complete.
 pub const STARTUP_READY_STAGE: &str = "initial-catalog";
+
+/// Whether this process already reported its startup outcome.
+static REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Claims the one startup report of this process.
+fn claim_report() -> bool {
+    !REPORTED.swap(true, Ordering::AcqRel)
+}
 
 /// Selects the receipt file from one environment value.
 ///
@@ -105,12 +119,13 @@ pub fn write_receipt_bytes(path: &Path, bytes: &[u8]) {
 
 /// Reports authenticated initial-query completion.
 ///
-/// No-op unless [`STARTUP_RECEIPT_ENV`] selects a usable file.
+/// No-op unless [`STARTUP_RECEIPT_ENV`] selects a usable file, and after
+/// this process's first report.
 pub fn report_ready() {
     let Some(path) = receipt_path_from_env() else {
         return;
     };
-    if !usable_receipt_path(&path) {
+    if !usable_receipt_path(&path) || !claim_report() {
         return;
     }
     write_receipt_bytes(
@@ -125,12 +140,13 @@ pub fn report_ready() {
 
 /// Reports a startup failure with its secret-free stage and category.
 ///
-/// No-op unless [`STARTUP_RECEIPT_ENV`] selects a usable file.
+/// No-op unless [`STARTUP_RECEIPT_ENV`] selects a usable file, and after
+/// this process's first report.
 pub fn report_failed(failure: ServiceFailure) {
     let Some(path) = receipt_path_from_env() else {
         return;
     };
-    if !usable_receipt_path(&path) {
+    if !usable_receipt_path(&path) || !claim_report() {
         return;
     }
     write_receipt_bytes(
@@ -144,9 +160,18 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
-        STARTUP_READY_STAGE, STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, receipt_path_from_value,
-        render_receipt, usable_receipt_path, write_receipt_bytes,
+        STARTUP_READY_STAGE, STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, claim_report,
+        receipt_path_from_value, render_receipt, usable_receipt_path, write_receipt_bytes,
     };
+
+    #[test]
+    fn only_the_first_outcome_of_a_process_is_reported() {
+        // Whether or not an earlier test in this process claimed it, every
+        // later claim fails: a later outcome never rewrites the receipt.
+        let _first = claim_report();
+        assert!(!claim_report());
+        assert!(!claim_report());
+    }
 
     #[test]
     fn env_contract_name_is_exact() {
