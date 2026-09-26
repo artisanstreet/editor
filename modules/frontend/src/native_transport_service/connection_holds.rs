@@ -15,8 +15,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{
-    ComposerDraftCommand, ComposerStateCommand, ForgeDecisionCommand, NativeTransportCommand,
-    PreferencesCommand,
+    ComposerDraftCommand, ComposerStateCommand, EngineInstallsCommand, ForgeDecisionCommand,
+    NativeTransportCommand, PreferencesCommand,
 };
 
 /// What an in-flight hold is keeping open, for progress copy only.
@@ -42,11 +42,13 @@ pub enum HoldKind {
     Draft,
     /// A navigation record or preference import.
     Preferences,
+    /// An engine version selection or rollback.
+    EngineVersion,
 }
 
 impl HoldKind {
     /// Every kind in presentation order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Message,
         Self::QueueChange,
         Self::StopRequest,
@@ -57,6 +59,7 @@ impl HoldKind {
         Self::ModelFavorite,
         Self::Draft,
         Self::Preferences,
+        Self::EngineVersion,
     ];
 
     const fn index(self) -> usize {
@@ -77,6 +80,7 @@ impl HoldKind {
             Self::ModelFavorite => ("favorite", "favorites"),
             Self::Draft => ("draft", "drafts"),
             Self::Preferences => ("preference", "preferences"),
+            Self::EngineVersion => ("engine version change", "engine version changes"),
         };
         if count == 1 { one } else { many }
     }
@@ -280,6 +284,7 @@ impl NativeTransportCommand {
             }
             Self::SetThreadEngineConfig(_) => Some(HoldKind::EngineSettings),
             Self::SetModelFavorite(_) => Some(HoldKind::ModelFavorite),
+            Self::EngineInstalls(EngineInstallsCommand::Change(_)) => Some(HoldKind::EngineVersion),
             Self::ComposerDraft(
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
@@ -299,7 +304,9 @@ impl NativeTransportCommand {
                 | ForgeDecisionCommand::ResolveEngineConfiguration(_),
             )
             | Self::Preferences(PreferencesCommand::Read)
-            | Self::EngineInstalls(_)
+            | Self::EngineInstalls(
+                EngineInstallsCommand::Read | EngineInstallsCommand::ListVersions(_),
+            )
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)
             | Self::RefreshThreads { .. }

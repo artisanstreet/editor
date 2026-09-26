@@ -111,6 +111,20 @@ fn pushed_statuses_and_version_controls_round_trip_through_the_forge(cx: &mut Te
                 })
                 .collect();
             assert!(sent.contains(&EngineInstallsCommand::ListVersions("claude".to_owned())));
+            // Version changes hold the connection so a host switch drains
+            // them; reads never do.
+            use crate::native_transport_service::HoldKind;
+            for command in &sent {
+                let kind = NativeTransportCommand::EngineInstalls(command.clone()).hold_kind();
+                match command {
+                    EngineInstallsCommand::Change(_) => {
+                        assert_eq!(kind, Some(HoldKind::EngineVersion));
+                    }
+                    EngineInstallsCommand::Read | EngineInstallsCommand::ListVersions(_) => {
+                        assert_eq!(kind, None);
+                    }
+                }
+            }
             assert!(sent.iter().any(|command| matches!(
                 command,
                 EngineInstallsCommand::Change(change)
