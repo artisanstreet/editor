@@ -619,6 +619,8 @@ dependencies = [
  "gpui_ce_platform",
  "image",
  "native-dialog",
+ "quinn",
+ "rcgen",
  "resvg",
  "rustls-pki-types",
  "serde_json",

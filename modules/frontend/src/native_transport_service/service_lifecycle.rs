@@ -309,6 +309,7 @@ impl ServiceRuntime {
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
         }
     }
 
@@ -437,6 +438,7 @@ async fn attach_to_owned_forge(
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
         }),
         Err(error) => {
             let shutdown_grace =
@@ -553,6 +555,7 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
         },
         frames,
     ))
@@ -689,8 +692,9 @@ async fn service_main(
     let started = start_native_service(home.as_deref()).await;
     match started {
         Ok((mut runtime, mut frames)) => {
-            let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
+            let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
             runtime.delivery_tx = Some(delivery_tx.clone());
+            runtime.deliveries.attach(delivery_rx, events.clone());
             // take_delivery exactly once for this session
             let delivery_started = {
                 let session = runtime.session.take();
@@ -732,7 +736,6 @@ async fn service_main(
                     crate::dev_startup_receipt::report_ready();
                     let command_result = command_loop_with_delivery(
                         &mut commands,
-                        &mut delivery_rx,
                         &mut runtime,
                         &mut frames,
                         &events,

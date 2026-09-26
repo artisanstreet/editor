@@ -70,18 +70,14 @@ fn two_contiguous_batches_publish_before_delayed_ack_without_reconnect() {
             .custody
             .on_subscribe(thread.clone(), Some(ConversationCursor::new(5)));
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<QueuedCommand>(8);
-        let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(8);
+        let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(8);
         let (event_tx, event_rx) = sync_channel::<NativeTransportEvent>(16);
+        service.deliveries.attach(delivery_rx, event_tx.clone());
         let mut frames = FrameFactory::new();
         let join = tokio::spawn(async move {
-            let outcome = command_loop_with_delivery(
-                &mut command_rx,
-                &mut delivery_rx,
-                &mut service,
-                &mut frames,
-                &event_tx,
-            )
-            .await;
+            let outcome =
+                command_loop_with_delivery(&mut command_rx, &mut service, &mut frames, &event_tx)
+                    .await;
             (outcome, service.custody)
         });
         delivery_tx
@@ -126,17 +122,12 @@ fn run_loop(
     std::thread::spawn(move || {
         test_runtime().block_on(async move {
             let mut commands = commands;
-            let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel(1);
+            let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel(1);
             let mut runtime = ServiceRuntime::new_for_batch_tests();
+            runtime.deliveries.attach(delivery_rx, events.clone());
             let mut frames = FrameFactory::new();
-            let outcome = command_loop_with_delivery(
-                &mut commands,
-                &mut delivery_rx,
-                &mut runtime,
-                &mut frames,
-                &events,
-            )
-            .await;
+            let outcome =
+                command_loop_with_delivery(&mut commands, &mut runtime, &mut frames, &events).await;
             drop(delivery_tx);
             outcome
         })
