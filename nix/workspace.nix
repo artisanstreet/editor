@@ -105,6 +105,9 @@ let
     inherit (publicTrust) ARTISAN_RELEASE_KEY_ID ARTISAN_RELEASE_PUBLIC_KEY_HEX;
   };
 
+  # Libraries the Nix-built Linux Editor and graphical tools load at runtime.
+  graphicsLibraryPath = lib.makeLibraryPath (libraries ++ [ pkgs.mesa ]);
+
   # The product: Debug and Production payloads per platform (nix/stages.nix).
   stageBuilds = import ./stages.nix {
     inherit
@@ -118,6 +121,7 @@ let
       libraries
       nativeTools
       releaseTrust
+      graphicsLibraryPath
       ;
   };
   production = stageBuilds.packages.linux-production;
@@ -218,9 +222,7 @@ let
   '';
 
   graphicalEnvironment = ''
-    export LD_LIBRARY_PATH="${
-      lib.makeLibraryPath (libraries ++ [ pkgs.mesa ])
-    }''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH="${graphicsLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     if [ -d /usr/lib/wsl/lib ]; then
       export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib/wsl/lib"
     fi
@@ -236,10 +238,7 @@ let
     program = "${derivation}/bin/${name}";
   };
   closure = pkgs.closureInfo { rootPaths = [ production ]; };
-  devLoop = import ./dev.nix {
-    inherit lib pkgs graphicalEnvironment;
-    linuxRunner = stageBuilds.runner "linux";
-  };
+  devApp = import ./dev.nix { runner = stageBuilds.packages.linux-runner; };
   parity = craneLib.buildPackage (
     base
     // {
@@ -329,7 +328,11 @@ let
         export CARGO_BUILD_JOBS="''${CARGO_BUILD_JOBS:-2}"
       '';
     };
-  checks = {
+  # Every stage payload and dev runner builds as a check, Windows included.
+  stageChecks = lib.mapAttrs' (
+    name: value: lib.nameValuePair "stage-${name}" value
+  ) stageBuilds.packages;
+  checks = stageChecks // {
     rustfmt = craneLib.cargoFmt {
       inherit src;
       pname = "artisan-rustfmt";
@@ -476,8 +479,8 @@ in
     };
   };
   apps = {
-    default = app devLoop "artisan-dev";
-    dev = app devLoop "artisan-dev";
+    default = devApp;
+    dev = devApp;
     codegen = app codegenApp "artisan-codegen";
     verify-gpui-pin = app pinApp "artisan-verify-gpui-pin";
     visual-proof = app visualApp "artisan-visual-proof";

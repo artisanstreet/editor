@@ -16,6 +16,7 @@
   libraries,
   nativeTools,
   releaseTrust,
+  graphicsLibraryPath,
 }:
 let
   stages = {
@@ -200,7 +201,8 @@ let
     );
   # The dev runner installs payloads; a plain release build is enough for a
   # tool. Its installer library compiles as a release build, so it carries
-  # the public trust anchor like any release installer.
+  # the public trust anchor like any release installer. The Linux runner
+  # records where the Linux Editor loads its graphics libraries from.
   runner =
     platform:
     let
@@ -208,6 +210,9 @@ let
       common =
         host.environment
         // releaseTrust
+        // lib.optionalAttrs (platform == "linux") {
+          ARTISAN_DEV_GRAPHICS_LIBRARY_PATH = graphicsLibraryPath;
+        }
         // {
           inherit src version;
           strictDeps = true;
