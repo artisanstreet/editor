@@ -524,14 +524,12 @@ fn codex_engine_command(executable: &Path, project_root: &RootPath) -> tokio::pr
 /// Spawns the verified Claude Code CLI child for one turn.
 ///
 /// Extends (never forks) the owner custody contract: the executable is the
-/// verified capability path, argv is the exact settings-derived stream-JSON
-/// invocation, the working directory is the exact project root, and the
-/// environment is inherited ambiently. Ambient inheritance is deliberate and
-/// mirrors `modules/engines/src/claude/cli-engine.ts`
-/// (`{ ...process.env, ...override }`): Claude runs as the user's installed
-/// CLI over its subscription session and `CLAUDE_CONFIG_DIR` resolution, not
-/// from a managed home. Revalidation is the last authority operation before
-/// the child is created.
+/// verified Forge-managed capability path, argv is the exact settings-derived
+/// stream-JSON invocation, the working directory is the exact project root,
+/// and the environment is exactly the managed one (`HOME` and
+/// `CLAUDE_CONFIG_DIR` in the Forge-owned engine home); nothing is inherited
+/// from the Forge. Revalidation is the last authority operation before the
+/// child is created.
 pub(crate) fn spawn_claude_engine(
     launch: &artisan_native_engine::VerifiedClaudeLaunch,
     project_root: &RootPath,

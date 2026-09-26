@@ -247,10 +247,26 @@ fn user_message_line_shapes_stream_input() {
 }
 
 #[test]
-fn new_session_id_is_bounded_hex() {
+fn new_session_id_is_a_version_4_uuid() {
+    // Claude Code rejects anything else with "Invalid session ID. Must be a
+    // valid UUID." before it announces the session.
     let first = new_session_id().expect("entropy available");
-    assert_eq!(first.len(), 32);
-    assert!(first.chars().all(|cell| cell.is_ascii_hexdigit()));
+    assert_eq!(first.len(), 36);
+    let groups: Vec<&str> = first.split('-').collect();
+    assert_eq!(
+        groups.iter().map(|group| group.len()).collect::<Vec<_>>(),
+        [8, 4, 4, 4, 12]
+    );
+    assert!(groups.iter().all(|group| {
+        group
+            .chars()
+            .all(|cell| matches!(cell, '0'..='9' | 'a'..='f'))
+    }));
+    assert!(groups[2].starts_with('4'), "version nibble must be 4");
+    assert!(
+        matches!(groups[3].chars().next(), Some('8' | '9' | 'a' | 'b')),
+        "variant bits must be RFC 4122"
+    );
     let second = new_session_id().expect("entropy available");
     assert_ne!(first, second, "session identities must not repeat");
 }

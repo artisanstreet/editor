@@ -27,7 +27,8 @@ impl ClaudeSession {
     }
 }
 
-/// Mints a fresh native session identity (32 lowercase hex characters).
+/// Mints a fresh native session identity: a random RFC 4122 version 4 UUID
+/// in its hyphenated lowercase form, the only shape `--session-id` accepts.
 ///
 /// Returns `None` when operating-system entropy is unavailable; the caller
 /// maps that to its entropy failure without touching the child.
@@ -35,8 +36,13 @@ pub(crate) fn new_session_id() -> Option<String> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).ok()?;
-    let mut id = String::with_capacity(32);
-    for byte in bytes {
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let mut id = String::with_capacity(36);
+    for (index, byte) in bytes.into_iter().enumerate() {
+        if matches!(index, 4 | 6 | 8 | 10) {
+            id.push('-');
+        }
         id.push(HEX[(byte >> 4) as usize] as char);
         id.push(HEX[(byte & 0x0f) as usize] as char);
     }
