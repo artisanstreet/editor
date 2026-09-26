@@ -1,5 +1,6 @@
-//! Claude thinking display: launch policy, mixed-content decoding, and
-//! thinking-stretch projection onto the shared reasoning observations.
+//! Claude thinking display: launch policy, mixed-content decoding,
+//! thinking-stretch projection onto the shared reasoning observations, and
+//! streamed-versus-buffered assistant text settling exactly once.
 //!
 //! Replays the sanitized captures in `tests/fixtures/claude/` (see its
 //! `manifest.json`; `constructed-*` files are labeled edge fixtures derived
@@ -173,6 +174,9 @@ fn stream_blocks_keep_their_index_and_opaque_deltas_stay_bookkeeping() {
 /// Everything one replayed fixture projected.
 #[derive(Default)]
 struct Replay {
+    /// Root assistant text as the dispatcher assembles it: deltas append to
+    /// their message part, snapshots replace it.
+    parts: Vec<(String, String)>,
     text: String,
     deltas: Vec<(String, String, String, String)>,
     completions: Vec<(String, Option<String>, String)>,
@@ -188,7 +192,23 @@ impl Replay {
             .map(|(_, delta, ..)| delta.as_str())
             .collect()
     }
+
+    fn part(&mut self, part_id: Option<&str>) -> &mut String {
+        let part_id = part_id.unwrap_or(UNANNOUNCED_PART);
+        if !self.parts.iter().any(|(known, _)| known == part_id) {
+            self.parts.push((part_id.to_owned(), String::new()));
+        }
+        let (_, text) = self
+            .parts
+            .iter_mut()
+            .find(|(known, _)| known == part_id)
+            .expect("part exists");
+        text
+    }
 }
+
+/// Part key for text whose stream never announced a message.
+const UNANNOUNCED_PART: &str = "unannounced";
 
 fn fixture_session(fixture: &str) -> String {
     fixture
@@ -244,7 +264,14 @@ async fn replay_lines(lines: &[&str], run: &str, display: ClaudeThinkingDisplay)
     drop(sender);
     while let Some(observation) = receiver.recv().await {
         match observation {
-            EngineObservation::TextDelta(delta) => replay.text.push_str(delta.delta()),
+            EngineObservation::TextDelta(delta) => {
+                replay.part(delta.part_id()).push_str(delta.delta());
+            }
+            EngineObservation::TextSnapshot(snapshot) => {
+                let part = replay.part(Some(snapshot.part_id()));
+                part.clear();
+                part.push_str(snapshot.text());
+            }
             EngineObservation::Usage(_) => replay.usage_reports += 1,
             EngineObservation::Activity(Observation::ReasoningSummaryDelta(row)) => {
                 replay.deltas.push((
@@ -264,6 +291,7 @@ async fn replay_lines(lines: &[&str], run: &str, display: ClaudeThinkingDisplay)
             _ => {}
         }
     }
+    replay.text = replay.parts.iter().map(|(_, text)| text.as_str()).collect();
     replay
 }
 
@@ -557,4 +585,132 @@ async fn child_thinking_and_signatures_never_reach_root_reasoning() {
     let everything = format!("{:?}{:?}{}", replay.deltas, replay.completions, replay.text);
     assert!(!everything.contains("child plan"));
     assert!(!everything.contains("SIG-SECRET"));
+}
+
+/// The authoritative root text per message: every buffered root text block
+/// in provider order, keyed by its message id.
+fn buffered_root_text(fixture: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    for line in fixture.lines().filter(|line| !line.is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).expect("fixture json");
+        if value["type"] != "assistant" || !value["parent_tool_use_id"].is_null() {
+            continue;
+        }
+        let message = &value["message"];
+        let text: String = message["content"]
+            .as_array()
+            .expect("content")
+            .iter()
+            .filter(|item| item["type"] == "text")
+            .filter_map(|item| item["text"].as_str())
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let id = message["id"].as_str().expect("message id").to_owned();
+        match parts.iter_mut().find(|(known, _)| *known == id) {
+            Some((_, body)) => body.push_str(&text),
+            None => parts.push((id, text)),
+        }
+    }
+    parts
+}
+
+#[tokio::test]
+async fn real_captures_commit_the_buffered_answer_exactly_once() {
+    for (name, fixture, display) in [
+        ("tools", TOOLS, ClaudeThinkingDisplay::Summarized),
+        ("mixed", MIXED, ClaudeThinkingDisplay::Summarized),
+        ("start", START, ClaudeThinkingDisplay::Summarized),
+        ("resume", RESUME, ClaudeThinkingDisplay::Summarized),
+        ("default", DEFAULT, ClaudeThinkingDisplay::Unrequested),
+    ] {
+        let expected = buffered_root_text(fixture);
+        assert!(!expected.is_empty(), "{name}: capture answers in text");
+        let replay = replay(fixture, &format!("run-text-{name}"), display).await;
+        assert_eq!(
+            replay.parts, expected,
+            "{name}: streamed deltas settle to the buffered text exactly once"
+        );
+    }
+}
+
+fn text_delta(index: u64, text: &str) -> String {
+    serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta",
+        "index":index,"delta":{"type":"text_delta","text":text}}})
+    .to_string()
+}
+
+fn buffered_text(message: &str, text: &str) -> String {
+    serde_json::json!({"type":"assistant","message":{"id":message,
+        "content":[{"type":"text","text":text}]}})
+    .to_string()
+}
+
+fn message_start(message: &str) -> String {
+    serde_json::json!({"type":"stream_event","event":{"type":"message_start",
+        "message":{"id":message}}})
+    .to_string()
+}
+
+#[tokio::test]
+async fn text_blocks_across_messages_settle_to_the_buffered_text_once() {
+    let child_delta = r#"{"type":"stream_event","parent_tool_use_id":"tool-1","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"child says"}}}"#;
+    let child_buffered = r#"{"type":"assistant","parent_tool_use_id":"tool-1","message":{"id":"msg-child","content":[{"type":"text","text":"child says"}]}}"#;
+    let tool_use = r#"{"type":"assistant","message":{"id":"msg-a","content":[{"type":"tool_use","id":"tool-1","name":"Task","input":{}}]}}"#;
+    let result = r#"{"type":"result","subtype":"success","is_error":false}"#;
+    let lines: Vec<String> = vec![
+        // Thinking, text, and a tool use in one message.
+        message_start("msg-a"),
+        STRETCH_START.to_owned(),
+        thinking_delta("Plan"),
+        buffered_thinking("Plan").replace("msg-edge", "msg-a"),
+        STRETCH_STOP.to_owned(),
+        text_delta(1, "Let me "),
+        text_delta(1, "check."),
+        buffered_text("msg-a", "Let me check."),
+        tool_use.to_owned(),
+        // The subagent speaks between the tool cycle's messages.
+        child_delta.to_owned(),
+        child_buffered.to_owned(),
+        // Three text blocks: exact, stopped short, and corrected.
+        message_start("msg-b"),
+        text_delta(0, "First "),
+        text_delta(0, "block."),
+        buffered_text("msg-b", "First block."),
+        text_delta(1, "Second"),
+        buffered_text("msg-b", "Second block."),
+        text_delta(2, "Draft"),
+        buffered_text("msg-b", "Final."),
+        // Partials only: no buffered frame before the result.
+        message_start("msg-c"),
+        text_delta(0, "Tail"),
+        result.to_owned(),
+    ];
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let replay = replay_lines(&lines, "run-blocks", ClaudeThinkingDisplay::Summarized).await;
+    assert_eq!(
+        replay.parts,
+        vec![
+            ("msg-a".to_owned(), "Let me check.".to_owned()),
+            (
+                "msg-b".to_owned(),
+                "First block.Second block.Final.".to_owned()
+            ),
+            ("msg-c".to_owned(), "Tail".to_owned()),
+        ]
+    );
+    assert!(!replay.text.contains("child says"));
+    assert_eq!(replay.completions.len(), 1);
+
+    // Buffered frames alone (no partials) land in full, once each.
+    let only_a = buffered_text("msg-x", "Only buffered.");
+    let only_b = buffered_text("msg-y", " Again.");
+    let buffered = replay_lines(
+        &[only_a.as_str(), only_b.as_str(), result],
+        "run-buffered",
+        ClaudeThinkingDisplay::Summarized,
+    )
+    .await;
+    assert_eq!(buffered.text, "Only buffered. Again.");
 }
