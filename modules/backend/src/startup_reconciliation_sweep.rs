@@ -18,8 +18,9 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_database::{
-    Repository, StartupReconciliationCandidate, StartupReconciliationDisposition,
-    StartupReconciliationDispositionError, StartupReconciliationError, StartupReconciliationQuery,
+    ExpiredLeaseRecovery, Repository, StartupReconciliationCandidate,
+    StartupReconciliationDisposition, StartupReconciliationDispositionError,
+    StartupReconciliationError, StartupReconciliationQuery,
 };
 use artisan_domain::{PatchId, RunId, UnixMillis};
 use thiserror::Error;
@@ -31,13 +32,16 @@ use thiserror::Error;
 /// Bounded input for one sweep pass.
 ///
 /// `operated_at` is the caller-injected time applied to every mutated row;
-/// `limit` is validated `1..=64`.
+/// `limit` is validated `1..=64`; `recovery` selects the persisted
+/// interruption text (startup versus a live lease expiry).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StartupReconciliationSweepInput {
     /// Time applied to every mutated row.
     pub operated_at: UnixMillis,
     /// Maximum candidates to sweep; validated `1..=64`.
     pub limit: usize,
+    /// Recovery pass whose interruption text is persisted.
+    pub recovery: ExpiredLeaseRecovery,
 }
 
 impl StartupReconciliationSweepInput {
@@ -55,7 +59,28 @@ impl StartupReconciliationSweepInput {
         if !(1..=64).contains(&limit) {
             return Err(StartupReconciliationSweepError::InvalidLimit { limit });
         }
-        Ok(Self { operated_at, limit })
+        Ok(Self {
+            operated_at,
+            limit,
+            recovery: ExpiredLeaseRecovery::Startup,
+        })
+    }
+
+    /// Creates a validated input for the live sweep of a running Forge,
+    /// whose expired candidates stopped renewing their lease.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`].
+    #[allow(clippy::result_large_err)]
+    pub fn live_lease_expiry(
+        operated_at: UnixMillis,
+        limit: usize,
+    ) -> Result<Self, StartupReconciliationSweepError> {
+        Ok(Self {
+            recovery: ExpiredLeaseRecovery::LiveLeaseExpiry,
+            ..Self::new(operated_at, limit)?
+        })
     }
 }
 
@@ -348,12 +373,15 @@ where
         }
 
         let outcome = repository
-            .dispose_expired_startup_candidate(StartupReconciliationDisposition {
-                candidate,
-                operated_at: input.operated_at,
-                turn_patch_id: &patches.turn_patch_id,
-                item_patch_id: patches.item_patch_id.as_ref(),
-            })
+            .dispose_expired_candidate(
+                StartupReconciliationDisposition {
+                    candidate,
+                    operated_at: input.operated_at,
+                    turn_patch_id: &patches.turn_patch_id,
+                    item_patch_id: patches.item_patch_id.as_ref(),
+                },
+                input.recovery,
+            )
             .await;
 
         match outcome {

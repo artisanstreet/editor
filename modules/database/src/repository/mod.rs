@@ -86,8 +86,8 @@ pub use run_observation::{
     validate_observation_engine,
 };
 pub use startup_reconciliation::{
-    StartupReconciliationCandidate, StartupReconciliationCandidates, StartupReconciliationError,
-    StartupReconciliationQuery, StartupRunLifecycle,
+    ExpiredLeaseRecovery, StartupReconciliationCandidate, StartupReconciliationCandidates,
+    StartupReconciliationError, StartupReconciliationQuery, StartupRunLifecycle,
 };
 pub use startup_reconciliation_disposition::{
     StartupReconciliationDisposition, StartupReconciliationDispositionError,

@@ -3,8 +3,8 @@ use artisan_database::entities::{
 };
 use artisan_database::{
     AssistantChange, BindRunProvider, CheckpointUpdate, ClaimMessageDispatch,
-    ClaimedMessageDispatch, ProviderBindingBytes, QueueFirstMessageInput, Repository,
-    RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
+    ClaimedMessageDispatch, ExpiredLeaseRecovery, ProviderBindingBytes, QueueFirstMessageInput,
+    Repository, RunLaunchCredentials, RunStartKey, SetThreadEngineConfigInput, SqliteConfig,
     StartupReconciliationDisposition, StartupReconciliationDispositionError,
     StartupReconciliationDispositionOutcome, StartupReconciliationQuery, StartupRunLifecycle,
     connect,
@@ -1587,4 +1587,84 @@ async fn error_bounds_and_provider_binding_bytes_preserved() {
         .expect("q")
         .expect("dispatch");
     assert_eq!(unrelated_dispatch.state, DispatchState::Queued);
+}
+
+#[tokio::test]
+async fn live_lease_expiry_records_its_own_reason_and_replays() {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (_claimed, _receipt, _sk, _creds) = queue_claim_launch(
+        &repository,
+        &database,
+        "thread-1",
+        "message-1",
+        "run-1",
+        "turn-1",
+    )
+    .await;
+    let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 10)
+        .expect("q");
+    let candidate = repository
+        .list_startup_reconciliation_candidates(query)
+        .await
+        .expect("cands")
+        .into_vec()
+        .into_iter()
+        .find(|c| c.run_id.as_str() == "run-1")
+        .expect("candidate");
+    let turn_patch = PatchId::parse("turn-patch-live").expect("p");
+    let command = || StartupReconciliationDisposition {
+        candidate: &candidate,
+        operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
+        turn_patch_id: &turn_patch,
+        item_patch_id: None,
+    };
+    let first = repository
+        .dispose_expired_candidate(command(), ExpiredLeaseRecovery::LiveLeaseExpiry)
+        .await
+        .expect("live disposition");
+    assert!(matches!(
+        first,
+        StartupReconciliationDispositionOutcome::Interrupted(_)
+    ));
+    let after = fetch_all(&database).await;
+    let run = after
+        .runs
+        .iter()
+        .find(|r| r.run_id == "run-1")
+        .expect("run");
+    let dispatch = after
+        .dispatches
+        .iter()
+        .find(|d| d.message_id == "message-1")
+        .expect("dispatch");
+    let live = ExpiredLeaseRecovery::LiveLeaseExpiry;
+    assert_eq!(run.error_code.as_deref(), Some(live.run_error_code()));
+    assert_eq!(run.error_message.as_deref(), Some(live.run_error_message()));
+    assert_eq!(dispatch.last_error.as_deref(), Some(live.dispatch_reason()));
+    assert_ne!(live.run_error_code(), RUN_ERROR_CODE);
+    assert_ne!(live.run_error_message(), RUN_ERROR_MESSAGE);
+    assert_ne!(live.dispatch_reason(), DISPATCH_REASON);
+    assert!(!live.dispatch_reason().contains("startup"));
+    assert_eq!(
+        ExpiredLeaseRecovery::Startup.run_error_code(),
+        RUN_ERROR_CODE
+    );
+
+    // The same pass replays; the startup text never matches a live record.
+    assert!(matches!(
+        repository
+            .dispose_expired_candidate(command(), live)
+            .await
+            .expect("live replay"),
+        StartupReconciliationDispositionOutcome::AlreadyInterrupted(_)
+    ));
+    assert_eq!(
+        repository
+            .dispose_expired_startup_candidate(command())
+            .await
+            .expect("startup pass over a live record"),
+        StartupReconciliationDispositionOutcome::SkippedMoved
+    );
+    assert_eq!(fetch_all(&database).await, after);
 }

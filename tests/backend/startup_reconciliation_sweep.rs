@@ -1166,6 +1166,7 @@ async fn invalid_limit_is_typed_and_no_mutation() {
     let raw_input = StartupReconciliationSweepInput {
         operated_at: UnixMillis::from_millis(SWEEP_OPERATED_AT_MS),
         limit: 65,
+        recovery: artisan_database::ExpiredLeaseRecovery::Startup,
     };
     let mut source = DeterministicSource;
     let err2 = sweep_startup_reconciliation(&repository, raw_input, &mut source)

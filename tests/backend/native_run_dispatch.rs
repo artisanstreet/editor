@@ -679,7 +679,7 @@ fn assert_binding_lifecycle(after: &AllRows, before_binding: Option<&entities::O
         assert_eq!(dispatch.state, DispatchState::Failed);
         assert_eq!(
             dispatch.last_error.as_deref(),
-            Some("startup reconciliation: unknown outcome after lease expiry")
+            Some(artisan_database::ExpiredLeaseRecovery::LiveLeaseExpiry.dispatch_reason())
         );
     }
     for run_id in ["run-launch", "run-run"] {
@@ -687,7 +687,7 @@ fn assert_binding_lifecycle(after: &AllRows, before_binding: Option<&entities::O
         assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
         assert_eq!(
             run.error_code.as_deref(),
-            Some("startup_reconciliation_unknown_outcome")
+            Some(artisan_database::ExpiredLeaseRecovery::LiveLeaseExpiry.run_error_code())
         );
     }
     let run_launch = after

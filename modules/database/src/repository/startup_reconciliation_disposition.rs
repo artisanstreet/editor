@@ -20,27 +20,14 @@ use crate::entities::{
     EntityLifecycle,
 };
 
-use super::startup_reconciliation::StartupReconciliationCandidate;
+use super::startup_reconciliation::{ExpiredLeaseRecovery, StartupReconciliationCandidate};
 use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
-
-// ---------------------------------------------------------------------------
-// Fixed bounded non-secret interruption values
-// ---------------------------------------------------------------------------
-
-const RUN_INTERRUPTED_ERROR_CODE: &str = "startup_reconciliation_unknown_outcome";
-const RUN_INTERRUPTED_ERROR_MESSAGE: &str =
-    "startup reconciliation interrupted with unknown outcome; provider state may have progressed";
-const DISPATCH_FAILED_REASON: &str = "startup reconciliation: unknown outcome after lease expiry";
-
-// ---------------------------------------------------------------------------
-// Command / outcome / error
-// ---------------------------------------------------------------------------
 
 /// Bounded command borrowing one accepted expired candidate.
 ///
 /// The interruption code, message, and dispatch reason are fixed typed
-/// bounded values defined in this module; callers do not supply raw provider
-/// output or secrets. `item_patch_id` must be `Some` exactly when
+/// bounded values selected by [`ExpiredLeaseRecovery`]; callers do not supply
+/// raw provider output or secrets. `item_patch_id` must be `Some` exactly when
 /// `candidate.assistant_item_id` is `Some`.
 pub struct StartupReconciliationDisposition<'a> {
     /// Accepted expired candidate discovered by
@@ -113,10 +100,6 @@ pub enum StartupReconciliationDispositionError {
     Repository(#[from] RepositoryError),
 }
 
-// ---------------------------------------------------------------------------
-// SQL fences
-// ---------------------------------------------------------------------------
-
 const DISPOSE_DISPATCH_SQL: &str = r"
 UPDATE message_dispatches
 SET state = 'failed',
@@ -152,10 +135,6 @@ WHERE run_id = ?
 RETURNING run_id
 ";
 
-// ---------------------------------------------------------------------------
-// Repository impl
-// ---------------------------------------------------------------------------
-
 impl Repository {
     /// Atomically disposes one already-discovered expired candidate.
     ///
@@ -181,6 +160,22 @@ impl Repository {
         command: StartupReconciliationDisposition<'_>,
     ) -> Result<StartupReconciliationDispositionOutcome, StartupReconciliationDispositionError>
     {
+        self.dispose_expired_candidate(command, ExpiredLeaseRecovery::Startup)
+            .await
+    }
+
+    /// Same atomic disposition as [`Self::dispose_expired_startup_candidate`],
+    /// persisting the interruption text of the given recovery pass.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::dispose_expired_startup_candidate`].
+    pub async fn dispose_expired_candidate(
+        &self,
+        command: StartupReconciliationDisposition<'_>,
+        recovery: ExpiredLeaseRecovery,
+    ) -> Result<StartupReconciliationDispositionOutcome, StartupReconciliationDispositionError>
+    {
         validate_disposition(&command)?;
         let transaction = self.begin_write().await.map_err(|source| {
             StartupReconciliationDispositionError::Repository(database_error(
@@ -188,7 +183,7 @@ impl Repository {
                 source,
             ))
         })?;
-        match execute_dispose(&transaction, &command).await {
+        match execute_dispose(&transaction, &command, recovery).await {
             Ok(DispositionExecution::Persisted(receipt)) => {
                 transaction.commit().await.map_err(|source| {
                     StartupReconciliationDispositionError::Repository(database_error(
@@ -239,10 +234,6 @@ enum DispositionExecution {
     Skipped,
 }
 
-// ---------------------------------------------------------------------------
-// Validation (pre-SQL)
-// ---------------------------------------------------------------------------
-
 fn validate_disposition(
     command: &StartupReconciliationDisposition<'_>,
 ) -> Result<(), StartupReconciliationDispositionError> {
@@ -291,24 +282,21 @@ fn validate_disposition(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Execute
-// ---------------------------------------------------------------------------
-
 async fn execute_dispose(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
+    recovery: ExpiredLeaseRecovery,
 ) -> Result<DispositionExecution, StartupReconciliationDispositionError> {
-    let dispatch_fenced = fence_dispatch(transaction, command).await?;
+    let dispatch_fenced = fence_dispatch(transaction, command, recovery).await?;
     if !dispatch_fenced {
-        if let Some(receipt) = classify_replay(transaction, command).await? {
+        if let Some(receipt) = classify_replay(transaction, command, recovery).await? {
             return Ok(DispositionExecution::Replay(receipt));
         }
         return Ok(DispositionExecution::Skipped);
     }
-    let run_fenced = fence_run(transaction, command).await?;
+    let run_fenced = fence_run(transaction, command, recovery).await?;
     if !run_fenced {
-        if let Some(receipt) = classify_replay(transaction, command).await? {
+        if let Some(receipt) = classify_replay(transaction, command, recovery).await? {
             return Ok(DispositionExecution::Replay(receipt));
         }
         return Ok(DispositionExecution::Skipped);
@@ -327,12 +315,13 @@ async fn execute_dispose(
 async fn fence_dispatch(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
+    recovery: ExpiredLeaseRecovery,
 ) -> Result<bool, StartupReconciliationDispositionError> {
     let statement = Statement::from_sql_and_values(
         DbBackend::Sqlite,
         DISPOSE_DISPATCH_SQL,
         [
-            DISPATCH_FAILED_REASON.to_owned().into(),
+            recovery.dispatch_reason().to_owned().into(),
             millis(command.operated_at).into(),
             command.candidate.message_id.as_str().into(),
             millis(command.candidate.lease_expires_at).into(),
@@ -355,13 +344,14 @@ async fn fence_dispatch(
 async fn fence_run(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
+    recovery: ExpiredLeaseRecovery,
 ) -> Result<bool, StartupReconciliationDispositionError> {
     let statement = Statement::from_sql_and_values(
         DbBackend::Sqlite,
         DISPOSE_RUN_SQL,
         [
-            RUN_INTERRUPTED_ERROR_CODE.to_owned().into(),
-            RUN_INTERRUPTED_ERROR_MESSAGE.to_owned().into(),
+            recovery.run_error_code().to_owned().into(),
+            recovery.run_error_message().to_owned().into(),
             millis(command.operated_at).into(),
             command.candidate.run_id.as_str().into(),
             command.candidate.thread_id.as_str().into(),
@@ -393,14 +383,11 @@ fn lifecycle_str(lifecycle: super::startup_reconciliation::StartupRunLifecycle) 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Replay classification
-// ---------------------------------------------------------------------------
-
 #[allow(clippy::too_many_lines)]
 async fn classify_replay(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
+    recovery: ExpiredLeaseRecovery,
 ) -> Result<Option<StartupReconciliationDispositionReceipt>, StartupReconciliationDispositionError>
 {
     let run = entities::assistant_run::Entity::find_by_id(command.candidate.run_id.as_str())
@@ -421,8 +408,8 @@ async fn classify_replay(
         || run.owner.is_some()
         || run.lease.is_some()
         || run.claim_token.is_some()
-        || run.error_code.as_deref() != Some(RUN_INTERRUPTED_ERROR_CODE)
-        || run.error_message.as_deref() != Some(RUN_INTERRUPTED_ERROR_MESSAGE)
+        || run.error_code.as_deref() != Some(recovery.run_error_code())
+        || run.error_message.as_deref() != Some(recovery.run_error_message())
         || run.thread_id != command.candidate.thread_id.as_str()
         || run.origin_message_id != command.candidate.message_id.as_str()
         || run.origin_turn_id != command.candidate.turn_id.as_str()
@@ -463,7 +450,7 @@ async fn classify_replay(
         || dispatch.updated_at_ms != millis(command.operated_at)
         || dispatch.lease_owner.is_some()
         || dispatch.lease_expires_at_ms.is_some()
-        || dispatch.last_error.as_deref() != Some(DISPATCH_FAILED_REASON)
+        || dispatch.last_error.as_deref() != Some(recovery.dispatch_reason())
     {
         return Ok(None);
     }
@@ -587,10 +574,6 @@ async fn patches_match_for_replay(
     }
     Ok(true)
 }
-
-// ---------------------------------------------------------------------------
-// Context loading / persistence
-// ---------------------------------------------------------------------------
 
 struct DispositionContext {
     state: LoadedState,

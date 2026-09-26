@@ -17,6 +17,54 @@ use super::{Repository, RepositoryError, corrupt_data, database_error};
 const MIN_LIMIT: usize = 1;
 const MAX_LIMIT: usize = 64;
 
+/// Which recovery pass disposes an expired candidate.
+///
+/// The pass selects the fixed, bounded interruption text persisted on the
+/// run and dispatch, so a lease that lapsed while the Forge kept running is
+/// never reported as startup reconciliation (and vice versa).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpiredLeaseRecovery {
+    /// Forge startup: the previous process ended while holding the lease.
+    Startup,
+    /// Live sweep in a running Forge: the lease holder stopped renewing.
+    LiveLeaseExpiry,
+}
+
+impl ExpiredLeaseRecovery {
+    /// Bounded run error code persisted by this pass.
+    #[must_use]
+    pub const fn run_error_code(self) -> &'static str {
+        match self {
+            Self::Startup => "startup_reconciliation_unknown_outcome",
+            Self::LiveLeaseExpiry => "lease_expired_unknown_outcome",
+        }
+    }
+
+    /// Bounded run error message persisted by this pass.
+    #[must_use]
+    pub const fn run_error_message(self) -> &'static str {
+        match self {
+            Self::Startup => {
+                "startup reconciliation interrupted with unknown outcome; provider state may have progressed"
+            }
+            Self::LiveLeaseExpiry => {
+                "run lease expired without renewal; provider state may have progressed"
+            }
+        }
+    }
+
+    /// Bounded dispatch failure reason persisted by this pass.
+    #[must_use]
+    pub const fn dispatch_reason(self) -> &'static str {
+        match self {
+            Self::Startup => "startup reconciliation: unknown outcome after lease expiry",
+            Self::LiveLeaseExpiry => {
+                "run lease expired: the Forge stopped renewing this run; its outcome is unknown"
+            }
+        }
+    }
+}
+
 const DISCOVERY_SQL: &str = r"
 SELECT
   ar.run_id AS run_id,
