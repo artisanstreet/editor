@@ -37,10 +37,11 @@ pub use cargo::{PAYLOAD_BINARIES, Workspace, is_cargo_run_variable, profile_dire
 pub use error::DevError;
 pub use identity::{GitState, dev_version, profile_for_bin_dir, runner_target};
 pub use launch::{
-    DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, MAX_RECEIPT_TEXT, ReadinessReconcile,
-    STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt,
+    DEV_LAUNCH_REPORT_TIMEOUT_MS, DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, EditorOutput,
+    EditorProcess, MAX_RECEIPT_TEXT, ReadinessReconcile, STARTUP_RECEIPT_ENV,
+    STARTUP_RECEIPT_SCHEMA, StartupWait, clear_stale_receipt, editor_log_path, editor_output,
     fresh_receipt_path, read_receipt, reconcile_stale_readiness, refuse_live_forge, spawn_editor,
-    staged_editor, staged_forge, stop_editor, wait_for_startup,
+    staged_editor, staged_forge, streams_are_terminals, wait_for_startup,
 };
 pub use lock::DevLock;
 pub use paths::{

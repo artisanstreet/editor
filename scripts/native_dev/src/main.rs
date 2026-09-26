@@ -12,11 +12,12 @@ use std::{path::Path, time::Duration};
 use artisan_build_info::{BuildIdentity, BuildInfo};
 use artisan_install::LocalSigner;
 use native_dev::{
-    Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, GitState,
-    InstanceOutcome, PAYLOAD_DIRECTORY, ReadinessReconcile, StartupWait, Workspace, assemble,
-    clear_stale_receipt, fresh_receipt_path, install_tree, locate_binaries, profile_for_bin_dir,
-    provision_forge_home, reconcile_stale_readiness, resolve_dev_root, spawn_editor, stage_line,
-    staged_editor, staged_forge, stop_editor, usage, wait_for_startup,
+    Action, Command, DEV_STARTUP_TIMEOUT_MS, DevArgs, DevError, DevLock, DevPaths, EditorOutput,
+    EditorProcess, GitState, InstanceOutcome, PAYLOAD_DIRECTORY, ReadinessReconcile, StartupWait,
+    Workspace, assemble, clear_stale_receipt, editor_log_path, editor_output, fresh_receipt_path,
+    install_tree, locate_binaries, profile_for_bin_dir, provision_forge_home,
+    reconcile_stale_readiness, resolve_dev_root, spawn_editor, stage_line, staged_editor,
+    staged_forge, streams_are_terminals, usage, wait_for_startup,
 };
 
 fn main() -> std::process::ExitCode {
@@ -195,13 +196,19 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         "{}",
         stage_line(6, total, "launch", &editor.display().to_string())
     );
-    let mut child = spawn_editor(&editor, &paths.home, &receipt_path).map_err(fail)?;
+    let output = editor_output(
+        options.attach,
+        streams_are_terminals(),
+        editor_log_path(paths),
+    );
+    let mut editor_process =
+        spawn_editor(&editor, &paths.home, &receipt_path, &output).map_err(fail)?;
     // Installs and launches are serialized only up to here: the lock is
     // never held for the Editor's lifetime, so the next `cargo dev` can
     // retire this Editor and relaunch its new build.
     drop(lock);
     let startup = wait_for_startup(
-        &mut child,
+        editor_process.child_mut(),
         &receipt_path,
         Duration::from_millis(DEV_STARTUP_TIMEOUT_MS),
     );
@@ -211,14 +218,15 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
             println!("{}", stage_line(7, total, "startup", &stage));
         }
         StartupWait::Failed { stage, reason } => {
-            let _ = stop_editor(child);
+            let _ = editor_process.stop();
             eprintln!("dev: stage 7/{total} startup ... failed ({stage}: {reason})");
             return Err(Outcome::Failure);
         }
         StartupWait::Timeout => {
-            let _ = stop_editor(child);
+            let _ = editor_process.stop();
             eprintln!(
-                "dev: stage 7/{total} startup ... failed (no receipt within {}s)",
+                "dev: stage 7/{total} startup ... failed (no startup receipt within {}s: the \
+                 editor did not complete its first host connection; it was stopped)",
                 DEV_STARTUP_TIMEOUT_MS / 1_000
             );
             return Err(Outcome::Failure);
@@ -232,19 +240,29 @@ fn install_and_launch(options: &DevArgs, paths: &DevPaths) -> Result<u8, Outcome
         }
     }
     if !options.attach {
+        let pid = editor_process.pid();
+        editor_process.release();
         println!(
-            "dev: editor running (pid {}); run `cargo dev` again to replace it with a new build",
-            child.id()
+            "dev: editor running (pid {pid}); run `cargo dev` again to replace it with a new build"
         );
+        if let EditorOutput::Detached { log } = &output {
+            if cfg!(windows) {
+                println!(
+                    "dev: editor output is not captured while this run's output is not a terminal"
+                );
+            } else {
+                println!("dev: editor output goes to {}", log.display());
+            }
+        }
         return Ok(0);
     }
-    wait_for_exit(child, &version_root)
+    wait_for_exit(editor_process, &version_root)
 }
 
 /// Follows the dev Editor until it exits, including when a later run
 /// retires it for a newer build.
-fn wait_for_exit(mut child: std::process::Child, version_root: &Path) -> Result<u8, Outcome> {
-    let status = child.wait().map_err(|_| {
+fn wait_for_exit(editor_process: EditorProcess, version_root: &Path) -> Result<u8, Outcome> {
+    let status = editor_process.wait().map_err(|_| {
         eprintln!("dev: error: cannot wait for the dev editor");
         Outcome::Failure
     })?;
