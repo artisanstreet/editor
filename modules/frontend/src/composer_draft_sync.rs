@@ -18,6 +18,11 @@
 //! Forge reported per scope outlives the connection's save chains, so a send
 //! repeated after a lost answer names the same revision.
 //!
+//! A save that failed because the connection was lost is not a failed body:
+//! its text becomes unsent again and the scope releases its hold, so a switch
+//! or quit never waits on a dead connection. Unsent bodies are sent (latest
+//! wins) once the service reports it has reconnected.
+//!
 //! The chain is generic over the hold so its bookkeeping is testable without
 //! a connection.
 
@@ -74,11 +79,17 @@ struct Slot<H> {
     /// Sequence of the latest save sent for this scope.
     sent: u64,
     in_flight: Option<u64>,
+    /// The body of the in-flight save, restored as unsent if the connection
+    /// is lost before it is acknowledged.
+    in_flight_body: Option<DraftBody>,
     pending: Option<DraftBody>,
     /// The body a waiting send carries, saved ahead of `pending`.
     pinned: Option<DraftBody>,
     submit: Option<SubmitWait>,
     uploads: usize,
+    /// The connection was lost: bodies stay unsent, and no hold is taken,
+    /// until the service reconnects.
+    interrupted: bool,
     hold: Option<H>,
 }
 
@@ -87,10 +98,12 @@ impl<H> Slot<H> {
         Self {
             sent: 0,
             in_flight: None,
+            in_flight_body: None,
             pending: None,
             pinned: None,
             submit: None,
             uploads: 0,
+            interrupted: false,
             hold: None,
         }
     }
@@ -105,6 +118,7 @@ impl<H> Slot<H> {
     fn send(&mut self, scope: &ComposerDraftScope, body: DraftBody) -> DraftSave {
         self.sent = self.sent.wrapping_add(1);
         self.in_flight = Some(self.sent);
+        self.in_flight_body = Some(body.clone());
         DraftSave {
             scope: scope.clone(),
             sequence: self.sent,
@@ -136,7 +150,7 @@ impl<H> DraftSync<H> {
         hold: impl FnOnce() -> Option<H>,
     ) -> &mut Slot<H> {
         let slot = self.slots.entry(scope.clone()).or_insert_with(Slot::new);
-        if slot.hold.is_none() {
+        if slot.hold.is_none() && !slot.interrupted {
             slot.hold = hold();
         }
         slot
@@ -257,10 +271,56 @@ impl<H> DraftSync<H> {
             return None;
         }
         slot.in_flight = None;
+        slot.in_flight_body = None;
         if slot.submit == Some(SubmitWait::Sequence(sequence)) {
             slot.submit = Some(revision.map_or(SubmitWait::Failed, SubmitWait::Ready));
         }
         self.advance(scope)
+    }
+
+    /// Settles the save with `sequence` as interrupted by a lost
+    /// connection: its body becomes unsent again (unless something newer was
+    /// typed) and the scope releases its hold until [`Self::resume`]. A send
+    /// waiting for this save fails; its text stays in the composer.
+    pub(crate) fn interrupted(&mut self, scope: &ComposerDraftScope, sequence: u64) {
+        let Some(slot) = self.slots.get_mut(scope) else {
+            return;
+        };
+        if slot.in_flight != Some(sequence) {
+            return;
+        }
+        slot.in_flight = None;
+        let body = slot.in_flight_body.take();
+        if slot.pending.is_none() {
+            slot.pending = body;
+        }
+        if slot.submit == Some(SubmitWait::Sequence(sequence)) {
+            slot.submit = Some(SubmitWait::Failed);
+        }
+        slot.interrupted = true;
+        slot.hold = None;
+    }
+
+    /// Sends every body left unsent by a lost connection, now that the
+    /// service has reconnected; each scope takes a fresh hold.
+    pub(crate) fn resume(&mut self, mut hold: impl FnMut() -> Option<H>) -> Vec<DraftSave> {
+        let scopes: Vec<_> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.interrupted)
+            .map(|(scope, _)| scope.clone())
+            .collect();
+        scopes
+            .into_iter()
+            .filter_map(|scope| {
+                let slot = self.slots.get_mut(&scope)?;
+                slot.interrupted = false;
+                if !slot.is_settled() && slot.hold.is_none() {
+                    slot.hold = hold();
+                }
+                self.advance(&scope)
+            })
+            .collect()
     }
 
     /// Keeps the scope busy while one attachment uploads.
@@ -315,7 +375,7 @@ impl<H> DraftSync<H> {
 
     fn advance(&mut self, scope: &ComposerDraftScope) -> Option<DraftSave> {
         let slot = self.slots.get_mut(scope)?;
-        let save = if slot.in_flight.is_some() {
+        let save = if slot.in_flight.is_some() || slot.interrupted {
             None
         } else if let Some(body) = slot.pinned.take() {
             let save = slot.send(scope, body);
@@ -327,7 +387,7 @@ impl<H> DraftSync<H> {
         } else {
             None
         };
-        if slot.is_settled() {
+        if slot.is_settled() || slot.interrupted {
             slot.hold = None;
         }
         save

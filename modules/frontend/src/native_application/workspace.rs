@@ -10,7 +10,7 @@
 //! The view entity is the host-scoped state: every value it owns belongs to
 //! its one connection and is discarded with it. Only window presentation that
 //! is not about a host (the sidebar and profile-menu disclosure) carries over.
-use super::impl_machines::SelectMachine;
+use super::impl_machines::{HostResolved, SelectMachine};
 use super::*;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -42,6 +42,7 @@ struct ConnectedHost {
     home: Option<PathBuf>,
     view: Entity<NativeApplication>,
     _selection: Subscription,
+    _resolution: Subscription,
 }
 
 pub(super) struct NativeWorkspace {
@@ -87,10 +88,14 @@ impl NativeWorkspace {
                 workspace.select(event.0.clone(), window, cx);
             },
         );
+        let resolution = cx.subscribe(&view, |workspace, _, event: &HostResolved, cx| {
+            workspace.adopt_resolved_home(event.0.clone(), cx);
+        });
         ConnectedHost {
             home,
             view,
             _selection: selection,
+            _resolution: resolution,
         }
     }
 
@@ -125,11 +130,10 @@ impl NativeWorkspace {
             .host
             .view
             .update(cx, |view, cx| view.begin_host_switch(label, cx));
+        let service = self.host.view.read(cx).service.clone();
         let task = cx.spawn_in(window, async move |workspace, cx| {
             if let Some(holds) = holds {
-                cx.background_executor()
-                    .spawn(async move { holds.idle().await })
-                    .await;
+                drain_holds(&holds, service.as_deref(), cx.background_executor()).await;
             }
             let Ok(service) = workspace.update(cx, Self::disconnect) else {
                 return;
@@ -196,6 +200,19 @@ impl NativeWorkspace {
         // A fresh launch reopens the machine the user last chose. Best-effort:
         // a hint that cannot be saved must not disturb the switch.
         let home = self.host.home.clone();
+        let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
+        cx.notify();
+    }
+
+    /// The connection resolved its host to a newer registration: the
+    /// session's home and the reopen hint follow it, so a relaunch opens the
+    /// registration that exists rather than the one it replaced.
+    fn adopt_resolved_home(&mut self, home: PathBuf, cx: &mut Context<Self>) {
+        let home = Some(home);
+        if self.host.home == home {
+            return;
+        }
+        self.host.home.clone_from(&home);
         let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
         cx.notify();
     }
@@ -371,6 +388,24 @@ pub(super) async fn close_connection(
         // Shutdown admission is nonblocking; retry while the queue is full.
         let _ = service.request_shutdown();
         while matches!(service.try_recv(), Ok(Some(_))) {}
+        executor.timer(POLL_INTERVAL).await;
+    }
+}
+
+/// Waits until a sealed connection's holds drain. A stopped service holds
+/// nothing it can still complete, and a lost connection releases its draft
+/// holds, but the wait is bounded as well: a switch never waits forever on a
+/// dead connection.
+async fn drain_holds(
+    holds: &crate::native_transport_service::ConnectionHolds,
+    service: Option<&NativeTransportService>,
+    executor: &gpui::BackgroundExecutor,
+) {
+    let deadline = Instant::now() + SERVICE_STOP_LIMIT;
+    while !holds.status().is_idle()
+        && !service.is_some_and(NativeTransportService::is_finished)
+        && Instant::now() < deadline
+    {
         executor.timer(POLL_INTERVAL).await;
     }
 }

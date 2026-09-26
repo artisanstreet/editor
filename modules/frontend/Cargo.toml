@@ -39,6 +39,10 @@ thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 
+[dev-dependencies]
+quinn.workspace = true
+rcgen.workspace = true
+
 [[test]]
 name = "active_thread_light_policy"
 path = "../../tests/frontend/active_thread_light_policy.rs"

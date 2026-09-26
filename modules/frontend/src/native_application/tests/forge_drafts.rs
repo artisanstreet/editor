@@ -331,3 +331,43 @@ fn quitting_with_an_upload_in_flight_saves_the_draft_that_references_it(cx: &mut
     assert_eq!(flushed[0].1.attachments(), [stored_png("shot.png")]);
     assert_eq!(flushed[0].1.text().as_str(), "recalled");
 }
+
+#[gpui::test]
+fn a_save_lost_with_the_connection_is_resent_latest_wins_after_reconnect(cx: &mut TestAppContext) {
+    let view = open_view(cx);
+    let _ = take_sent(cx, &view);
+    read_nothing(cx, &view);
+    type_text(cx, &view, "before");
+    assert_eq!(
+        texts(&take_sent(cx, &view)),
+        vec![(1, scope(), "before".to_owned())]
+    );
+    type_text(cx, &view, " the loss");
+    deliver(
+        cx,
+        &view,
+        ComposerDraftEvent::SaveFailed {
+            scope: scope(),
+            sequence: 1,
+            failure: ServiceFailure {
+                stage: ServiceFailureStage::Handshake,
+                category: ServiceFailureCategory::Authentication,
+            },
+        },
+    );
+    type_text(cx, &view, ", typed offline");
+    assert!(
+        take_sent(cx, &view).is_empty(),
+        "nothing is sent while the connection is down"
+    );
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(NativeTransportEvent::Reconnected, cx);
+        });
+    });
+    assert_eq!(
+        texts(&take_sent(cx, &view)),
+        vec![(2, scope(), "before the loss, typed offline".to_owned())],
+        "the latest text is saved once the service reconnects"
+    );
+}

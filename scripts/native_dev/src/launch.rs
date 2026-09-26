@@ -21,7 +21,10 @@ use artisan_editor_cli::process::{self, ForgeReadiness, ForgeReadinessStatus};
 
 use crate::{
     error::DevError,
-    paths::{DEV_HOME_ENV, DevPaths, STRIPPED_DEV_HOME_ENV, STRIPPED_DEV_READY_ENV, exe_name},
+    paths::{
+        DEV_HOME_ENV, DevPaths, OWNED_DEV_FORGE_ENV, STRIPPED_DEV_HOME_ENV, STRIPPED_DEV_READY_ENV,
+        exe_name,
+    },
 };
 
 /// Environment variable selecting the Editor's startup receipt file.
@@ -571,10 +574,11 @@ fn reconcile_invalid_readiness(
 /// Spawns the staged Editor on the dev home.
 ///
 /// The child inherits the environment with `ARTISAN_HOME` pointed at the
-/// dev home, the manual-forge escape hatches removed, and the startup
-/// receipt path set, so the Editor always exercises its owned Forge
-/// custody path. Standard streams are inherited so Editor output stays
-/// visible.
+/// dev home, the manual-forge escape hatches removed, the owned dev Forge
+/// requested, and the startup receipt path set. Without a registered host
+/// the Editor therefore exercises its owned Forge custody path; with one
+/// (the reopen hint, or the first registered host) it connects to that
+/// host. Standard streams are inherited so Editor output stays visible.
 ///
 /// # Errors
 ///
@@ -588,6 +592,7 @@ pub fn spawn_editor(
     command
         .env(DEV_HOME_ENV, home)
         .env(STARTUP_RECEIPT_ENV, receipt_path)
+        .env(OWNED_DEV_FORGE_ENV, "1")
         .env_remove(STRIPPED_DEV_HOME_ENV)
         .env_remove(STRIPPED_DEV_READY_ENV)
         .stdin(Stdio::inherit())

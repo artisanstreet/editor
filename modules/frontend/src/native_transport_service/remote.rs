@@ -101,6 +101,8 @@ pub(super) async fn start(home: &Path) -> Result<(ServiceRuntime, FrameFactory),
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
+            resolved_home: Some(resolved_home),
         },
         frames,
     ))

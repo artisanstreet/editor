@@ -71,10 +71,8 @@ fn report_renderer(window: &mut Window) {
 #[cfg(not(target_os = "windows"))]
 fn report_renderer(_window: &mut Window) {}
 
-fn window_title() -> String {
-    super::selectors::window_title(&crate::native_hosts::label(
-        crate::native_hosts::selected_home().as_deref(),
-    ))
+fn window_title(home: Option<&std::path::Path>) -> String {
+    super::selectors::window_title(&crate::native_hosts::label(home))
 }
 
 /// Launches the real native application window.
@@ -83,7 +81,12 @@ pub fn run() -> ExitCode {
     if let Some(code) = crate::native_hosts::headless() {
         return code;
     }
-    let service = NativeTransportService::spawn().ok().map(Arc::new);
+    // One selection for the whole launch: the connection, the title, and the
+    // window all name the same host (or none, until one is added).
+    let home = crate::native_hosts::selected_home();
+    let service = NativeTransportService::spawn_for_host(home.clone())
+        .ok()
+        .map(Arc::new);
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let launched = Rc::new(Cell::new(false));
     let launch_flag = Rc::clone(&launched);
@@ -120,12 +123,13 @@ pub fn run() -> ExitCode {
 
             let bounds = Bounds::centered(None, size(px(SURFACE_WIDTH), px(SURFACE_HEIGHT)), cx);
             let service_for_view = service.clone();
+            let home_for_view = home.clone();
             let view_for_registration = Rc::clone(&application_view);
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
-                        title: Some(window_title().into()),
+                        title: Some(window_title(home.as_deref()).into()),
                         // CE keeps native resizing; desktop_shell supplies caption hit areas.
                         appears_transparent: true,
                         ..Default::default()
@@ -136,7 +140,7 @@ pub fn run() -> ExitCode {
                     crate::native_frame_rate::initialize(window, cx);
                     let view = cx.new(|view_cx| {
                         NativeWorkspace::new(
-                            crate::native_hosts::selected_home(),
+                            home_for_view.clone(),
                             service_for_view,
                             window,
                             view_cx,

@@ -598,6 +598,11 @@ pub enum NativeTransportEvent {
     HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
+    /// The service connected again after losing its connection.
+    Reconnected,
+    /// The registered host home the connection resolved to, which replaces
+    /// the home it was started with when a newer incarnation superseded it.
+    HostHome(std::path::PathBuf),
     /// Terminal service state.
     Stopped(ServiceStopStatus),
 }
@@ -632,6 +637,12 @@ struct ServiceRuntime {
     delivery_cancel: Option<Arc<CancelHandle>>,
     delivery_join: Option<tokio::task::JoinHandle<()>>,
     delivery_tx: Option<tokio::sync::mpsc::Sender<PrivateDelivery>>,
+    /// Pushed deliveries, forwarded by the command loop and by every
+    /// in-flight request exchange.
+    deliveries: DeliveryInbox,
+    /// The registered host home this connection resolved to (a newer
+    /// incarnation may have replaced the one it was started with).
+    resolved_home: Option<std::path::PathBuf>,
 }
 
 fn publish(
@@ -731,7 +742,7 @@ mod request_delivery;
 pub use request_delivery::delivery_task_loop;
 #[cfg(test)]
 use request_delivery::session_needs_reconnect;
-use request_delivery::{command_loop_with_delivery, request_envelope_payload};
+use request_delivery::{DeliveryInbox, command_loop_with_delivery};
 
 #[path = "native_transport_service/subscriptions.rs"]
 mod subscriptions;
@@ -775,3 +786,7 @@ mod tests;
 #[cfg(test)]
 #[path = "native_transport_service/command_loop_tests.rs"]
 mod command_loop_tests;
+
+#[cfg(test)]
+#[path = "native_transport_service/push_stall_tests.rs"]
+mod push_stall_tests;

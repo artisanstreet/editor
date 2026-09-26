@@ -6,6 +6,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The host a new window connects to.
+///
+/// An explicit `--host-home` always wins. Otherwise the reopen-host hint,
+/// resolved to the host's current registration (a newer incarnation may have
+/// replaced the recorded one), when its credentials still decode; otherwise
+/// the first registered host. `None` means no host is registered: the window
+/// offers to add one (development runs may use a Forge on this machine
+/// instead, see [`crate::forge_dev_endpoint::local_dev_forge_requested`]).
 pub(crate) fn selected_home() -> Option<PathBuf> {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -13,36 +21,42 @@ pub(crate) fn selected_home() -> Option<PathBuf> {
             return Some(args.next().map(PathBuf::from).unwrap_or_default());
         }
     }
-    // An explicit CLI host always wins; otherwise reopen the launch-time
-    // reopen-host hint when its credentials still decode, else fall back to local.
-    // A newer incarnation of the same host may have superseded the recorded home.
-    let home = hosts::current_home(crate::editor_settings::startup().reopen_host()?);
-    hosts::read_private(&home, "host.json")
-        .and_then(|bytes| hosts::HostInvitation::decode(&bytes))
-        .map(|_| home)
-        .ok()
+    let decodes = |home: &Path| {
+        hosts::read_private(home, "host.json")
+            .and_then(|bytes| hosts::HostInvitation::decode(&bytes))
+            .is_ok()
+    };
+    let hinted = crate::editor_settings::startup()
+        .reopen_host()
+        .map(hosts::current_home)
+        .filter(|home| decodes(home));
+    hinted.or_else(|| {
+        hosts::list()
+            .ok()?
+            .into_iter()
+            .map(|(_, home)| home)
+            .find(|home| decodes(home))
+    })
 }
 
 mod catalog;
 pub(crate) mod wsl;
+#[cfg(test)]
+pub(crate) use catalog::name_for_test;
 pub(crate) use catalog::{label, refresh, same_host};
 
+/// The machine menu: every registered host, then "Add new host". The Editor
+/// has no built-in host of its own; it connects to Forges it was invited to.
 pub(crate) fn group() -> CommandMenuGroup {
-    let mut entries = vec![CommandMenuEntry {
-        id: "local-host".into(),
-        title: "This computer".into(),
-        keywords: vec![],
-        action: CommandMenuAction::OpenHost { home: None },
-    }];
-    {
-        let hosts = catalog::entries();
-        entries.extend(hosts.into_iter().map(|(name, home)| CommandMenuEntry {
+    let mut entries: Vec<_> = catalog::entries()
+        .into_iter()
+        .map(|(name, home)| CommandMenuEntry {
             id: format!("host-{}", home.to_string_lossy()),
             title: name,
             keywords: vec!["machine remote".into()],
             action: CommandMenuAction::OpenHost { home: Some(home) },
-        }));
-    }
+        })
+        .collect();
     entries.push(CommandMenuEntry {
         id: "add-host".into(),
         title: "Add new host".into(),
@@ -211,19 +225,12 @@ pub(crate) fn presentation(home: Option<&Path>) -> HostPresentation {
 
 fn read_presentation(home: Option<&Path>) -> HostPresentation {
     let Some(home) = home else {
-        // This computer's own tile, shown whichever host is connected and
-        // before any connection exists: its avatar is seeded from the local
-        // machine's name, the one fact only this machine can present. It is
-        // tile presentation, never the account or a Forge fact.
+        // No registered host is connected: a development Forge on this
+        // machine, or nothing yet.
         return HostPresentation {
             wsl_distribution: None,
-            subtitle: local_host_subtitle(
-                cfg!(target_os = "linux") && std::env::var_os("WSL_DISTRO_NAME").is_some(),
-            )
-            .into(),
-            avatar_seed: std::env::var("COMPUTERNAME")
-                .or_else(|_| std::env::var("HOSTNAME"))
-                .unwrap_or_else(|_| "local-machine".into()),
+            subtitle: no_host_label().into(),
+            avatar_seed: "no-host".into(),
         };
     };
     let host = hosts::read_private(home, "host.json")
@@ -256,11 +263,12 @@ fn read_presentation(home: Option<&Path>) -> HostPresentation {
     }
 }
 
-fn local_host_subtitle(wsl: bool) -> &'static str {
-    if wsl {
-        "This computer on WSL"
+/// The label of a window without a registered host.
+pub(crate) fn no_host_label() -> &'static str {
+    if crate::forge_dev_endpoint::local_dev_forge_requested() {
+        "Development Forge"
     } else {
-        "This computer"
+        "No host"
     }
 }
 
@@ -274,9 +282,18 @@ fn is_local_wsl_source(source: &str) -> bool {
 mod presentation_tests {
     use super::*;
     #[test]
-    fn local_labels_and_wsl_provenance_are_explicit() {
-        assert_eq!(local_host_subtitle(false), "This computer");
-        assert_eq!(local_host_subtitle(true), "This computer on WSL");
+    fn wsl_provenance_is_explicit_and_there_is_no_built_in_host() {
+        assert!(
+            group()
+                .entries
+                .iter()
+                .all(|entry| !matches!(entry.action, CommandMenuAction::OpenHost { home: None })),
+            "the machine menu lists registered hosts only"
+        );
+        assert_eq!(
+            group().entries.last().map(|entry| entry.id.as_str()),
+            Some("add-host")
+        );
         assert!(is_local_wsl_source(
             r"\\wsl.localhost\Ubuntu\home\user\host.json"
         ));

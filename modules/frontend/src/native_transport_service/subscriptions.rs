@@ -258,6 +258,9 @@ impl ServiceRuntime {
         ));
         self.delivery_cancel = Some(cancel);
         self.delivery_join = Some(join);
+        // Work the application parked while the connection was down (unsent
+        // draft saves) resumes on this signal.
+        self.deliveries.announce(NativeTransportEvent::Reconnected);
         if restore_subscription && let Some(thread_id) = self.custody.active_thread().cloned() {
             let after = self.custody.last_accepted_cursor();
             if let Err(failure) = self
@@ -303,14 +306,9 @@ impl ServiceRuntime {
             thread_id: thread_id.clone(),
         };
         let session = self.session.take().ok_or(ServiceFailure::local_session())?;
-        let attempt = request_envelope_payload(
-            session,
-            envelope,
-            request_id.clone(),
-            expected,
-            &self.cancel,
-        )
-        .await;
+        let attempt = self
+            .exchange(session, envelope, request_id.clone(), expected)
+            .await;
         match self.finish_request_attempt(attempt) {
             Ok(ResponsePayload::ConversationSubscriptionStarted(started)) => {
                 if validate_started_correlation(&thread_id, &started).is_err() {
@@ -366,14 +364,9 @@ pub(super) async fn handle_subscribe(
         .take()
         .ok_or(ServiceFailure::local_session())
         .map_err(RequestFailure::terminal)?;
-    let attempt = request_envelope_payload(
-        session,
-        envelope,
-        request_id.clone(),
-        expected,
-        &runtime.cancel,
-    )
-    .await;
+    let attempt = runtime
+        .exchange(session, envelope, request_id.clone(), expected)
+        .await;
     match runtime.finish_request_attempt(attempt) {
         Ok(ResponsePayload::ConversationSubscriptionStarted(started)) => {
             if validate_started_correlation(&thread_id, &started).is_err() {
@@ -434,14 +427,9 @@ pub(super) async fn handle_unsubscribe(
         .session
         .take()
         .ok_or(ServiceFailure::local_session())?;
-    let attempt = request_envelope_payload(
-        session,
-        envelope,
-        request_id.clone(),
-        expected,
-        &runtime.cancel,
-    )
-    .await;
+    let attempt = runtime
+        .exchange(session, envelope, request_id.clone(), expected)
+        .await;
     match runtime.finish_request_attempt(attempt) {
         Ok(ResponsePayload::ConversationSubscriptionStopped(stopped)) => {
             if validate_stopped_correlation(&thread_id, &stopped).is_err() {

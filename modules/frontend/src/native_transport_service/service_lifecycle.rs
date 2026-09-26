@@ -63,9 +63,17 @@ impl NativeTransportService {
 
     /// Starts a connection for an explicitly selected host, independently of process arguments.
     ///
+    /// `None` connects to a development Forge on this machine and is only
+    /// admitted when one was requested; the Editor has no built-in host.
+    ///
     /// # Errors
-    /// Returns [`ServiceSpawnError::Thread`] if the service thread cannot be created.
+    /// Returns [`ServiceSpawnError::NoHost`] for `None` without a requested
+    /// development Forge, or [`ServiceSpawnError::Thread`] if the service
+    /// thread cannot be created.
     pub fn spawn_for_host(home: Option<std::path::PathBuf>) -> Result<Self, ServiceSpawnError> {
+        if home.is_none() && !dev_endpoint::local_dev_forge_requested() {
+            return Err(ServiceSpawnError::NoHost);
+        }
         let (command_tx, command_rx) = tokio::sync::mpsc::channel(COMMAND_CAPACITY);
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
         let finished = Arc::new(AtomicBool::new(false));
@@ -309,6 +317,8 @@ impl ServiceRuntime {
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         }
     }
 
@@ -381,6 +391,11 @@ async fn start_native_service(
     if let Some(home) = dev_endpoint::dev_home_from_env() {
         return start_dev_service(&home).await;
     }
+    // Without a host, only the `cargo dev` runner's owned dev Forge remains;
+    // the shipping Editor never starts a Forge of its own.
+    if !dev_endpoint::owned_dev_forge_requested() {
+        return Err(StartupError::Stage(ServiceFailureStage::Instance));
+    }
     let layout =
         Layout::discover().map_err(|_| StartupError::Stage(ServiceFailureStage::Layout))?;
     let manifest = InstallationManifest::load(&layout.manifest)
@@ -437,6 +452,8 @@ async fn attach_to_owned_forge(
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         }),
         Err(error) => {
             let shutdown_grace =
@@ -553,6 +570,8 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             delivery_cancel: None,
             delivery_join: None,
             delivery_tx: None,
+            deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         },
         frames,
     ))
@@ -689,8 +708,12 @@ async fn service_main(
     let started = start_native_service(home.as_deref()).await;
     match started {
         Ok((mut runtime, mut frames)) => {
-            let (delivery_tx, mut delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
+            let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
             runtime.delivery_tx = Some(delivery_tx.clone());
+            runtime.deliveries.attach(delivery_rx, events.clone());
+            if let Some(home) = runtime.resolved_home.clone() {
+                let _ = publish(&events, NativeTransportEvent::HostHome(home));
+            }
             // take_delivery exactly once for this session
             let delivery_started = {
                 let session = runtime.session.take();
@@ -732,7 +755,6 @@ async fn service_main(
                     crate::dev_startup_receipt::report_ready();
                     let command_result = command_loop_with_delivery(
                         &mut commands,
-                        &mut delivery_rx,
                         &mut runtime,
                         &mut frames,
                         &events,

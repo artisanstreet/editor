@@ -132,10 +132,19 @@ impl NativeApplication {
                 self.composer_drafts.sync.observe_revision(&scope, revision);
             }
             ComposerDraftEvent::SaveFailed {
-                scope, sequence, ..
+                scope,
+                sequence,
+                failure,
             } => {
-                let next = self.composer_drafts.sync.settled(&scope, sequence);
-                self.submit_draft_save(next);
+                if failure.is_connection_loss() {
+                    // The text is kept unsent and saved again once the
+                    // service reconnects; the hold must not outlive the
+                    // connection.
+                    self.composer_drafts.sync.interrupted(&scope, sequence);
+                } else {
+                    let next = self.composer_drafts.sync.settled(&scope, sequence);
+                    self.submit_draft_save(next);
+                }
                 self.drive_draft_submission(cx);
             }
             ComposerDraftEvent::Read { scope, result } => {
@@ -232,6 +241,16 @@ impl NativeApplication {
             let _ = self.submit_draft(command, hold.as_ref());
         }
         self.release_composer_drafts();
+    }
+
+    /// Saves the bodies a lost connection left unsent, now that the service
+    /// has reconnected (latest wins).
+    pub(super) fn resume_composer_drafts(&mut self) {
+        let holds = self.connection_holds();
+        let acquire = || holds.as_ref()?.try_hold(HoldKind::Draft);
+        for save in self.composer_drafts.sync.resume(acquire) {
+            self.submit_draft_save(Some(save));
+        }
     }
 
     /// Drops every draft hold with the connection that owned it.

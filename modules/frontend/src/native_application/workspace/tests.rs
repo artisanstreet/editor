@@ -27,6 +27,44 @@ fn add_test_host(view: &Entity<NativeApplication>, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
+/// The registered host the connected test windows start on.
+const BUILD_HOME: &str = "/test/build";
+
+/// Names [`BUILD_HOME`] in the host catalog, as a machine refresh would.
+fn name_build_host() -> PathBuf {
+    let home = PathBuf::from(BUILD_HOME);
+    crate::native_hosts::name_for_test(&home, "Build server");
+    home
+}
+
+/// Lists one registered host row ahead of "Add new host".
+fn list_host(
+    view: &Entity<NativeApplication>,
+    id: &str,
+    title: &str,
+    home: &str,
+    cx: &mut VisualTestContext,
+) {
+    let (id, title, home) = (id.to_owned(), title.to_owned(), PathBuf::from(home));
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            let entries = &mut view.machine_menu.entries;
+            let before_add = entries.len().saturating_sub(1);
+            entries.insert(
+                before_add,
+                CommandMenuEntry {
+                    id,
+                    title,
+                    keywords: Vec::new(),
+                    action: CommandMenuAction::OpenHost { home: Some(home) },
+                },
+            );
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+}
+
 fn draft(view: &Entity<NativeApplication>, cx: &mut VisualTestContext) -> String {
     cx.update(|_, cx| view.read(cx).composer.read(cx).draft().to_owned())
 }
@@ -48,8 +86,10 @@ fn connected_workspace<'a>(
     next: Vec<Arc<NativeTransportService>>,
 ) -> (Entity<NativeWorkspace>, &'a mut VisualTestContext) {
     let service = service.clone();
-    let (workspace, cx) =
-        cx.add_window_view(move |window, cx| NativeWorkspace::new(None, Some(service), window, cx));
+    let home = name_build_host();
+    let (workspace, cx) = cx.add_window_view(move |window, cx| {
+        NativeWorkspace::new(Some(home), Some(service), window, cx)
+    });
     cx.update(|_, cx| {
         workspace.update(cx, |workspace, _| {
             let mut next = next.into_iter();
@@ -96,7 +136,7 @@ fn switch_seals_drains_disconnects_and_connects_the_new_host(cx: &mut TestAppCon
     let new = Arc::new(new);
     let (workspace, cx) = connected_workspace(cx, &old, vec![new.clone()]);
     let local = selected(&workspace, cx);
-    set_draft(&local, "local unsent draft", cx);
+    set_draft(&local, "build server unsent draft", cx);
     old.submit(stop_request())
         .expect("admitted before the switch");
     let in_flight = old_commands.try_recv().expect("held command");
@@ -107,7 +147,7 @@ fn switch_seals_drains_disconnects_and_connects_the_new_host(cx: &mut TestAppCon
         let view = local.read(cx);
         assert_eq!(
             view.host_switch_status().as_deref(),
-            Some("Saving 1 stop request to This computer…")
+            Some("Saving 1 stop request to Build server…")
         );
         assert!(!view.message_submission_is_admissible(cx));
     });
@@ -124,6 +164,9 @@ fn switch_seals_drains_disconnects_and_connects_the_new_host(cx: &mut TestAppCon
     );
 
     drop(in_flight);
+    // The drain checks the holds on the UI poll interval.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
     cx.run_until_parked();
     assert_eq!(
         next_command(&mut old_commands).as_deref(),
@@ -169,7 +212,7 @@ fn reselecting_the_current_host_while_draining_cancels_the_switch(cx: &mut TestA
 
     select_host(&workspace, Some("/test/ubuntu"), cx);
     assert!(service.holds().status().sealed);
-    select_host(&workspace, None, cx);
+    select_host(&workspace, Some(BUILD_HOME), cx);
     assert!(!service.holds().status().sealed, "cancel unseals");
     cx.update(|_, cx| {
         assert!(workspace.read(cx).switch.is_none());
@@ -232,11 +275,12 @@ fn quitting_seals_and_drains_before_shutdown(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn machine_dropdown_click_switches_host_and_discards_host_state(cx: &mut TestAppContext) {
+    let home = name_build_host();
     let (workspace, cx) =
-        cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
+        cx.add_window_view(move |window, cx| NativeWorkspace::new(Some(home), None, window, cx));
     cx.run_until_parked();
     let local = selected(&workspace, cx);
-    set_draft(&local, "local unsent draft", cx);
+    set_draft(&local, "build server unsent draft", cx);
     open_profile(cx);
     let trigger = cx
         .debug_bounds("machine-selector")
@@ -283,18 +327,25 @@ fn machine_dropdown_click_switches_host_and_discards_host_state(cx: &mut TestApp
     let trigger = cx.debug_bounds("machine-selector").unwrap();
     cx.simulate_click(trigger.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    let local_row = cx.debug_bounds("machine-option-local-host").unwrap();
-    cx.simulate_click(local_row.center(), gpui::Modifiers::none());
+    list_host(&remote, "test-build", "Build server", BUILD_HOME, cx);
+    let build_row = cx.debug_bounds("machine-option-test-build").unwrap();
+    cx.simulate_click(build_row.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     let back = selected(&workspace, cx);
     assert_ne!(back, local, "returning connects a fresh view");
     assert_ne!(back, remote);
     assert_eq!(draft(&back, cx), "");
     cx.update(|_, cx| {
-        assert_eq!(crate::editor_settings::get(cx).reopen_host(), None);
+        assert_eq!(
+            crate::editor_settings::get(cx).reopen_host(),
+            Some(Path::new(BUILD_HOME))
+        );
         assert!(remote.read(cx).shutdown_prepared);
         assert!(!back.read(cx).shutdown_prepared);
-        assert_eq!(back.read(cx).machine_home, None);
+        assert_eq!(
+            back.read(cx).machine_home.as_deref(),
+            Some(Path::new(BUILD_HOME))
+        );
     });
 }
 
@@ -412,7 +463,7 @@ fn open_profile(cx: &mut VisualTestContext) {
 }
 
 #[gpui::test]
-fn account_name_overrides_local_identity_without_changing_host(cx: &mut TestAppContext) {
+fn account_name_overrides_the_profile_name_without_changing_host(cx: &mut TestAppContext) {
     let (workspace, cx) =
         cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
     let local = selected(&workspace, cx);
@@ -423,7 +474,7 @@ fn account_name_overrides_local_identity_without_changing_host(cx: &mut TestAppC
             display_name: "sanderAST".into(),
         });
         assert_eq!(local.read(cx).profile_display_name(cx), "sanderAST");
-        assert_eq!(local.read(cx).machine_label, "This computer");
+        assert_eq!(local.read(cx).machine_label, "No host");
         cx.remove_global::<crate::native_account_identity::ArtisanAccountIdentity>();
         assert_eq!(local.read(cx).profile_display_name(cx), "Theo");
     });
@@ -556,13 +607,14 @@ fn host_header_shares_glass_track_and_submenu_preserves_pointer_travel(cx: &mut 
         menu.left() >= parent.right(),
         "submenu opens beside the parent"
     );
-    let row = cx.debug_bounds("machine-option-local-host").unwrap();
+    list_host(&view, "test-ubuntu", "Ubuntu", "/test/ubuntu", cx);
+    let row = cx.debug_bounds("machine-option-test-ubuntu").unwrap();
     cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
     cx.run_until_parked();
     cx.update(|_, cx| {
         let menu = &view.read(cx).machine_menu;
         assert!(menu.is_open());
-        assert_eq!(menu.hover.borrow().active_id(), Some("local-host"));
+        assert_eq!(menu.hover.borrow().active_id(), Some("test-ubuntu"));
     });
     let separator = cx.debug_bounds("machine-add-separator").unwrap();
     let add = cx.debug_bounds("machine-option-add-host").unwrap();
@@ -588,8 +640,9 @@ fn host_header_shares_glass_track_and_submenu_preserves_pointer_travel(cx: &mut 
 
 #[gpui::test]
 fn busy_connection_retry_keeps_the_same_host_view(cx: &mut TestAppContext) {
+    let home = name_build_host();
     let (workspace, cx) =
-        cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
+        cx.add_window_view(move |window, cx| NativeWorkspace::new(Some(home), None, window, cx));
     let view = selected(&workspace, cx);
     cx.update(|_, cx| {
         view.update(cx, |app, cx| {
@@ -668,5 +721,60 @@ fn closed_worker_channel_preserves_its_final_authentication_failure(cx: &mut Tes
             assert!(!view.poll_service(cx));
             assert!(matches!(&view.state, NativeViewState::Failure(actual) if *actual == failure));
         });
+    });
+}
+
+#[gpui::test]
+fn a_window_without_a_host_offers_to_add_one(cx: &mut TestAppContext) {
+    let (workspace, cx) =
+        cx.add_window_view(|window, cx| NativeWorkspace::new(None, None, window, cx));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("add-forge-host").is_some(),
+        "no built-in host: the window offers to add one"
+    );
+    assert!(cx.debug_bounds("retry-forge-connection").is_none());
+    let view = selected(&workspace, cx);
+    cx.update(|_, cx| assert_eq!(view.read(cx).machine_label, "No host"));
+}
+
+#[gpui::test]
+fn a_resolved_host_incarnation_becomes_the_session_home_and_reopen_hint(cx: &mut TestAppContext) {
+    let resolved = PathBuf::from("/test/hosts/ubuntu-current");
+    let service = Arc::new(NativeTransportService::completed_for_test(vec![
+        NativeTransportEvent::HostHome(resolved.clone()),
+    ]));
+    let (workspace, cx) = cx.add_window_view(move |window, cx| {
+        NativeWorkspace::new(
+            Some(PathBuf::from("/test/hosts/ubuntu-retired")),
+            Some(service),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let view = selected(&workspace, cx);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.poll_service(cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            view.read(cx).machine_home.as_deref(),
+            Some(resolved.as_path()),
+            "the view follows the registration the connection resolved to"
+        );
+        assert_eq!(
+            workspace.read(cx).host.home.as_deref(),
+            Some(resolved.as_path()),
+            "the session home follows it too"
+        );
+        assert_eq!(
+            crate::editor_settings::get(cx).reopen_host(),
+            Some(resolved.as_path()),
+            "a relaunch reopens the registration that exists"
+        );
     });
 }

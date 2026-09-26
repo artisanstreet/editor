@@ -114,7 +114,7 @@ impl NativeApplication {
     }
 
     /// Progress copy for a pending switch, such as
-    /// `Saving 2 messages to Ubuntu…`, then `Switching to This computer…`.
+    /// `Saving 2 messages to Ubuntu…`, then `Switching to Build server…`.
     pub(super) fn host_switch_status(&self) -> Option<String> {
         let notice = self.host_switch.as_ref()?;
         let saving = self

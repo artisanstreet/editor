@@ -12,20 +12,156 @@
 
 use super::*;
 
-pub(super) async fn request_payload(
-    session: ClientSession,
-    frames: &mut FrameFactory,
-    request: ClientRequest,
-    expected: ExpectedResponse,
-    cancel: &CancelHandle,
-) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
-    let protocol_version = session.protocol_version();
-    let (envelope, expected_request_id) = make_request_frame(frames, protocol_version, request)
-        .map_err(|failure| RequestAttemptError::Terminal {
-            failure,
-            retryable_local_session_loss: false,
-        })?;
-    request_envelope_payload(session, envelope, expected_request_id, expected, cancel).await
+/// Pushed deliveries on their way from the delivery task to the application.
+///
+/// The Forge serves a connection strictly in order and pushes after a
+/// response, so it can be in the middle of a long push (a thread's history)
+/// when the Editor sends its next request. That request is only answered once
+/// the push has crossed the wire, and the push only crosses while the Editor
+/// reads it. The Editor therefore keeps forwarding deliveries while it waits
+/// for any response ([`ServiceRuntime::exchange`]); otherwise the bounded
+/// delivery channel and the stream's flow-control window fill and both sides
+/// wait for each other until their deadlines expire.
+///
+/// A delivery that needs the command loop (a loss, or a batch that does not
+/// continue the forwarded cursor yet, such as the first batch of a fresh
+/// subscription whose response is still being read) is parked, and the
+/// exchange stops forwarding until its response settles. At most one
+/// delivery is parked; the command loop handles it before anything else.
+#[derive(Default)]
+pub(super) struct DeliveryInbox {
+    pub(super) receiver: Option<tokio::sync::mpsc::Receiver<PrivateDelivery>>,
+    events: Option<SyncSender<NativeTransportEvent>>,
+    pub(super) parked: Option<PrivateDelivery>,
+}
+
+impl DeliveryInbox {
+    /// Installs the delivery channel and the application bridge.
+    pub(super) fn attach(
+        &mut self,
+        receiver: tokio::sync::mpsc::Receiver<PrivateDelivery>,
+        events: SyncSender<NativeTransportEvent>,
+    ) {
+        self.receiver = Some(receiver);
+        self.events = Some(events);
+    }
+
+    /// Publishes one service event through the attached bridge, if any.
+    pub(super) fn announce(&self, event: NativeTransportEvent) {
+        if let Some(events) = self.events.as_ref() {
+            let _ = publish(events, event);
+        }
+    }
+
+    /// Forwards the parked delivery once custody lets it continue. Returns
+    /// `false` only when the application bridge has closed.
+    pub(super) fn forward_parked_if_ready(&mut self, custody: &mut SubscriptionCustody) -> bool {
+        let Some(events) = self.events.as_ref() else {
+            return true;
+        };
+        if !self
+            .parked
+            .as_ref()
+            .is_some_and(|parked| forwards_without_recovery(custody, parked))
+        {
+            return true;
+        }
+        self.parked
+            .take()
+            .is_none_or(|parked| forward_delivery(custody, events, parked).is_ok())
+    }
+
+    /// The next delivery for the command loop: the parked one first. A closed
+    /// channel is a delivery loss; without a channel this never resolves.
+    async fn next(&mut self) -> PrivateDelivery {
+        if let Some(parked) = self.parked.take() {
+            return parked;
+        }
+        match self.receiver.as_mut() {
+            Some(receiver) => receiver.recv().await.unwrap_or_else(closed_delivery),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+fn closed_delivery() -> PrivateDelivery {
+    PrivateDelivery::Lost(ServiceFailure::new(
+        ServiceFailureStage::Delivery,
+        ServiceFailureCategory::LocalSession,
+    ))
+}
+
+/// Whether a delivery can be forwarded without the command loop's recovery.
+fn forwards_without_recovery(custody: &SubscriptionCustody, delivery: &PrivateDelivery) -> bool {
+    match delivery {
+        PrivateDelivery::Batch(batch) => {
+            let stale = custody
+                .active_thread()
+                .is_none_or(|thread| thread != batch.thread_id());
+            stale || custody.expected_batch_from() == Some(batch.from_cursor())
+        }
+        PrivateDelivery::Observation(_)
+        | PrivateDelivery::Outbox(_)
+        | PrivateDelivery::HostState(_) => true,
+        PrivateDelivery::Lost(_) => false,
+    }
+}
+
+/// Forwards one delivery to the application, or names the failure the
+/// command loop must recover from.
+fn forward_delivery(
+    custody: &mut SubscriptionCustody,
+    events: &SyncSender<NativeTransportEvent>,
+    delivery: PrivateDelivery,
+) -> Result<Option<ServiceFailure>, ServiceFailure> {
+    match delivery {
+        PrivateDelivery::Batch(batch) => {
+            let is_stale = custody
+                .active_thread()
+                .is_none_or(|thread| thread != batch.thread_id());
+            if is_stale {
+                return Ok(None);
+            }
+            // Validate cursor continuity against transport-forwarded
+            // position first: a second contiguous batch may arrive before the
+            // UI acknowledgement is selected from the command queue. The
+            // subscribe baseline covers the first batch of an epoch and the
+            // accepted cursor covers a live epoch with nothing forwarded yet.
+            // Forwarding never marks application acceptance: the resume
+            // baseline stays on the last explicit ack.
+            if custody.expected_batch_from() != Some(batch.from_cursor()) {
+                return Ok(Some(ServiceFailure::new(
+                    ServiceFailureStage::Delivery,
+                    ServiceFailureCategory::Integrity,
+                )));
+            }
+            custody.on_batch_forwarded(batch.to_cursor());
+            publish(events, NativeTransportEvent::PatchBatch(batch))?;
+        }
+        PrivateDelivery::Observation(observation) => {
+            let artisan_domain::Event::EngineObservation(paired) = &observation.event else {
+                return Ok(None);
+            };
+            if custody
+                .active_thread()
+                .is_some_and(|active| active == &paired.thread_id)
+            {
+                // The application owns cursor ordering and replay dedup; emit
+                // without advancing custody, like patch batches.
+                publish(events, NativeTransportEvent::EngineObservation(observation))?;
+            }
+        }
+        PrivateDelivery::Outbox(outbox) => {
+            if custody.active_thread() == Some(outbox.thread_id()) {
+                publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
+            }
+        }
+        PrivateDelivery::HostState(state) => {
+            publish(events, NativeTransportEvent::HostState(state))?;
+        }
+        PrivateDelivery::Lost(failure) => return Ok(Some(failure)),
+    }
+    Ok(None)
 }
 
 pub(super) async fn request_envelope_payload(
@@ -167,12 +303,77 @@ impl ServiceRuntime {
         self.ensure_session(frames, false)
             .await
             .map_err(RequestFailure::terminal)?;
+        let protocol_version = self
+            .session
+            .as_ref()
+            .map(ClientSession::protocol_version)
+            .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
+        let (envelope, expected_request_id) = make_request_frame(frames, protocol_version, request)
+            .map_err(RequestFailure::terminal)?;
         let session = self
             .session
             .take()
             .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
-        let attempt = request_payload(session, frames, request, expected, &self.cancel).await;
+        let attempt = self
+            .exchange(session, envelope, expected_request_id, expected)
+            .await;
         self.finish_request_attempt(attempt)
+    }
+
+    /// Runs one request exchange while forwarding the Forge's pushes.
+    ///
+    /// See [`DeliveryInbox`]: the Forge may only answer this request after
+    /// the push it is writing has been read, so waiting without reading would
+    /// stall both sides until their deadlines expire.
+    pub(super) async fn exchange(
+        &mut self,
+        session: ClientSession,
+        envelope: WireEnvelope,
+        expected_request_id: RequestId,
+        expected: ExpectedResponse,
+    ) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
+        let request = request_envelope_payload(
+            session,
+            envelope,
+            expected_request_id,
+            expected,
+            &self.cancel,
+        );
+        let mut request = std::pin::pin!(request);
+        let inbox = &mut self.deliveries;
+        let custody = &mut self.custody;
+        // A delivery parked during an earlier request of the same handler
+        // (the first batch of a subscription whose response was still being
+        // read) may continue the cursor by now; forward it rather than stop
+        // reading for this request too.
+        if !inbox.forward_parked_if_ready(custody) {
+            return request.await;
+        }
+        loop {
+            let (Some(receiver), Some(events), None) = (
+                inbox.receiver.as_mut(),
+                inbox.events.as_ref(),
+                &inbox.parked,
+            ) else {
+                return request.await;
+            };
+            tokio::select! {
+                biased;
+                attempt = &mut request => return attempt,
+                delivery = receiver.recv() => {
+                    let delivery = delivery.unwrap_or_else(closed_delivery);
+                    if !forwards_without_recovery(custody, &delivery) {
+                        inbox.parked = Some(delivery);
+                        continue;
+                    }
+                    // A closed bridge ends the service at the handler's own
+                    // publish; stop forwarding and let the request settle.
+                    if forward_delivery(custody, events, delivery).is_err() {
+                        return request.await;
+                    }
+                }
+            }
+        }
     }
 
     pub(super) async fn request_stable(
@@ -197,14 +398,9 @@ impl ServiceRuntime {
             .session
             .take()
             .ok_or(RequestFailure::terminal(ServiceFailure::local_session()))?;
-        let attempt = request_envelope_payload(
-            session,
-            envelope,
-            expected_request_id,
-            expected,
-            &self.cancel,
-        )
-        .await;
+        let attempt = self
+            .exchange(session, envelope, expected_request_id, expected)
+            .await;
         self.finish_request_attempt(attempt)
     }
 }
@@ -236,21 +432,28 @@ pub async fn delivery_task_loop(
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
             let is_lost = matches!(result, PrivateDelivery::Lost(_));
-            if tx.send(result).await.is_err() {
-                break;
-            }
-            if is_lost {
+            if !hand_over(&tx, &cancel, result).await || is_lost {
                 break;
             }
         } else {
-            let _ = tx
-                .send(PrivateDelivery::Lost(ServiceFailure::new(
-                    ServiceFailureStage::Delivery,
-                    ServiceFailureCategory::LocalSession,
-                )))
-                .await;
+            let _ = hand_over(&tx, &cancel, closed_delivery()).await;
             break;
         }
+    }
+}
+
+/// Hands one delivery to the service loop. Cancellation wins over a full
+/// channel, so a reconnect that cancels and joins this task never waits for
+/// a consumer that is itself waiting on the join.
+async fn hand_over(
+    tx: &tokio::sync::mpsc::Sender<PrivateDelivery>,
+    cancel: &CancelHandle,
+    delivery: PrivateDelivery,
+) -> bool {
+    tokio::select! {
+        biased;
+        () = cancel.wait() => false,
+        sent = tx.send(delivery) => sent.is_ok(),
     }
 }
 
@@ -260,23 +463,31 @@ pub async fn delivery_task_loop(
 )]
 pub(super) async fn command_loop_with_delivery(
     commands: &mut tokio::sync::mpsc::Receiver<QueuedCommand>,
-    delivery_rx: &mut tokio::sync::mpsc::Receiver<PrivateDelivery>,
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
     loop {
-        tokio::select! {
-            cmd = commands.recv() => {
+        let step = tokio::select! {
+            cmd = commands.recv() => LoopStep::Command(cmd),
+            delivery = runtime.deliveries.next() => LoopStep::Delivery(delivery),
+        };
+        match step {
+            LoopStep::Command(cmd) => {
                 // The hold travels with its command and drops when this arm
                 // ends: after the handler returns, or with its failure.
-                let Some(QueuedCommand { command, hold: _hold }) = cmd else {
+                let Some(QueuedCommand {
+                    command,
+                    hold: _hold,
+                }) = cmd
+                else {
                     return Ok(());
                 };
                 match command {
                     NativeTransportCommand::Shutdown => return Ok(()),
                     NativeTransportCommand::BeginProjectIntakeAt(path) => {
-                        project_intake::begin_project_intake_at(runtime, frames, events, path).await?;
+                        project_intake::begin_project_intake_at(runtime, frames, events, path)
+                            .await?;
                     }
                     NativeTransportCommand::BeginProjectIntake => {
                         begin_project_intake(runtime, frames, events).await?;
@@ -284,8 +495,14 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::RetryProjectIntake => {
                         retry_project_intake(runtime, frames, events).await?;
                     }
-                    NativeTransportCommand::ReadSidebarThreads { project_id, generation } => {
-                        handlers::read_sidebar_threads(runtime, frames, events, project_id, generation).await?;
+                    NativeTransportCommand::ReadSidebarThreads {
+                        project_id,
+                        generation,
+                    } => {
+                        handlers::read_sidebar_threads(
+                            runtime, frames, events, project_id, generation,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::SelectProject(project_id) => {
                         select_project(runtime, frames, events, project_id).await?;
@@ -293,23 +510,47 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::CreateTask(project_id) => {
                         create_task_in_project(runtime, frames, events, project_id).await?;
                     }
-                    NativeTransportCommand::RecoverFailedMessage { project_id, command } => {
-                        project_intake::recover_failed_message(runtime, frames, events, project_id, *command).await?;
+                    NativeTransportCommand::RecoverFailedMessage {
+                        project_id,
+                        command,
+                    } => {
+                        project_intake::recover_failed_message(
+                            runtime, frames, events, project_id, *command,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::ComposerState(command) => {
-                        composer_state_operations::handle_composer_state_command(runtime, frames, events, command).await?;
+                        composer_state_operations::handle_composer_state_command(
+                            runtime, frames, events, command,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::ComposerDraft(command) => {
-                        composer_draft_operations::handle_composer_draft_command(runtime, frames, events, command).await?;
+                        composer_draft_operations::handle_composer_draft_command(
+                            runtime, frames, events, command,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::Preferences(command) => {
-                        preferences_operations::handle_preferences_command(runtime, frames, events, command).await?;
+                        preferences_operations::handle_preferences_command(
+                            runtime, frames, events, command,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::ForgeDecision(command) => {
-                        forge_decision_operations::handle_forge_decision_command(runtime, frames, events, command).await?;
+                        forge_decision_operations::handle_forge_decision_command(
+                            runtime, frames, events, command,
+                        )
+                        .await?;
                     }
-                    NativeTransportCommand::ReadActiveRun { thread_id, generation } => {
-                        composer_operations::read_active_run(runtime, frames, events, thread_id, generation).await?;
+                    NativeTransportCommand::ReadActiveRun {
+                        thread_id,
+                        generation,
+                    } => {
+                        composer_operations::read_active_run(
+                            runtime, frames, events, thread_id, generation,
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::StopRun(command) => {
                         composer_operations::stop_run(runtime, frames, events, command).await?;
@@ -326,18 +567,32 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::RequestSnapshot(thread_id) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
                     }
-                    NativeTransportCommand::LoadThreadEngineSettings { thread_id, generation } => {
-                        load_thread_engine_settings(runtime, frames, events, thread_id, generation).await?;
+                    NativeTransportCommand::LoadThreadEngineSettings {
+                        thread_id,
+                        generation,
+                    } => {
+                        load_thread_engine_settings(runtime, frames, events, thread_id, generation)
+                            .await?;
                     }
-                    NativeTransportCommand::ReadComposerCatalog { thread_id, profile_id, generation } => {
+                    NativeTransportCommand::ReadComposerCatalog {
+                        thread_id,
+                        profile_id,
+                        generation,
+                    } => {
                         composer_operations::read_composer_catalog(
                             runtime, frames, events, thread_id, profile_id, generation,
-                        ).await?;
+                        )
+                        .await?;
                     }
-                    NativeTransportCommand::ReadModelFavorites { thread_id, profile_id, generation } => {
+                    NativeTransportCommand::ReadModelFavorites {
+                        thread_id,
+                        profile_id,
+                        generation,
+                    } => {
                         composer_operations::read_model_favorites(
                             runtime, frames, events, thread_id, profile_id, generation,
-                        ).await?;
+                        )
+                        .await?;
                     }
                     NativeTransportCommand::ListRegisteredProfiles => {
                         list_registered_profiles(runtime, frames, events).await?;
@@ -363,7 +618,8 @@ pub(super) async fn command_loop_with_delivery(
                         set_thread_engine_config(runtime, frames, events, command).await?;
                     }
                     NativeTransportCommand::SetModelFavorite(command) => {
-                        composer_operations::set_model_favorite(runtime, frames, events, *command).await?;
+                        composer_operations::set_model_favorite(runtime, frames, events, *command)
+                            .await?;
                     }
                     NativeTransportCommand::QueueFirstMessage(command) => {
                         queue_first_message(runtime, frames, events, *command).await?;
@@ -385,83 +641,22 @@ pub(super) async fn command_loop_with_delivery(
                         // recovery Subscribe for that same host.
                         handle_unsubscribe(runtime, frames, events, thread_id).await?;
                     }
-                    NativeTransportCommand::AcknowledgePatch { thread_id, cursor } =>
-                        handle_acknowledge_patch(runtime, &thread_id, cursor)?,
+                    NativeTransportCommand::AcknowledgePatch { thread_id, cursor } => {
+                        handle_acknowledge_patch(runtime, &thread_id, cursor)?
+                    }
                 }
             }
-            delivery = delivery_rx.recv() => {
-                match delivery {
-                    Some(PrivateDelivery::Batch(batch)) => {
-                        let is_stale = runtime
-                            .custody
-                            .active_thread()
-                            .is_none_or(|tid| tid != batch.thread_id());
-                        if is_stale {
-                            continue;
-                        }
-                        // Validate cursor continuity against transport-forwarded
-                        // position first: a second contiguous batch may arrive
-                        // before the UI acknowledgement is selected from the
-                        // command queue. The subscribe baseline covers the
-                        // first batch of an epoch and the accepted cursor
-                        // covers a live epoch with nothing forwarded yet.
-                        // Forwarding never marks application acceptance: the
-                        // resume baseline stays on the last explicit ack.
-                        let Some(expected_from) = runtime.custody.expected_batch_from() else {
-                            let failure = ServiceFailure::new(
-                                ServiceFailureStage::Delivery,
-                                ServiceFailureCategory::Integrity,
-                            );
-                            handle_delivery_lost_reconnect(runtime, frames, events, failure)
-                                .await?;
-                            continue;
-                        };
-                        if batch.from_cursor() != expected_from {
-                            let failure = ServiceFailure::new(
-                                ServiceFailureStage::Delivery,
-                                ServiceFailureCategory::Integrity,
-                            );
-                            handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                            continue;
-                        }
-                        runtime.custody.on_batch_forwarded(batch.to_cursor());
-                        publish(events, NativeTransportEvent::PatchBatch(batch))?;
-                    }
-                    Some(PrivateDelivery::Observation(observation)) => {
-                        let artisan_domain::Event::EngineObservation(paired) = &observation.event
-                        else {
-                            continue;
-                        };
-                        let is_stale = runtime
-                            .custody
-                            .active_thread()
-                            .is_none_or(|active| active != &paired.thread_id);
-                        if is_stale {
-                            continue;
-                        }
-                        // The application owns cursor ordering and replay dedup;
-                        // emit without advancing custody, like patch batches.
-                        publish(events, NativeTransportEvent::EngineObservation(observation))?;
-                    }
-                    Some(PrivateDelivery::Outbox(outbox)) => {
-                        if runtime.custody.active_thread() == Some(outbox.thread_id()) {
-                            publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
-                        }
-                    }
-                    Some(PrivateDelivery::HostState(state)) => {
-                        publish(events, NativeTransportEvent::HostState(state))?;
-                    }
-                    Some(PrivateDelivery::Lost(failure)) =>
-                        handle_delivery_lost_reconnect(runtime, frames, events, failure).await?,
-                    None => {
-                        let failure = ServiceFailure::new(
-                            ServiceFailureStage::Delivery,
-                            ServiceFailureCategory::LocalSession,
-                        );
-                        handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
-                    }
+            LoopStep::Delivery(delivery) => {
+                let recovery = forward_delivery(&mut runtime.custody, events, delivery)?;
+                if let Some(failure) = recovery {
+                    handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
                 }
             }
         }
     }
+}
+
+enum LoopStep {
+    Command(Option<QueuedCommand>),
+    Delivery(PrivateDelivery),
 }

@@ -157,19 +157,7 @@ impl NativeApplication {
         let theme = self.desktop_theme;
         let selected = matches!(&entry.action, CommandMenuAction::OpenHost { home }
             if crate::native_hosts::same_host(home.as_deref(), self.machine_home.as_deref()));
-        // The account name is the connected Forge's, so it names the local
-        // tile only while that Forge is this computer's.
-        let name = if matches!(&entry.action, CommandMenuAction::OpenHost { home: None })
-            && self.machine_home.is_none()
-        {
-            self.profile_name
-                .as_ref()
-                .or(self.profile_hostname.as_ref())
-                .cloned()
-                .unwrap_or_else(|| entry.title.clone())
-        } else {
-            entry.title.clone()
-        };
+        let name = entry.title.clone();
         let selector = format!("machine-option-{}", entry.id);
         let mut row = div()
             .id(("machine-option", index))

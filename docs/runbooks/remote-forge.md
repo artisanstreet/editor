@@ -66,8 +66,16 @@ The profile name uses the local identity while signed out. When a future Artisan
 Street account session supplies an identity, its display name takes precedence.
 The avatar, display name, host subtitle, and selector icon form one clickable
 header. Usage and its menu action are hidden when Forge is disconnected.
-The host subtitle remains separate: This computer, Ubuntu, or the registered host
-name. Account sign-in and cloud sync are not implemented by this UI change.
+The host subtitle remains separate: the registered host's name or address
+("This computer on WSL" for a host whose invitation lives in a local WSL distribution). Account sign-in and cloud sync are not implemented by this UI change.
+
+The Editor has no built-in host: it never starts a Forge of its own. The machine
+menu lists registered hosts and **Add new host**. At launch the Editor opens the
+host it last connected to (resolved to that host's current registration), else
+the first registered host; with none registered the window offers **Add a host**.
+Development runs are the exception: `cargo dev` sets `ARTISAN_DEV_OWNED_FORGE=1`
+so a dev Editor without a host starts the dev installation's own Forge, and
+`ARTISAN_DEV_FORGE_HOME` still attaches to a manually started dev Forge.
 
 Selecting a machine changes the active Forge connection **in the same editor
 window**. Switching does not spawn an editor process or disconnect other hosts.
@@ -151,8 +159,8 @@ Verified on Ubuntu WSL with a native Windows MSVC editor build:
 - The installed Nix Forge service restarted through systemd; the original saved
   Windows registration refreshed its invitation and connected successfully.
 - Native Windows profile clicks and ghost-selector keyboard navigation selected Ubuntu,
-  completed authenticated initial queries, and switched to This computer and
-  back in the same window (unchanged HWND and process).
+  completed authenticated initial queries, and switched to another registered
+  host and back in the same window (unchanged HWND and process).
   [Machine dropdown](../../evidence/whole-profile-selector-20260913-203140.png).
 - GPUI interaction tests cover mouse and keyboard selection, draft retention,
   isolation of commands/events, and shutdown of all retained host views.

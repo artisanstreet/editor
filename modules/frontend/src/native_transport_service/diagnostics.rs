@@ -159,6 +159,19 @@ impl ServiceFailure {
         Self::new(stage, ServiceFailureCategory::InvalidConfiguration)
     }
 
+    /// Whether the failure is the connection being unavailable or lost,
+    /// rather than an answer about the request itself.
+    #[must_use]
+    pub const fn is_connection_loss(self) -> bool {
+        matches!(
+            self.category,
+            ServiceFailureCategory::LocalSession
+                | ServiceFailureCategory::Unavailable
+                | ServiceFailureCategory::Authentication
+                | ServiceFailureCategory::ConnectionBusy
+        )
+    }
+
     pub(super) const fn local_session() -> Self {
         Self::new(
             ServiceFailureStage::Request,
@@ -225,6 +238,10 @@ pub enum ServiceSpawnError {
     /// The operating system refused the bounded service thread.
     #[error("native service thread could not be started")]
     Thread,
+    /// No host was selected and no development Forge on this machine was
+    /// requested: there is nothing to connect to.
+    #[error("no host is registered")]
+    NoHost,
 }
 
 /// Delivery frame flowing from the dedicated delivery task via the private bounded Tokio channel.

@@ -29,6 +29,34 @@ impl NativeApplication {
         if self.connection_retry_pending {
             return root.child(self.home_heading("Reconnecting to Forge…"));
         }
+        if self.service.is_none() && self.machine_home.is_none() {
+            return root
+                .child(self.home_heading("Add a host"))
+                .child(
+                    div()
+                        .mt(px(8.0))
+                        .max_w(px(440.0))
+                        .text_size(px(15.0))
+                        .text_color(self.desktop_theme.secondary)
+                        .child(
+                            "Artisan works on a Forge host you trust. Select the invitation the host published to connect to it.",
+                        ),
+                )
+                .child(
+                    div()
+                        .id("add-forge-host")
+                        .debug_selector(|| "add-forge-host".into())
+                        .cursor_pointer()
+                        .mt(px(16.0))
+                        .px(px(16.0))
+                        .py(px(8.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(self.desktop_theme.line)
+                        .child("Add a host")
+                        .on_click(cx.listener(|_, _, _, cx| Self::add_host(cx))),
+                );
+        }
         if let NativeViewState::Failure(failure) = &self.state {
             let (heading, detail) = match failure.category {
                 ServiceFailureCategory::ConnectionBusy => (
