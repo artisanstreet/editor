@@ -26,7 +26,9 @@
 //! (`unspecified` for streamed deltas, `commentary` for assistant text that
 //! accompanies tool uses, mirroring the TypeScript normalizer); both fold to
 //! `TextDelta` on the shared vocabulary. Buffered assistant frames project
-//! their ordered content (text and thinking) plus at most one usage sample.
+//! their ordered content (text and thinking) plus at most one usage sample;
+//! their text is authoritative and settles the streamed deltas of the same
+//! message through the [`ClaudeTextLedger`], so each block lands exactly once.
 //! When the launch requested `--thinking-display summarized`, thinking
 //! blocks carry public summary prose that the [`ClaudeThinkingTracker`]
 //! projects onto the shared reasoning-summary observations, one item per
@@ -69,6 +71,7 @@ mod launch;
 mod protocol;
 #[cfg(test)]
 mod quota;
+mod text;
 mod thinking;
 mod usage;
 pub(crate) use adapter::*;

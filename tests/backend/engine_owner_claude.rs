@@ -1191,7 +1191,7 @@ async fn fixture_start_deltas_phases_close() {
         init_line(),
         r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg-7"}}}"#,
         r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello "}}}"#,
-        r#"{"type":"assistant","message":{"id":"msg-7","content":[{"type":"text","text":"world"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"echo hi"}}]}}"#,
+        r#"{"type":"assistant","message":{"id":"msg-7","content":[{"type":"text","text":"hello world"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"echo hi"}}]}}"#,
         r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":9}"#,
         r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#,
         r#"{"type":"system","subtype":"task_started","task_id":"task-1","description":"Explore"}"#,
@@ -1204,6 +1204,8 @@ async fn fixture_start_deltas_phases_close() {
     .await
     .expect("fixture finishes");
     assert_eq!(outcome.terminal, Some(TerminalState::Completed));
+    // The buffered block is authoritative: the streamed prefix is kept and
+    // only its missing suffix lands.
     assert_eq!(joined(&outcome), "hello world");
     assert_eq!(outcome.phases, vec!["unspecified", "commentary"]);
     assert_eq!(
