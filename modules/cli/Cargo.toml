@@ -64,3 +64,7 @@ path = "../../tests/cli/engine_commands.rs"
 [[test]]
 name = "cli_native_lifecycle"
 path = "../../tests/cli/native_lifecycle.rs"
+
+[[test]]
+name = "cli_stale_readiness"
+path = "../../tests/cli/stale_readiness.rs"

@@ -17,6 +17,11 @@ use super::{
     FORGE_READY_INTERVAL, MAX_READINESS_BYTES,
     spec::{ForgeReadiness, ForgeReadinessStatus, StartResult},
 };
+
+mod stale;
+
+pub use stale::{ReadinessReconcile, reconcile_stale_readiness};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ReadinessFileSnapshot {
     pub(super) identity: Option<ReadinessFileIdentity>,

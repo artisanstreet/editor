@@ -123,6 +123,12 @@ pub enum CliError {
     InvalidForgeReadiness { reason: &'static str },
     #[error("Forge did not establish readiness before the startup deadline")]
     ForgeReadinessTimeout,
+    #[error("a Forge is already running from this installation (pid {pid})")]
+    ForgeAlreadyRunning { pid: u32 },
+    #[error("Forge custody is held at {}; a live Forge may own this home", path.display())]
+    ForgeCustodyHeld { path: PathBuf },
+    #[error("stale Forge readiness was preserved: {0}")]
+    StaleReadiness(String),
     #[error("Forge terminated during startup: {termination}")]
     ForgeTerminated { termination: ForgeTermination },
     #[error("native Forge lifecycle control is unsupported by this Forge")]

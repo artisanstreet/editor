@@ -17,7 +17,7 @@ mod receipt;
 mod spec;
 
 pub use lifecycle::{ForgeProcessLease, start, start_owned, start_owned_until, start_until};
-pub use receipt::readiness_status;
+pub use receipt::{ReadinessReconcile, readiness_status, reconcile_stale_readiness};
 pub(crate) use spec::validate_credential_manifest;
 pub use spec::{ForgeLaunchSpec, ForgeReadiness, ForgeReadinessStatus, StartResult};
 
