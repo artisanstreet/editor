@@ -201,7 +201,7 @@ fn reject_job(job: Job, error: EngineOperationError) {
         Job::Turn {
             prepared, respond, ..
         } => {
-            let _ = prepared.send(Err(error.clone()));
+            let _ = prepared.send(Err(error.clone().into()));
             let _ = respond.send(Err(error));
         }
     }

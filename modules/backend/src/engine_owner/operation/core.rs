@@ -15,7 +15,7 @@ use super::super::interaction::{
     InteractionDeliveryError, InteractionTarget, TurnInteractionLedger, TurnInteractionOutcome,
 };
 use super::super::observation::{EngineObservation, TerminalState};
-use super::super::process::RetainedEngine;
+use super::super::process::{RetainedEngine, StartDiagnostic};
 use super::super::readiness::ReadinessError;
 use super::super::{InternalCatalogInput, InternalPreflightInput, InternalTurnInput};
 /// Payload-free engine health observable by the facade.
@@ -137,6 +137,26 @@ pub(crate) enum EngineOperationError {
     },
 }
 
+/// Why a configured turn never announced its session.
+///
+/// The typed cause stays payload-free; `detail` is the engine's own reason
+/// when one was observed, already sanitized and bounded
+/// ([`StartDiagnostic`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct StartRefusal {
+    pub(crate) error: EngineOperationError,
+    pub(crate) detail: Option<StartDiagnostic>,
+}
+
+impl From<EngineOperationError> for StartRefusal {
+    fn from(error: EngineOperationError) -> Self {
+        Self {
+            error,
+            detail: None,
+        }
+    }
+}
+
 /// Observed cleanup mode for a successful configured-engine preflight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PreflightReap {
@@ -248,7 +268,7 @@ pub(crate) enum Job {
         input: Box<InternalTurnInput>,
         deadline: Instant,
         control: Arc<CancelHandle>,
-        prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+        prepared: oneshot::Sender<Result<PreparedSession, StartRefusal>>,
         authorize: oneshot::Receiver<()>,
         observations: mpsc::Sender<EngineObservation>,
         respond: oneshot::Sender<TurnResult>,
@@ -525,7 +545,7 @@ pub(super) fn settle_steers_closed(
 
 /// Single-owner handoff for the configured turn phases.
 pub(crate) struct AcceptedTurn {
-    prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
+    prepared: oneshot::Receiver<Result<PreparedSession, StartRefusal>>,
     authorize_sender: Option<oneshot::Sender<()>>,
     observations: mpsc::Receiver<EngineObservation>,
     receiver: Option<oneshot::Receiver<TurnResult>>,
@@ -537,7 +557,7 @@ pub(crate) struct AcceptedTurn {
 impl AcceptedTurn {
     pub(crate) fn from_parts(
         run_id: RunId,
-        prepared: oneshot::Receiver<Result<PreparedSession, EngineOperationError>>,
+        prepared: oneshot::Receiver<Result<PreparedSession, StartRefusal>>,
         authorize_sender: oneshot::Sender<()>,
         observations: mpsc::Receiver<EngineObservation>,
         receiver: oneshot::Receiver<TurnResult>,
@@ -555,10 +575,18 @@ impl AcceptedTurn {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn prepare(&mut self) -> TurnResultPrepared {
+        self.prepare_with_detail()
+            .await
+            .map_err(|refusal| refusal.error)
+    }
+
+    /// Like [`Self::prepare`], keeping the engine's sanitized start reason.
+    pub(crate) async fn prepare_with_detail(&mut self) -> Result<PreparedSession, StartRefusal> {
         match (&mut self.prepared).await {
             Ok(result) => result,
-            Err(_) => Err(EngineOperationError::ReapUnresolved),
+            Err(_) => Err(EngineOperationError::ReapUnresolved.into()),
         }
     }
 
@@ -736,6 +764,7 @@ impl Drop for AcceptedTurn {
     }
 }
 
+#[cfg(test)]
 type TurnResultPrepared = Result<PreparedSession, EngineOperationError>;
 
 /// How one executed job ended for the owner loop.

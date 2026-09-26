@@ -31,8 +31,8 @@ use tokio::time::Instant;
 use super::super::codex as codex_runtime;
 use super::super::codex::CodexSettings;
 use super::super::process::{
-    ChildParts, CleanupObservation, LifelineWriter, RetainedEngine, StderrCounter,
-    cleanup_after_abort, spawn_codex_engine,
+    ChildParts, CleanupObservation, LifelineWriter, RetainedEngine, START_DIAGNOSTIC_DRAIN,
+    StartDiagnostic, StderrCounter, cleanup_after_abort, spawn_codex_engine,
 };
 use super::SocketTurnContext;
 
@@ -136,8 +136,15 @@ pub(crate) async fn open_codex_session(
     let Ok(project_root) = RootPath::parse(input.working_directory.clone()) else {
         return EngineOpenOutcome::failed(EngineOpenError::InvalidInput);
     };
-    let Ok(mut child) = spawn_codex_engine(launch, &project_root) else {
-        return EngineOpenOutcome::failed(EngineOpenError::SpawnFailed);
+    let mut child = match spawn_codex_engine(launch, &project_root) {
+        Ok(child) => child,
+        Err(error) => {
+            return EngineOpenOutcome::Failed {
+                error: EngineOpenError::SpawnFailed,
+                custody: None,
+                detail: StartDiagnostic::for_spawn_error(&error).map(StartDiagnostic::into_string),
+            };
+        }
     };
     // The sole stdin lifeline is taken before any handshake step can fail;
     // every write below borrows this exact handle, so `fail_open` cleanup
@@ -361,27 +368,41 @@ fn phase_deadline(budget: Duration, attempt_deadline: Instant) -> Instant {
 
 /// Runs the fixed bounded cleanup for a failed open.
 ///
-/// A reaped child yields a custody-free typed failure. A child whose death
-/// could not be observed moves whole into the returned outcome so the owner
-/// quarantines it exactly as the drive phase would have.
+/// A child that exited or refused the handshake first reports its own
+/// sanitized reason from the retained stderr tail. A reaped child yields a
+/// custody-free typed failure. A child whose death could not be observed
+/// moves whole into the returned outcome so the owner quarantines it exactly
+/// as the drive phase would have.
 async fn fail_open(
-    parts: ChildParts,
+    mut parts: ChildParts,
     error: EngineOpenError,
     close_budget: Duration,
 ) -> EngineOpenOutcome {
-    match cleanup_after_abort(parts, close_budget).await {
-        CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => {
-            EngineOpenOutcome::Failed {
-                error,
-                custody: None,
-            }
-        }
+    let detail = if matches!(
+        error,
+        EngineOpenError::SpawnFailed
+            | EngineOpenError::HandshakeFailed
+            | EngineOpenError::ResumeRejected
+    ) {
+        parts
+            .stderr_counter
+            .start_diagnostic(START_DIAGNOSTIC_DRAIN)
+            .await
+            .map(StartDiagnostic::into_string)
+    } else {
+        parts.stderr_counter.release_diagnostics();
+        None
+    };
+    let custody = match cleanup_after_abort(parts, close_budget).await {
+        CleanupObservation::ReapedWithoutKill(_) | CleanupObservation::ReapedAfterKill(_) => None,
         CleanupObservation::Retained(retained) => {
             let custody: Box<dyn EngineSocketSession> = retained;
-            EngineOpenOutcome::Failed {
-                error,
-                custody: Some(custody),
-            }
+            Some(custody)
         }
+    };
+    EngineOpenOutcome::Failed {
+        error,
+        custody,
+        detail,
     }
 }

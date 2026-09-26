@@ -352,6 +352,10 @@ pub enum EngineOpenOutcome {
         error: EngineOpenError,
         /// Unobserved custody retained by the failed open, when present.
         custody: Option<Box<dyn EngineSocketSession>>,
+        /// The engine's own reason for refusing the open, when it gave one:
+        /// one line the runtime already sanitized and bounded (no control
+        /// characters, credentials, or home paths).
+        detail: Option<String>,
     },
 }
 
@@ -362,6 +366,7 @@ impl EngineOpenOutcome {
         Self::Failed {
             error,
             custody: None,
+            detail: None,
         }
     }
 }
@@ -370,13 +375,18 @@ impl fmt::Debug for EngineOpenOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Opened(run) => formatter.debug_tuple("Opened").field(run).finish(),
-            Self::Failed { error, custody } => formatter
+            Self::Failed {
+                error,
+                custody,
+                detail,
+            } => formatter
                 .debug_struct("Failed")
                 .field("error", error)
                 .field(
                     "custody",
                     &custody.as_ref().map(|_custody| "<runtime-owned>"),
                 )
+                .field("detail", detail)
                 .finish(),
         }
     }
@@ -697,6 +707,7 @@ mod tests {
             EngineOpenOutcome::Failed {
                 error: EngineOpenError::SpawnFailed,
                 custody: None,
+                detail: None,
             }
         ));
     }

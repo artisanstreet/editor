@@ -2,7 +2,8 @@
 //!
 //! Everything here serves the single owner task in
 //! [`crate::engine_owner::operation`]: exact-child spawning, the sole
-//! stdin lifeline writer, count-only stderr draining, and the fixed cleanup
+//! stdin lifeline writer, counted stderr draining (with a bounded tail kept
+//! only for sanitized start diagnostics, see [`stderr`]), and the fixed cleanup
 //! sequence that ends in an observed reap or retained custody. The generic
 //! recipe uses the caller-supplied absolute engine executable with an explicit
 //! empty environment (`env_clear`); the verified configured path below adds
@@ -217,8 +218,9 @@ fn take_descendant_sentinel_marker() -> io::Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns the raw spawn failure; the caller reduces it to a typed,
-/// payload-free cause and never surfaces the operating-system message.
+/// Returns the raw spawn failure; the caller reduces it to a typed cause
+/// ([`StartDiagnostic::for_spawn_error`]) and never surfaces the
+/// operating-system message.
 pub(crate) fn spawn_engine(recipe: &LaunchRecipe, secret: &str) -> io::Result<EngineChild> {
     let mut command = match recipe {
         LaunchRecipe::Production { executable } => {
@@ -477,7 +479,7 @@ pub(crate) fn spawn_configured_engine(
 
     launch
         .revalidate()
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "profile rejected"))?;
+        .map_err(|_| LaunchRejected::error("profile rejected"))?;
     EngineChild::spawn(command, true)
 }
 
@@ -501,7 +503,7 @@ pub(crate) fn spawn_codex_engine(
 
     launch
         .revalidate()
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "codex launch rejected"))?;
+        .map_err(|_| LaunchRejected::error("codex launch rejected"))?;
     EngineChild::spawn(command, true)
 }
 
@@ -548,7 +550,7 @@ pub(crate) fn spawn_claude_engine(
 
     launch
         .revalidate()
-        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "claude launch rejected"))?;
+        .map_err(|_| LaunchRejected::error("claude launch rejected"))?;
     EngineChild::spawn(command, true)
 }
 
@@ -564,100 +566,12 @@ pub(crate) use lifeline::LifelineWriter;
 /// how long one cleanup may keep the owner busy after the kill.
 pub(crate) const POST_KILL_GRACE: Duration = Duration::from_millis(250);
 
-/// Count-only stderr draining state.
-///
-/// Bytes are counted toward the caller-supplied `stderr_cap_bytes` and
-/// discarded; nothing is ever retained, printed, or formatted. Terminal
-/// states stop further reads but never discard the pipe handle.
-pub(crate) struct StderrCounter {
-    stderr: Option<ChildStderr>,
-    counted: usize,
-    cap: usize,
-    state: StderrState,
-}
+mod diagnostic;
+mod stderr;
 
-/// Current counting state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StderrState {
-    /// The stream is open and within the cap.
-    Open,
-    /// The cap was crossed; reads stopped while the handle stays retained.
-    Capped,
-    /// Clean end of stream within the cap.
-    ClosedWithinCap,
-    /// The operating-system read failed.
-    Failed,
-}
-
-impl StderrCounter {
-    /// Wraps the child's piped stderr with the caller-supplied cap.
-    pub(crate) fn new(stderr: Option<ChildStderr>, cap: usize) -> Self {
-        Self {
-            stderr,
-            counted: 0,
-            cap,
-            state: StderrState::Open,
-        }
-    }
-
-    /// Current counting state.
-    #[must_use]
-    pub(crate) fn state(&self) -> StderrState {
-        self.state
-    }
-
-    /// Performs at most one bounded counting read.
-    ///
-    /// Bytes beyond the cap are counted and discarded; content is never
-    /// retained. Returns whether the cap was crossed or the stream closed.
-    pub(crate) async fn pump(&mut self) -> StderrEvent {
-        use tokio::io::AsyncReadExt as _;
-        match self.state {
-            StderrState::Capped => return StderrEvent::CapExceeded,
-            StderrState::ClosedWithinCap => return StderrEvent::Closed,
-            StderrState::Failed => return StderrEvent::ReadFailed,
-            StderrState::Open => {}
-        }
-        let Some(stderr) = self.stderr.as_mut() else {
-            self.state = StderrState::Failed;
-            return StderrEvent::ReadFailed;
-        };
-        let mut buf = [0_u8; 512];
-        let window = self.cap.saturating_sub(self.counted).saturating_add(1);
-        let window = window.min(buf.len());
-        match stderr.read(&mut buf[..window]).await {
-            Ok(0) => {
-                self.state = StderrState::ClosedWithinCap;
-                StderrEvent::Closed
-            }
-            Ok(count) => {
-                self.counted += count;
-                if self.counted > self.cap {
-                    self.state = StderrState::Capped;
-                    StderrEvent::CapExceeded
-                } else {
-                    StderrEvent::WithinCap
-                }
-            }
-            Err(_) => {
-                self.state = StderrState::Failed;
-                StderrEvent::ReadFailed
-            }
-        }
-    }
-}
-
-/// What one stderr pump step observed.
-pub(crate) enum StderrEvent {
-    /// More bytes were counted; the stream stays open within the cap.
-    WithinCap,
-    /// The cap was crossed; counting stopped permanently.
-    CapExceeded,
-    /// Clean end of stream within the cap.
-    Closed,
-    /// The operating-system read failed.
-    ReadFailed,
-}
+pub(crate) use diagnostic::{LaunchRejected, StartDiagnostic};
+#[allow(unused_imports)]
+pub(crate) use stderr::{START_DIAGNOSTIC_DRAIN, StderrCounter, StderrEvent, StderrState};
 
 /// Exact custody retained when a child's death could not be observed.
 #[allow(dead_code)]
@@ -688,7 +602,7 @@ pub(crate) struct ChildParts {
     pub(crate) lifeline: LifelineWriter,
     /// Owned stdout pipe for exactly one bounded readiness record.
     pub(crate) stdout: Option<ChildStdout>,
-    /// Count-only stderr state.
+    /// Counted stderr state and its start-only diagnostic tail.
     pub(crate) stderr_counter: StderrCounter,
 }
 

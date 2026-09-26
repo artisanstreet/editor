@@ -1,7 +1,9 @@
 //! TEST-ONLY engine-owner protocol child fixture.
 //!
 //! One ordinary `main` in a `testonly` Cargo `rust_binary`: no libtest
-//! harness, no banner, never shipped. It implements nine frozen scenarios:
+//! harness, no banner, never shipped. It implements the frozen scenarios
+//! below plus three stderr start-diagnostic scenarios (a refusal, a refusal
+//! carrying credential-shaped text, and stderr noise before a healthy run):
 //! six P0 first-wave readiness/health cases, one finite P4 transport
 //! prerequisite `prompt_text_then_terminal` that serves a bounded
 //! `GET /api/health` → `POST /api/session/test-session/prompt` →
@@ -121,8 +123,36 @@ fn main() {
         }
         "prompt_text_then_hold_after_first_delta" => run_prompt_text_then_hold_after_first_delta(),
         "descendant_holds_sentinel" => run_descendant_holds_sentinel(),
+        "stderr_error_then_exit" => stderr_then_exit(STDERR_ERROR_REASON),
+        "stderr_secret_then_exit" => stderr_then_exit(STDERR_SECRET_REASON),
+        "stderr_noise_then_terminal" => {
+            // A healthy provider that chatters on stderr before it starts:
+            // nothing of it may surface for a run that starts.
+            write_stderr(STDERR_ERROR_REASON);
+            run_prompt_text_then_terminal()
+        }
         _ => process::exit(SCENARIO_REFUSED_EXIT),
     }
+}
+
+/// A refusal written the way real CLIs do: noise, the reason, a frame.
+const STDERR_ERROR_REASON: &str =
+    "starting fixture engine\nError: something specific\n    at main (fixture.js:1:1)\n";
+/// A refusal whose reason carries credential-shaped values and a home path.
+const STDERR_SECRET_REASON: &str = "Error: login failed for /home/fixture-user/.config \
+     token=fixture-secret-value key sk-fixture-0123456789abcdef\n";
+
+fn write_stderr(text: &str) {
+    let mut err = std::io::stderr().lock();
+    let _ = err.write_all(text.as_bytes());
+    let _ = err.flush();
+}
+
+/// Refuses to start: writes the reason to stderr and exits before any
+/// readiness record, exactly like a CLI rejecting its arguments.
+fn stderr_then_exit(reason: &str) -> ! {
+    write_stderr(reason);
+    process::exit(1)
 }
 
 fn run_ready_malformed() -> ! {
@@ -1022,6 +1052,9 @@ fn is_known_scenario(name: &str) -> bool {
             | "slow_start_then_terminal"
             | "prompt_text_then_hold_after_first_delta"
             | "descendant_holds_sentinel"
+            | "stderr_error_then_exit"
+            | "stderr_secret_then_exit"
+            | "stderr_noise_then_terminal"
     )
 }
 
@@ -1114,6 +1147,9 @@ mod tests {
             "prompt_text_then_terminal",
             "prompt_text_then_hold_after_first_delta",
             "descendant_holds_sentinel",
+            "stderr_error_then_exit",
+            "stderr_secret_then_exit",
+            "stderr_noise_then_terminal",
         ] {
             assert!(is_known_scenario(s), "{s} should be known");
         }

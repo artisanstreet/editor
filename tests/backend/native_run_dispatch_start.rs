@@ -97,6 +97,10 @@ struct StartRun {
 }
 
 async fn run_slow_start(label: &str, launch_deadline: Duration) -> StartRun {
+    run_start(label, SLOW_START_SCENARIO, launch_deadline).await
+}
+
+async fn run_start(label: &str, scenario: &'static str, launch_deadline: Duration) -> StartRun {
     let (database, repository, temp) = temp_repository(label).await;
     let thread_id = ThreadId::parse("fixture-thread").expect("thread id");
     seed_project_and_thread_with_profile(
@@ -133,7 +137,7 @@ async fn run_slow_start(label: &str, launch_deadline: Duration) -> StartRun {
             activity: ActivityGateImpl::new(),
             runtime: &tokio::runtime::Handle::current(),
             fixture_program: registered_fixture_program(),
-            scenario: SLOW_START_SCENARIO,
+            scenario,
         });
     tokio::time::timeout(SETTLE_DEADLINE, async {
         loop {
@@ -203,4 +207,66 @@ async fn dispatch_provider_start_past_its_deadline_fails_with_the_launch_error()
     assert!(started.run.provider_binding.is_none());
     assert!(started.run.terminal_at_ms.is_some());
     assert_eq!(started.turn.lifecycle, EntityLifecycle::Failed);
+}
+
+/// Asserts a start that failed before announcing, returning its message.
+fn assert_refused_start(started: &StartRun) -> String {
+    assert_eq!(started.dispatch.state, DispatchState::Failed);
+    assert_eq!(started.run.lifecycle, AssistantRunLifecycle::Failed);
+    assert_eq!(
+        started.run.error_code.as_deref(),
+        Some("provider_start_failed")
+    );
+    assert!(started.run.provider_binding.is_none());
+    assert_eq!(started.turn.lifecycle, EntityLifecycle::Failed);
+    let message = started.dispatch.last_error.clone().expect("dispatch error");
+    assert_eq!(started.run.error_message.as_deref(), Some(message.as_str()));
+    message
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_provider_refusal_reports_the_engines_own_reason() {
+    let started = run_start(
+        "start-stderr-reason",
+        "stderr_error_then_exit",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(
+        assert_refused_start(&started),
+        "OpenCode failed to start: something specific."
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_provider_refusal_redacts_secrets_in_the_reason() {
+    let started = run_start(
+        "start-stderr-secret",
+        "stderr_secret_then_exit",
+        Duration::from_secs(10),
+    )
+    .await;
+    let message = assert_refused_start(&started);
+    assert_eq!(
+        message,
+        "OpenCode failed to start: login failed for ~/.config token=[redacted] key [redacted]."
+    );
+    for leaked in ["fixture-secret-value", "sk-fixture", "fixture-user"] {
+        assert!(!message.contains(leaked), "{leaked} leaked into {message}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dispatch_provider_stderr_never_surfaces_for_a_started_run() {
+    let started = run_start(
+        "start-stderr-noise",
+        "stderr_noise_then_terminal",
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(started.dispatch.state, DispatchState::Completed);
+    assert!(started.dispatch.last_error.is_none());
+    assert_eq!(started.run.lifecycle, AssistantRunLifecycle::Completed);
+    assert!(started.run.error_code.is_none());
+    assert!(started.run.error_message.is_none());
 }
