@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
     CliError, Result, credentials,
+    host_access::{HostAccess, ListenAddress},
     instance::{
         self, NativeInstanceConfig, NativeListenerConfig, NativeRunConfig, NativeRunConfigInput,
     },
@@ -128,8 +129,18 @@ pub enum Commands {
         native_run_prompt_delivery: NativeRunPromptDelivery,
         #[arg(long = "native-run-stream-after", required = true)]
         native_run_stream_after: u64,
+        /// Also start the Forge with the user's session: a systemd user
+        /// service on Linux, a logon task on Windows.
         #[arg(long)]
         autostart: bool,
+        /// Listen for other machines at IP:PORT, or at `auto:PORT` (the
+        /// default route's IPv4 address, resolved at each start), and publish
+        /// a host invitation. Without it the Forge is loopback-only.
+        #[arg(long, value_name = "ADDRESS", requires = "host_name")]
+        listen: Option<ListenAddress>,
+        /// The machine name host invitations carry.
+        #[arg(long, value_name = "NAME", requires = "listen")]
+        host_name: Option<String>,
     },
     Start {
         #[arg(long)]
@@ -378,8 +389,11 @@ pub fn run(cli: Cli) -> Result<()> {
             native_run_prompt_delivery,
             native_run_stream_after,
             autostart,
+            listen,
+            host_name,
         } => {
             require_installation(&layout)?;
+            let before = configuration_snapshot(&layout);
             setup_native(
                 &layout,
                 NativeSetupValues {
@@ -406,9 +420,13 @@ pub fn run(cli: Cli) -> Result<()> {
                     })?,
                 },
             )?;
+            match listen.zip(host_name) {
+                Some((listen, name)) => HostAccess::new(listen, name)?.write(&layout.root)?,
+                None => HostAccess::remove(&layout.root)?,
+            }
             delegate_installer(&layout, "repair", false)?;
             if autostart {
-                enable_autostart(&layout)?;
+                enable_autostart(&layout, configuration_snapshot(&layout) != before)?;
             }
             println!("Configured Forge");
             Ok(())
@@ -437,7 +455,7 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             open(&layout, origin.as_deref(), flow)
         }
-        Commands::Autostart { disable } => autostart(disable),
+        Commands::Autostart { disable } => autostart(&layout, disable),
         Commands::Update => delegate_installer(&layout, "update", false),
         Commands::Engine { database, command } => {
             engine_command(&layout, database.as_deref(), &command)
@@ -571,5 +589,18 @@ pub(super) fn native_launch_spec(layout: &Layout) -> Result<process::ForgeLaunch
     let manifest = require_launchable_installation(layout)?;
     let config = load_native_instance(layout)?;
     let credentials = credentials::provision_or_load(&layout.root)?;
-    process::ForgeLaunchSpec::new(&manifest, &config, &credentials)
+    let spec = process::ForgeLaunchSpec::new(&manifest, &config, &credentials)?;
+    match HostAccess::load(&layout.root)? {
+        Some(access) => Ok(spec.listening_on(access.listen().resolve()?)),
+        None => Ok(spec),
+    }
+}
+
+/// The configuration a running Forge was started with: its instance and
+/// host access files. Setup restarts a service Forge when they change.
+fn configuration_snapshot(layout: &Layout) -> [Option<Vec<u8>>; 2] {
+    [
+        fs::read(layout.native_instance_path()).ok(),
+        fs::read(HostAccess::path(&layout.root)).ok(),
+    ]
 }

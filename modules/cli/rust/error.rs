@@ -129,6 +129,10 @@ pub enum CliError {
     ForgeCustodyHeld { path: PathBuf },
     #[error("stale Forge readiness was preserved: {0}")]
     StaleReadiness(String),
+    #[error("host access: {0}")]
+    HostAccess(String),
+    #[error("Forge service: {0}")]
+    Service(String),
     #[error("Forge terminated during startup: {termination}")]
     ForgeTerminated { termination: ForgeTermination },
     #[error("native Forge lifecycle control is unsupported by this Forge")]

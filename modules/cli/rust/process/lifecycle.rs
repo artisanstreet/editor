@@ -17,13 +17,14 @@ use super::{
     OWNED_FORGE_ALREADY_RUNNING, OWNED_FORGE_READINESS_FAILURE, OWNED_FORGE_SHUTDOWN_FAILURE,
     OWNED_FORGE_START_FAILURE,
     receipt::{
-        BackgroundStartDecision, ReadinessFileRead, ReadinessFileSnapshot,
+        BackgroundStartDecision, ReadinessFileRead, ReadinessFileSnapshot, ReadinessReconcile,
         background_start_decision, detach, process_executable, read_readiness_file,
-        readiness_file_replaced, readiness_matches_child, sleep_until, wait_for_readiness_with,
+        readiness_file_replaced, readiness_matches_child, readiness_status,
+        reconcile_stale_readiness, sleep_until, wait_for_readiness_with,
     },
     spec::{
-        ForgeLaunchSpec, ForgeReadiness, StartResult, ensure_forge_executable, forge_command,
-        is_forbidden_environment_key,
+        ForgeLaunchSpec, ForgeReadiness, ForgeReadinessStatus, StartResult,
+        ensure_forge_executable, forge_command, is_forbidden_environment_key,
     },
 };
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -405,25 +406,73 @@ pub async fn start_owned_until(
     }
 }
 
-pub fn start(spec: &ForgeLaunchSpec, foreground: bool) -> Result<StartResult> {
-    start_until(spec, foreground, Instant::now() + FORGE_START_TIMEOUT)
-}
-
 pub fn start_until(
     spec: &ForgeLaunchSpec,
     foreground: bool,
     readiness_deadline: Instant,
 ) -> Result<StartResult> {
     if foreground {
-        start_foreground(spec)
+        supervise(spec, readiness_deadline, &mut |_| Ok(()))
     } else {
         spawn_background_forge(spec, readiness_deadline)
     }
 }
 
-fn start_foreground(spec: &ForgeLaunchSpec) -> Result<StartResult> {
+/// Runs the Forge in the foreground until it exits, as a service manager's
+/// main process does.
+///
+/// A readiness receipt left by a Forge that was killed is reconciled first
+/// (see [`super::reconcile_stale_readiness`]), so a restart after a crash
+/// is never blocked by it. Once the Forge publishes readiness, `on_ready`
+/// runs (for example to publish a host invitation); a failure there stops
+/// the Forge and is returned, so a supervisor restarts it.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when a live Forge already runs from this home, the
+/// Forge fails before readiness, `on_ready` fails, or the Forge exits
+/// unsuccessfully.
+pub fn supervise(
+    spec: &ForgeLaunchSpec,
+    readiness_deadline: Instant,
+    on_ready: &mut dyn FnMut(&ForgeReadiness) -> Result<()>,
+) -> Result<StartResult> {
     ensure_forge_executable(spec)?;
-    let status = forge_command(spec).status().map_err(io("start Forge"))?;
+    if let ReadinessReconcile::CleanedStale { pid } = reconcile_stale_readiness(
+        spec.readiness_path(),
+        spec.custody_path(),
+        spec.executable(),
+    )? {
+        eprintln!("removed the readiness receipt of exited Forge pid {pid}");
+    }
+    let mut child = forge_command(spec)
+        .stdin(Stdio::null())
+        .spawn()
+        .map_err(io("start Forge"))?;
+    let ready = wait_for_readiness_with(
+        &mut child,
+        spec.executable(),
+        spec.readiness_path(),
+        None,
+        readiness_deadline,
+        read_readiness_file,
+        process_executable,
+        sleep_until,
+    )
+    .and_then(
+        |_| match readiness_status(spec.readiness_path(), spec.executable()) {
+            ForgeReadinessStatus::Ready(readiness) => on_ready(&readiness),
+            ForgeReadinessStatus::Missing | ForgeReadinessStatus::Invalid => {
+                Err(CliError::ForgeReadinessTimeout)
+            }
+        },
+    );
+    if let Err(error) = ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    let status = child.wait().map_err(io("wait for Forge"))?;
     if status.success() {
         Ok(StartResult::ForegroundExited)
     } else {

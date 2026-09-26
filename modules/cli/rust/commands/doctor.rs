@@ -101,12 +101,16 @@ pub(super) fn doctor(
         payload::PayloadHealth::Unverifiable,
         |manifest: &InstallationManifest| payload::verify(&manifest.version_root()),
     );
+    let service = service_health(layout);
     // Repair never invents a Forge configuration. `ae setup` is the sole
     // explicit creator.
     let healthy = installation.is_ok()
         && protocol.is_ok()
         && instance_state.is_ok()
-        && !matches!(payload_health, payload::PayloadHealth::Modified(_));
+        && !matches!(payload_health, payload::PayloadHealth::Modified(_))
+        && service
+            .as_ref()
+            .is_none_or(|(state, _)| matches!(*state, "ok" | "absent"));
     if json {
         println!(
             "{}",
@@ -120,6 +124,7 @@ pub(super) fn doctor(
                     payload::PayloadHealth::Modified(issues) => issues.clone(),
                     _ => Vec::new(),
                 },
+                "service": service.as_ref().map(|(state, _)| *state),
             })
         );
     } else {
@@ -148,6 +153,14 @@ pub(super) fn doctor(
                 println!("warn: version payload (unverifiable: no payload manifest)");
             }
         }
+        if let Some((state, detail)) = &service {
+            let level = match *state {
+                "ok" => "ok",
+                "absent" => "warn",
+                _ => "error",
+            };
+            println!("{level}: forge service ({detail})");
+        }
     }
     if healthy {
         Ok(())
@@ -156,6 +169,58 @@ pub(super) fn doctor(
             "doctor found unresolved issues".into(),
         ))
     }
+}
+
+/// The Linux Forge service: its state (`ok`, `absent`, `drifted`,
+/// `foreign`, or `unavailable`) and a human detail. Other platforms have no
+/// service line.
+#[cfg(target_os = "linux")]
+fn service_health(layout: &Layout) -> Option<(&'static str, String)> {
+    use crate::service::{ForgeService, UnitFile, UserSystemctl};
+
+    let service = match ForgeService::for_current_user(&layout.root) {
+        Ok(service) => service,
+        Err(error) => return Some(("unavailable", error.to_string())),
+    };
+    let name = service.unit_name().to_owned();
+    Some(match service.inspect() {
+        Ok(UnitFile::Absent) => (
+            "absent",
+            format!("{name} is not installed; run `ae setup --autostart`"),
+        ),
+        Ok(UnitFile::Foreign) => (
+            "foreign",
+            format!(
+                "{} was not written for this installation",
+                service.unit_path().display()
+            ),
+        ),
+        Ok(UnitFile::Owned { current: false }) => (
+            "drifted",
+            format!("{name} no longer runs this installation; run `ae setup --autostart`"),
+        ),
+        Ok(UnitFile::Owned { current: true }) => {
+            let state = |known: Result<bool>, yes: &'static str, no: &'static str| match known {
+                Ok(true) => yes,
+                Ok(false) => no,
+                Err(_) => "unknown",
+            };
+            (
+                "ok",
+                format!(
+                    "{name} {}, {}",
+                    state(service.is_enabled(&UserSystemctl), "enabled", "disabled"),
+                    state(service.is_active(&UserSystemctl), "active", "inactive"),
+                ),
+            )
+        }
+        Err(error) => ("unavailable", error.to_string()),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+const fn service_health(_: &Layout) -> Option<(&'static str, String)> {
+    None
 }
 
 #[derive(Serialize)]

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use artisan_editor_cli::{
     CliError,
-    process::{ReadinessReconcile, reconcile_stale_readiness},
+    process::{ForgeReadiness, ReadinessReconcile, reconcile_stale_readiness},
 };
 
 /// A syntactically valid receipt naming a pid no live process can have.
@@ -148,4 +148,24 @@ fn a_symlinked_parent_refuses_and_preserves() {
     .expect_err("refused");
     assert!(error.to_string().contains("symbolic link"), "{error}");
     assert!(readiness.exists());
+}
+
+#[test]
+fn receipts_name_one_concrete_address_loopback_or_reachable() {
+    let receipt = |endpoint: &str| {
+        ForgeReadiness::new("artisan-forge-ready-v1", endpoint, "a".repeat(64), 42)
+    };
+    for valid in ["127.0.0.1:4317", "172.29.34.184:4433", "[fd00::2]:4433"] {
+        assert!(receipt(valid).is_ok(), "{valid}");
+    }
+    for invalid in [
+        "0.0.0.0:4433",
+        "127.0.0.1:0",
+        "127.0.0.1:04317",
+        "224.0.0.1:4433",
+        "localhost:4317",
+        "172.29.34.184",
+    ] {
+        assert!(receipt(invalid).is_err(), "{invalid}");
+    }
 }
