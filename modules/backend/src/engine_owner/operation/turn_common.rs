@@ -10,15 +10,18 @@ use artisan_transport::CancelHandle;
 
 use super::super::observation::EngineObservation;
 use super::super::process::{
-    ChildParts, CleanupObservation, RetainedEngine, StderrState, cleanup_after_abort,
+    ChildParts, CleanupObservation, RetainedEngine, START_DIAGNOSTIC_DRAIN, StartDiagnostic,
+    StderrCounter, StderrState, cleanup_after_abort,
 };
 use super::super::{EngineBounds, EngineLimits, InternalTurnInput};
-use super::core::{EngineOperationError, Execution, PreparedSession, SteerDelivery, TurnResult};
+use super::core::{
+    EngineOperationError, Execution, PreparedSession, StartRefusal, SteerDelivery, TurnResult,
+};
 pub(super) struct ConfiguredTurnRequest {
     pub(super) input: InternalTurnInput,
     pub(super) deadline: Instant,
     pub(super) control: Arc<CancelHandle>,
-    pub(super) prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    pub(super) prepared: oneshot::Sender<Result<PreparedSession, StartRefusal>>,
     pub(super) authorize: oneshot::Receiver<()>,
     pub(super) observations: mpsc::Sender<EngineObservation>,
     pub(super) respond: oneshot::Sender<TurnResult>,
@@ -27,10 +30,49 @@ pub(super) struct ConfiguredTurnRequest {
 
 impl ConfiguredTurnRequest {
     pub(super) fn fail(self, error: EngineOperationError) -> Execution {
-        let _ = self.prepared.send(Err(error.clone()));
+        self.fail_with_detail(error, None)
+    }
+
+    /// Fails before any child exists, keeping a typed start reason.
+    pub(super) fn fail_with_detail(
+        self,
+        error: EngineOperationError,
+        detail: Option<StartDiagnostic>,
+    ) -> Execution {
+        let refusal = StartRefusal {
+            error: error.clone(),
+            detail,
+        };
+        let _ = self.prepared.send(Err(refusal));
         let _ = self.respond.send(Err(error));
         Execution::Completed
     }
+}
+
+/// The engine's own sanitized reason for a failed start, when it gave one.
+///
+/// Only failures where the child exited or refused its session consult the
+/// retained stderr tail; cancellation, shutdown, deadlines, and settings
+/// failures report no detail. The tail is consumed either way.
+pub(super) async fn start_detail(
+    stderr: &mut StderrCounter,
+    error: &EngineOperationError,
+) -> Option<StartDiagnostic> {
+    let consult = matches!(
+        error,
+        EngineOperationError::SpawnFailed
+            | EngineOperationError::ReadinessFailed(_)
+            | EngineOperationError::HealthFailed(_)
+            | EngineOperationError::IncompatibleVersion
+            | EngineOperationError::ProviderRequestFailed
+            | EngineOperationError::StreamFailed
+            | EngineOperationError::FrameTooLarge
+    );
+    if !consult {
+        stderr.release_diagnostics();
+        return None;
+    }
+    stderr.start_diagnostic(START_DIAGNOSTIC_DRAIN).await
 }
 
 pub(super) struct ConfiguredRuntime {
@@ -113,6 +155,8 @@ pub(super) async fn wait_for_authorization(
     shutdown: &Arc<CancelHandle>,
     control: &Arc<CancelHandle>,
 ) -> Result<(), EngineOperationError> {
+    // The session is announced: a started run never retains stderr content.
+    parts.stderr_counter.release_diagnostics();
     loop {
         tokio::select! {
             biased;
@@ -212,16 +256,22 @@ pub(super) async fn finish_turn_result(
     }
 }
 
+/// Settles one failed start: the engine's sanitized reason (if any) rides
+/// on the prepared refusal, then the child is cleaned up as usual.
 pub(super) async fn finish_configured_start(
     request: ConfiguredTurnRequest,
-    parts: ChildParts,
+    mut parts: ChildParts,
     error: EngineOperationError,
     close_budget: Duration,
 ) -> Execution {
     let ConfiguredTurnRequest {
         prepared, respond, ..
     } = request;
-    let _ = prepared.send(Err(error.clone()));
+    let detail = start_detail(&mut parts.stderr_counter, &error).await;
+    let _ = prepared.send(Err(StartRefusal {
+        error: error.clone(),
+        detail,
+    }));
     finish_turn_result(parts, Err(error), respond, close_budget).await
 }
 
@@ -229,13 +279,14 @@ pub(super) async fn finish_configured_start(
 /// custody, mirroring the drive phase's retained-cleanup settlement.
 pub(super) fn finish_quarantined_open(
     request: ConfiguredTurnRequest,
-    error: EngineOperationError,
+    refusal: StartRefusal,
     retained: Box<RetainedEngine>,
 ) -> Execution {
     let ConfiguredTurnRequest {
         prepared, respond, ..
     } = request;
-    let _ = prepared.send(Err(error.clone()));
+    let error = refusal.error.clone();
+    let _ = prepared.send(Err(refusal));
     let _ = respond.send(Err(EngineOperationError::UnresolvedReapDuring {
         primary: Box::new(error),
     }));

@@ -23,7 +23,7 @@ use super::super::codex::write_codex_line;
 use super::super::observation::EngineObservation;
 use super::super::observation::TerminalState;
 use super::super::process::ChildParts;
-use super::super::process::RetainedEngine;
+use super::super::process::{RetainedEngine, StartDiagnostic};
 use super::super::socket::SocketTurnContext;
 use super::super::socket::adapter_for;
 use super::super::socket::codex_session::CodexDriveSession;
@@ -31,10 +31,10 @@ use super::super::socket::codex_session::CodexOpenSession;
 use super::core::EngineOperationError;
 use super::core::EngineTurnResult;
 use super::core::Execution;
-use super::core::PreparedSession;
 use super::core::SteerDelivery;
 use super::core::SteerError;
 use super::core::settle_steers_closed;
+use super::core::{PreparedSession, StartRefusal};
 use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::finish_quarantined_open;
@@ -150,18 +150,17 @@ pub(super) async fn execute_codex_turn(
         }
         EngineOpenOutcome::Failed {
             error,
-            custody: None,
-        } => {
-            return request.fail(map_codex_open_error(error));
-        }
-        EngineOpenOutcome::Failed {
-            error,
-            custody: Some(custody),
+            custody,
+            detail,
         } => {
             let error = map_codex_open_error(error);
-            return match custody.into_any().downcast::<RetainedEngine>() {
-                Ok(retained) => finish_quarantined_open(request, error, retained),
-                Err(_) => request.fail(error),
+            // The open already sanitized the detail; re-validate at the seam.
+            let detail = detail.as_deref().and_then(StartDiagnostic::from_text);
+            return match custody.map(|custody| custody.into_any().downcast::<RetainedEngine>()) {
+                Some(Ok(retained)) => {
+                    finish_quarantined_open(request, StartRefusal { error, detail }, retained)
+                }
+                _ => request.fail_with_detail(error, detail),
             };
         }
     };

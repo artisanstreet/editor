@@ -731,3 +731,60 @@ async fn configured_fixture_abrupt_exit_is_handled_and_bounded() {
     let shutdown = owner.shutdown().await;
     assert_eq!(shutdown, EngineOwnerShutdown::Joined);
 }
+
+// ---------------------------------------------------------------------------
+// Start diagnostics: the bounded stderr tail
+// ---------------------------------------------------------------------------
+
+/// Spawns the fixture scenario with piped stderr and waits for its exit.
+async fn exited_fixture_stderr(
+    scenario: &'static str,
+) -> (super::process::EngineChild, super::process::StderrCounter) {
+    let program = fixture_program_path();
+    let mut child =
+        super::process::spawn_configured_fixture_engine(&program, scenario, "fixture-secret")
+            .expect("fixture spawns");
+    let counter = super::process::StderrCounter::new(child.stderr.take(), 64 * 1024);
+    tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .expect("fixture exits")
+        .expect("exit observed");
+    (child, counter)
+}
+
+#[tokio::test]
+async fn failed_start_surfaces_only_the_sanitized_stderr_reason() {
+    let (_child, mut counter) = exited_fixture_stderr("stderr_error_then_exit").await;
+    assert!(counter.retains_diagnostics());
+    let detail = counter
+        .start_diagnostic(super::process::START_DIAGNOSTIC_DRAIN)
+        .await
+        .expect("the refusal reason surfaces");
+    assert_eq!(detail.as_str(), "something specific");
+    // The tail is consumed: nothing remains to be read twice.
+    assert!(!counter.retains_diagnostics());
+    assert!(
+        counter
+            .start_diagnostic(super::process::START_DIAGNOSTIC_DRAIN)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn started_child_retains_no_stderr() {
+    let (_child, mut counter) = exited_fixture_stderr("stderr_error_then_exit").await;
+    // Announcement releases the tail before any byte is read; later bytes
+    // are only counted, so a started run can never surface stderr.
+    counter.release_diagnostics();
+    while counter.state() == super::process::StderrState::Open {
+        let _ = counter.pump().await;
+    }
+    assert!(!counter.retains_diagnostics());
+    assert!(
+        counter
+            .start_diagnostic(super::process::START_DIAGNOSTIC_DRAIN)
+            .await
+            .is_none()
+    );
+}

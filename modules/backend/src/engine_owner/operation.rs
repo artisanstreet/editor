@@ -39,9 +39,11 @@ pub(crate) use self::core::{
     AcceptedCatalog, AcceptedLaunch, AcceptedPreflight, AcceptedTurn, CatalogOperationResult,
     EngineOperationError, EngineTurnResult, Execution, GenerationAllocator, HealthState, Job,
     LaunchAdmissionError, LaunchOutcome, LaunchResult, PreflightReap, PreflightReceipt,
-    PreflightResult, PreparedSession, STEER_CHANNEL_CAPACITY, SteerDelivery, SteerError,
-    TurnResult,
+    PreflightResult, PreparedSession, STEER_CHANNEL_CAPACITY, StartRefusal, SteerDelivery,
+    SteerError, TurnResult,
 };
+#[cfg(test)]
+pub(crate) use super::process::StartDiagnostic;
 
 // Steer helpers re-exported so the `engine_owner::operation::*` paths keep
 // resolving for the `#[path]` engine-owner suites.

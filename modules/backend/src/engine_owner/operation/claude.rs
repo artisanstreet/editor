@@ -121,9 +121,12 @@ pub(super) async fn execute_claude_turn(
     };
     let session_id = session.session_id().to_owned();
     let args = settings.spawn_args(&session);
-    let Ok(mut child) = spawn_claude_engine(launch.as_ref(), &request.input.project_root, &args)
-    else {
-        return request.fail(EngineOperationError::SpawnFailed);
+    let mut child = match spawn_claude_engine(launch.as_ref(), &request.input.project_root, &args) {
+        Ok(child) => child,
+        Err(error) => {
+            let detail = super::super::process::StartDiagnostic::for_spawn_error(&error);
+            return request.fail_with_detail(EngineOperationError::SpawnFailed, detail);
+        }
     };
     // The sole stdin lifeline is taken before any failure cleanup can run;
     // the prompt and every steer write borrow this exact handle, so cleanup's

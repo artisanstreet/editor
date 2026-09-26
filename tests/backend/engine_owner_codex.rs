@@ -740,7 +740,7 @@ async fn steer_text_without_channel_is_typed_unsupported() {
     // Cursor/grok/opencode2 turns never carry a sender: the attempt
     // resolves `Unsupported` without touching any pump or hanging.
     let (_prepared_tx, prepared_rx) = tokio::sync::oneshot::channel::<
-        Result<super::operation::PreparedSession, EngineOperationError>,
+        Result<super::operation::PreparedSession, super::operation::StartRefusal>,
     >();
     let (authorize_tx, authorize_rx) = tokio::sync::oneshot::channel::<()>();
     let (_obs_tx, obs_rx) = mpsc::channel(8);
@@ -776,7 +776,7 @@ async fn steer_text_future_holds_no_turn_borrow() {
         value
     }
     let (_prepared_tx, prepared_rx) = tokio::sync::oneshot::channel::<
-        Result<super::operation::PreparedSession, EngineOperationError>,
+        Result<super::operation::PreparedSession, super::operation::StartRefusal>,
     >();
     let (authorize_tx, _authorize_rx) = tokio::sync::oneshot::channel::<()>();
     let (_obs_tx, obs_rx) = mpsc::channel(8);
@@ -2724,9 +2724,10 @@ async fn codex_socket_open_maps_spawn_failure() {
                 EngineOpenOutcome::Failed {
                     error: EngineOpenError::SpawnFailed,
                     custody: None,
-                }
+                    detail: Some(ref detail),
+                } if detail == "its installation failed verification"
             ),
-            "spawn failure must map typed: {outcome:?}"
+            "spawn failure must map typed with its specific reason: {outcome:?}"
         );
     })
     .await
@@ -2788,6 +2789,7 @@ async fn codex_socket_open_rejects_foreign_resume_thread() {
                 EngineOpenOutcome::Failed {
                     error: EngineOpenError::ResumeRejected,
                     custody: None,
+                    ..
                 }
             ),
             "foreign resume thread must map typed: {outcome:?}"

@@ -62,7 +62,7 @@ struct PreparedConfiguredSession {
     input: super::super::InternalTurnInput,
     deadline: Instant,
     control: Arc<CancelHandle>,
-    prepared: oneshot::Sender<Result<PreparedSession, EngineOperationError>>,
+    prepared: oneshot::Sender<Result<PreparedSession, super::core::StartRefusal>>,
     authorize: oneshot::Receiver<()>,
     observations: mpsc::Sender<EngineObservation>,
     respond: oneshot::Sender<TurnResult>,
@@ -150,7 +150,7 @@ async fn prepare_configured_process(
     let Ok(secret) = HealthSecret::generate() else {
         return Err(request.fail(EngineOperationError::EntropyFailed));
     };
-    let Ok(mut child) = (match &request.input.launch {
+    let spawned = match &request.input.launch {
         crate::engine_owner::InternalLaunch::Verified(verified) => spawn_configured_engine(
             verified.as_ref(),
             &request.input.project_root,
@@ -176,8 +176,13 @@ async fn prepare_configured_process(
         crate::engine_owner::InternalLaunch::Cursor(_) => {
             return Err(request.fail(EngineOperationError::Configuration));
         }
-    }) else {
-        return Err(request.fail(EngineOperationError::SpawnFailed));
+    };
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            let detail = super::super::process::StartDiagnostic::for_spawn_error(&error);
+            return Err(request.fail_with_detail(EngineOperationError::SpawnFailed, detail));
+        }
     };
     let lifeline = LifelineWriter::take(&mut child);
     let maybe_stdout = child.stdout.take();

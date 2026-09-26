@@ -16,7 +16,9 @@ use artisan_database::{
 use artisan_domain::EngineId;
 use artisan_transport::CancelHandle;
 
-use crate::engine_owner::operation::{AcceptedTurn, EngineOperationError, PreparedSession};
+use crate::engine_owner::operation::{
+    AcceptedTurn, EngineOperationError, PreparedSession, StartRefusal,
+};
 
 use super::dispatch_support::{at_or_after, mint_patch_id};
 use super::{ClaimExecution, ClaimIds};
@@ -28,8 +30,9 @@ pub(super) enum StartFailure {
     NotAdmitted,
     /// The provider did not announce its session within the launch deadline.
     DeadlineElapsed(Duration),
-    /// The owner reported a typed startup failure.
-    Failed(EngineOperationError),
+    /// The owner reported a typed startup failure, with the engine's own
+    /// sanitized reason when it gave one.
+    Failed(StartRefusal),
 }
 
 /// Result of waiting for the provider to start.
@@ -62,21 +65,23 @@ pub(super) async fn await_provider_start(
     let deadline = tokio::time::Instant::now() + launch_deadline;
     let wait = tokio::select! {
         biased;
-        result = turn.prepare() => Wait::Prepared(result),
+        result = turn.prepare_with_detail() => Wait::Prepared(result),
         () = run_cancel.wait() => Wait::Stopped,
         () = tokio::time::sleep_until(deadline) => Wait::Elapsed,
     };
     let (prepared, stopped) = match wait {
         Wait::Prepared(result) => (Some(result), run_cancel.is_cancelled()),
         Wait::Stopped => (
-            tokio::time::timeout_at(deadline, turn.prepare()).await.ok(),
+            tokio::time::timeout_at(deadline, turn.prepare_with_detail())
+                .await
+                .ok(),
             true,
         ),
         Wait::Elapsed => (None, run_cancel.is_cancelled()),
     };
     match prepared {
         Some(Ok(session)) => ProviderStart::Started { session, stopped },
-        Some(Err(error)) => ProviderStart::Failed(StartFailure::Failed(error)),
+        Some(Err(refusal)) => ProviderStart::Failed(StartFailure::Failed(refusal)),
         None => ProviderStart::Failed(StartFailure::DeadlineElapsed(launch_deadline)),
     }
 }
@@ -102,7 +107,7 @@ fn format_deadline(deadline: Duration) -> String {
 /// Bounded run error code and reader-facing text for one startup failure.
 pub(super) fn describe(engine: EngineId, failure: &StartFailure) -> (&'static str, String) {
     let name = engine_name(engine);
-    let error = match failure {
+    let (error, detail) = match failure {
         StartFailure::NotAdmitted => {
             return (
                 "provider_start_failed",
@@ -118,8 +123,10 @@ pub(super) fn describe(engine: EngineId, failure: &StartFailure) -> (&'static st
                 ),
             );
         }
-        StartFailure::Failed(EngineOperationError::UnresolvedReapDuring { primary }) => primary,
-        StartFailure::Failed(error) => error,
+        StartFailure::Failed(StartRefusal { error, detail }) => match error {
+            EngineOperationError::UnresolvedReapDuring { primary } => (&**primary, detail),
+            error => (error, detail),
+        },
     };
     let cause = match error {
         EngineOperationError::Cancelled => {
@@ -146,10 +153,21 @@ pub(super) fn describe(engine: EngineId, failure: &StartFailure) -> (&'static st
         }
         _ => "its process failed during startup",
     };
-    (
-        "provider_start_failed",
-        format!("{name} failed to start: {cause}."),
-    )
+    // The engine's own (sanitized, bounded) reason replaces the generic
+    // cause whenever the owner observed one.
+    let message = match detail {
+        Some(detail) => {
+            let detail = detail.as_str();
+            let stop = if detail.ends_with(['.', '!', '?', '…']) {
+                ""
+            } else {
+                "."
+            };
+            format!("{name} failed to start: {detail}{stop}")
+        }
+        None => format!("{name} failed to start: {cause}."),
+    };
+    ("provider_start_failed", message)
 }
 
 /// Fails the launched run and its dispatch with the startup failure.
@@ -165,6 +183,16 @@ pub(super) async fn settle_unstarted_claim(
     failure: &StartFailure,
 ) {
     let (code, message) = describe(engine, failure);
+    if matches!(
+        failure,
+        StartFailure::Failed(StartRefusal {
+            detail: Some(_),
+            ..
+        })
+    ) {
+        // One already-sanitized line; raw stderr never reaches the log.
+        eprintln!("native run start failed: {message}");
+    }
     let (Ok(error_code), Ok(error_message), Ok(dispatch_reason)) = (
         RunErrorCode::parse(code.to_owned()),
         RunErrorMessage::parse(message.clone()),
@@ -210,7 +238,56 @@ mod tests {
 
     use artisan_domain::EngineId;
 
-    use super::{EngineOperationError, StartFailure, describe};
+    use super::{EngineOperationError, StartFailure, StartRefusal, describe};
+    use crate::engine_owner::operation::StartDiagnostic;
+
+    fn refused(error: EngineOperationError, stderr: &str) -> StartFailure {
+        StartFailure::Failed(StartRefusal {
+            error,
+            detail: StartDiagnostic::from_text(stderr),
+        })
+    }
+
+    #[test]
+    fn startup_failures_carry_the_engines_sanitized_reason() {
+        assert_eq!(
+            describe(
+                EngineId::Claude,
+                &refused(
+                    EngineOperationError::ProviderRequestFailed,
+                    "Error: Invalid session ID. Must be a valid UUID.\n",
+                )
+            ),
+            (
+                "provider_start_failed",
+                "Claude failed to start: Invalid session ID. Must be a valid UUID.".to_owned()
+            )
+        );
+        assert_eq!(
+            describe(
+                EngineId::Grok,
+                &StartFailure::Failed(StartRefusal {
+                    error: EngineOperationError::UnresolvedReapDuring {
+                        primary: Box::new(EngineOperationError::ReadinessFailed(
+                            crate::engine_owner::readiness::ReadinessError::Io
+                        )),
+                    },
+                    detail: StartDiagnostic::from_text("fatal: login required token=abc"),
+                })
+            )
+            .1,
+            "Grok failed to start: login required token=[redacted]."
+        );
+        // Without a detail the typed cause stays generic.
+        assert_eq!(
+            describe(
+                EngineId::Claude,
+                &StartFailure::Failed(EngineOperationError::ProviderRequestFailed.into())
+            )
+            .1,
+            "Claude failed to start: it exited or refused the session before announcing it."
+        );
+    }
 
     #[test]
     fn startup_failures_name_the_engine_and_the_cause() {
@@ -227,9 +304,12 @@ mod tests {
         assert_eq!(
             describe(
                 EngineId::Codex,
-                &StartFailure::Failed(EngineOperationError::UnresolvedReapDuring {
-                    primary: Box::new(EngineOperationError::SpawnFailed),
-                })
+                &StartFailure::Failed(
+                    EngineOperationError::UnresolvedReapDuring {
+                        primary: Box::new(EngineOperationError::SpawnFailed),
+                    }
+                    .into()
+                )
             ),
             (
                 "provider_start_failed",
@@ -239,7 +319,7 @@ mod tests {
         assert_eq!(
             describe(
                 EngineId::Claude,
-                &StartFailure::Failed(EngineOperationError::Cancelled)
+                &StartFailure::Failed(EngineOperationError::Cancelled.into())
             ),
             (
                 "provider_start_cancelled",

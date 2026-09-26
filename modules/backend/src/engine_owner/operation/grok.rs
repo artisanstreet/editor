@@ -22,6 +22,7 @@ use super::core::TurnResult;
 use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::phase_deadline;
+use super::turn_common::start_detail;
 
 /// Executes one finite Grok turn over `grok agent stdio` through the shared
 /// ACP core.
@@ -97,19 +98,23 @@ pub(super) async fn execute_grok_turn(
     else {
         return request.fail(EngineOperationError::SpawnFailed);
     };
-    let Ok(mut child) = acp_core::spawn_acp_child(
+    let mut child = match acp_core::spawn_acp_child(
         launch.executable_path().as_os_str(),
         &argv,
         Some(std::path::Path::new(request.input.project_root.as_str())),
         Some(&environment),
-    ) else {
-        return request.fail(EngineOperationError::SpawnFailed);
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            let detail = super::super::process::StartDiagnostic::for_spawn_error(&error);
+            return request.fail_with_detail(EngineOperationError::SpawnFailed, detail);
+        }
     };
     let Some(pipes) = child.take_pipes() else {
         let ConfiguredTurnRequest {
             prepared, respond, ..
         } = request;
-        let _ = prepared.send(Err(EngineOperationError::SpawnFailed));
+        let _ = prepared.send(Err(EngineOperationError::SpawnFailed.into()));
         return finish_grok_turn(
             child,
             Err(EngineOperationError::SpawnFailed),
@@ -139,7 +144,7 @@ pub(super) async fn execute_grok_turn(
         let ConfiguredTurnRequest {
             prepared, respond, ..
         } = request;
-        let _ = prepared.send(Err(EngineOperationError::Configuration));
+        let _ = prepared.send(Err(EngineOperationError::Configuration.into()));
         return finish_grok_turn(
             child,
             Err(EngineOperationError::Configuration),
@@ -162,8 +167,15 @@ pub(super) async fn execute_grok_turn(
     let initialize = match initialize {
         Ok(initialize) => initialize,
         Err(error) => {
-            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
-                .await;
+            return finish_grok_start(
+                &mut stderr_counter,
+                Some(transport),
+                child,
+                request,
+                error,
+                runtime.limits.close,
+            )
+            .await;
         }
     };
     let available: Vec<&str> = initialize.auth_methods.iter().map(String::as_str).collect();
@@ -173,6 +185,7 @@ pub(super) async fn execute_grok_turn(
         // No usable auth method is durable configuration state (the user
         // must sign in), not a transient provider failure.
         return finish_grok_start(
+            &mut stderr_counter,
             Some(transport),
             child,
             request,
@@ -189,8 +202,15 @@ pub(super) async fn execute_grok_turn(
         result = transport.authenticate(auth_method) => result.map_err(map_grok_acp_error),
     };
     if let Err(error) = authenticated {
-        return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
-            .await;
+        return finish_grok_start(
+            &mut stderr_counter,
+            Some(transport),
+            child,
+            request,
+            error,
+            runtime.limits.close,
+        )
+        .await;
     }
 
     // session/new or session/load -------------------------------------------
@@ -206,6 +226,7 @@ pub(super) async fn execute_grok_turn(
         let Some(validated) = grok_runtime::grok_resume_session_id(stored) else {
             let _ = transport.shutdown_writer().await;
             return finish_grok_start(
+                &mut stderr_counter,
                 Some(transport),
                 child,
                 request,
@@ -219,6 +240,7 @@ pub(super) async fn execute_grok_turn(
         else {
             let _ = transport.shutdown_writer().await;
             return finish_grok_start(
+                &mut stderr_counter,
                 Some(transport),
                 child,
                 request,
@@ -235,11 +257,19 @@ pub(super) async fn execute_grok_turn(
             result = transport.load_session(&resumed, cwd.as_str()) => result.map_err(map_grok_acp_error),
         };
         if let Err(error) = loaded {
-            return finish_grok_start(Some(transport), child, request, error, runtime.limits.close)
-                .await;
+            return finish_grok_start(
+                &mut stderr_counter,
+                Some(transport),
+                child,
+                request,
+                error,
+                runtime.limits.close,
+            )
+            .await;
         }
         if !grok_runtime::grok_loaded_session_is_stored(resumed.as_str(), stored) {
             return finish_grok_start(
+                &mut stderr_counter,
                 Some(transport),
                 child,
                 request,
@@ -261,6 +291,7 @@ pub(super) async fn execute_grok_turn(
             Ok(session) => session,
             Err(error) => {
                 return finish_grok_start(
+                    &mut stderr_counter,
                     Some(transport),
                     child,
                     request,
@@ -288,6 +319,8 @@ pub(super) async fn execute_grok_turn(
         // plumbing.
         steer_rx: _,
     } = request;
+    // The session is announced: a started run never retains stderr content.
+    stderr_counter.release_diagnostics();
     if prepared
         .send(Ok(PreparedSession::new(session.as_str().to_owned())))
         .is_err()
@@ -582,8 +615,11 @@ fn map_grok_acp_error(error: super::super::acp::AcpError) -> EngineOperationErro
 
 /// Runs the fixed pre-prompt teardown for a faulted Grok start and settles
 /// both owner channels: the stdin lifeline closes first so an EOF-clean
-/// agent can exit on its own, then the child reaps within the close budget.
+/// agent can exit on its own, the prepared refusal carries the agent's
+/// sanitized stderr reason (if any), then the child reaps within the close
+/// budget.
 async fn finish_grok_start(
+    stderr_counter: &mut StderrCounter,
     transport: Option<
         super::super::acp::AcpTransport<tokio::process::ChildStdout, tokio::process::ChildStdin>,
     >,
@@ -598,7 +634,11 @@ async fn finish_grok_start(
     let ConfiguredTurnRequest {
         prepared, respond, ..
     } = request;
-    let _ = prepared.send(Err(error.clone()));
+    let detail = start_detail(stderr_counter, &error).await;
+    let _ = prepared.send(Err(super::core::StartRefusal {
+        error: error.clone(),
+        detail,
+    }));
     finish_grok_turn(child, Err(error), respond, close_budget).await
 }
 
