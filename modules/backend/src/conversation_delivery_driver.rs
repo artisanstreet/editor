@@ -66,6 +66,9 @@ pub(crate) struct ConversationDeliveryDriver {
     /// The recent threads last served or pushed, once the connection read
     /// them.
     recent: Option<DeliveredRecentThreads>,
+    /// The project catalog last served or pushed, once the connection
+    /// listed the projects.
+    projects: Option<artisan_domain::ProjectListing>,
 }
 
 /// The host state last pushed to this connection and the host-state
@@ -109,6 +112,7 @@ impl ConversationDeliveryDriver {
             run_usage: BTreeMap::new(),
             host: DeliveredHostState::default(),
             recent: None,
+            projects: None,
         }
     }
 
@@ -157,6 +161,9 @@ impl ConversationDeliveryDriver {
                 listing,
             });
         }
+        if let Some(listing) = outcome.follow_up.project_catalog {
+            self.projects = Some(listing);
+        }
 
         if let Some(subscription) = outcome.activation {
             let thread_id = subscription.lease().thread_id().clone();
@@ -178,6 +185,7 @@ impl ConversationDeliveryDriver {
         // Every request looks for a host-state change; the first one also
         // pushes the current usage.
         self.deliver_host_state(stamp, limit, cancel).await?;
+        self.deliver_project_catalog(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
@@ -222,6 +230,7 @@ impl ConversationDeliveryDriver {
             self.active.insert(thread_id, subscription);
         }
         self.deliver_host_state(stamp, limit, cancel).await?;
+        self.deliver_project_catalog(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
@@ -556,6 +565,7 @@ impl ConversationDeliveryDriver {
         self.titles.clear();
         self.run_usage.clear();
         self.recent = None;
+        self.projects = None;
         writer_result
     }
 

@@ -1087,6 +1087,12 @@ impl RequestHandler {
         if response.is_ok() {
             self.wake_message_outbox(command);
             self.wake_preferences(command);
+            // A catalog change reaches connections that listed the projects.
+            if matches!(command, Command::AttachProject(_))
+                && let Some(notifier) = &self.conversation_commit_notifier
+            {
+                notifier.wake_any();
+            }
         }
         response
     }

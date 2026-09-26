@@ -15,7 +15,7 @@
 //! only [`PartialEq`]. Every exhaustive `match` on this enum names the
 //! engine arm explicitly; no wildcard may hide it.
 
-use crate::model::{ProjectSummary, QueuedMessage, ThreadSummary};
+use crate::model::{ProjectListing, ProjectSummary, QueuedMessage, ThreadSummary};
 use crate::observation::Observation;
 use crate::time::UnixMillis;
 use crate::{
@@ -88,6 +88,9 @@ pub enum Event {
     /// The recent threads across every project changed; pushed to a
     /// connection that read them.
     RecentThreads(RecentThreadListing),
+    /// The attached-project catalog changed; pushed to a connection that
+    /// listed the projects.
+    ProjectCatalog(ProjectListing),
 }
 
 /// A subscribed thread's display title changed: the generated title was

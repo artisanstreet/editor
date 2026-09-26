@@ -85,6 +85,35 @@ fn pushed_recent_threads_round_trip() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn pushed_project_catalog_round_trips() -> Result<(), Box<dyn Error>> {
+    use artisan_domain::{ProjectListing, ProjectSummary, RootPath};
+    let project = |id: &str, name: &str| -> Result<ProjectSummary, Box<dyn Error>> {
+        Ok(ProjectSummary {
+            project_id: ProjectId::parse(id)?,
+            display_name: DisplayName::parse(name)?,
+            root_path: RootPath::parse(format!("/srv/{id}"))?,
+            attached_at: UnixMillis::from_millis(7),
+        })
+    };
+    for projects in [
+        Vec::new(),
+        vec![
+            project("project-a", "editor")?,
+            project("project-b", "scratch")?,
+        ],
+    ] {
+        round_trip(
+            WireEnvelopeBody::Event(ServerEvent {
+                cursor: EventCursor::new(5)?,
+                event: Event::ProjectCatalog(ProjectListing::new(projects)?),
+            }),
+            "project-catalog-push",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn recent_threads_are_bounded_and_unique() {
     let rows = (0..=RECENT_THREADS_MAX)
         .map(|index| row(&format!("thread-{index}"), "project", "project", Some(1)))

@@ -31,19 +31,41 @@ pub(crate) fn encode_project_listing_response(
     builder: artisan_capnp::response::Builder<'_>,
     listing: &ProjectListing,
 ) -> Result<(), ProtocolEncodeError> {
-    let mut projects = builder.init_project_list().init_projects(list_length(
-        "response.projectList.projects",
-        listing.projects().len(),
-    )?);
+    encode_project_list(builder.init_project_list(), listing)
+}
+
+/// Encodes one project catalog, shared by the answer and the push.
+pub(crate) fn encode_project_list(
+    builder: artisan_capnp::project_list::Builder<'_>,
+    listing: &ProjectListing,
+) -> Result<(), ProtocolEncodeError> {
+    let field = "projectList.projects";
+    let mut projects = builder.init_projects(list_length(field, listing.projects().len())?);
     for (index, project) in listing.projects().iter().enumerate() {
-        encode_project(
-            projects
-                .reborrow()
-                .get(list_index("response.projectList.projects", index)?),
-            project,
-        );
+        encode_project(projects.reborrow().get(list_index(field, index)?), project);
     }
     Ok(())
+}
+
+/// Decodes one project catalog after checking its bound.
+pub(crate) fn decode_project_list(
+    value: artisan_capnp::project_list::Reader<'_>,
+) -> Result<ProjectListing, ProtocolDecodeError> {
+    let projects = value.get_projects()?;
+    let count = projects.len() as usize;
+    if count > PROJECT_LISTING_MAX_PROJECTS {
+        return Err(ProtocolDecodeError::ProjectListing {
+            source: ProjectListingError::TooManyProjects {
+                count,
+                maximum: PROJECT_LISTING_MAX_PROJECTS,
+            },
+        });
+    }
+    let decoded = projects
+        .iter()
+        .map(decode_project)
+        .collect::<Result<Vec<_>, _>>()?;
+    ProjectListing::new(decoded).map_err(|source| ProtocolDecodeError::ProjectListing { source })
 }
 
 pub(crate) fn encode_lifecycle_response(
@@ -147,6 +169,9 @@ pub(crate) fn encode_event(
         .map_err(|_| ProtocolEncodeError::ComposerState)?,
         Event::RecentThreads(listing) => {
             encode_recent_threads(builder.reborrow().init_recent_threads(), listing)?;
+        }
+        Event::ProjectCatalog(listing) => {
+            encode_project_list(builder.reborrow().init_project_catalog(), listing)?;
         }
     }
     Ok(())
@@ -388,6 +413,9 @@ pub(crate) fn decode_event(
         ),
         event::Which::RecentThreads(listing) => {
             Event::RecentThreads(decode_recent_threads(listing?)?)
+        }
+        event::Which::ProjectCatalog(listing) => {
+            Event::ProjectCatalog(decode_project_list(listing?)?)
         }
     };
     Ok(ServerEvent { cursor, event })

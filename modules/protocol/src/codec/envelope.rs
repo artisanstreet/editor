@@ -805,24 +805,7 @@ pub(crate) fn decode_response(
             ResponsePayload::DirectoryListing(decode_directory_listing(listing?)?)
         }
         response::Which::ProjectList(listing) => {
-            let projects = listing?.get_projects()?;
-            let project_count = projects.len() as usize;
-            if project_count > PROJECT_LISTING_MAX_PROJECTS {
-                return Err(ProtocolDecodeError::ProjectListing {
-                    source: ProjectListingError::TooManyProjects {
-                        count: project_count,
-                        maximum: PROJECT_LISTING_MAX_PROJECTS,
-                    },
-                });
-            }
-            let decoded = projects
-                .iter()
-                .map(decode_project)
-                .collect::<Result<Vec<_>, _>>()?;
-            ResponsePayload::ProjectListing(
-                ProjectListing::new(decoded)
-                    .map_err(|source| ProtocolDecodeError::ProjectListing { source })?,
-            )
+            ResponsePayload::ProjectListing(decode_project_list(listing?)?)
         }
         response::Which::AttachedProject(result) => {
             let result = result?;

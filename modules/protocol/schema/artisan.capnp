@@ -1118,6 +1118,11 @@ struct Event {
     # to a connection that read them (replaces the Editor's listing
     # polling). Fresh member @10.
     recentThreads @10 :RecentThreadList;
+
+    # The attached-project catalog, pushed whenever a project is attached,
+    # renamed, or removed to a connection that listed the projects. Fresh
+    # member @11.
+    projectCatalog @11 :ProjectList;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first

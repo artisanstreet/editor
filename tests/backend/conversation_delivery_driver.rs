@@ -2253,3 +2253,109 @@ async fn recent_threads_are_pushed_to_a_connection_that_read_them() -> Result<()
     app.shutdown().await?;
     Ok(())
 }
+
+/// A connection that listed the projects receives the catalog again when
+/// another client attaches one, and nothing when it did not change.
+#[tokio::test]
+async fn project_catalog_is_pushed_to_a_connection_that_listed_it() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    seed_project_thread_and_message(&repository).await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+        let listed = request_once(
+            &connection,
+            "delivery-list-projects",
+            ClientRequest::Query(artisan_domain::Query::ListAttachedProjects(
+                artisan_domain::ListAttachedProjects,
+            )),
+        )
+        .await?;
+        assert!(
+            matches!(listed, ResponsePayload::ProjectListing(ref listing) if listing.projects().len() == 1)
+        );
+
+        repository
+            .attach_project(AttachProjectInput {
+                request_id: RequestId::parse("delivery-second-project-request")?,
+                directory_id: artisan_domain::DirectoryId::parse("delivery-second-directory")?,
+                project_id: ProjectId::parse("delivery-second-project")?,
+                root_path: RootPath::parse("C:/repos/second")?,
+                display_name: DisplayName::parse("Second")?,
+                attached_at: UnixMillis::from_millis(950),
+            })
+            .await?;
+        notifier.wake_any();
+        let mut delivery = tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        let frame = receive_delivery_frame(&mut delivery).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the catalog event".into());
+        };
+        let Event::ProjectCatalog(catalog) = event.event else {
+            return Err("expected the project catalog".into());
+        };
+        assert!(
+            catalog
+                .projects()
+                .iter()
+                .any(|project| project.project_id.as_str() == "delivery-second-project")
+        );
+        notifier.wake_any();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery),
+            )
+            .await
+            .is_err(),
+            "an unchanged catalog is not pushed again"
+        );
+        cancel.cancel();
+        drop(delivery);
+        drop(control_send);
+        drop(control_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery project catalog test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}

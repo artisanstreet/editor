@@ -1,10 +1,11 @@
-//! Recent-threads delivery: a connection that read the recent threads
-//! receives them again whenever what they show changes.
+//! Recent-threads and project-catalog delivery: a connection that read the
+//! recent threads, or listed the projects, receives them again whenever they
+//! change.
 
 use std::time::Duration;
 
 use artisan_database::RecentThreadsFingerprint;
-use artisan_domain::{ConversationRequest, Event, RecentThreadListing, ThreadId};
+use artisan_domain::{ConversationRequest, Event, ProjectListing, RecentThreadListing, ThreadId};
 use artisan_protocol::{ClientRequest, ProtocolFailure, ResponsePayload, ServerResponse};
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
@@ -20,6 +21,9 @@ pub(crate) struct RequestFollowUp {
     /// The recent threads a read served: the connection now receives their
     /// changes.
     pub(crate) recent_threads: Option<RecentThreadListing>,
+    /// The project catalog a listing served: the connection now receives
+    /// its changes.
+    pub(crate) project_catalog: Option<ProjectListing>,
 }
 
 impl RequestFollowUp {
@@ -34,16 +38,19 @@ impl RequestFollowUp {
             }
             _ => None,
         };
-        let recent_threads = match answered {
-            Ok(ServerResponse {
-                payload: ResponsePayload::RecentThreads(listing),
-                ..
-            }) => Some(listing.clone()),
+        let payload = answered.as_ref().ok().map(|response| &response.payload);
+        let recent_threads = match payload {
+            Some(ResponsePayload::RecentThreads(listing)) => Some(listing.clone()),
+            _ => None,
+        };
+        let project_catalog = match payload {
+            Some(ResponsePayload::ProjectListing(listing)) => Some(listing.clone()),
             _ => None,
         };
         Self {
             stopped_thread,
             recent_threads,
+            project_catalog,
         }
     }
 }
@@ -110,6 +117,39 @@ impl ConversationDeliveryDriver {
             subtitle_generation,
             listing,
         });
+        Ok(())
+    }
+
+    /// Pushes the project catalog when it changed since this connection
+    /// last received it; nothing before the connection listed the projects.
+    /// The catalog is a handful of rows, so it is read and compared whole.
+    pub(super) async fn deliver_project_catalog<F>(
+        &mut self,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        if self.projects.is_none() {
+            return Ok(());
+        }
+        let repository = self.context.repository().clone();
+        let listing = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.list_projects(),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        if self.projects.as_ref() == Some(&listing) {
+            return Ok(());
+        }
+        let event = Event::ProjectCatalog(listing.clone());
+        self.send_state_event(event, stamp, limit, cancel).await?;
+        self.projects = Some(listing);
         Ok(())
     }
 }

@@ -441,7 +441,8 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)
-            | artisan_domain::Event::FirstMessageQueued(_) => Err(ServiceFailure::new(
+            | artisan_domain::Event::FirstMessageQueued(_)
+            | artisan_domain::Event::ProjectCatalog(_) => Err(ServiceFailure::new(
                 ServiceFailureStage::Delivery,
                 ServiceFailureCategory::Integrity,
             )),
