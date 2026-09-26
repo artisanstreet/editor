@@ -105,6 +105,42 @@ the first download at least guarantees that a version never silently changes aft
   or "trusted on first download (hash recorded <date>)", and Settings shows the same on the
   engine's Installation section.
 
+## Archive policy
+
+Archives are extracted only after their bytes are verified, by a script-free tar parser bounded
+by a per-engine policy in the catalog, sized from the real vendor artifacts (inventoried
+2026-09-26) with headroom:
+
+| Engine | Real archive | Expanded bound | Entries | Name bytes | Metadata |
+| --- | --- | --- | --- | --- | --- |
+| Codex | `0.157.1-linux-x64`: 46 files, 391,130,194 bytes, longest name 103 (ustar prefix); empty owner fields | 1 GiB | 512 | 255 | PAX (npm) |
+| Cursor Agent | `2026.09.26-dd393fe` linux-x64: 454 files, 125 directories, 52 GNU long names, 583,125,383 bytes, longest name 132; padded to the 10 KiB tar record | 1.5 GiB | 4096 | 512 | GNU long names |
+| OpenCode2 | `0.0.0-beta-19271`: 2 files, 210,120,955 bytes | 512 MiB | 1024 | 255 | PAX (npm) |
+
+Regular files and directories are the only members ever created; links, devices, FIFOs, and
+metadata forms outside the policy are rejected (none of these archives contains a link), so
+extraction can never be redirected outside the staging directory. Names must be relative and
+normalized and may not collide case-insensitively. Every rejection is a typed reason carrying
+its limit and the archive member, for example `too_many_entries: 632 entries, limit 512`,
+`expanded_too_large: … bytes, limit …`, `unsupported_entry: symlink package/bin/x`,
+`name_too_long`, `unsafe_name`, `name_collision`, `archive_malformed: checksum of entry 3`,
+`archive_truncated`, `archive_trailing_data`.
+
+Opt-in tests install the real archives and run `--version` of the result:
+`ARTISAN_REAL_ENGINE_ARCHIVES=<dir> cargo test -p artisan-native-engine real_artifact`, with
+`<dir>` holding `codex-<version>-linux-x64.tgz` and `cursor-<version>-linux-x64.tar.gz`.
+
+## Install failures
+
+A failed install (anything except another holder of the install lock) is recorded in
+`toolchain/<engine>/install-failure.json`: the reason code, its detail, the version, the number
+of consecutive failed attempts, and when. A successful install removes it. `ae engine
+list|status` and the Editor status show `failed: <detail>` for an engine without a usable
+install (and "last update failed" beside a ready version) instead of "not installed"; `ae
+engine install` prints the detail and exits with status 4. The Forge retries a failed engine
+one minute after the first failure, doubling per attempt up to the six-hour update interval
+(an engine held at an installed version is only retried on request).
+
 ## Layout
 
 Everything lives beside the Forge database (the Forge state directory):
@@ -115,6 +151,7 @@ Everything lives beside the Forge database (the Forge state directory):
   use.lock                shared by every running engine process; a switch needs it exclusively
   state.json              active generation, up to 3 previous, optional pending (atomic replace)
   selection.json          "latest" or one exact version (atomic replace; missing = latest)
+  install-failure.json    last failed install: reason, detail, attempts (removed on success)
   versions/
     generation-<32 hex>/  one verified install (executable path, size, SHA-256 recorded in state)
     staging-<32 hex>/     in-progress install, removed by the next install
@@ -157,7 +194,8 @@ only reach a Forge started by systemd or `forge-host`.
 
 - at startup it installs every supported engine's selection (`latest` by default) in the
   background, publishing `installing` with download progress, then `ready vX` or `failed` with a
-  reason; unsupported engines report `unsupported` with the vendor reason;
+  reason; unsupported engines report `unsupported` with the vendor reason; a failed engine is
+  retried with backoff (see "Install failures");
 - every 6 hours it re-reads the vendor feed; engines following `latest` install the newer release
   as a new generation, engines held at a version are left alone;
 - every minute it activates `pending` generations whose engine is idle;

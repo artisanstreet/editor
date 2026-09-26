@@ -233,8 +233,31 @@ pub struct ArtifactPlan {
     pub layout: Layout,
     /// Maximum accepted download size in bytes.
     pub download_bound_bytes: u64,
-    /// Maximum total expanded archive size in bytes.
+}
+
+/// What one vendor archive may contain, sized from the real artifacts with
+/// headroom. Anything outside it fails with a typed archive error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArchivePolicy {
+    /// Maximum total size of the regular members in bytes.
     pub expanded_bound_bytes: u64,
+    /// Maximum number of tar headers, metadata headers included.
+    pub max_entries: u64,
+    /// Maximum member name length in bytes.
+    pub max_name_bytes: usize,
+    /// Which metadata entries the vendor's tar writer uses. Regular files
+    /// and directories are always accepted; links, devices, and FIFOs never
+    /// are, so extraction can never be redirected outside the generation.
+    pub entry_types: ArchiveEntryTypes,
+}
+
+/// Metadata entry forms an archive may use for long member names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArchiveEntryTypes {
+    /// PAX extended headers (`path` and `size` records), as npm writes them.
+    pub pax_headers: bool,
+    /// GNU `././@LongLink` long names, as GNU tar writes them.
+    pub gnu_long_names: bool,
 }
 
 /// How an engine's downloads are verified.
@@ -330,6 +353,7 @@ pub enum Layout {
     TarMember {
         member: &'static str,
         binary: &'static str,
+        archive: ArchivePolicy,
     },
     /// Every regular file below `strip` is extracted; `entry` is the
     /// executable and `tool_dirs` are prepended to the engine `PATH`.
@@ -337,6 +361,7 @@ pub enum Layout {
         strip: &'static str,
         entry: &'static str,
         tool_dirs: &'static [&'static str],
+        archive: ArchivePolicy,
     },
 }
 
@@ -347,6 +372,15 @@ impl Layout {
         match self {
             Self::SingleBinary { binary } | Self::TarMember { binary, .. } => binary,
             Self::TarTree { entry, .. } => entry,
+        }
+    }
+
+    /// Returns the archive policy of an archive layout.
+    #[must_use]
+    pub const fn archive(self) -> Option<ArchivePolicy> {
+        match self {
+            Self::SingleBinary { .. } => None,
+            Self::TarMember { archive, .. } | Self::TarTree { archive, .. } => Some(archive),
         }
     }
 
@@ -362,6 +396,47 @@ impl Layout {
 }
 
 const MIB: u64 = 1024 * 1024;
+
+/// `@openai/codex@<v>-<platform>` npm tarballs. `0.157.1-linux-x64`
+/// (2026-09-26): 46 regular files, no directories or links, 391,130,194
+/// bytes expanded (the `codex` binary alone 285,340,072), longest name 103
+/// bytes through the ustar prefix; npm writes empty owner fields and PAX
+/// headers for names that do not fit ustar.
+const CODEX_ARCHIVE: ArchivePolicy = ArchivePolicy {
+    expanded_bound_bytes: 1024 * MIB,
+    max_entries: 512,
+    max_name_bytes: 255,
+    entry_types: ArchiveEntryTypes {
+        pax_headers: true,
+        gnu_long_names: false,
+    },
+};
+
+/// Cursor's `agent-cli-package.tar.gz`, written by GNU tar.
+/// `2026.09.26-dd393fe` linux-x64: 631 headers (454 files, 125 directories,
+/// 52 GNU long names), no links, 583,125,383 bytes expanded, longest name
+/// 132 bytes, zero padding to the 10 KiB tar record.
+const CURSOR_ARCHIVE: ArchivePolicy = ArchivePolicy {
+    expanded_bound_bytes: 1536 * MIB,
+    max_entries: 4096,
+    max_name_bytes: 512,
+    entry_types: ArchiveEntryTypes {
+        pax_headers: false,
+        gnu_long_names: true,
+    },
+};
+
+/// `@opencode-ai/cli-windows-x64` npm tarballs; only one member is taken.
+/// `0.0.0-beta-19271`: 2 regular files, 210,120,955 bytes expanded.
+const OPENCODE2_ARCHIVE: ArchivePolicy = ArchivePolicy {
+    expanded_bound_bytes: 512 * MIB,
+    max_entries: 1024,
+    max_name_bytes: 255,
+    entry_types: ArchiveEntryTypes {
+        pax_headers: true,
+        gnu_long_names: false,
+    },
+};
 
 const fn claude_distribution(platform: HostPlatform) -> Distribution {
     let (platform_key, binary) = match platform {
@@ -385,7 +460,6 @@ const fn claude_distribution(platform: HostPlatform) -> Distribution {
         integrity: Integrity::VendorDigest,
         layout: Layout::SingleBinary { binary },
         download_bound_bytes: 512 * MIB,
-        expanded_bound_bytes: 512 * MIB,
     })
 }
 
@@ -437,9 +511,9 @@ const fn codex_distribution(platform: HostPlatform) -> Distribution {
             strip: "package/",
             entry,
             tool_dirs,
+            archive: CODEX_ARCHIVE,
         },
         download_bound_bytes: 512 * MIB,
-        expanded_bound_bytes: 1024 * MIB,
     })
 }
 
@@ -456,9 +530,9 @@ const fn opencode2_distribution(platform: HostPlatform) -> Distribution {
             layout: Layout::TarMember {
                 member: "package/bin/opencode2.exe",
                 binary: "opencode2.exe",
+                archive: OPENCODE2_ARCHIVE,
             },
             download_bound_bytes: 256 * MIB,
-            expanded_bound_bytes: 512 * MIB,
         }),
         _ => Distribution::Unsupported(UnsupportedReason::NoVendorBuild),
     }
@@ -483,7 +557,6 @@ const fn grok_distribution(platform: HostPlatform) -> Distribution {
         integrity: Integrity::TrustOnFirstDownload,
         layout: Layout::SingleBinary { binary },
         download_bound_bytes: 512 * MIB,
-        expanded_bound_bytes: 512 * MIB,
     })
 }
 
@@ -507,9 +580,9 @@ const fn cursor_distribution(platform: HostPlatform) -> Distribution {
             strip: "dist-package/",
             entry: "cursor-agent",
             tool_dirs: &[],
+            archive: CURSOR_ARCHIVE,
         },
         download_bound_bytes: 512 * MIB,
-        expanded_bound_bytes: 1024 * MIB,
     })
 }
 
@@ -527,7 +600,10 @@ mod tests {
                 match engine.distribution(platform) {
                     Distribution::Supported(plan) => {
                         assert!(plan.download_bound_bytes > 0);
-                        assert!(plan.expanded_bound_bytes >= plan.download_bound_bytes / 2);
+                        if let Some(archive) = plan.layout.archive() {
+                            assert!(archive.expanded_bound_bytes >= plan.download_bound_bytes);
+                            assert!(archive.max_entries > 0 && archive.max_name_bytes >= 100);
+                        }
                         let entry = plan.layout.entry();
                         assert!(!entry.is_empty() && !entry.starts_with('/'));
                         assert!(!entry.split('/').any(|part| part == ".." || part.is_empty()));
@@ -591,6 +667,47 @@ mod tests {
             ManagedEngine::Cursor.distribution(HostPlatform::WindowsX64),
             Distribution::Unsupported(UnsupportedReason::ArchiveFormat)
         );
+    }
+
+    #[test]
+    fn archive_policies_fit_the_real_vendor_archives_with_headroom() {
+        // (engine, headers, expanded bytes, longest name) of the archives
+        // inventoried on 2026-09-26.
+        for (engine, platform, headers, expanded, name) in [
+            (
+                ManagedEngine::Codex,
+                HostPlatform::LinuxX64,
+                46,
+                391_130_194,
+                103,
+            ),
+            (
+                ManagedEngine::Cursor,
+                HostPlatform::LinuxX64,
+                631,
+                583_125_383,
+                132,
+            ),
+            (
+                ManagedEngine::OpenCode2,
+                HostPlatform::WindowsX64,
+                2,
+                210_120_955,
+                25,
+            ),
+        ] {
+            let Distribution::Supported(plan) = engine.distribution(platform) else {
+                panic!("{engine} is supported on {platform:?}");
+            };
+            let policy = plan.layout.archive().unwrap();
+            assert!(policy.max_entries >= headers * 4, "{engine}");
+            assert!(policy.expanded_bound_bytes >= expanded * 2, "{engine}");
+            assert!(policy.max_name_bytes >= name * 2, "{engine}");
+        }
+        let codex = CODEX_ARCHIVE.entry_types;
+        assert!(codex.pax_headers && !codex.gnu_long_names);
+        let cursor = CURSOR_ARCHIVE.entry_types;
+        assert!(cursor.gnu_long_names && !cursor.pax_headers);
     }
 
     #[test]

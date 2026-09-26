@@ -14,7 +14,8 @@
 //!   documents;
 //! - `authority` owns inspection and verified active-generation resolution;
 //! - `archive`, `pipeline`, and `operations` install, switch, roll back, and
-//!   list versions;
+//!   list versions; `failure` records the last failed install for status and
+//!   retry;
 //! - `launch` resolves spawn targets and builds the engine environment;
 //! - `opencode2` is the engine-fixed façade used by `OpenCode2` profiles.
 
@@ -24,6 +25,8 @@ mod archive;
 mod authority;
 #[path = "install/catalog.rs"]
 mod catalog;
+#[path = "install/failure.rs"]
+mod failure;
 #[path = "install/feed.rs"]
 mod feed;
 #[path = "install/launch.rs"]
@@ -50,9 +53,10 @@ mod version;
 pub use archive::ArchiveError;
 pub use authority::{EngineInspection, ManagedEngineAuthority, ResolvedGeneration};
 pub use catalog::{
-    ArtifactPlan, Distribution, Feed, HostPlatform, Integrity, Layout, ManagedEngine,
-    UnsupportedReason, VersionFilter,
+    ArchiveEntryTypes, ArchivePolicy, ArtifactPlan, Distribution, Feed, HostPlatform, Integrity,
+    Layout, ManagedEngine, UnsupportedReason, VersionFilter,
 };
+pub use failure::{InstallFailure, read_install_failure};
 pub use feed::{ArtifactDigest, FeedError, FeedRequest, ReleaseArtifact, versions_listed};
 pub use launch::{
     LaunchSource, LaunchTarget, SeatedLaunch, apply_managed_environment, build_environment,

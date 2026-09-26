@@ -6,7 +6,9 @@
 //! is blocking and bounded). At start it installs each supported engine's
 //! selected version; afterwards it checks the vendor for a newer `latest`
 //! every [`UPDATE_INTERVAL`] (only for engines that follow `latest`) and
-//! activates pending generations once their engine is idle. Editor requests
+//! activates pending generations once their engine is idle. A failed install
+//! is recorded on disk (so `ae engine` reports it too) and retried with
+//! backoff, from one minute up to the update interval. Editor requests
 //! (select a version, roll back, list versions) are queued to the same
 //! thread, so operations never race. Status changes are published through a
 //! watch channel that the connection push path observes.
@@ -25,8 +27,8 @@ use artisan_domain::{
 };
 use artisan_native_engine::{
     EngineInspection, EngineOperations, EngineSelection, EngineVersion, HttpsTransport,
-    InstallError, InstallProgress, Integrity, ManagedEngine, ManagedEngineAuthority,
-    ReleaseTransport, read_trust_records, record_for,
+    InstallError, InstallFailure, InstallProgress, Integrity, ManagedEngine,
+    ManagedEngineAuthority, ReleaseTransport, read_install_failure, read_trust_records, record_for,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -46,7 +48,7 @@ enum ManagerCommand {
 }
 
 /// A refused engine request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EngineManagerError {
     UnknownEngine,
     InvalidSelection,
@@ -56,7 +58,7 @@ pub(crate) enum EngineManagerError {
 
 impl EngineManagerError {
     /// Returns a presentation-ready, path-free reason.
-    pub(crate) const fn reason(self) -> &'static str {
+    pub(crate) const fn reason(&self) -> &'static str {
         match self {
             Self::UnknownEngine => "unknown engine",
             Self::InvalidSelection => {
@@ -295,6 +297,9 @@ fn run(
                     if let Ok(Some(_)) = operations(shared, transport, engine).activate_pending() {
                         shared.publish();
                     }
+                    if retry_due(shared, engine) {
+                        ensure(shared, transport, engine, true);
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -312,6 +317,28 @@ fn operations<'a>(
         &shared.database,
         transport,
     )
+}
+
+/// Returns whether `engine`'s last install failed and its backoff has
+/// passed. An engine held at an installed version is only retried by an
+/// explicit request.
+fn retry_due(shared: &Shared, engine: ManagedEngine) -> bool {
+    let authority = ManagedEngineAuthority::new(engine);
+    let Ok(root) = authority.managed_engine_root(&shared.database) else {
+        return false;
+    };
+    let due = read_install_failure(&root, engine)
+        .ok()
+        .flatten()
+        .is_some_and(|failure| failure.retry_due());
+    let held = authority
+        .read_selection(&root)
+        .is_ok_and(|selection| !selection.follows_latest());
+    let installed = matches!(
+        authority.inspect(&shared.database),
+        Ok(EngineInspection::Ready(_))
+    );
+    due && !(held && installed)
 }
 
 /// Installs the selected version (or `latest`) and records the latest
@@ -349,7 +376,7 @@ fn finish(shared: &Shared, engine: ManagedEngine, result: Result<(), InstallErro
         // A lock failure means another process holds the install lock (for
         // example a live `OpenCode2` profile launch); the next pass retries.
         Ok(()) | Err(InstallError::Lock(_)) => Activity::Idle,
-        Err(error) => Activity::Failed(failure_reason(engine, error)),
+        Err(error) => Activity::Failed(failure_reason(engine, &error)),
     };
     shared.set_activity(engine, activity);
 }
@@ -393,8 +420,9 @@ fn list_versions(
     .map_err(|_| EngineManagerError::Unavailable)
 }
 
-fn failure_reason(engine: ManagedEngine, error: InstallError) -> String {
+fn failure_reason(engine: ManagedEngine, error: &InstallError) -> String {
     let what = match error {
+        InstallError::Archive(_) => "the vendor archive was rejected",
         InstallError::Transport(_) | InstallError::Feed(_) => {
             "could not reach the vendor's release feed"
         }
@@ -408,7 +436,22 @@ fn failure_reason(engine: ManagedEngine, error: InstallError) -> String {
     format!(
         "{} update failed: {what} ({}).",
         engine.display_name(),
-        error.code()
+        error.detail()
+    )
+}
+
+/// The status reason of a failure recorded by an earlier install attempt
+/// (this Forge before a restart, or `ae engine install`).
+fn recorded_failure_reason(engine: ManagedEngine, failure: &InstallFailure) -> String {
+    let version = failure
+        .version
+        .as_deref()
+        .map_or_else(String::new, |version| format!(" {version}"));
+    format!(
+        "{}{version} install failed: {} (attempt {}; retrying automatically).",
+        engine.display_name(),
+        failure.detail,
+        failure.attempts
     )
 }
 
@@ -433,6 +476,9 @@ fn observe(
             EngineSelection::Held(version) => Some(version.to_string()),
         });
     let inspection = authority.inspect(database);
+    let failure = root
+        .as_ref()
+        .and_then(|root| read_install_failure(root, engine).ok().flatten());
     let active_version = match &inspection {
         Ok(EngineInspection::Ready(generation)) => Some(generation.version().to_string()),
         _ => None,
@@ -451,9 +497,13 @@ fn observe(
         (_, Activity::Installing(_)) => (EngineInstallPhase::Installing, None),
         (_, Activity::Failed(reason)) => (EngineInstallPhase::Failed, Some(reason.clone())),
         (Ok(EngineInspection::Ready(_)), Activity::Idle) => (EngineInstallPhase::Ready, None),
-        (Ok(EngineInspection::NotInstalled), Activity::Idle) => {
-            (EngineInstallPhase::NotInstalled, None)
-        }
+        (Ok(EngineInspection::NotInstalled), Activity::Idle) => match &failure {
+            Some(failure) => (
+                EngineInstallPhase::Failed,
+                Some(recorded_failure_reason(engine, failure)),
+            ),
+            None => (EngineInstallPhase::NotInstalled, None),
+        },
         (Err(error), Activity::Idle) => (
             EngineInstallPhase::Failed,
             Some(format!(

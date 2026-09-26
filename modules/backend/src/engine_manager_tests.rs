@@ -141,6 +141,50 @@ fn installs_latest_at_start_and_reports_every_engine() {
 }
 
 #[test]
+fn a_failed_install_reports_its_reason_and_the_record_survives_a_restart() {
+    if ManagedEngineAuthority::new(ManagedEngine::Claude)
+        .plan()
+        .is_err()
+    {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("forge.db");
+    let vendor = Arc::new(Vendor::default());
+    vendor.publish_claude("2.1.283", &["2.1.283"]);
+    for (url, body) in vendor.documents.lock().unwrap().iter_mut() {
+        if url.starts_with(&format!("{CLAUDE}/2.1.283/")) && !url.ends_with("manifest.json") {
+            *body = b"tampered".to_vec();
+        }
+    }
+    let manager = EngineManager::start_with(&database, Some(vendor), UPDATE_INTERVAL, || {});
+    let status = wait_for(&manager, "claude failed", |status| {
+        status.phase == EngineInstallPhase::Failed
+    });
+    assert_eq!(
+        status.reason.as_deref(),
+        Some(
+            "Claude Code update failed: the download did not match the vendor's published \
+             checksum (integrity_mismatch)."
+        )
+    );
+    drop(manager);
+
+    // A restarted Forge (or `ae engine`) reads the recorded failure instead
+    // of reporting the engine as not installed.
+    let status = observe(ManagedEngine::Claude, &database, &Activity::Idle, None);
+    assert_eq!(status.phase, EngineInstallPhase::Failed);
+    assert_eq!(
+        status.reason.as_deref(),
+        Some(
+            "Claude Code 2.1.283 install failed: integrity_mismatch (attempt 1; retrying \
+             automatically)."
+        )
+    );
+    status.validate().unwrap();
+}
+
+#[test]
 fn trusted_engines_report_when_their_hash_was_recorded() {
     let Distribution::Supported(plan) = ManagedEngine::Grok.distribution(HostPlatform::current())
     else {
