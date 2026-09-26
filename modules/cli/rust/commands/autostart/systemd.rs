@@ -58,6 +58,37 @@ pub(super) fn start(
     start_and_wait(&service, &UserSystemctl, spec, deadline).map(Some)
 }
 
+/// Stops the installation's service when its Forge is `pid`, through the
+/// user manager: the Forge gets SIGINT, its graceful shutdown. Returns
+/// `false`, touching nothing, when the installation has no active service.
+///
+/// A service Forge serves its Editor, which holds the Forge's only control
+/// session, so `ae` cannot ask it about active work first; stopping the
+/// service is the orderly stop an update retirement can use.
+pub(super) fn stop(layout: &Layout, pid: u32) -> Result<bool> {
+    let service = ForgeService::for_current_user(&layout.root)?;
+    if !matches!(service.inspect()?, UnitFile::Owned { .. })
+        || !service.is_active(&UserSystemctl)?
+    {
+        return Ok(false);
+    }
+    service.stop(&UserSystemctl)?;
+    let deadline = Instant::now() + SERVICE_STOP_TIMEOUT;
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if Instant::now() >= deadline {
+            return Err(CliError::Service(format!(
+                "Forge pid {pid} kept running after {} stopped; it is not this service's Forge",
+                service.unit_name()
+            )));
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    Ok(true)
+}
+
+/// Longer than the unit's `TimeoutStopSec`, after which the manager kills.
+const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(40);
+
 fn start_and_wait(
     service: &ForgeService,
     systemctl: &dyn Systemctl,

@@ -277,6 +277,26 @@ fn health_follows_the_unit_file_and_the_manager() {
     assert_eq!(service.health(&systemctl), ServiceHealth::Foreign);
 }
 
+/// An update retires a service Forge through the user manager, which stops
+/// it with SIGINT, its graceful shutdown.
+#[test]
+fn start_and_stop_go_through_the_user_manager() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (service, _) = dev_service(scratch.path());
+    let systemctl = FakeSystemctl::default();
+    service.start(&systemctl).expect("start");
+    service.stop(&systemctl).expect("stop");
+    service.try_restart(&systemctl).expect("try-restart");
+    assert_eq!(
+        systemctl.calls.borrow().as_slice(),
+        [
+            "start artisan-forge-dev.service",
+            "stop artisan-forge-dev.service",
+            "try-restart artisan-forge-dev.service"
+        ]
+    );
+}
+
 #[test]
 fn manager_refusals_are_reported() {
     let scratch = tempfile::tempdir().expect("scratch");

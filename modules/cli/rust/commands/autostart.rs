@@ -136,6 +136,20 @@ pub(super) fn enable_autostart(layout: &Layout, configuration_changed: bool) -> 
     }
 }
 
+/// Stops a service-managed Forge `pid` through the user manager; `false`
+/// when the installation's Forge is not a running service.
+pub(super) fn stop_service(layout: &Layout, pid: u32) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        systemd::stop(layout, pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (layout, pid);
+        Ok(false)
+    }
+}
+
 fn disable_autostart(layout: &Layout) -> Result<()> {
     #[cfg(target_os = "linux")]
     {

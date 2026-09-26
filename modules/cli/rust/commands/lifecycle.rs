@@ -56,8 +56,22 @@ pub(super) fn status(layout: &Layout, json: bool) -> Result<()> {
     let config = load_lifecycle_instance(layout)?;
     match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
         process::ForgeReadinessStatus::Ready(readiness) => {
-            let result =
-                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Status)?;
+            let result = match authenticated_lifecycle(
+                layout,
+                &config,
+                &readiness,
+                LifecycleOperation::Status,
+            ) {
+                // The Forge's only control session belongs to the Editor
+                // it serves; readiness is all `ae` can report.
+                Err(
+                    CliError::LifecycleReadiness { .. } | CliError::LifecycleCredentialState { .. },
+                ) => {
+                    print_readiness_status(&readiness, json);
+                    return Ok(());
+                }
+                result => result?,
+            };
             let LifecycleResult::Status(lifecycle) = result else {
                 return Err(CliError::LifecycleService {
                     reason: "unexpected lifecycle response",
@@ -102,6 +116,10 @@ pub(super) fn stop(layout: &Layout, pid: NonZeroU32, if_idle: bool) -> Result<()
                 return Err(CliError::LifecycleReadiness {
                     reason: "PID does not match the readiness receipt",
                 });
+            }
+            if super::autostart::stop_service(layout, pid.get())? {
+                println!("stopped the Forge service");
+                return Ok(());
             }
             let result =
                 authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Stop)?;
@@ -549,6 +567,31 @@ pub(super) fn lifecycle_credential_error(error: &ForgeCredentialError) -> CliErr
         _ => CliError::LifecycleCredentialState {
             reason: "reconnect capability or client identity is unavailable",
         },
+    }
+}
+
+/// Readiness of a Forge whose control session its Editor holds: running and
+/// where, without the activity only that session may ask for.
+fn print_readiness_status(readiness: &process::ForgeReadiness, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "certificate_sha256": readiness.certificate_sha256(),
+                "endpoint": readiness.endpoint(),
+                "lifecycle": null,
+                "pid": readiness.pid(),
+                "readiness": "ready",
+                "schema": readiness.schema(),
+            })
+        );
+    } else {
+        println!(
+            "ready (pid {} at {})",
+            readiness.pid(),
+            readiness.endpoint()
+        );
+        println!("lifecycle: reported to the Editor that holds its control session");
     }
 }
 

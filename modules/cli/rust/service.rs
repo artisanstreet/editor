@@ -485,6 +485,15 @@ impl ForgeService {
         require(systemctl, &["start", &self.unit_name])
     }
 
+    /// Stops the service and waits for the manager to finish stopping it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError::Service`] when the manager refuses.
+    pub fn stop(&self, systemctl: &dyn Systemctl) -> Result<()> {
+        require(systemctl, &["stop", &self.unit_name])
+    }
+
     /// Restarts the service only if it is running, applying a changed
     /// configuration.
     ///
