@@ -12,9 +12,7 @@ use artisan_domain::EngineProfileId;
 
 use crate::engine_core::NativeOpenCode2Authority;
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-use crate::engine_core::{
-    NativeOpenCode2InstallLock, NativeOpenCode2InstallLockError, NativeOpenCode2InstallPaths,
-};
+use crate::engine_core::{ManagedInstallLock, ManagedInstallLockError, ManagedInstallPaths};
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 use crate::io::AtomicReplaceOutcome;
 
@@ -450,9 +448,11 @@ fn generation_replacement_and_executable_identity_drift_fail_revalidation() {
     let launch = authority.resolve_profile_launch(&database, &id).unwrap();
     let replacement_id = "generation-fedcba9876543210fedcba9876543210";
     write_generation(&paths, replacement_id, b"test executable");
-    let state = authority.new_install_state(replacement_id, None).unwrap();
+    let state = fixture_state(replacement_id);
     assert_eq!(
-        authority.write_install_state(paths.engine_root(), &state),
+        authority
+            .managed()
+            .write_install_state(paths.engine_root(), &state),
         Ok(AtomicReplaceOutcome::Committed)
     );
     assert_eq!(
@@ -494,8 +494,8 @@ fn executable_size_and_hash_failures_are_distinct_and_lock_is_retained() {
     fs::write(&executable, b"test executable").unwrap();
     let launch = authority.resolve_profile_launch(&database, &id).unwrap();
     assert!(matches!(
-        NativeOpenCode2InstallLock::try_acquire(&paths),
-        Err(NativeOpenCode2InstallLockError::Busy)
+        ManagedInstallLock::try_acquire(&paths),
+        Err(ManagedInstallLockError::Busy)
     ));
     assert!(!format!("{launch:?}").contains(&database.to_string_lossy().to_string()));
     assert_eq!(
@@ -509,17 +509,19 @@ fn installed_fixture() -> (
     tempfile::TempDir,
     PathBuf,
     NativeOpenCode2Authority,
-    NativeOpenCode2InstallPaths,
+    ManagedInstallPaths,
 ) {
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("artisan.sqlite");
-    let authority = NativeOpenCode2Authority::test();
+    let authority = NativeOpenCode2Authority::new();
     let paths = authority.install_paths(&database).unwrap();
     paths.prepare().unwrap();
     write_generation(&paths, generation_id(), b"test executable");
-    let state = authority.new_install_state(generation_id(), None).unwrap();
+    let state = fixture_state(generation_id());
     assert_eq!(
-        authority.write_install_state(paths.engine_root(), &state),
+        authority
+            .managed()
+            .write_install_state(paths.engine_root(), &state),
         Ok(AtomicReplaceOutcome::Committed)
     );
     (root, database, authority, paths)
@@ -531,18 +533,34 @@ fn generation_id() -> &'static str {
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn test_executable(paths: &NativeOpenCode2InstallPaths) -> PathBuf {
+fn test_executable(paths: &ManagedInstallPaths) -> PathBuf {
     executable_for(paths, generation_id())
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn executable_for(paths: &NativeOpenCode2InstallPaths, id: &str) -> PathBuf {
+fn executable_for(paths: &ManagedInstallPaths, id: &str) -> PathBuf {
     paths.versions_root().join(id).join("opencode2.exe")
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-fn write_generation(paths: &NativeOpenCode2InstallPaths, id: &str, bytes: &[u8]) {
+fn write_generation(paths: &ManagedInstallPaths, id: &str, bytes: &[u8]) {
     let generation = paths.versions_root().join(id);
     fs::create_dir_all(&generation).unwrap();
     fs::write(generation.join("opencode2.exe"), bytes).unwrap();
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn fixture_state(directory: &str) -> crate::engine_core::ManagedToolchainState {
+    use sha2::{Digest, Sha256};
+
+    crate::engine_core::ManagedToolchainState::new(crate::engine_core::ManagedGeneration {
+        binary: "opencode2.exe".into(),
+        directory: directory.into(),
+        sha256: Sha256::digest(b"test executable")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        size: Some(15),
+        version: "0.0.0-beta-17778".into(),
+    })
 }

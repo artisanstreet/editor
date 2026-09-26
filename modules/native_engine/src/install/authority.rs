@@ -1,100 +1,117 @@
-//! Certified `OpenCode2` inspection and executable-resolution façade.
+//! Managed engine inspection and executable-resolution façade.
 //!
-//! Composes the certified spec, the exclusive install lock, the validated
+//! Composes the catalog, the installation paths and locks, the validated
 //! install-state codec, and the native file-verification seam into the single
-//! authority used by profile registration and launch resolution.
+//! authority every launch resolves through. There is no discovery here: an
+//! engine is either the verified active generation of its managed install or
+//! unavailable.
 
 use std::{
+    collections::HashMap,
     fmt,
     path::{Path, PathBuf},
+    sync::{LazyLock, Mutex},
+    time::SystemTime,
 };
 
 use crate::io as native_files;
 use crate::io::{AtomicReplaceOutcome, NativeFileError, VerifiedFileIdentity};
 
 use super::{
+    catalog::{ArtifactPlan, Distribution, HostPlatform, ManagedEngine, UnsupportedReason},
+    selection::{EngineSelection, read_selection, write_selection},
     spec::{
-        CERTIFIED_ARCHITECTURE, CERTIFIED_ARCHIVE_MEMBER, CERTIFIED_ARTIFACT_KIND,
-        CERTIFIED_BINARY, CERTIFIED_DOWNLOAD_BOUND_BYTES, CERTIFIED_ENGINE_ID,
-        CERTIFIED_EXECUTABLE_SHA256, CERTIFIED_EXECUTABLE_SHA256_HEX,
-        CERTIFIED_EXECUTABLE_SIZE_BYTES, CERTIFIED_NPM_INTEGRITY_SHA512, CERTIFIED_NPM_URL,
-        CERTIFIED_PLATFORM, CERTIFIED_UPSTREAM_COMMIT, CERTIFIED_VERSION,
-        NativeOpenCode2InstallLock, NativeOpenCode2InstallLockError,
-        NativeOpenCode2InstallPathError, NativeOpenCode2InstallPaths, NativeOpenCode2InstallSpec,
-        map_path_lock_error, platform_supported,
+        ManagedInstallLock, ManagedInstallLockError, ManagedInstallPathError, ManagedInstallPaths,
+        map_path_lock_error,
     },
     state::{
-        MAX_STATE_BYTES, ManagedToolchainStateV1, NativeOpenCode2Error, NativeOpenCode2State,
-        NativeOpenCode2StateError, decode_state, map_state_decoder_error, map_state_file_error,
+        MAX_STATE_BYTES, ManagedEngineError, ManagedGeneration, ManagedStateError,
+        ManagedToolchainState, decode_state, map_state_decoder_error, map_state_file_error,
         map_state_replace_error, map_state_seam_error, state_path_for_root, validate_install_state,
     },
+    version::EngineVersion,
 };
 
-/// The result of inspecting the certified `OpenCode2` installation.
-#[must_use = "inspection results contain the certified generation decision"]
+/// The result of inspecting one managed engine.
+#[must_use = "inspection results contain the managed generation decision"]
 #[derive(Debug)]
-pub enum OpenCode2Inspection {
-    UnsupportedPlatform,
+pub enum EngineInspection {
+    UnsupportedPlatform(UnsupportedReason),
     NotInstalled,
-    Ready(ResolvedOpenCode2Generation),
+    Ready(Box<ResolvedGeneration>),
 }
 
-/// A certified active generation whose executable identity, size, and hash
-/// were verified together.
+/// A managed generation whose executable identity, size, and hash were
+/// verified together against its install record.
 #[must_use = "retain the verified generation for the protected launch"]
-pub struct ResolvedOpenCode2Generation {
+pub struct ResolvedGeneration {
+    pub(crate) engine: ManagedEngine,
     pub(crate) executable: PathBuf,
+    pub(crate) generation_root: PathBuf,
     pub(crate) generation_id: String,
-    pub(crate) version: &'static str,
-    pub(crate) upstream_commit: &'static str,
+    pub(crate) version: EngineVersion,
     pub(crate) executable_size_bytes: u64,
     pub(crate) executable_sha256: [u8; 32],
+    pub(crate) tool_dirs: Vec<PathBuf>,
     pub(crate) verified_file_id: VerifiedFileIdentity,
 }
 
-impl fmt::Debug for ResolvedOpenCode2Generation {
+impl fmt::Debug for ResolvedGeneration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ResolvedOpenCode2Generation")
+            .debug_struct("ResolvedGeneration")
+            .field("engine", &self.engine)
             .finish_non_exhaustive()
     }
 }
 
-impl ResolvedOpenCode2Generation {
-    /// Returns the certified executable path.
+impl ResolvedGeneration {
+    /// Returns the engine this generation belongs to.
+    #[must_use]
+    pub const fn engine(&self) -> ManagedEngine {
+        self.engine
+    }
+
+    /// Returns the verified executable path.
     #[must_use]
     pub fn executable_path(&self) -> &Path {
         &self.executable
     }
 
-    /// Returns the certified generation identifier.
+    /// Returns the generation directory.
+    #[must_use]
+    pub fn generation_root(&self) -> &Path {
+        &self.generation_root
+    }
+
+    /// Returns the generation identifier.
     #[must_use]
     pub fn generation_id(&self) -> &str {
         &self.generation_id
     }
 
-    /// Returns the certified artifact version.
+    /// Returns the installed release version.
     #[must_use]
-    pub fn version(&self) -> &'static str {
-        self.version
+    pub fn version(&self) -> &EngineVersion {
+        &self.version
     }
 
-    /// Returns the certified upstream source commit.
-    #[must_use]
-    pub fn upstream_commit(&self) -> &'static str {
-        self.upstream_commit
-    }
-
-    /// Returns the certified executable size in bytes.
+    /// Returns the verified executable size in bytes.
     #[must_use]
     pub fn executable_size_bytes(&self) -> u64 {
         self.executable_size_bytes
     }
 
-    /// Returns the certified executable SHA-256 digest.
+    /// Returns the verified executable SHA-256 digest.
     #[must_use]
     pub fn executable_sha256(&self) -> &[u8; 32] {
         &self.executable_sha256
+    }
+
+    /// Returns the generation's tool directories for the engine `PATH`.
+    #[must_use]
+    pub fn tool_dirs(&self) -> &[PathBuf] {
+        &self.tool_dirs
     }
 
     pub(crate) const fn file_identity(&self) -> VerifiedFileIdentity {
@@ -102,188 +119,171 @@ impl ResolvedOpenCode2Generation {
     }
 }
 
-/// Shared authority for the certified `OpenCode2` specification, install state,
-/// and filesystem verification.
-#[must_use = "use the authority for certified OpenCode2 operations"]
-pub struct NativeOpenCode2Authority {
-    install_spec: NativeOpenCode2InstallSpec,
+/// The engine-agnostic authority over one engine's managed installation.
+#[must_use = "use the authority for managed engine operations"]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManagedEngineAuthority {
+    engine: ManagedEngine,
+    platform: HostPlatform,
 }
 
-impl fmt::Debug for NativeOpenCode2Authority {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("NativeOpenCode2Authority")
-            .finish_non_exhaustive()
-    }
-}
-
-impl NativeOpenCode2Authority {
-    /// Constructs the explicit certified `OpenCode2` authority.
-    // This compatibility-preserved constructor deliberately has no `Default`:
-    // callers must opt into the certified authority explicitly rather than
-    // implying ambient or inferred launch configuration.
-    #[allow(clippy::new_without_default)]
-    pub const fn new() -> Self {
-        Self {
-            install_spec: Self::certified_install_spec(),
-        }
+impl ManagedEngineAuthority {
+    /// Constructs the authority for `engine` on this host.
+    pub fn new(engine: ManagedEngine) -> Self {
+        Self::for_platform(engine, HostPlatform::current())
     }
 
-    pub(crate) const fn with_spec(install_spec: NativeOpenCode2InstallSpec) -> Self {
-        Self { install_spec }
+    /// Constructs the authority for `engine` on an explicit platform.
+    pub const fn for_platform(engine: ManagedEngine, platform: HostPlatform) -> Self {
+        Self { engine, platform }
     }
 
-    /// Returns the immutable certified `OpenCode2` artifact specification.
+    /// Returns the managed engine.
     #[must_use]
-    pub const fn certified_install_spec() -> NativeOpenCode2InstallSpec {
-        NativeOpenCode2InstallSpec {
-            engine_id: CERTIFIED_ENGINE_ID,
-            version: CERTIFIED_VERSION,
-            upstream_commit: CERTIFIED_UPSTREAM_COMMIT,
-            platform: CERTIFIED_PLATFORM,
-            architecture: CERTIFIED_ARCHITECTURE,
-            artifact_kind: CERTIFIED_ARTIFACT_KIND,
-            archive_member: CERTIFIED_ARCHIVE_MEMBER,
-            binary: CERTIFIED_BINARY,
-            npm_integrity_sha512: CERTIFIED_NPM_INTEGRITY_SHA512,
-            npm_url: CERTIFIED_NPM_URL,
-            download_bound_bytes: CERTIFIED_DOWNLOAD_BOUND_BYTES,
-            executable_size_bytes: CERTIFIED_EXECUTABLE_SIZE_BYTES,
-            executable_sha256: CERTIFIED_EXECUTABLE_SHA256,
-            executable_sha256_hex: CERTIFIED_EXECUTABLE_SHA256_HEX,
-        }
+    pub const fn engine(&self) -> ManagedEngine {
+        self.engine
     }
 
-    /// Derives the certified installation paths for an absolute database path.
+    /// Returns the platform artifacts are resolved for.
+    #[must_use]
+    pub const fn platform(&self) -> HostPlatform {
+        self.platform
+    }
+
+    /// Returns the artifact plan, or why the engine is unsupported here.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallPathError`] when the database path is
-    /// unsafe or the derived installation root is unavailable.
+    /// Returns the [`UnsupportedReason`] for an unsupported platform.
+    pub const fn plan(&self) -> Result<ArtifactPlan, UnsupportedReason> {
+        match self.engine.distribution(self.platform) {
+            Distribution::Supported(plan) => Ok(plan),
+            Distribution::Unsupported(reason) => Err(reason),
+        }
+    }
+
+    /// Derives the installation paths for an absolute database path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedInstallPathError`] when the database path is unsafe.
     pub fn install_paths(
         &self,
         database_path: &Path,
-    ) -> Result<NativeOpenCode2InstallPaths, NativeOpenCode2InstallPathError> {
-        NativeOpenCode2InstallPaths::derive(database_path, &self.install_spec)
+    ) -> Result<ManagedInstallPaths, ManagedInstallPathError> {
+        ManagedInstallPaths::derive(database_path, self.engine)
     }
 
-    /// Acquires and fences the shared exclusive installation lock.
+    /// Acquires and fences the exclusive installation lock.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2InstallLockError`] when the installation root
-    /// or lock is unsafe, unavailable, changed, or busy beyond the timeout.
+    /// Returns [`ManagedInstallLockError`] when the root or lock is unsafe,
+    /// unavailable, changed, or busy beyond the timeout.
     pub fn acquire_install_lock(
         &self,
         database_path: &Path,
-    ) -> Result<NativeOpenCode2InstallLock, NativeOpenCode2InstallLockError> {
+    ) -> Result<ManagedInstallLock, ManagedInstallLockError> {
         let paths = self
             .install_paths(database_path)
             .map_err(map_path_lock_error)?;
-        NativeOpenCode2InstallLock::acquire(&paths)
+        ManagedInstallLock::acquire(&paths)
     }
 
-    /// Inspects the certified installation without discovering or selecting a
-    /// profile.
+    /// Inspects the installation without installing or discovering anything.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2Error`] when managed state or its active
-    /// executable fails certified validation.
-    pub fn inspect(
-        &self,
-        database_path: &Path,
-    ) -> Result<OpenCode2Inspection, NativeOpenCode2Error> {
-        if !platform_supported() {
-            return Ok(OpenCode2Inspection::UnsupportedPlatform);
+    /// Returns [`ManagedEngineError`] when managed state or its active
+    /// executable fails validation.
+    pub fn inspect(&self, database_path: &Path) -> Result<EngineInspection, ManagedEngineError> {
+        if let Err(reason) = self.plan() {
+            return Ok(EngineInspection::UnsupportedPlatform(reason));
         }
         match self.resolve_active(database_path) {
-            Ok(generation) => Ok(OpenCode2Inspection::Ready(generation)),
-            Err(NativeOpenCode2Error::StateMissing) => Ok(OpenCode2Inspection::NotInstalled),
+            Ok(generation) => Ok(EngineInspection::Ready(Box::new(generation))),
+            Err(ManagedEngineError::StateMissing) => Ok(EngineInspection::NotInstalled),
             Err(error) => Err(error),
         }
     }
 
-    /// Resolves and verifies the certified active generation.
+    /// Resolves and verifies the active generation.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2Error`] when the platform, managed state,
+    /// Returns [`ManagedEngineError`] when the platform, managed state,
     /// generation, executable path, identity, size, or hash is invalid.
     pub fn resolve_active(
         &self,
         database_path: &Path,
-    ) -> Result<ResolvedOpenCode2Generation, NativeOpenCode2Error> {
-        if !platform_supported() {
-            return Err(NativeOpenCode2Error::UnsupportedPlatform);
-        }
+    ) -> Result<ResolvedGeneration, ManagedEngineError> {
+        let plan = self
+            .plan()
+            .map_err(|_| ManagedEngineError::UnsupportedPlatform)?;
         let paths = self
             .install_paths(database_path)
             .map_err(map_path_authority_error)?;
         let state = self
             .read_install_state(paths.engine_root())
             .map_err(map_state_seam_error)?
-            .ok_or(NativeOpenCode2Error::StateMissing)?;
-        let active = &state.inner.active;
-        let executable = paths
-            .versions_root()
-            .join(&active.directory)
-            .join(&active.binary);
-        let verified_file_id = native_files::verify_file(
-            &executable,
-            self.install_spec.executable_size_bytes(),
-            self.install_spec.executable_sha256(),
-        )
-        .map_err(map_executable_error)?;
-        Ok(ResolvedOpenCode2Generation {
+            .ok_or(ManagedEngineError::StateMissing)?;
+        self.verify_generation(&paths, &plan, &state.active)
+    }
+
+    /// Verifies one recorded generation on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedEngineError`] when the generation's executable is
+    /// missing, unsafe, changed, or does not match its record.
+    pub fn verify_generation(
+        &self,
+        paths: &ManagedInstallPaths,
+        plan: &ArtifactPlan,
+        generation: &ManagedGeneration,
+    ) -> Result<ResolvedGeneration, ManagedEngineError> {
+        let version = generation
+            .parsed_version()
+            .ok_or(ManagedEngineError::ActiveGenerationUntrusted)?;
+        let sha256 = decode_sha256(&generation.sha256)
+            .ok_or(ManagedEngineError::ActiveGenerationUntrusted)?;
+        let generation_root = paths.versions_root().join(&generation.directory);
+        let executable = generation_root.join(&generation.binary);
+        let size = match generation.size {
+            Some(size) => size,
+            None => std::fs::symlink_metadata(&executable)
+                .map_err(|_| ManagedEngineError::ExecutableUnavailable)?
+                .len(),
+        };
+        let verified_file_id =
+            verify_cached(&executable, size, &sha256).map_err(map_executable_error)?;
+        Ok(ResolvedGeneration {
+            engine: self.engine,
+            tool_dirs: plan
+                .layout
+                .tool_dirs()
+                .iter()
+                .map(|directory| generation_root.join(directory))
+                .collect(),
             executable,
-            generation_id: active.directory.clone(),
-            version: self.install_spec.version(),
-            upstream_commit: self.install_spec.upstream_commit(),
-            executable_size_bytes: self.install_spec.executable_size_bytes(),
-            executable_sha256: *self.install_spec.executable_sha256(),
+            generation_root,
+            generation_id: generation.directory.clone(),
+            version,
+            executable_size_bytes: size,
+            executable_sha256: sha256,
             verified_file_id,
         })
     }
 
-    /// Returns the certified engine root for an absolute database path.
+    /// Returns the engine root for an absolute database path.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2Error`] when the database path is unsafe or
-    /// the derived installation root is unavailable.
-    pub fn managed_engine_root(
-        &self,
-        database_path: &Path,
-    ) -> Result<PathBuf, NativeOpenCode2Error> {
+    /// Returns [`ManagedEngineError`] when the database path is unsafe.
+    pub fn managed_engine_root(&self, database_path: &Path) -> Result<PathBuf, ManagedEngineError> {
         self.install_paths(database_path)
             .map(|paths| paths.engine_root().to_path_buf())
             .map_err(map_path_authority_error)
-    }
-
-    /// Builds a validated install-state value for one exact generation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NativeOpenCode2StateError`] when the generation or optional
-    /// previous state does not satisfy the certified state specification.
-    pub fn new_install_state(
-        &self,
-        generation_id: &str,
-        previous: Option<&NativeOpenCode2State>,
-    ) -> Result<NativeOpenCode2State, NativeOpenCode2StateError> {
-        if let Some(previous) = previous {
-            validate_install_state(&previous.inner, &self.install_spec)?;
-        }
-        let state = NativeOpenCode2State {
-            inner: ManagedToolchainStateV1 {
-                active: self.install_spec.generation(generation_id),
-                format_version: 1,
-                previous: previous.map(|state| state.inner.active.clone()),
-            },
-        };
-        validate_install_state(&state.inner, &self.install_spec)?;
-        Ok(state)
     }
 
     /// Reads and validates the bounded install-state document.
@@ -292,38 +292,37 @@ impl NativeOpenCode2Authority {
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2StateError`] when the state path, bytes, or
-    /// decoded state fails certified validation.
+    /// Returns [`ManagedStateError`] when the state path, bytes, or decoded
+    /// state fails validation.
     pub fn read_install_state(
         &self,
         engine_root: &Path,
-    ) -> Result<Option<NativeOpenCode2State>, NativeOpenCode2StateError> {
-        let state_path = state_path_for_root(engine_root, self.install_spec.engine_id())?;
+    ) -> Result<Option<ManagedToolchainState>, ManagedStateError> {
+        let state_path = state_path_for_root(engine_root, self.engine)?;
         let bytes = match native_files::read_bounded(&state_path, MAX_STATE_BYTES) {
             Ok(bytes) => bytes,
             Err(NativeFileError::NotFound) => return Ok(None),
             Err(error) => return Err(map_state_file_error(error)),
         };
-        let inner = decode_state(&bytes).map_err(map_state_decoder_error)?;
-        validate_install_state(&inner, &self.install_spec)?;
-        Ok(Some(NativeOpenCode2State { inner }))
+        let state = decode_state(&bytes).map_err(map_state_decoder_error)?;
+        validate_install_state(&state, self.engine, self.platform)?;
+        Ok(Some(state))
     }
 
-    /// Encodes a validated install-state value with the shared state codec.
+    /// Encodes a validated install-state value.
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2StateError`] when the state is invalid, cannot
-    /// be encoded, or exceeds the bounded representation.
+    /// Returns [`ManagedStateError`] when the state is invalid, cannot be
+    /// encoded, or exceeds the bounded representation.
     pub fn encode_install_state(
         &self,
-        state: &NativeOpenCode2State,
-    ) -> Result<Vec<u8>, NativeOpenCode2StateError> {
-        validate_install_state(&state.inner, &self.install_spec)?;
-        let bytes =
-            serde_json::to_vec(&state.inner).map_err(|_| NativeOpenCode2StateError::Encode)?;
+        state: &ManagedToolchainState,
+    ) -> Result<Vec<u8>, ManagedStateError> {
+        validate_install_state(state, self.engine, self.platform)?;
+        let bytes = serde_json::to_vec(state).map_err(|_| ManagedStateError::Encode)?;
         if bytes.len() > MAX_STATE_BYTES {
-            return Err(NativeOpenCode2StateError::TooLarge);
+            return Err(ManagedStateError::TooLarge);
         }
         Ok(bytes)
     }
@@ -332,67 +331,146 @@ impl NativeOpenCode2Authority {
     ///
     /// # Errors
     ///
-    /// Returns [`NativeOpenCode2StateError`] when the state, destination, or
-    /// atomic publication fails certified validation.
+    /// Returns [`ManagedStateError`] when the state, destination, or atomic
+    /// publication fails validation.
     pub fn write_install_state(
         &self,
         engine_root: &Path,
-        state: &NativeOpenCode2State,
-    ) -> Result<AtomicReplaceOutcome, NativeOpenCode2StateError> {
-        let state_path = state_path_for_root(engine_root, self.install_spec.engine_id())?;
+        state: &ManagedToolchainState,
+    ) -> Result<AtomicReplaceOutcome, ManagedStateError> {
+        let state_path = state_path_for_root(engine_root, self.engine)?;
         let bytes = self.encode_install_state(state)?;
         native_files::replace_file(&state_path, &bytes).map_err(map_state_replace_error)
     }
 
-    pub(crate) fn spec(&self) -> &NativeOpenCode2InstallSpec {
-        &self.install_spec
+    /// Reads the persisted version selection (`latest` when unset).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedStateError`] when the selection document is invalid.
+    pub fn read_selection(&self, engine_root: &Path) -> Result<EngineSelection, ManagedStateError> {
+        read_selection(engine_root, self.engine)
     }
 
-    #[cfg(all(test, target_os = "windows", target_arch = "x86_64"))]
-    pub(crate) fn test() -> Self {
-        Self {
-            install_spec: NativeOpenCode2InstallSpec {
-                engine_id: "opencode2",
-                version: "1.2.3-test",
-                upstream_commit: "test-commit",
-                platform: "win32",
-                architecture: "x64",
-                artifact_kind: "test-artifact",
-                archive_member: "package/bin/opencode2.exe",
-                binary: "opencode2.exe",
-                npm_integrity_sha512: "test-integrity",
-                npm_url: "https://example.invalid/test.tgz",
-                download_bound_bytes: 1024,
-                executable_size_bytes: 15,
-                executable_sha256: [
-                    0xff, 0x87, 0x15, 0xf0, 0x27, 0x07, 0x31, 0xbb, 0xdb, 0x0b, 0xb3, 0x58, 0x6a,
-                    0x77, 0xd0, 0x32, 0xf5, 0xe8, 0x83, 0xb8, 0x90, 0x9d, 0xca, 0xfb, 0xf3, 0xe8,
-                    0x90, 0x9c, 0xb8, 0xc7, 0x12, 0x01,
-                ],
-                executable_sha256_hex: "ff8715f0270731bbdb0bb3586a77d032f5e883b8909dcafbf3e8909cb8c71201",
-            },
-        }
+    /// Atomically persists the version selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ManagedStateError`] when the publication fails.
+    pub fn write_selection(
+        &self,
+        engine_root: &Path,
+        selection: &EngineSelection,
+    ) -> Result<AtomicReplaceOutcome, ManagedStateError> {
+        write_selection(engine_root, self.engine, selection)
     }
 }
 
-fn map_path_authority_error(error: NativeOpenCode2InstallPathError) -> NativeOpenCode2Error {
-    match error {
-        NativeOpenCode2InstallPathError::InvalidRoot => NativeOpenCode2Error::UnsafePath,
-        NativeOpenCode2InstallPathError::Unavailable => NativeOpenCode2Error::Io,
+/// Filesystem facts that change whenever a file's bytes can have changed.
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct Fingerprint {
+    identity: VerifiedFileIdentity,
+    size: u64,
+    sha256: [u8; 32],
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+static VERIFIED: LazyLock<Mutex<HashMap<PathBuf, Fingerprint>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Verifies `path` like [`native_files::verify_file`], skipping the rehash
+/// when this process already verified the same file identity, size, and
+/// change times against the same digest. Engine executables are hundreds of
+/// megabytes and are resolved for every spawn.
+fn verify_cached(
+    path: &Path,
+    size: u64,
+    sha256: &[u8; 32],
+) -> Result<VerifiedFileIdentity, NativeFileError> {
+    let current = |identity| fingerprint(path, identity, size, sha256);
+    if let Ok(identity) = native_files::path_identity(path).map(VerifiedFileIdentity::new)
+        && let Some(observed) = current(identity)
+        && VERIFIED
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(path).copied())
+            == Some(observed)
+        && native_files::verify_regular_file(path).is_ok()
+    {
+        return Ok(identity);
+    }
+    let identity = native_files::verify_file(path, size, sha256)?;
+    if let (Some(observed), Ok(mut cache)) = (current(identity), VERIFIED.lock()) {
+        cache.insert(path.to_path_buf(), observed);
+    }
+    Ok(identity)
+}
+
+fn fingerprint(
+    path: &Path,
+    identity: VerifiedFileIdentity,
+    size: u64,
+    sha256: &[u8; 32],
+) -> Option<Fingerprint> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() != size {
+        return None;
+    }
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ctime(), metadata.ctime_nsec())
+    };
+    Some(Fingerprint {
+        identity,
+        size,
+        sha256: *sha256,
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        changed,
+    })
+}
+
+pub(crate) fn decode_sha256(value: &str) -> Option<[u8; 32]> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (byte, [high, low]) in digest.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *byte = (hex_nibble(*high)? << 4) | hex_nibble(*low)?;
+    }
+    Some(digest)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
     }
 }
 
-fn map_executable_error(error: NativeFileError) -> NativeOpenCode2Error {
+pub(crate) fn map_path_authority_error(error: ManagedInstallPathError) -> ManagedEngineError {
     match error {
-        NativeFileError::NotFound => NativeOpenCode2Error::ExecutableUnavailable,
+        ManagedInstallPathError::InvalidRoot => ManagedEngineError::UnsafePath,
+        ManagedInstallPathError::Unavailable => ManagedEngineError::Io,
+    }
+}
+
+fn map_executable_error(error: NativeFileError) -> ManagedEngineError {
+    match error {
+        NativeFileError::NotFound => ManagedEngineError::ExecutableUnavailable,
         NativeFileError::TooLarge | NativeFileError::FileSizeMismatch => {
-            NativeOpenCode2Error::ExecutableSizeMismatch
+            ManagedEngineError::ExecutableSizeMismatch
         }
-        NativeFileError::FileChanged => NativeOpenCode2Error::ExecutableChanged,
-        NativeFileError::FileHashMismatch => NativeOpenCode2Error::ExecutableHashMismatch,
+        NativeFileError::FileChanged => ManagedEngineError::ExecutableChanged,
+        NativeFileError::FileHashMismatch => ManagedEngineError::ExecutableHashMismatch,
         NativeFileError::UnsafePath | NativeFileError::PrivatePermissions => {
-            NativeOpenCode2Error::UnsafePath
+            ManagedEngineError::UnsafePath
         }
-        NativeFileError::Io => NativeOpenCode2Error::Io,
+        NativeFileError::Io => ManagedEngineError::Io,
     }
 }

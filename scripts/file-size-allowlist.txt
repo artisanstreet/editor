@@ -19,7 +19,6 @@
 1035 modules/cli/rust/credentials/keychain.rs
 903 modules/cli/rust/credentials/storage.rs
 1555 modules/cli/rust/credentials/validation/dacl.rs
-1457 modules/cli/rust/engine_install.rs
 1070 modules/cli/rust/instance.rs
 1047 modules/cli/rust/process.rs
 883 modules/database/src/engine_run_config.rs

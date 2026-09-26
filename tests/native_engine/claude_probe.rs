@@ -207,41 +207,67 @@ fn thinking_display_support_is_separate_from_the_continuation_floor() {
 
 #[test]
 fn verified_launch_carries_display_support_for_supported_and_older_clis() {
-    let directory = std::env::temp_dir().join(format!(
-        "artisan-claude-display-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&directory).expect("fixture directory");
-    let executable = directory.join("claude");
+    use std::fmt::Write as _;
+
+    use artisan_native_engine::{
+        ManagedEngine, ManagedEngineAuthority, ManagedGeneration, ManagedToolchainState,
+    };
+    use sha2::{Digest, Sha256};
+
+    let root = tempfile::tempdir().expect("fixture directory");
+    let database = root.path().join("artisan.sqlite");
+    let authority = ManagedEngineAuthority::new(ManagedEngine::Claude);
+    let Ok(plan) = authority.plan() else {
+        return;
+    };
+    let paths = authority.install_paths(&database).expect("paths");
+    paths.prepare().expect("prepare");
+    let directory = "generation-0123456789abcdef0123456789abcdef";
+    let executable = paths
+        .versions_root()
+        .join(directory)
+        .join(plan.layout.entry());
+    std::fs::create_dir_all(executable.parent().expect("parent")).expect("generation");
     std::fs::write(&executable, b"fixture").expect("fixture executable");
+    let state = ManagedToolchainState::new(ManagedGeneration {
+        binary: plan.layout.entry().to_owned(),
+        directory: directory.to_owned(),
+        sha256: Sha256::digest(b"fixture")
+            .iter()
+            .fold(String::new(), |mut hex, byte| {
+                let _ = write!(hex, "{byte:02x}");
+                hex
+            }),
+        size: Some(7),
+        version: "2.1.282".to_owned(),
+    });
+    let _committed = authority
+        .write_install_state(paths.engine_root(), &state)
+        .expect("state");
     let profile = EngineProfileId::parse("claude-fixture").expect("profile id");
-    let authority = NativeClaudeAuthority::new();
-    let database = directory.join("artisan.sqlite");
-    let supported = authority
-        .resolve_launch_with_executable(&database, &profile, &executable, "2.1.282 (Claude Code)")
+    let claude = NativeClaudeAuthority::new();
+    let supported = claude
+        .resolve_launch(&database, &profile, "2.1.282 (Claude Code)")
         .expect("supported launch");
+    assert_eq!(supported.executable_path(), executable);
     assert_eq!(
         supported.thinking_display(),
         ClaudeThinkingDisplaySupport::Summarized
     );
+    drop(supported);
     // An older CLI above the unchanged continuation floor still launches; it
     // only loses the display flag.
-    let older = authority
-        .resolve_launch_with_executable(&database, &profile, &executable, "2.1.220")
+    let older = claude
+        .resolve_launch(&database, &profile, "2.1.220")
         .expect("older launch stays certified");
     assert_eq!(
         older.thinking_display(),
         ClaudeThinkingDisplaySupport::Unsupported
     );
     assert!(
-        authority
-            .resolve_launch_with_executable(&database, &profile, &executable, "2.1.219")
+        claude
+            .resolve_launch(&database, &profile, "2.1.219")
             .is_err(),
         "the continuation floor is unchanged"
     );
-    std::fs::remove_dir_all(&directory).expect("fixture cleanup");
 }
