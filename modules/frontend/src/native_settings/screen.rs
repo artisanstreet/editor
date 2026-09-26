@@ -96,6 +96,8 @@ pub struct SettingsEngineSnapshot {
     pub save_failed: bool,
     /// Catalog model rows for this engine, in catalog order.
     pub models: Vec<SettingsEngineModel>,
+    /// The Forge-managed install of this engine, once the Forge reported it.
+    pub install: Option<super::SettingsEngineInstall>,
 }
 
 impl SettingsEngineSnapshot {
@@ -127,6 +129,9 @@ impl SettingsEngineSnapshot {
     /// account verdicts never promote it to Installed.
     #[must_use]
     pub fn installation_state(&self) -> String {
+        if let Some(install) = &self.install {
+            return install.status_copy();
+        }
         if self.engine_id == "cursor" {
             match self.readiness {
                 crate::native_profile_usage::EngineReadinessVerdict::Ready => {
@@ -239,6 +244,24 @@ pub enum SettingsScreenEvent {
         engine_id: String,
         /// Stable catalog model id that is chosen.
         model_id: String,
+    },
+    /// Ask the Forge for one engine's published versions.
+    LoadEngineVersions {
+        /// Engine id whose versions are listed.
+        engine_id: String,
+    },
+    /// Hold one engine at a version, or return it to the latest release
+    /// (`None`).
+    SelectEngineVersion {
+        /// Engine id whose version is chosen.
+        engine_id: String,
+        /// The exact version, or `None` for the latest release.
+        version: Option<String>,
+    },
+    /// Switch one engine back to its previous version.
+    RollbackEngine {
+        /// Engine id to roll back.
+        engine_id: String,
     },
 }
 

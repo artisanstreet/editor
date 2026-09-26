@@ -294,6 +294,13 @@ pub enum ProtocolDecodeError {
         #[source]
         source: ModelFavoritesSnapshotError,
     },
+    /// An engine-install field failed its domain bound or shape policy.
+    #[error("invalid engine install data: {source}")]
+    EngineInstall {
+        /// Domain-owned engine-install validation failure.
+        #[source]
+        source: artisan_domain::EngineInstallError,
+    },
     /// An account-usage field failed its domain bound or shape policy.
     #[error("invalid account usage: {source}")]
     EngineUsage {

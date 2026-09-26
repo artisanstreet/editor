@@ -404,6 +404,8 @@ pub struct AccountUsageService {
     per_engine_timeout: Duration,
     /// What the service pushes to connected Editors (see [`push`]).
     push: push::UsagePush,
+    /// The engine manager whose install statuses are pushed beside usage.
+    pub(crate) engines: std::sync::OnceLock<crate::engine_manager::EngineManager>,
 }
 
 mod push;
@@ -469,6 +471,7 @@ impl AccountUsageService {
             freshness,
             per_engine_timeout,
             push: push::UsagePush::default(),
+            engines: std::sync::OnceLock::new(),
         }
     }
 

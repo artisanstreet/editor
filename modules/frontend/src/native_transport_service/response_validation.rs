@@ -84,6 +84,7 @@ pub(super) enum ExpectedResponse {
     },
     ComposerDraft(super::composer_draft_operations::ComposerDraftExpectation),
     ForgeDecision(super::forge_decision_operations::ForgeDecisionExpectation),
+    EngineInstalls(super::engine_installs_operations::EngineInstallsExpectation),
     Preferences(super::preferences_operations::PreferencesExpectation),
 }
 
@@ -155,6 +156,9 @@ pub(super) fn validate_response_family(
             Ok(payload)
         }
         (ExpectedResponse::ForgeDecision(expected), payload) if expected.accepts(&payload) => {
+            Ok(payload)
+        }
+        (ExpectedResponse::EngineInstalls(expected), payload) if expected.accepts(&payload) => {
             Ok(payload)
         }
         (ExpectedResponse::Preferences(expected), payload) if expected.accepts(&payload) => {
@@ -385,6 +389,8 @@ pub enum HostStateEvent {
     RecentThreads(artisan_domain::RecentThreadListing),
     /// The attached-project catalog.
     ProjectCatalog(ProjectListing),
+    /// Every Forge-managed engine's install status.
+    EngineInstalls(artisan_domain::EngineInstallSnapshot),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -427,6 +433,9 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::ProjectCatalog(listing) => Ok(UniDelivery::HostState(
                 HostStateEvent::ProjectCatalog(listing.clone()),
+            )),
+            artisan_domain::Event::EngineInstalls(snapshot) => Ok(UniDelivery::HostState(
+                HostStateEvent::EngineInstalls(snapshot.clone()),
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)

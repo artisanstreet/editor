@@ -93,15 +93,62 @@ the WSL Forge, `/var/lib/artisan-forge` under the NixOS module). `OpenCode2` kee
 ## Resolution
 
 Every Forge spawn of an engine (runs, model discovery, account usage, version and auth probes)
-resolves the active generation from `state.json`, verifies the executable's size and SHA-256
-recorded at install time (cached per file identity for the process lifetime), and launches that
-path. There is no `PATH` lookup and no ambient discovery.
+resolves through `artisan_native_engine::resolve_launch_target`: the active generation from
+`state.json`, with the executable's size and SHA-256 recorded at install time verified (the
+rehash is skipped only when this process already verified the same file identity, size, and
+change times). There is no `PATH`, `LOCALAPPDATA`, `WinGet`, or npm-shim discovery anywhere; the
+old discovery code (`codex/discovery.rs`, `account_usage_resolve.rs`, PATH search in the Claude,
+Grok, and Cursor modules) is deleted. The Forge registers its database at startup
+(`register_managed_database`); `ae engine` passes its instance database or `--database`.
 
-Developer override: `ARTISAN_<ENGINE>_EXECUTABLE` (`ARTISAN_CLAUDE_EXECUTABLE`,
-`ARTISAN_CODEX_EXECUTABLE`, `ARTISAN_GROK_EXECUTABLE`, `ARTISAN_CURSOR_EXECUTABLE`) is honoured
-only as an absolute path, is reported as `override` in status and logs a warning on every
-resolution. The systemd drop-in that set `ARTISAN_CODEX_EXECUTABLE` on the WSL Forge is obsolete
-once Codex is installed through the Forge; remove it after the managed install is ready.
+Run launches (`VerifiedCodexLaunch`, `VerifiedClaudeLaunch`) carry a shared `use.lock` lease for
+the life of the run. A generation switch needs that lock exclusively, so an update or selection
+made while a run is live is recorded as `pending` and activated by the Forge once the engine is
+idle; a running process never has its generation switched underneath it.
+
+Developer override: `ARTISAN_<ENGINE>_EXECUTABLE` is honoured only as an absolute path to a
+regular file (relative names are rejected rather than searched), carries no lease, and is shown
+as an override in `ae engine list` (with a warning) and in the Editor status. The systemd drop-in
+that set `ARTISAN_CODEX_EXECUTABLE` on the WSL Forge is obsolete once Codex is installed through
+the Forge; remove it after the managed install is ready (it would otherwise keep overriding the
+managed Codex). Note that a Forge started by `ae` strips every `ARTISAN_*` variable, so overrides
+only reach a Forge started by systemd or `forge-host`.
+
+## Forge engine manager
+
+`modules/backend/src/engine_manager.rs` runs one dedicated thread per Forge:
+
+- at startup it installs every supported engine's selection (`latest` by default) in the
+  background, publishing `installing` with download progress, then `ready vX` or `failed` with a
+  reason; unsupported engines report `unsupported` with the vendor reason;
+- every 6 hours it re-reads the vendor feed; engines following `latest` install the newer release
+  as a new generation, engines held at a version are left alone;
+- every minute it activates `pending` generations whose engine is idle;
+- Editor requests (select a version or `latest`, roll back, list versions) queue to the same
+  thread, so operations never race; a failed lock (for example a live `OpenCode2` profile) is
+  retried on the next pass rather than reported as a failure.
+
+## Status push and Editor
+
+Protocol (fresh ordinals): `readEngineInstalls` (Request @47) and `changeEngineVersion` (@49)
+answer `engineInstalls` (Response @45), an `EngineInstallSnapshot` with one
+`EngineInstallStatus` per engine: phase (`notInstalled`, `installing` with progress, `ready`,
+`failed` with reason, `unsupported` with reason), active, held, latest, pending, and rollback
+versions, and whether a developer override is set. `listEngineVersions` (@48) answers
+`engineVersions` (@46), newest first, each marked installed, active, or below the floor. The
+`engineInstalls` Event (@12) pushes the snapshot to connections that read it, following the
+recent-threads rule so an older Editor is never sent an event it does not know.
+
+The Forge attaches the manager to the account-usage service (both are an engine's host state);
+every snapshot change wakes connection delivery through the host-state notifier, and the
+delivery driver pushes only a changed snapshot.
+
+The Editor reads the snapshot when a Settings engine page opens and then follows pushes. The
+Installation section shows the Forge's status copy (version, installing with progress, failed or
+unsupported with the reason, a pending version waiting for an idle engine, an active override),
+the selection ("Follows the latest release" or "Held at X"), and actions: Use latest, Roll back to
+the previous version, and Choose version, which lists the vendor's versions with Use buttons
+(below-floor versions are shown but not selectable).
 
 ## Environment policy
 

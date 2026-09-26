@@ -24,6 +24,9 @@ pub(crate) struct RequestFollowUp {
     /// The project catalog a listing served: the connection now receives
     /// its changes.
     pub(crate) project_catalog: Option<ProjectListing>,
+    /// The engine installs a read or version change served: the connection
+    /// now receives their changes.
+    pub(crate) engine_installs: Option<artisan_domain::EngineInstallSnapshot>,
 }
 
 impl RequestFollowUp {
@@ -47,10 +50,15 @@ impl RequestFollowUp {
             Some(ResponsePayload::ProjectListing(listing)) => Some(listing.clone()),
             _ => None,
         };
+        let engine_installs = match payload {
+            Some(ResponsePayload::EngineInstalls(snapshot)) => Some(snapshot.clone()),
+            _ => None,
+        };
         Self {
             stopped_thread,
             recent_threads,
             project_catalog,
+            engine_installs,
         }
     }
 }

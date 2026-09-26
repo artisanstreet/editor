@@ -204,6 +204,9 @@ mod impl_catalog;
 #[path = "native_application/impl_profile_usage.rs"]
 mod impl_profile_usage;
 
+#[path = "native_application/impl_engine_installs.rs"]
+mod impl_engine_installs;
+
 // Phase-5 split submodules (see native_application/).
 
 #[path = "native_application/app_entry.rs"]
@@ -362,6 +365,7 @@ pub struct NativeApplication {
     profile_name: Option<String>,
     profile_hostname: Option<String>,
     profile_usage: NativeProfileUsageState,
+    engine_installs: impl_engine_installs::EngineInstallsState,
     profile_usage_generation: ProfileUsageGeneration,
     profile_usage_next_seq: u64,
     profile_hover: Rc<RefCell<SlidingHoverState>>,

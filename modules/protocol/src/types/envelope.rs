@@ -124,6 +124,10 @@ pub enum ResponsePayload {
     LegacyPreferencesImported(artisan_domain::LegacyPreferencesImported),
     /// The recent threads across every project, answering a read.
     RecentThreads(artisan_domain::RecentThreadListing),
+    /// Every managed engine's install status, answering a read or change.
+    EngineInstalls(artisan_domain::EngineInstallSnapshot),
+    /// The vendor's versions of one engine, answering a listing.
+    EngineVersions(artisan_domain::EngineVersionList),
 }
 
 /// Successful response correlated to a client request frame.

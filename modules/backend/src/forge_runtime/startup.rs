@@ -683,6 +683,10 @@ async fn run_with_handler(
             &database,
             crate::account_usage_cursor::CursorUsageConfig::new(),
         )
+        .with_engine_manager(crate::engine_manager::EngineManager::start(&database, {
+            let notifier = notifier.clone();
+            move || notifier.publish_host_state()
+        }))
         .with_host_state_notifier(notifier.clone()),
     );
     let usage_refresher = tokio::spawn(crate::account_usage_service::refresh_while_observed(

@@ -299,6 +299,7 @@ impl NativeTransportCommand {
                 | ForgeDecisionCommand::ResolveEngineConfiguration(_),
             )
             | Self::Preferences(PreferencesCommand::Read)
+            | Self::EngineInstalls(_)
             | Self::ReadActiveRun { .. }
             | Self::SelectProject(_)
             | Self::RefreshThreads { .. }

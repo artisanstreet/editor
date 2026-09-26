@@ -163,6 +163,7 @@ impl NativeApplication {
             profile_name: None,
             profile_hostname: None,
             profile_usage: NativeProfileUsageState::default(),
+            engine_installs: impl_engine_installs::EngineInstallsState::default(),
             profile_usage_generation: ProfileUsageGeneration::first(),
             profile_usage_next_seq: 0,
             profile_hover: Rc::new(RefCell::new(SlidingHoverState::default())),

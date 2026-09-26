@@ -345,6 +345,16 @@ impl RequestHandler {
             }
             Query::ReadUserPreferences(_) => self.read_user_preferences_outcome(request_id).await,
             Query::ReadRecentThreads(_) => self.recent_threads_outcome(request_id).await,
+            Query::ReadEngineInstalls(_)
+            | Query::ListEngineVersions(_)
+            | Query::ChangeEngineVersion(_) => {
+                crate::engine_install_handler::answer(
+                    self.account_usage.as_deref(),
+                    request_id,
+                    query,
+                )
+                .await
+            }
             Query::ResolveEngineConfiguration(query) => {
                 Ok(self.resolve_engine_configuration_outcome(request_id, query))
             }

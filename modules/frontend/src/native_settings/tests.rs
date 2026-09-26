@@ -319,6 +319,7 @@ mod settings_screen_tests {
             save_failed: false,
             choice_notice: None,
             models: Vec::new(),
+            install: None,
         }
     }
 

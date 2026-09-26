@@ -173,6 +173,9 @@ pub(crate) fn encode_event(
         Event::ProjectCatalog(listing) => {
             encode_project_list(builder.reborrow().init_project_catalog(), listing)?;
         }
+        Event::EngineInstalls(snapshot) => {
+            encode_engine_install_snapshot(builder.reborrow().init_engine_installs(), snapshot)?;
+        }
     }
     Ok(())
 }
@@ -416,6 +419,9 @@ pub(crate) fn decode_event(
         }
         event::Which::ProjectCatalog(listing) => {
             Event::ProjectCatalog(decode_project_list(listing?)?)
+        }
+        event::Which::EngineInstalls(snapshot) => {
+            Event::EngineInstalls(decode_engine_install_snapshot(snapshot?)?)
         }
     };
     Ok(ServerEvent { cursor, event })

@@ -64,6 +64,10 @@ mod sections;
 #[path = "native_settings/screen.rs"]
 mod screen;
 
+#[path = "native_settings/engine_install.rs"]
+mod engine_install;
+pub use engine_install::{SettingsEngineInstall, SettingsEngineVersions};
+
 #[path = "native_settings/render.rs"]
 mod render;
 

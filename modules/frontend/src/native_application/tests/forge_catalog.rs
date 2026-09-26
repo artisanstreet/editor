@@ -352,3 +352,7 @@ mod host_state_push;
 // The manual settings draft resolves through the Forge like a selection.
 #[path = "manual_settings.rs"]
 mod manual_settings;
+
+// Managed engine installs build on the same fixtures.
+#[path = "engine_installs.rs"]
+mod engine_installs;

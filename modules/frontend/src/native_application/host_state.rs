@@ -25,6 +25,7 @@ impl NativeApplication {
             HostStateEvent::RunUsage(usage) => self.apply_pushed_run_usage(usage, cx),
             HostStateEvent::RecentThreads(listing) => self.apply_recent_threads(listing, cx),
             HostStateEvent::ProjectCatalog(listing) => self.apply_project_catalog(&listing, cx),
+            HostStateEvent::EngineInstalls(snapshot) => self.apply_engine_installs(snapshot, cx),
         }
         cx.notify();
     }
