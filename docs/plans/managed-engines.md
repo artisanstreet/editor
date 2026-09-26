@@ -1,6 +1,6 @@
 # Forge-managed engine binaries
 
-- Status: in progress (branch `managed-engines`)
+- Status: implemented on branch `managed-engines` (not merged)
 - Scope: how the Forge installs, versions, resolves, and launches every engine CLI (Codex,
   Claude Code, Grok Build, Cursor Agent, OpenCode2)
 
@@ -35,8 +35,14 @@ a systemd drop-in (`ARTISAN_CODEX_EXECUTABLE`).
 - The user can hold an engine at an explicit version (`use <engine> <version>`) or return to
   `latest`. Automatic updates only apply while the selection is `latest`. The selection is Forge
   state and survives restarts.
-- Rollback switches to the most recent retained generation. The active generation plus up to
-  three previous generations stay on disk.
+- Rollback switches to the most recently active previous generation (no download) and holds the
+  engine at that version, so the next automatic update does not undo it; `use <engine> latest`
+  resumes updates. The active generation, up to three previous generations, and at most one
+  pending generation stay on disk; older generations are pruned (a generation still executing on
+  Windows is removed on a later prune).
+- "Latest" means the vendor's default channel: Claude's `latest` pointer (the channel its
+  installer and auto-updater default to), Codex's npm `latest` dist-tag, and `OpenCode2`'s npm
+  `beta` dist-tag (its V1 `latest` line is a different product).
 
 ## Per-engine source of truth
 
@@ -175,40 +181,66 @@ variables; `artisan_native_engine::build_environment`):
 
 ## Sign-in
 
-A managed engine starts without credentials. Readiness reports `needs sign-in`. The owner signs
-in once per Forge host with the managed binary and environment:
+A managed engine starts without credentials. The account-usage reads run the managed CLI, so
+readiness reports `needs sign-in` (and `not ready` with "engine is not installed on this Forge"
+before the first install finishes). The owner signs in once per Forge host with the managed
+binary and exactly the environment the Forge uses:
 
 ```sh
 ae engine login claude --database ~/.local/state/artisan-forge/forge.db
-#   runs the managed `claude auth login` with the Forge environment (CLAUDE_CONFIG_DIR)
+#   runs the managed `claude auth login` with the Forge CLAUDE_CONFIG_DIR
 ae engine login codex --database ~/.local/state/artisan-forge/forge.db -- --device-auth
 #   runs the managed `codex login --device-auth` with the Forge CODEX_HOME
 ```
 
 Arguments after `--` replace the default sign-in arguments (for example
-`ae engine login claude -- setup-token`, or `-- auth login --console` for API billing).
+`ae engine login claude -- setup-token`, or `-- auth login --console` for API billing). An
+operator can instead provide `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` to the Forge service; those are the only credential variables passed through.
 
-Copying Windows credentials into the Forge config home is technically possible (both CLIs keep
-credentials in files under their config home on Linux) but is not done automatically; it needs an
-explicit design decision.
+Option, not implemented (needs explicit approval): copy the Windows credentials
+(`%USERPROFILE%\.claude\.credentials.json`, `%USERPROFILE%\.codex\auth.json`) into the Forge
+engine homes. It would sign a WSL Forge in without a browser, but moves long-lived secrets across
+an OS boundary automatically.
 
 ## Migration
 
 - Existing OpenCode2 installs (`toolchain/opencode2/state.json` format 1) keep working: format 1
   is read, and the next write upgrades to format 2.
 - Codex and Claude are installed on first Forge start. Until then their status is `installing`
-  and runs report the engine as unavailable instead of falling back to PATH.
-- Owner steps on the WSL Forge after deploying: wait for `ready`, sign in (above), then remove the
-  `ARTISAN_CODEX_EXECUTABLE` drop-in and `~/.local/share/artisan/codex/0.156.0`.
+  and runs, usage reads, and model discovery report the engine as unavailable instead of falling
+  back to `PATH`.
+- Owner steps on the WSL Forge after deploying (also in `docs/runbooks/remote-forge.md`): wait for
+  `ready` (Settings, or `ae engine list --database …`), sign in (above), then remove the
+  `ARTISAN_CODEX_EXECUTABLE` drop-in, restart the service, and delete
+  `~/.local/share/artisan/codex/0.156.0`.
 
-## Delivery order
+## Known gaps
+
+- Grok Build and Cursor Agent are unsupported everywhere: their vendors publish no checksums
+  (verified 2026-09-26). They resolve only through the developer override until a verifiable
+  source exists.
+- `OpenCode2` stays Windows x64 only (its harness integration is certified there); the beta npm
+  channel also publishes Linux builds.
+- The run-dispatch version probes in `native_run_dispatch/claim.rs` (owned by another work
+  stream) spawn `--version` with the Forge's inherited environment; they resolve only managed
+  executables, but should adopt `LaunchTarget::environment` when that file is next changed.
+- The native readiness probes in `claude/probe.rs`, `codex/probe.rs`, `grok/probe.rs`, and
+  `cursor/probe.rs` have no production caller; they still inherit their caller's environment.
+- `Choose version` lists the npm version history (Claude uses the official
+  `@anthropic-ai/claude-code` package for the list, and its native manifest for the artifact);
+  a listed version without a native build fails with `feed_platform_missing`.
+- The per-process verification cache skips rehashing a file whose identity, size, and change
+  times are unchanged; a same-size in-place rewrite that also restores those times would not be
+  detected until the Forge restarts.
+
+## Delivery
 
 1. Plan (this document).
-2. Engine-agnostic catalog, feeds, state format 2, selection, and authority in
-   `artisan-native-engine`; OpenCode2 becomes one catalog entry.
-3. Install pipeline moved from the CLI into the shared authority (fetch seam, single-binary,
-   tar member, and tar tree layouts, retention, rollback).
-4. `ae engine list|versions|install|use|rollback|status|login`.
-5. Managed-only resolution and the environment builder for every spawn site.
-6. Forge engine manager (startup install, periodic update, activation when idle) and the status
-   push; Editor Settings engine section.
+2. Engine-agnostic catalog, feeds, state format 2, selection, authority, install pipeline
+   (moved from the CLI), retention, rollback, and `ae engine
+   list|status|versions|install|update|use|rollback|login`.
+3. Managed-only resolution and the environment builder for every spawn site; ambient discovery
+   deleted.
+4. Forge engine manager (startup install, periodic update, activation when idle), protocol,
+   status push, and the Editor Settings Installation section.
