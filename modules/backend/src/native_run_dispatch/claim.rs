@@ -259,7 +259,9 @@ async fn load_claim(
         },
         EngineSelection::Grok(selection) => match launch_mode {
             ClaimLaunchMode::Configured => {
-                let Some(launch) = resolve_grok_launch(selection.profile_id()).await else {
+                let Some(launch) =
+                    resolve_grok_launch(context.database_path, selection.profile_id()).await
+                else {
                     context.requeue("engine profile unavailable").await;
                     return None;
                 };
@@ -1040,21 +1042,24 @@ async fn bind_with_retry(
     Err(last_error.expect("positive retry count always records a result"))
 }
 
-/// Resolves one Codex profile into a verified launch with a bounded
-/// `--version` probe enforcing the minimum CLI at probe time.
-///
-/// Returns `None` when the executable is unavailable, the probe times out or
-/// fails, or the version predates the minimum; the caller requeues the claim.
-async fn resolve_codex_launch(
+/// Runs one bounded `--version` probe of the Forge-managed `engine` with its
+/// managed environment. Returns the probed stdout, or `None` when the engine
+/// is not installed, the probe times out, or it fails.
+async fn probe_managed_version(
+    engine: artisan_native_engine::ManagedEngine,
     database_path: &Path,
-    profile_id: &artisan_domain::EngineProfileId,
-) -> Option<VerifiedCodexLaunch> {
-    let authority = NativeCodexAuthority::new();
-    let executable = authority.resolve_executable().ok()?;
+) -> Option<(std::path::PathBuf, String)> {
+    let target = artisan_native_engine::resolve_launch_target_in(engine, database_path, &|name| {
+        std::env::var_os(name)
+    })
+    .ok()?;
+    let environment = target.environment().ok()?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::process::Command::new(&executable)
+        tokio::process::Command::new(target.executable())
             .arg("--version")
+            .env_clear()
+            .envs(environment)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -1066,8 +1071,24 @@ async fn resolve_codex_launch(
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    authority
+    Some((
+        target.executable().to_path_buf(),
+        String::from_utf8(output.stdout).ok()?,
+    ))
+}
+
+/// Resolves one Codex profile into a verified launch with a bounded
+/// `--version` probe enforcing the minimum CLI at probe time.
+///
+/// Returns `None` when the executable is unavailable, the probe times out or
+/// fails, or the version predates the minimum; the caller requeues the claim.
+async fn resolve_codex_launch(
+    database_path: &Path,
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<VerifiedCodexLaunch> {
+    let (_, stdout) =
+        probe_managed_version(artisan_native_engine::ManagedEngine::Codex, database_path).await?;
+    NativeCodexAuthority::new()
         .resolve_launch(database_path, profile_id, &stdout)
         .ok()
 }
@@ -1081,59 +1102,23 @@ async fn resolve_claude_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
 ) -> Option<VerifiedClaudeLaunch> {
-    let authority = NativeClaudeAuthority::new();
-    let executable = authority.resolve_executable().ok()?;
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(&executable)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    authority
+    let (_, stdout) =
+        probe_managed_version(artisan_native_engine::ManagedEngine::Claude, database_path).await?;
+    NativeClaudeAuthority::new()
         .resolve_launch(database_path, profile_id, &stdout)
         .ok()
 }
 
 /// Resolves one Grok profile into a probe-certified launch with a bounded
-/// `--version` probe parsed by the shared ACP row.
-///
-/// There is no verified-launch authority or minimum CLI for Grok in the
-/// TypeScript evidence: the existing discovery resolves the executable, the
-/// path must still be a regular file, and any parsed version seats the
-/// launch. Returns `None` when the executable is unavailable, the probe
-/// times out or fails, or no version parses; the caller requeues the claim.
-async fn resolve_grok_launch(profile_id: &artisan_domain::EngineProfileId) -> Option<GrokLaunch> {
-    let resolved = artisan_native_engine::grok::resolve_live()?;
-    let executable = resolved.path().to_path_buf();
-    if !executable.is_file() {
-        return None;
-    }
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(&executable)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
+/// `--version` probe parsed by the shared ACP row: the Forge-managed Grok (or
+/// its developer override) must answer with a parseable version. Returns
+/// `None` otherwise; the caller requeues the claim.
+async fn resolve_grok_launch(
+    database_path: &Path,
+    profile_id: &artisan_domain::EngineProfileId,
+) -> Option<GrokLaunch> {
+    let (executable, stdout) =
+        probe_managed_version(artisan_native_engine::ManagedEngine::Grok, database_path).await?;
     let version = artisan_native_engine::grok::parse_grok_version(&stdout)?;
     Some(GrokLaunch::new(executable, profile_id.clone(), version))
 }

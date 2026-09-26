@@ -251,6 +251,29 @@ impl SeatedLaunch {
     }
 }
 
+/// Returns the managed environment for `program` when it is the resolved
+/// executable of a managed engine of the registered Forge. Generic probe
+/// runners that receive a bare program path use this so a managed engine is
+/// never spawned with the ambient environment; `None` means `program` is not
+/// a managed engine (a test fixture).
+#[must_use]
+pub fn managed_environment_for(program: &Path) -> Option<Vec<(OsString, OsString)>> {
+    ManagedEngine::ALL.into_iter().find_map(|engine| {
+        let target = resolve_launch_target(engine).ok()?;
+        (target.executable() == program)
+            .then(|| target.environment().ok())
+            .flatten()
+    })
+}
+
+/// Applies the managed environment to a probe command whose program is a
+/// managed engine; other programs keep the caller's environment.
+pub fn apply_managed_environment(command: &mut std::process::Command, program: &Path) {
+    if let Some(environment) = managed_environment_for(program) {
+        command.env_clear().envs(environment);
+    }
+}
+
 /// Resolves `engine` for the registered Forge state directory.
 ///
 /// # Errors

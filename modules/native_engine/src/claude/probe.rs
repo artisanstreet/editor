@@ -533,7 +533,9 @@ fn run_bounded(
     max_stderr_bytes: usize,
     phase: ClaudeProbePhase,
 ) -> Result<ChildOutput, ClaudeProbeError> {
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    crate::engine_core::apply_managed_environment(&mut command, std::path::Path::new(program));
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

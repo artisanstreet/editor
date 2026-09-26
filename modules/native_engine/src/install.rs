@@ -53,8 +53,9 @@ pub use catalog::{
 };
 pub use feed::{ArtifactDigest, FeedError, FeedRequest, ReleaseArtifact};
 pub use launch::{
-    LaunchSource, LaunchTarget, SeatedLaunch, build_environment, engine_home, managed_database,
-    register_managed_database, resolve_launch_target, resolve_launch_target_in,
+    LaunchSource, LaunchTarget, SeatedLaunch, apply_managed_environment, build_environment,
+    engine_home, managed_database, managed_environment_for, register_managed_database,
+    resolve_launch_target, resolve_launch_target_in,
 };
 pub use opencode2::NativeOpenCode2Authority;
 pub use operations::{

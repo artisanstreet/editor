@@ -324,7 +324,9 @@ pub fn run_bounded_command(
 ) -> Result<BoundedChildOutput, GrokProbeError> {
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    crate::engine_core::apply_managed_environment(&mut command, program);
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

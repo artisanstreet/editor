@@ -38,8 +38,8 @@ pub(crate) fn probe_deadline(timeout: Duration) -> Result<Instant, CodexProbeErr
 /// Spawns a probe child with piped stdio and no shell.
 ///
 /// Array entries pass paths containing spaces as single arguments.
-/// `CODEX_HOME` is set only when provided; the rest of the environment is
-/// inherited.
+/// A Forge-managed Codex gets its managed environment; `CODEX_HOME` is set
+/// only when provided.
 ///
 /// # Errors
 ///
@@ -50,6 +50,7 @@ pub(crate) fn spawn_probe_child(
     codex_home: Option<&Path>,
 ) -> Result<Child, CodexProbeError> {
     let mut command = Command::new(executable);
+    crate::engine_core::apply_managed_environment(&mut command, executable);
     command.args(argv);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
