@@ -598,6 +598,9 @@ pub enum NativeTransportEvent {
     HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
+    /// The registered host home the connection resolved to, which replaces
+    /// the home it was started with when a newer incarnation superseded it.
+    HostHome(std::path::PathBuf),
     /// Terminal service state.
     Stopped(ServiceStopStatus),
 }
@@ -635,6 +638,9 @@ struct ServiceRuntime {
     /// Pushed deliveries, forwarded by the command loop and by every
     /// in-flight request exchange.
     deliveries: DeliveryInbox,
+    /// The registered host home this connection resolved to (a newer
+    /// incarnation may have replaced the one it was started with).
+    resolved_home: Option<std::path::PathBuf>,
 }
 
 fn publish(

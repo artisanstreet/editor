@@ -10,7 +10,7 @@
 //! The view entity is the host-scoped state: every value it owns belongs to
 //! its one connection and is discarded with it. Only window presentation that
 //! is not about a host (the sidebar and profile-menu disclosure) carries over.
-use super::impl_machines::SelectMachine;
+use super::impl_machines::{HostResolved, SelectMachine};
 use super::*;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -42,6 +42,7 @@ struct ConnectedHost {
     home: Option<PathBuf>,
     view: Entity<NativeApplication>,
     _selection: Subscription,
+    _resolution: Subscription,
 }
 
 pub(super) struct NativeWorkspace {
@@ -87,10 +88,14 @@ impl NativeWorkspace {
                 workspace.select(event.0.clone(), window, cx);
             },
         );
+        let resolution = cx.subscribe(&view, |workspace, _, event: &HostResolved, cx| {
+            workspace.adopt_resolved_home(event.0.clone(), cx);
+        });
         ConnectedHost {
             home,
             view,
             _selection: selection,
+            _resolution: resolution,
         }
     }
 
@@ -196,6 +201,19 @@ impl NativeWorkspace {
         // A fresh launch reopens the machine the user last chose. Best-effort:
         // a hint that cannot be saved must not disturb the switch.
         let home = self.host.home.clone();
+        let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
+        cx.notify();
+    }
+
+    /// The connection resolved its host to a newer registration: the
+    /// session's home and the reopen hint follow it, so a relaunch opens the
+    /// registration that exists rather than the one it replaced.
+    fn adopt_resolved_home(&mut self, home: PathBuf, cx: &mut Context<Self>) {
+        let home = Some(home);
+        if self.host.home == home {
+            return;
+        }
+        self.host.home.clone_from(&home);
         let _ = crate::editor_settings::update(cx, |settings| settings.with_reopen_host(home));
         cx.notify();
     }

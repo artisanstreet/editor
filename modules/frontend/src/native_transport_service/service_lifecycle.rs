@@ -310,6 +310,7 @@ impl ServiceRuntime {
             delivery_join: None,
             delivery_tx: None,
             deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         }
     }
 
@@ -439,6 +440,7 @@ async fn attach_to_owned_forge(
             delivery_join: None,
             delivery_tx: None,
             deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         }),
         Err(error) => {
             let shutdown_grace =
@@ -556,6 +558,7 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
             delivery_join: None,
             delivery_tx: None,
             deliveries: DeliveryInbox::default(),
+            resolved_home: None,
         },
         frames,
     ))
@@ -695,6 +698,9 @@ async fn service_main(
             let (delivery_tx, delivery_rx) = tokio::sync::mpsc::channel::<PrivateDelivery>(64);
             runtime.delivery_tx = Some(delivery_tx.clone());
             runtime.deliveries.attach(delivery_rx, events.clone());
+            if let Some(home) = runtime.resolved_home.clone() {
+                let _ = publish(&events, NativeTransportEvent::HostHome(home));
+            }
             // take_delivery exactly once for this session
             let delivery_started = {
                 let session = runtime.session.take();

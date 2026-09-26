@@ -5,10 +5,18 @@ use std::path::PathBuf;
 pub(super) struct SelectMachine(pub Option<PathBuf>);
 impl gpui::EventEmitter<SelectMachine> for NativeApplication {}
 
+/// The connection resolved its host to this registration: a newer
+/// incarnation of the same host that replaced the one it was opened with.
+pub(super) struct HostResolved(pub PathBuf);
+impl gpui::EventEmitter<HostResolved> for NativeApplication {}
+
 pub(super) struct MachineMenu {
     pub(super) open: bool,
     #[cfg(not(test))]
     refreshing: bool,
+    /// A refresh was asked for while one ran; it runs again when it ends.
+    #[cfg(not(test))]
+    refresh_again: bool,
     trigger_focus: FocusHandle,
     pub(super) bounds: Rc<Cell<Bounds<gpui::Pixels>>>,
     pub(super) focus: FocusHandle,
@@ -29,6 +37,8 @@ impl MachineMenu {
             open: false,
             #[cfg(not(test))]
             refreshing: false,
+            #[cfg(not(test))]
+            refresh_again: false,
             trigger_focus: cx.focus_handle(),
             bounds: Rc::new(Cell::new(Bounds::default())),
             focus: cx.focus_handle(),
@@ -138,6 +148,7 @@ impl NativeApplication {
     #[cfg(not(test))]
     pub(super) fn refresh_machines(&mut self, cx: &mut Context<Self>) {
         if self.machine_menu.refreshing {
+            self.machine_menu.refresh_again = true;
             return;
         }
         self.machine_menu.refreshing = true;
@@ -167,10 +178,31 @@ impl NativeApplication {
                 }
                 app.machine_label = crate::native_hosts::label(app.machine_home.as_deref());
                 app.sync_command_menu_groups(cx);
+                if std::mem::take(&mut app.machine_menu.refresh_again) {
+                    app.refresh_machines(cx);
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Adopts the registration the connection resolved its host to.
+    ///
+    /// Connecting refreshes the host's invitation, and a newer incarnation
+    /// replaces (and deletes) the registration the window was opened with.
+    /// The window's home, label, and the reopen hint must follow it, or the
+    /// connected host reads as unavailable.
+    pub(super) fn adopt_resolved_home(&mut self, home: PathBuf, cx: &mut Context<Self>) {
+        if self.machine_home.as_deref() == Some(home.as_path()) {
+            return;
+        }
+        self.machine_home = Some(home.clone());
+        self.machine_label = crate::native_hosts::label(Some(&home));
+        #[cfg(not(test))]
+        self.refresh_machines(cx);
+        cx.emit(HostResolved(home));
+        cx.notify();
     }
 
     pub(super) fn dismiss_machine_submenu(&mut self) {

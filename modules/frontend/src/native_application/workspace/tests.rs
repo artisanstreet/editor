@@ -670,3 +670,44 @@ fn closed_worker_channel_preserves_its_final_authentication_failure(cx: &mut Tes
         });
     });
 }
+
+#[gpui::test]
+fn a_resolved_host_incarnation_becomes_the_session_home_and_reopen_hint(cx: &mut TestAppContext) {
+    let resolved = PathBuf::from("/test/hosts/ubuntu-current");
+    let service = Arc::new(NativeTransportService::completed_for_test(vec![
+        NativeTransportEvent::HostHome(resolved.clone()),
+    ]));
+    let (workspace, cx) = cx.add_window_view(move |window, cx| {
+        NativeWorkspace::new(
+            Some(PathBuf::from("/test/hosts/ubuntu-retired")),
+            Some(service),
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    let view = selected(&workspace, cx);
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.poll_service(cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|_, cx| {
+        assert_eq!(
+            view.read(cx).machine_home.as_deref(),
+            Some(resolved.as_path()),
+            "the view follows the registration the connection resolved to"
+        );
+        assert_eq!(
+            workspace.read(cx).host.home.as_deref(),
+            Some(resolved.as_path()),
+            "the session home follows it too"
+        );
+        assert_eq!(
+            crate::editor_settings::get(cx).reopen_host(),
+            Some(resolved.as_path()),
+            "a relaunch reopens the registration that exists"
+        );
+    });
+}
