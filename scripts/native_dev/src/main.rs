@@ -72,10 +72,11 @@ fn orchestrate(options: &DevArgs) -> Result<u8, DevError> {
     };
     match options.command {
         Command::Where => {
-            report_where(&paths);
+            report_forge(&paths);
             if windows {
                 return windows_maintenance("where");
             }
+            report_editor(&paths);
             Ok(0)
         }
         Command::Prune => {
@@ -207,7 +208,7 @@ fn editor_half(options: &EditorArgs) -> Result<u8, DevError> {
     let paths = DevPaths::new(&resolve_dev_root(options.root.as_deref())?)?;
     match options.command {
         Command::Where => {
-            report_where(&paths);
+            report_editor(&paths);
             Ok(0)
         }
         Command::Prune => {
@@ -241,8 +242,35 @@ fn exit_code(outcome: EditorOutcome) -> u8 {
     }
 }
 
-/// Prints one installation, its active build, and (on Linux) its Forge.
-fn report_where(paths: &DevPaths) {
+/// Prints the Forge's installation, active build, service, and invitation.
+fn report_forge(paths: &DevPaths) {
+    println!("forge root: {}", paths.home.display());
+    let Ok(version_root) = paths.active_version_root() else {
+        println!("forge build: nothing installed yet; run `nix run .#dev`");
+        return;
+    };
+    println!(
+        "forge build: {}",
+        BuildIdentity::for_executable(&staged_forge(&version_root))
+    );
+    println!("forge: {}", staged_forge(&version_root).display());
+    if let Ok(service) = ForgeService::for_current_user(&paths.home) {
+        let active = service.is_active(&UserSystemctl).unwrap_or(false);
+        println!(
+            "service: {} ({})",
+            service.unit_name(),
+            if active { "active" } else { "inactive" }
+        );
+    }
+    let invitation = paths.home.join(INVITATION_FILE);
+    if invitation.is_file() {
+        println!("invitation: {}", invitation.display());
+    }
+}
+
+/// Prints the Editor's installation and active build (the keys
+/// `scripts/verify_visual.ps1` reads).
+fn report_editor(paths: &DevPaths) {
     println!("root: {}", paths.home.display());
     let Ok(version_root) = paths.active_version_root() else {
         println!("build: nothing installed yet; run `nix run .#dev`");
@@ -253,21 +281,6 @@ fn report_where(paths: &DevPaths) {
         BuildIdentity::for_executable(&staged_editor(&version_root))
     );
     println!("editor: {}", staged_editor(&version_root).display());
-    if cfg!(target_os = "linux") {
-        println!("forge: {}", staged_forge(&version_root).display());
-        if let Ok(service) = ForgeService::for_current_user(&paths.home) {
-            let active = service.is_active(&UserSystemctl).unwrap_or(false);
-            println!(
-                "service: {} ({})",
-                service.unit_name(),
-                if active { "active" } else { "inactive" }
-            );
-        }
-        let invitation = paths.home.join(INVITATION_FILE);
-        if invitation.is_file() {
-            println!("invitation: {}", invitation.display());
-        }
-    }
 }
 
 /// This machine's host name.

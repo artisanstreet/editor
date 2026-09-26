@@ -272,7 +272,7 @@ fn editor_log_lives_in_the_runner_directory() {
 }
 
 /// A detached Editor on Unix writes to the runner's log and holds none of
-/// the runner's standard streams, so a caller reading `cargo dev` through a
+/// the runner's standard streams, so a caller reading the runner through a
 /// pipe sees end-of-file as soon as the runner returns.
 #[cfg(target_os = "linux")]
 #[test]
