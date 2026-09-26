@@ -124,6 +124,9 @@ fn switch_seals_drains_disconnects_and_connects_the_new_host(cx: &mut TestAppCon
     );
 
     drop(in_flight);
+    // The drain checks the holds on the UI poll interval.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
     cx.run_until_parked();
     assert_eq!(
         next_command(&mut old_commands).as_deref(),

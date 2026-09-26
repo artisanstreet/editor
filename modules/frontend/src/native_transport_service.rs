@@ -598,6 +598,8 @@ pub enum NativeTransportEvent {
     HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
     DeliveryLost(ServiceFailure),
+    /// The service connected again after losing its connection.
+    Reconnected,
     /// The registered host home the connection resolved to, which replaces
     /// the home it was started with when a newer incarnation superseded it.
     HostHome(std::path::PathBuf),

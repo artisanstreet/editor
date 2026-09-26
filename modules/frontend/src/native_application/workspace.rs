@@ -130,11 +130,10 @@ impl NativeWorkspace {
             .host
             .view
             .update(cx, |view, cx| view.begin_host_switch(label, cx));
+        let service = self.host.view.read(cx).service.clone();
         let task = cx.spawn_in(window, async move |workspace, cx| {
             if let Some(holds) = holds {
-                cx.background_executor()
-                    .spawn(async move { holds.idle().await })
-                    .await;
+                drain_holds(&holds, service.as_deref(), cx.background_executor()).await;
             }
             let Ok(service) = workspace.update(cx, Self::disconnect) else {
                 return;
@@ -389,6 +388,24 @@ pub(super) async fn close_connection(
         // Shutdown admission is nonblocking; retry while the queue is full.
         let _ = service.request_shutdown();
         while matches!(service.try_recv(), Ok(Some(_))) {}
+        executor.timer(POLL_INTERVAL).await;
+    }
+}
+
+/// Waits until a sealed connection's holds drain. A stopped service holds
+/// nothing it can still complete, and a lost connection releases its draft
+/// holds, but the wait is bounded as well: a switch never waits forever on a
+/// dead connection.
+async fn drain_holds(
+    holds: &crate::native_transport_service::ConnectionHolds,
+    service: Option<&NativeTransportService>,
+    executor: &gpui::BackgroundExecutor,
+) {
+    let deadline = Instant::now() + SERVICE_STOP_LIMIT;
+    while !holds.status().is_idle()
+        && !service.is_some_and(NativeTransportService::is_finished)
+        && Instant::now() < deadline
+    {
         executor.timer(POLL_INTERVAL).await;
     }
 }

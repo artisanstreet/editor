@@ -199,3 +199,74 @@ fn a_body_the_forge_never_stored_is_saved_before_it_is_sent() {
     sync.edit(&thread, body("typed"), acquire(&live));
     assert_eq!(sync.end_submit(&thread), Some(save(&thread, 2, "typed")));
 }
+
+#[test]
+fn a_lost_connection_releases_the_hold_and_resends_the_latest_text_after_reconnect() {
+    let live = Rc::new(Cell::new(0));
+    let thread = scope("thread-lost");
+    let mut sync = DraftSync::default();
+    assert_eq!(
+        sync.edit(&thread, body("typed"), acquire(&live)),
+        Some(save(&thread, 1, "typed"))
+    );
+    assert_eq!(sync.edit(&thread, body("typed more"), acquire(&live)), None);
+    assert_eq!(live.get(), 1, "the in-flight save holds the connection");
+
+    sync.interrupted(&thread, 1);
+    assert_eq!(live.get(), 0, "a lost connection never keeps a hold");
+    assert!(!sync.is_settled(&thread), "the text is still unsent");
+
+    // Typing while the connection is down neither sends nor holds.
+    assert_eq!(sync.edit(&thread, body("typed most"), acquire(&live)), None);
+    assert_eq!(live.get(), 0);
+
+    let resumed = sync.resume(|| acquire(&live)());
+    assert_eq!(resumed, vec![save(&thread, 2, "typed most")], "latest wins");
+    assert_eq!(live.get(), 1, "the resent save holds the new connection");
+    assert_eq!(sync.acknowledged(&thread, 2, revision(4)), None);
+    assert_eq!(live.get(), 0);
+    assert!(sync.is_settled(&thread));
+}
+
+#[test]
+fn an_interrupted_save_without_newer_text_resends_its_own_body() {
+    let live = Rc::new(Cell::new(0));
+    let thread = scope("thread-lost-own");
+    let mut sync = DraftSync::default();
+    let _ = sync.edit(&thread, body("only"), acquire(&live));
+    sync.interrupted(&thread, 1);
+    assert_eq!(live.get(), 0);
+    assert_eq!(
+        sync.resume(|| acquire(&live)()),
+        vec![save(&thread, 2, "only")]
+    );
+    assert!(sync.resume(|| acquire(&live)()).is_empty(), "resumed once");
+}
+
+#[test]
+fn a_sealed_connection_drains_once_its_draft_save_is_interrupted() {
+    use crate::native_transport_service::{ConnectionHolds, HoldKind};
+    let holds = ConnectionHolds::new();
+    let thread = scope("thread-drain");
+    let mut sync = DraftSync::default();
+    let acquire = || holds.try_hold(HoldKind::Draft);
+    assert!(sync.edit(&thread, body("draft"), acquire).is_some());
+    holds.seal();
+    assert_eq!(holds.status().count, 1, "a switch waits for the save");
+    sync.interrupted(&thread, 1);
+    let drained = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), holds.idle()).await
+        });
+    assert!(
+        drained.is_ok(),
+        "the drain resolves once the connection is lost"
+    );
+    holds.unseal();
+    let resumed = sync.resume(|| holds.try_hold(HoldKind::Draft));
+    assert_eq!(resumed, vec![save(&thread, 2, "draft")]);
+    assert_eq!(holds.status().count, 1);
+}

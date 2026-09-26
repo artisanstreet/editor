@@ -258,6 +258,9 @@ impl ServiceRuntime {
         ));
         self.delivery_cancel = Some(cancel);
         self.delivery_join = Some(join);
+        // Work the application parked while the connection was down (unsent
+        // draft saves) resumes on this signal.
+        self.deliveries.announce(NativeTransportEvent::Reconnected);
         if restore_subscription && let Some(thread_id) = self.custody.active_thread().cloned() {
             let after = self.custody.last_accepted_cursor();
             if let Err(failure) = self

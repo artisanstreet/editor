@@ -46,6 +46,13 @@ impl DeliveryInbox {
         self.events = Some(events);
     }
 
+    /// Publishes one service event through the attached bridge, if any.
+    pub(super) fn announce(&self, event: NativeTransportEvent) {
+        if let Some(events) = self.events.as_ref() {
+            let _ = publish(events, event);
+        }
+    }
+
     /// The next delivery for the command loop: the parked one first. A closed
     /// channel is a delivery loss; without a channel this never resolves.
     async fn next(&mut self) -> PrivateDelivery {

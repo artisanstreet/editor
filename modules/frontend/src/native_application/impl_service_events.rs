@@ -292,6 +292,7 @@ impl NativeApplication {
             NativeTransportEvent::HostState(state) => self.apply_host_state(state, cx),
             NativeTransportEvent::Preferences(event) => self.handle_preferences_event(event, cx),
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
+            NativeTransportEvent::Reconnected => self.resume_composer_drafts(),
             NativeTransportEvent::HostHome(home) => self.adopt_resolved_home(home, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
