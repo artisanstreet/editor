@@ -301,6 +301,7 @@ impl NativeApplication {
             self.sync_composer_availability(cx);
             return;
         }
+        self.project_navigation.chosen_thread = Some(thread_id.clone());
         if self.selected_thread.is_none() || self.conversation_host.is_none() {
             self.selected_thread = None;
             self.pending_thread = Some(thread_id);

@@ -184,10 +184,19 @@ impl NativeApplication {
         if let Some(project) = self.selected_project.clone() {
             self.report_navigation(project, Some(thread_id.clone()));
         }
-        if matches!(
-            self.route(),
-            NativeRoute::NewThread { .. } | NativeRoute::Thread { .. }
-        ) && let Some(project) = self.selected_project.clone()
+        // A background mount keeps a route that shows no conversation; the
+        // thread the user chose is shown wherever they chose it.
+        let chosen = self
+            .project_navigation
+            .chosen_thread
+            .take_if(|chosen| *chosen == thread_id)
+            .is_some();
+        if (chosen
+            || matches!(
+                self.route(),
+                NativeRoute::NewThread { .. } | NativeRoute::Thread { .. }
+            ))
+            && let Some(project) = self.selected_project.clone()
         {
             self.navigate(
                 NativeRoute::Thread {

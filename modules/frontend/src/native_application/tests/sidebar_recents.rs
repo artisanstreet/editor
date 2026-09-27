@@ -237,6 +237,170 @@ fn choosing_a_recent_thread_opens_it_in_its_own_project(cx: &mut TestAppContext)
     });
 }
 
+/// Where the window is when a recent-thread row is clicked.
+#[derive(Clone, Copy, Debug)]
+enum ClickOrigin {
+    /// Settings, with no conversation open.
+    Settings,
+    /// Settings, opened from a conversation that stays mounted.
+    SettingsOverThread,
+    /// An open conversation.
+    Thread,
+    /// The project's new-thread screen.
+    NewThread,
+}
+
+impl ClickOrigin {
+    fn has_open_thread(self) -> bool {
+        matches!(self, Self::SettingsOverThread | Self::Thread)
+    }
+}
+
+/// Clicks the row of another listed thread of the selected project from
+/// `origin` and asserts the window shows that thread.
+fn click_recent_row_from(origin: ClickOrigin, cx: &mut TestAppContext) {
+    use gpui::px;
+
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let (sink, _commands) = command_sink([]);
+    let project = ProjectId::parse("message-project").expect("fixture project");
+    let current = ThreadId::parse("current").expect("fixture thread");
+    let target = ThreadId::parse("target").expect("fixture thread");
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.project_options = vec![ProjectOption {
+                id: project.clone(),
+                name: "editor".into(),
+            }];
+            application.selected_project = Some(project.clone());
+            if origin.has_open_thread() {
+                install_ready_message_surface(application, cx, current.clone(), "", sink);
+            } else {
+                application.test_command_sink = Some(sink);
+                application.state = NativeViewState::Ready;
+            }
+            application.thread_listing = Some(
+                ThreadListing::new(vec![
+                    thread(current.as_str(), project.as_str(), "Current"),
+                    thread(target.as_str(), project.as_str(), "Target"),
+                ])
+                .expect("listing"),
+            );
+            push_recent(
+                application,
+                recent_listing(vec![
+                    recent_row(
+                        current.as_str(),
+                        project.as_str(),
+                        "Current",
+                        "owner/editor",
+                        60_000,
+                    ),
+                    recent_row(
+                        target.as_str(),
+                        project.as_str(),
+                        "Target",
+                        "owner/editor",
+                        HOUR_MS,
+                    ),
+                ]),
+                cx,
+            );
+            match origin {
+                ClickOrigin::Settings | ClickOrigin::SettingsOverThread => application.navigate(
+                    NativeRoute::Settings {
+                        section: SettingsRoute::Models,
+                        engine: None,
+                    },
+                    cx,
+                ),
+                ClickOrigin::NewThread => application.navigate(
+                    NativeRoute::NewThread {
+                        project: Some(project.clone()),
+                    },
+                    cx,
+                ),
+                ClickOrigin::Thread => {}
+            }
+        });
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+
+    let row = cx
+        .debug_bounds("artisan-sidebar-thread-target")
+        .expect("the target row paints");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    if origin.has_open_thread() {
+        // The open conversation's subscription stops; the switch mounts the
+        // chosen thread.
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                assert_eq!(
+                    application
+                        .thread_switch_flight
+                        .as_ref()
+                        .and_then(|flight| flight.target_thread.clone()),
+                    Some(target.clone()),
+                    "clicking the row from {origin:?} switches to its thread"
+                );
+                application.handle_service_event(
+                    NativeTransportEvent::ConversationSubscriptionStopped {
+                        thread_id: current.clone(),
+                        request_id: request("sidebar-click-stop"),
+                        stopped: ConversationSubscriptionStopped {
+                            thread_id: current.clone(),
+                        },
+                    },
+                    cx,
+                );
+            });
+        });
+        cx.run_until_parked();
+    }
+    cx.update(|_, app| {
+        let application = view.read(app);
+        assert_eq!(
+            application.selected_thread.as_ref(),
+            Some(&target),
+            "clicking the row from {origin:?} opens its thread"
+        );
+        assert!(
+            application.sidebar_threads.awaited_open.is_none(),
+            "the click from {origin:?} is not left waiting"
+        );
+        assert_eq!(
+            application.route(),
+            &NativeRoute::Thread {
+                project: project.clone(),
+                thread: target.clone(),
+            },
+            "the click from {origin:?} shows the chosen thread"
+        );
+    });
+}
+
+#[gpui::test]
+fn a_recent_thread_opens_when_clicked_from_settings(cx: &mut TestAppContext) {
+    click_recent_row_from(ClickOrigin::Settings, cx);
+}
+
+#[gpui::test]
+fn a_recent_thread_opens_when_clicked_from_settings_over_a_thread(cx: &mut TestAppContext) {
+    click_recent_row_from(ClickOrigin::SettingsOverThread, cx);
+}
+
+#[gpui::test]
+fn a_recent_thread_opens_when_clicked_from_a_thread(cx: &mut TestAppContext) {
+    click_recent_row_from(ClickOrigin::Thread, cx);
+}
+
+#[gpui::test]
+fn a_recent_thread_opens_when_clicked_from_a_new_thread(cx: &mut TestAppContext) {
+    click_recent_row_from(ClickOrigin::NewThread, cx);
+}
+
 #[gpui::test]
 fn pushed_recent_threads_refresh_the_selected_listing_once_without_polling(
     cx: &mut TestAppContext,

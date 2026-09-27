@@ -637,12 +637,10 @@ impl RequestHandler {
 
     /// Attaches the one process-owned bounded project-repository reader.
     ///
-    /// The reader inspects the durable catalog's stored project roots on
-    /// demand and owns no persisted state. Without it,
-    /// `QueryProjectRepository` answers the established
-    /// unsupported-capability failure instead of fabricating repository
-    /// facts, and recent threads show their projects' display names. The
-    /// subtitle cache every connection shares observes through it.
+    /// The reader inspects stored project roots on demand and owns no
+    /// persisted state. Without it, `QueryProjectRepository` answers the
+    /// unsupported-capability failure and recent threads show display names.
+    /// The subtitle cache every connection shares observes through it.
     #[must_use]
     pub fn with_project_repository_service(
         mut self,
@@ -653,6 +651,12 @@ impl RequestHandler {
         ));
         self.project_repository = Some(service);
         self
+    }
+
+    /// The subtitle cache every connection shares, once repositories are read.
+    #[must_use]
+    pub fn project_subtitles(&self) -> Option<&crate::project_subtitles::ProjectSubtitles> {
+        self.project_subtitles.as_ref()
     }
 
     /// Attaches the one process-owned live-run cancellation registry shared

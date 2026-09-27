@@ -2359,3 +2359,162 @@ async fn project_catalog_is_pushed_to_a_connection_that_listed_it() -> Result<()
     app.shutdown().await?;
     Ok(())
 }
+
+/// Runs `git` with `args` in `directory`.
+#[cfg(unix)]
+fn git_in(directory: &std::path::Path, args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        return Err(format!("git {args:?}: {}", String::from_utf8_lossy(&output.stderr)).into());
+    }
+    Ok(())
+}
+
+/// After a Forge starts, the recent threads show project names until the
+/// repositories are observed; the observation then reaches every Editor that
+/// read them without any request. A read that failed (Git could not start)
+/// is retried rather than kept, and its result is pushed too.
+#[cfg(unix)]
+#[tokio::test]
+async fn resolved_subtitles_are_pushed_after_startup_even_when_a_read_failed()
+-> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    commit_assistant_start(&repository, &seeded.run).await?;
+    let checkout = temporary.directory.join("checkout");
+    fs::create_dir(&checkout)?;
+    git_in(&checkout, &["init", "-q", "-b", "main"])?;
+    git_in(
+        &checkout,
+        &["remote", "add", "origin", "git@github.com:owner/repo.git"],
+    )?;
+    // Git cannot start until this executable exists; it then reads the
+    // checkout above in place of the project's stored root.
+    let git = temporary.directory.join("git");
+    let service = artisan_backend::project_repository_service::ProjectRepositoryService::new(
+        repository.clone(),
+    )
+    .with_git_executable(&git);
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone())
+        .with_project_repository_service(service);
+    let subtitles = handler
+        .project_subtitles()
+        .cloned()
+        .ok_or("subtitle cache")?;
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = std::sync::Arc::new(CancelHandle::new());
+    let keeper = tokio::spawn(subtitles.clone().keep_current(
+        repository.clone(),
+        notifier.clone(),
+        std::sync::Arc::clone(&cancel),
+    ));
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+        let read = request_once(
+            &connection,
+            "delivery-read-subtitles",
+            ClientRequest::Query(artisan_domain::Query::ReadRecentThreads(
+                artisan_domain::ReadRecentThreads,
+            )),
+        )
+        .await?;
+        let ResponsePayload::RecentThreads(listing) = read else {
+            return Err("expected the recent threads".into());
+        };
+        let [row] = listing.threads() else {
+            return Err("expected the started thread".into());
+        };
+        assert_eq!(
+            row.subtitle.as_str(),
+            "Delivery",
+            "a cold cache shows names"
+        );
+
+        // The failed read is recorded before Git becomes available.
+        let started = std::time::Instant::now();
+        while subtitles.generation() == 0 {
+            if started.elapsed() > TEST_DEADLINE {
+                return Err("the first read never finished".into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let staged = temporary.directory.join("git.staged");
+        fs::write(
+            &staged,
+            format!(
+                "#!/bin/sh\nshift 2\nexec git -C '{}' \"$@\"\n",
+                checkout.display()
+            ),
+        )?;
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&staged, &git)?;
+
+        let mut delivery = tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        let listing = tokio::time::timeout(TEST_DEADLINE * 2, async {
+            loop {
+                let frame = receive_delivery_frame(&mut delivery).await?;
+                if let Ok(listing) = pushed_recent_threads(frame) {
+                    return Ok::<_, Box<dyn Error>>(listing);
+                }
+            }
+        })
+        .await??;
+        assert_eq!(
+            listing.threads()[0].subtitle.as_str(),
+            "owner/repo",
+            "the observed repository is pushed"
+        );
+        cancel.cancel();
+        drop(delivery);
+        drop(control_send);
+        drop(control_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    keeper.await?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery subtitle test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
