@@ -73,6 +73,7 @@ mod protocol;
 mod quota;
 mod text;
 mod thinking;
+mod tools;
 mod usage;
 pub(crate) use adapter::*;
 #[cfg(test)]
@@ -81,4 +82,6 @@ pub(crate) use launch::*;
 pub(crate) use protocol::*;
 #[cfg(test)]
 pub(crate) use quota::*;
+#[cfg(test)]
+pub(crate) use tools::ClaudeToolUse;
 pub(crate) use usage::*;
