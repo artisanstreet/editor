@@ -306,6 +306,10 @@ pub(crate) enum ClaudeEvent {
         index: u64,
         text: String,
     },
+    /// A streamed tool-use block opened: the message's text is commentary.
+    ToolUseStarted,
+    /// The `tool_result` blocks of one root `user` frame.
+    ToolResults(Vec<super::tools::ClaudeToolResult>),
     /// A streamed content block (of any kind) closed at this index.
     ContentBlockStopped {
         index: u64,
@@ -432,6 +436,7 @@ fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
         "system" => decode_system(envelope),
         "stream_event" => decode_stream_event(envelope),
         "assistant" => decode_assistant(envelope),
+        "user" => decode_user(envelope),
         "result" => decode_result(envelope),
         "control_request" => decode_control(envelope),
         _ => ClaudeEvent::Unknown,
@@ -538,6 +543,20 @@ fn decode_assistant(envelope: &Value) -> ClaudeEvent {
     };
     assistant_content(bounded_id(message, "id"), content, usage)
         .map_or(ClaudeEvent::Unknown, ClaudeEvent::Assistant)
+}
+
+fn decode_user(envelope: &Value) -> ClaudeEvent {
+    let results = envelope
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .map(|content| super::tools::tool_results(content))
+        .unwrap_or_default();
+    if results.is_empty() {
+        ClaudeEvent::Unknown
+    } else {
+        ClaudeEvent::ToolResults(results)
+    }
 }
 
 fn decode_result(envelope: &Value) -> ClaudeEvent {

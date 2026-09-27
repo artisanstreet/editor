@@ -9,7 +9,12 @@
 //! holds, so the buffered block settles it exactly once: an identical block
 //! emits nothing, a block the stream only started appends its missing
 //! suffix, and a diverging block replaces the whole message part. A buffered
-//! block that arrives without partials appends in full. Child frames
+//! block that arrives without partials appends in full.
+//!
+//! A message that goes on to call a tool is interim narration, not the
+//! answer: Claude streams its text before the `tool_use` block, so the text
+//! starts `unspecified` and the first tool-use block of the message re-phases
+//! everything the message said (and says after) as `commentary`. Child frames
 //! (`parent_tool_use_id`) route before root decoding and never reach this
 //! ledger.
 
@@ -32,6 +37,8 @@ pub(crate) struct ClaudeTextLedger {
     body: String,
     /// Leading bytes of `body` already settled by buffered blocks.
     settled: usize,
+    /// Set once the current message called a tool.
+    commentary: bool,
 }
 
 impl ClaudeTextLedger {
@@ -40,6 +47,27 @@ impl ClaudeTextLedger {
         self.message_id = Some(message_id.to_owned());
         self.body.clear();
         self.settled = 0;
+        self.commentary = false;
+    }
+
+    /// Marks the current message as commentary because it called a tool.
+    ///
+    /// Returns the body to re-phase when this is the first mark and the
+    /// message already said something; later marks return nothing.
+    pub(crate) fn mark_commentary(&mut self) -> Option<&str> {
+        if std::mem::replace(&mut self.commentary, true) || self.body.is_empty() {
+            return None;
+        }
+        Some(&self.body)
+    }
+
+    /// Returns the verbatim phase of the current message's text.
+    pub(crate) fn phase(&self) -> &'static str {
+        if self.commentary {
+            "commentary"
+        } else {
+            "unspecified"
+        }
     }
 
     /// Records one provisional streamed fragment of the current message.

@@ -22,6 +22,7 @@ use super::protocol::{
 };
 use super::text::{ClaudeTextLedger, ClaudeTextSettlement};
 use super::thinking::ClaudeThinkingTracker;
+use super::tools::ClaudeToolTracker;
 use super::usage::{ClaudeUsageScope, project_usage_sample};
 
 /// Builds one validated subagent discovery row.
@@ -114,6 +115,7 @@ pub(crate) struct ClaudePendingTracker {
     thinking_tokens: Option<u64>,
     thinking: ClaudeThinkingTracker,
     text: ClaudeTextLedger,
+    tools: ClaudeToolTracker,
     permission_denials: usize,
     stream_message_id: Option<String>,
     init_seen: bool,
@@ -377,7 +379,7 @@ async fn emit_text(
     Ok(())
 }
 
-/// Sends validated activity rows (reasoning observations) in order.
+/// Sends validated activity rows (reasoning and tool work) in order.
 async fn emit_rows(
     observations: &mpsc::Sender<EngineObservation>,
     rows: Vec<Observation>,
@@ -442,6 +444,28 @@ async fn settle_buffered_text(
         .map_err(|_| TerminalState::Interrupted)
 }
 
+/// Re-phases the current message as commentary the first time it calls a
+/// tool, replacing its part with the same body under the new phase.
+async fn mark_commentary(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    tracker: &mut ClaudePendingTracker,
+    frame_sequence: u64,
+) -> Result<(), TerminalState> {
+    let Some(body) = tracker.text.mark_commentary().map(str::to_owned) else {
+        return Ok(());
+    };
+    let Some(part_id) = tracker.stream_message_id.clone() else {
+        return Ok(());
+    };
+    let snapshot = TextSnapshot::new(run_id.clone(), frame_sequence, part_id, body)
+        .with_phase(artisan_domain::AssistantMessagePhase::Commentary);
+    observations
+        .send(EngineObservation::TextSnapshot(snapshot))
+        .await
+        .map_err(|_| TerminalState::Interrupted)
+}
+
 /// Projects one buffered assistant frame: every supported part in provider
 /// order, then its usage sample exactly once.
 async fn apply_assistant_frame(
@@ -459,6 +483,11 @@ async fn apply_assistant_frame(
     for part in &frame.content {
         match part {
             ClaudeAssistantContent::Text { text, phase } => {
+                let phase = if tracker.text.phase() == "commentary" {
+                    "commentary"
+                } else {
+                    phase
+                };
                 let settlement = tracker.text.buffered(frame.message_id.as_deref(), text);
                 let part_id = tracker.stream_message_id.as_deref();
                 settle_buffered_text(
@@ -477,6 +506,11 @@ async fn apply_assistant_frame(
                     tracker
                         .thinking
                         .buffered(run_id, frame_sequence, message_id.as_deref(), text);
+                emit_rows(observations, rows).await?;
+            }
+            ClaudeAssistantContent::ToolUse(tool) => {
+                mark_commentary(observations, run_id, tracker, frame_sequence).await?;
+                let rows = tracker.tools.started(run_id, frame_sequence, tool);
                 emit_rows(observations, rows).await?;
             }
         }
@@ -543,6 +577,11 @@ pub(crate) async fn apply_event(
                 *active_turn = Some(expected_session.to_owned());
             }
             tracker.text.streamed(&delta);
+            let phase = if tracker.text.phase() == "commentary" {
+                "commentary"
+            } else {
+                phase
+            };
             let part_id = tracker.stream_message_id.as_deref();
             settle(emit_text(observations, run_id, part_id, frame_sequence, &delta, phase).await)
         }
@@ -566,6 +605,16 @@ pub(crate) async fn apply_event(
         }
         ClaudeEvent::ThinkingDelta { index, text } => {
             let rows = tracker.thinking.delta(run_id, frame_sequence, index, &text);
+            settle(emit_rows(observations, rows).await)
+        }
+        ClaudeEvent::ToolUseStarted => {
+            settle(mark_commentary(observations, run_id, tracker, frame_sequence).await)
+        }
+        ClaudeEvent::ToolResults(results) => {
+            let rows = results
+                .iter()
+                .flat_map(|result| tracker.tools.finished(run_id, frame_sequence, result))
+                .collect();
             settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ContentBlockStopped { index } => {

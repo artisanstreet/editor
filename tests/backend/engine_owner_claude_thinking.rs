@@ -1,6 +1,7 @@
 //! Claude thinking display: launch policy, mixed-content decoding,
-//! thinking-stretch projection onto the shared reasoning observations, and
-//! streamed-versus-buffered assistant text settling exactly once.
+//! thinking-stretch projection onto the shared reasoning observations,
+//! streamed-versus-buffered assistant text settling exactly once, and tool
+//! calls projecting as work beside commentary.
 //!
 //! Replays the sanitized captures in `tests/fixtures/claude/` (see its
 //! `manifest.json`; `constructed-*` files are labeled edge fixtures derived
@@ -8,8 +9,8 @@
 //! `apply_event` pair the live pump uses. No real `claude` binary.
 
 use artisan_domain::{
-    ApprovalMode, ClaudeEffort, ClaudeSelection, EngineAgentId, EngineModelId,
-    EnginePermissionPolicy, EngineProfileId, FilesystemAccess, NetworkAccess,
+    ApprovalMode, AssistantMessagePhase, ClaudeEffort, ClaudeSelection, EngineAgentId,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, FilesystemAccess, NetworkAccess,
     OBSERVATION_DELTA_MAX_BYTES, OBSERVATION_MESSAGE_MAX_BYTES, Observation, PermissionId, RunId,
     ThreadId, WebSearchAccess,
 };
@@ -18,7 +19,8 @@ use tokio::sync::mpsc;
 
 use super::claude::{
     ClaudeApplyOutcome, ClaudeAssistantContent, ClaudeEvent, ClaudePendingTracker, ClaudeSession,
-    ClaudeSettings, ClaudeThinkingDisplay, ClaudeUsageScope, apply_event, parse_frame,
+    ClaudeSettings, ClaudeThinkingDisplay, ClaudeToolUse, ClaudeUsageScope, apply_event,
+    parse_frame,
 };
 use super::observation::EngineObservation;
 
@@ -117,6 +119,11 @@ fn mixed_assistant_frame_projects_thinking_text_and_usage_once() {
                 text: "Reading now".to_owned(),
                 phase: "commentary"
             },
+            ClaudeAssistantContent::ToolUse(ClaudeToolUse {
+                id: "tool-1".to_owned(),
+                name: "Read".to_owned(),
+                input: serde_json::json!({}),
+            }),
             ClaudeAssistantContent::Thinking {
                 text: "Second stretch".to_owned()
             },
@@ -182,6 +189,12 @@ struct Replay {
     completions: Vec<(String, Option<String>, String)>,
     usage_reports: usize,
     outcomes: Vec<ClaudeApplyOutcome>,
+    /// Latest phase each message part carried.
+    phases: Vec<(String, AssistantMessagePhase)>,
+    /// Tool steps as `(tool id, kind, action, detail)`.
+    tools: Vec<(String, String, String, Option<String>)>,
+    /// Terminal rows as `(activity id, state, command, output)`.
+    terminals: Vec<(String, String, Option<String>, Option<String>)>,
 }
 
 impl Replay {
@@ -204,6 +217,23 @@ impl Replay {
             .find(|(known, _)| known == part_id)
             .expect("part exists");
         text
+    }
+
+    fn note_phase(&mut self, part_id: Option<&str>, phase: Option<AssistantMessagePhase>) {
+        let (Some(part_id), Some(phase)) = (part_id, phase) else {
+            return;
+        };
+        match self.phases.iter_mut().find(|(known, _)| known == part_id) {
+            Some((_, known)) => *known = phase,
+            None => self.phases.push((part_id.to_owned(), phase)),
+        }
+    }
+
+    fn phase(&self, part_id: &str) -> Option<AssistantMessagePhase> {
+        self.phases
+            .iter()
+            .find(|(known, _)| known == part_id)
+            .map(|(_, phase)| *phase)
     }
 }
 
@@ -266,11 +296,29 @@ async fn replay_lines(lines: &[&str], run: &str, display: ClaudeThinkingDisplay)
         match observation {
             EngineObservation::TextDelta(delta) => {
                 replay.part(delta.part_id()).push_str(delta.delta());
+                replay.note_phase(delta.part_id(), delta.phase());
             }
             EngineObservation::TextSnapshot(snapshot) => {
                 let part = replay.part(Some(snapshot.part_id()));
                 part.clear();
                 part.push_str(snapshot.text());
+                replay.note_phase(Some(snapshot.part_id()), snapshot.phase());
+            }
+            EngineObservation::Activity(Observation::Tool(row)) => {
+                replay.tools.push((
+                    row.tool_id().as_str().to_owned(),
+                    row.tool_name().to_owned(),
+                    row.action().as_str().to_owned(),
+                    row.detail().map(str::to_owned),
+                ));
+            }
+            EngineObservation::Activity(Observation::TerminalActivity(row)) => {
+                replay.terminals.push((
+                    row.activity_id().as_str().to_owned(),
+                    row.state().as_str().to_owned(),
+                    row.command().map(str::to_owned),
+                    row.output().map(str::to_owned),
+                ));
             }
             EngineObservation::Usage(_) => replay.usage_reports += 1,
             EngineObservation::Activity(Observation::ReasoningSummaryDelta(row)) => {
@@ -713,4 +761,120 @@ async fn text_blocks_across_messages_settle_to_the_buffered_text_once() {
     )
     .await;
     assert_eq!(buffered.text, "Only buffered. Again.");
+}
+
+#[tokio::test]
+async fn tool_cycle_capture_projects_each_read_as_work() {
+    let replay = replay(TOOLS, "run-tool-steps", ClaudeThinkingDisplay::Summarized).await;
+    let step = |id: &str, action: &str| {
+        (
+            id.to_owned(),
+            "read".to_owned(),
+            action.to_owned(),
+            Some("/project/numbers.txt".to_owned()),
+        )
+    };
+    assert_eq!(
+        replay.tools,
+        vec![
+            step("toolu_fixture_01", "started"),
+            step("toolu_fixture_01", "completed"),
+            step("toolu_fixture_02", "started"),
+            step("toolu_fixture_02", "completed"),
+        ]
+    );
+    // The answer after the last tool result is never commentary.
+    assert_ne!(
+        replay.phase("msg_fixture_03"),
+        Some(AssistantMessagePhase::Commentary)
+    );
+}
+
+fn tool_use_start(index: u64, id: &str, name: &str) -> String {
+    serde_json::json!({"type":"stream_event","event":{"type":"content_block_start",
+        "index":index,"content_block":{"type":"tool_use","id":id,"name":name,"input":{}}}})
+    .to_string()
+}
+
+fn buffered_tool_use(message: &str, id: &str, name: &str, input: serde_json::Value) -> String {
+    serde_json::json!({"type":"assistant","message":{"id":message,
+        "content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+    .to_string()
+}
+
+fn tool_result(id: &str, output: &str, is_error: bool) -> String {
+    serde_json::json!({"type":"user","parent_tool_use_id":null,"message":{"role":"user",
+        "content":[{"type":"tool_result","tool_use_id":id,"is_error":is_error,
+            "content":[{"type":"text","text":output}]}]}})
+    .to_string()
+}
+
+#[tokio::test]
+async fn narration_before_a_tool_call_is_commentary_and_commands_are_terminal_work() {
+    let lines: Vec<String> = vec![
+        message_start("msg-plan"),
+        text_delta(0, "I'll list "),
+        text_delta(0, "the files."),
+        buffered_text("msg-plan", "I'll list the files."),
+        tool_use_start(1, "toolu-ls", "Bash"),
+        text_delta(2, " Then read."),
+        buffered_tool_use(
+            "msg-plan",
+            "toolu-ls",
+            "Bash",
+            serde_json::json!({"command":"ls -a","description":"List files"}),
+        ),
+        tool_result("toolu-ls", "a\nb", false),
+        message_start("msg-retry"),
+        buffered_tool_use(
+            "msg-retry",
+            "toolu-bad",
+            "Bash",
+            serde_json::json!({"command":"false"}),
+        ),
+        tool_result("toolu-bad", "exit 1", true),
+        tool_result("toolu-unknown", "ignored", false),
+        message_start("msg-answer"),
+        text_delta(0, "Two files."),
+        buffered_text("msg-answer", "Two files."),
+    ];
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let replay = replay_lines(&lines, "run-commentary", ClaudeThinkingDisplay::Summarized).await;
+    assert_eq!(
+        replay.parts,
+        vec![
+            (
+                "msg-plan".to_owned(),
+                "I'll list the files. Then read.".to_owned()
+            ),
+            ("msg-answer".to_owned(), "Two files.".to_owned()),
+        ]
+    );
+    assert_eq!(
+        replay.phase("msg-plan"),
+        Some(AssistantMessagePhase::Commentary),
+        "text of a message that called a tool is narration"
+    );
+    assert_eq!(
+        replay.phase("msg-answer"),
+        Some(AssistantMessagePhase::Unspecified)
+    );
+    let row = |id: &str, state: &str, command: Option<&str>, output: Option<&str>| {
+        (
+            id.to_owned(),
+            state.to_owned(),
+            command.map(str::to_owned),
+            output.map(str::to_owned),
+        )
+    };
+    assert_eq!(
+        replay.terminals,
+        vec![
+            row("toolu-ls", "started", Some("ls -a"), None),
+            row("toolu-ls", "completed", None, Some("a\nb")),
+            row("toolu-bad", "started", Some("false"), None),
+            row("toolu-bad", "failed", None, Some("exit 1")),
+        ]
+    );
+    assert!(replay.tools.is_empty(), "commands are terminal work only");
 }

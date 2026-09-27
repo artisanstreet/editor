@@ -12,6 +12,7 @@
 use serde_json::{Map, Value};
 
 use super::protocol::ClaudeEvent;
+use super::tools::ClaudeToolUse;
 use super::usage::ClaudeUsageSample;
 
 /// One supported part of a buffered assistant frame, in provider order.
@@ -24,6 +25,8 @@ pub(crate) enum ClaudeAssistantContent {
     /// One thinking block's text. Empty when the display omits thinking;
     /// public summary prose only when the launch requested `summarized`.
     Thinking { text: String },
+    /// One tool call with its complete input.
+    ToolUse(ClaudeToolUse),
 }
 
 /// One buffered assistant frame after bounded decoding.
@@ -71,7 +74,20 @@ pub(crate) fn assistant_content(
                     text.push_str(fragment);
                 }
             }
-            "tool_use" => has_tool_use |= item.get("id").and_then(Value::as_str).is_some(),
+            "tool_use" => {
+                let (Some(id), Some(name)) = (
+                    item.get("id").and_then(Value::as_str),
+                    item.get("name").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                has_tool_use = true;
+                parts.push(ClaudeAssistantContent::ToolUse(ClaudeToolUse {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    input: item.get("input").cloned().unwrap_or(Value::Null),
+                }));
+            }
             "thinking" => parts.push(ClaudeAssistantContent::Thinking {
                 text: item
                     .get("thinking")
@@ -104,8 +120,9 @@ fn block_index(event: &Map<String, Value>) -> Option<u64> {
     event.get("index").and_then(Value::as_u64)
 }
 
-/// Decodes one stream `content_block_start`: only thinking blocks open a
-/// tracked stretch; every other block kind stays bookkeeping.
+/// Decodes one stream `content_block_start`: thinking blocks open a tracked
+/// stretch and tool-use blocks mark the message's text as commentary; every
+/// other block kind stays bookkeeping.
 pub(crate) fn decode_block_start(event: &Map<String, Value>) -> ClaudeEvent {
     let kind = event
         .get("content_block")
@@ -113,6 +130,7 @@ pub(crate) fn decode_block_start(event: &Map<String, Value>) -> ClaudeEvent {
         .and_then(Value::as_str);
     match (kind, block_index(event)) {
         (Some("thinking"), Some(index)) => ClaudeEvent::ThinkingStarted { index },
+        (Some("tool_use"), _) => ClaudeEvent::ToolUseStarted,
         _ => ClaudeEvent::Unknown,
     }
 }
