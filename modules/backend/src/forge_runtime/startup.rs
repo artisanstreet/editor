@@ -694,6 +694,15 @@ async fn run_with_handler(
         Arc::clone(&cancel),
     ));
     let handler = handler.with_shared_account_usage_service(usage);
+    // Subtitles resolve from startup on and follow repository changes; each
+    // change is pushed to the Editors that read the recent threads.
+    let subtitle_keeper = handler.project_subtitles().cloned().map(|subtitles| {
+        tokio::spawn(subtitles.keep_current(
+            app.repository().clone(),
+            notifier.clone(),
+            Arc::clone(&cancel),
+        ))
+    });
     let primary = match listener.serve_until_cancel(&handler, &cancel).await {
         Ok(()) => None,
         Err(error) if error.is_service_failure() => Some(ForgeRuntimeError::Service(error)),
@@ -705,6 +714,9 @@ async fn run_with_handler(
     };
     // Serving ended; no Editor remains for the refresher to keep current.
     usage_refresher.abort();
+    if let Some(keeper) = subtitle_keeper {
+        keeper.abort();
+    }
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
     finish(
