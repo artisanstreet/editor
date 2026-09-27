@@ -17,7 +17,8 @@ use crate::error::DevError;
 /// `production`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
-    /// Production codegen plus debug info, assertions, and the inspector.
+    /// Optimized for build speed, plus debug info, assertions, and the
+    /// inspector.
     Debug,
     /// The shipped build.
     Production,
@@ -30,6 +31,20 @@ impl Stage {
         match self {
             Self::Debug => "debug",
             Self::Production => "production",
+        }
+    }
+
+    /// How many derivations Nix may build at once for this stage.
+    ///
+    /// Production payloads end in fat-LTO links of several GB, and two
+    /// payloads linking at once exhaust a 16 GB machine. Debug payloads have
+    /// no whole-program link, so the Linux and Windows payloads build side
+    /// by side and fill the cores one payload's crate graph leaves idle.
+    #[must_use]
+    pub const fn concurrent_builds(self) -> u8 {
+        match self {
+            Self::Debug => 2,
+            Self::Production => 1,
         }
     }
 }
@@ -130,17 +145,17 @@ pub fn untracked_refusal(listing: &str) -> Option<DevError> {
     )))
 }
 
-/// Builds `installables` in one `nix build` and returns their output paths
-/// in the same order. Nix's progress goes to the runner's stderr.
+/// Builds `installables` in one `nix build`, at most `concurrent` derivations
+/// at a time (see [`Stage::concurrent_builds`]), and returns their output
+/// paths in the same order. Nix's progress goes to the runner's stderr.
 ///
 /// # Errors
 ///
 /// Returns [`DevError::Stage`] when Nix fails or reports unexpected output.
-pub fn build(installables: &[String]) -> Result<Vec<PathBuf>, DevError> {
+pub fn build(installables: &[String], concurrent: u8) -> Result<Vec<PathBuf>, DevError> {
     let output = Command::new("nix")
-        // One derivation at a time: every payload ends in fat-LTO links, and
-        // two payloads linking at once exhaust a 16 GB machine.
-        .args(["build", "--no-link", "--json", "--max-jobs", "1"])
+        .args(["build", "--no-link", "--json", "--max-jobs"])
+        .arg(concurrent.to_string())
         .args(installables)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())

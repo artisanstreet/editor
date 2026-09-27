@@ -67,7 +67,7 @@ fn orchestrate(options: &DevArgs) -> Result<u8, DevError> {
     let windows = platform == EditorPlatform::Windows;
     let checkout = || Checkout::locate(&std::env::current_dir().unwrap_or_default());
     let windows_maintenance = |command: &str| {
-        let runner = build(&checkout()?, &[nix::runner_attribute(Target::Windows)])?;
+        let runner = build(&checkout()?, &[nix::runner_attribute(Target::Windows)], 1)?;
         windows_half(&runner[0], command, None, None, options)
     };
     match options.command {
@@ -102,7 +102,7 @@ fn deploy(
         attributes.push(nix::payload_attribute(Target::Windows, options.stage));
         attributes.push(nix::runner_attribute(Target::Windows));
     }
-    let outputs = build(checkout, &attributes)?;
+    let outputs = build(checkout, &attributes, options.stage.concurrent_builds())?;
     let default_root = options.root.is_none() && std::env::var_os(DEV_ROOT_ENV).is_none();
     let wsl_host = wsl::interop_available() || wsl::distribution().is_some();
     let access = HostAccess {
@@ -158,13 +158,17 @@ fn deploy(
     Ok(exit_code(outcome))
 }
 
-fn build(checkout: &Checkout, attributes: &[String]) -> Result<Vec<PathBuf>, DevError> {
+fn build(
+    checkout: &Checkout,
+    attributes: &[String],
+    concurrent: u8,
+) -> Result<Vec<PathBuf>, DevError> {
     println!("dev: building {}", attributes.join(", "));
     let installables: Vec<String> = attributes
         .iter()
         .map(|attribute| checkout.installable(attribute))
         .collect();
-    nix::build(&installables)
+    nix::build(&installables, concurrent)
 }
 
 /// Runs the Windows runner's Editor half through WSL interop.
