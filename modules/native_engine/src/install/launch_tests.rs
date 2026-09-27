@@ -112,6 +112,8 @@ fn the_active_managed_generation_is_resolved_with_its_version() {
         Some(&home.join(".codex").into_os_string())
     );
     assert!(home.is_dir());
+    // Codex refuses to start (login included) when CODEX_HOME is missing.
+    assert!(home.join(".codex").is_dir());
 
     fs::write(&executable, b"tampr").unwrap();
     assert!(matches!(
