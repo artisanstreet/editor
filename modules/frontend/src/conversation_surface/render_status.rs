@@ -8,6 +8,28 @@
 use super::*;
 
 impl ConversationSurface {
+    /// Terminal header copy for one work group: the duration label, chipped
+    /// with the group's reduced thinking label on a thinking stretch.
+    ///
+    /// The reduction runs through the turn's typed engine policy, the same
+    /// one the live line uses, so the chip and the status row never disagree.
+    pub(in crate::conversation_surface) fn group_header_terminal(
+        &self,
+        turn_id: &TurnId,
+        block: &crate::conversation_scene::WorkGroupBlock,
+    ) -> Option<String> {
+        let engine = self.scene.turn_scene(turn_id).and_then(|turn| {
+            turn.blocks().iter().find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => status.engine,
+                _ => None,
+            })
+        });
+        thinking_header_copy(
+            block.label,
+            thinking_chip_label(block.reasoning_summary.as_deref(), engine).as_deref(),
+        )
+    }
+
     pub(in crate::conversation_surface) fn render_status(
         &self,
         turn_id: &TurnId,
@@ -33,23 +55,10 @@ impl ConversationSurface {
         let has_summary =
             status_summary_copy(block.reasoning_summary.as_deref(), block.engine).is_some();
         let copy = turn_status_block_copy(block, self.active_now_ms)?;
-        // A live line identical to the owning group header paints once, in
-        // the header; a distinct narration (a summary counts) still paints.
-        // Render and scroll identities share this exact decision.
-        let owner_header = if matches!(
-            block.narration,
-            TurnNarration::Thinking | TurnNarration::Working
-        ) {
-            turn_scene.and_then(|turn| turn_owner_header(turn, self.active_now_ms))
-        } else {
-            None
-        };
-        if !turn_status_paints(
-            turn_has_work_group,
-            block.narration,
-            Some(copy.as_str()),
-            owner_header.as_deref(),
-        ) {
+        // The shared paint decision covers structural visibility, header
+        // ownership, and the chip-carried label; the scroll-identity filter
+        // uses the same entry point.
+        if !turn_status_block_paints(turn_scene, block, turn_has_work_group, self.active_now_ms) {
             return None;
         }
         // Base-size muted copy. The effective motion resolves the live

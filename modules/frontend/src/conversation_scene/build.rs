@@ -966,20 +966,20 @@ impl ConversationScene {
 
             flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
 
-            // Finalize the session group: live summary, engine label, and
-            // superseded state resolve here, once the whole turn was seen.
-            // A superseded session never narrates: later content in the same
-            // turn owns the live line.
-            let live_summary = (summary_scoped.or(summary_all))
-                .filter(|_| narration.is_active_work())
-                .map(|(_, body)| body);
+            // Finalize the session group: the newest thinking body, the live
+            // summary line, and the superseded state resolve here, once the
+            // whole turn was seen; a superseded session never narrates.
+            let newest_summary = (summary_scoped.or(summary_all)).map(|(_, body)| body);
+            let live_summary = newest_summary
+                .clone()
+                .filter(|_| narration.is_active_work());
             if let Some(group_index) = group_index {
                 let is_last_content = group_index == blocks.len().saturating_sub(1);
                 let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
                     unreachable!("session index always addresses its group");
                 };
                 group.superseded = !is_last_content;
-                group.reasoning_summary.clone_from(&live_summary);
+                group.reasoning_summary.clone_from(&newest_summary);
             }
 
             // A duration narration is a terminal label, not a label on every

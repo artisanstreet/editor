@@ -40,7 +40,7 @@ use artisan_ui::button::{
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
 use artisan_ui::gradient::{hover_fill_gradient, vertical_gradient};
-use artisan_ui::inline_code_text::{inline_runs, summary_line};
+use artisan_ui::inline_code_text::inline_runs;
 use artisan_ui::input_state::TextInputState;
 use artisan_ui::markdown_cache::MarkdownParseReport;
 use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer, RichLinkTitleSource};

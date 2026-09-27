@@ -1386,9 +1386,13 @@ fn session_groups_late_reasoning_before_final_reply() {
     );
     assert!(group.items.is_empty());
     assert!(group.session_details.is_empty());
-    // Settled rows never carry the live summary, and reasoning never becomes
-    // a visible work item even though it arrived late.
-    assert_eq!(group.reasoning_summary, None);
+    // The settled group keeps the newest thinking body for its collapsed
+    // chip label, and reasoning never becomes a visible work item even
+    // though it arrived late.
+    assert_eq!(
+        group.reasoning_summary.as_deref(),
+        Some("Planning playful ambiguous response")
+    );
     // Reference store.ts:785 marks the group superseded whenever it is not
     // the last content block; the final reply follows here, so true is the
     // exact value (settled turns show no live line either way).

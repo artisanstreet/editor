@@ -2,6 +2,7 @@
 
 Status: accepted on 2026-09-25 for the public-summary release (Packets A and B
 of [the thinking-highlights plan](../plans/claude-thinking-highlights.md)).
+Extended 2026-09-26 with the collapsed-chip presentation (below).
 
 ## Decision
 
@@ -47,3 +48,25 @@ with its own fixtures and decision.
   already does; only the returned text changes.
 - A newer CLI that changes the transport shape must be recaptured with
   `scripts/claude_thinking_capture.py` before the floor moves.
+
+## Collapsed thinking chips (2026-09-26)
+
+A Claude thinking stretch now leaves the app-style one-line trace: the reduced
+label titles the collapsed work-group header as `label · duration`
+(`Checking pairwise sums of the values · 13s`), the way the Claude app's
+collapsed thinking header does.
+
+- The label is the first meaningful line of the public summary prose trimmed
+  to its first clause (`claude_first_clause`): the opening phrase of the
+  prose, cut at the first clause separator. Server-authored highlight titles
+  stay gated (Packet C), so this presentation derives the small title locally.
+- The live status row no longer repeats the label under `Thinking for Xs`;
+  the chip is the line's only surface when an owning work group carries it.
+  Every other engine keeps the previous behavior: a summary row beside the
+  elapsed header, and the Codex sentence policy unchanged.
+- A settled thinking group keeps its newest thinking body
+  (`WorkGroupBlock.reasoning_summary` is no longer live-only) so the chip
+  survives settlement like the app's chips. `TurnStatusBlock.reasoning_summary`
+  stays live-only: the status row is a live surface.
+- Work sessions are unchanged: `Working`/`WorkedFor` headers keep their work
+  verbs, and a thinking label beside them stays a status row.

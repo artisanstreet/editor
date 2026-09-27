@@ -197,6 +197,74 @@ pub fn claude_label_line(text: &str) -> Option<String> {
     Some(format!("{}…", kept.trim_end()))
 }
 
+/// Reduces a Claude thinking label to its first clause.
+///
+/// The collapsed thinking chip titles a stretch the way the Claude app's
+/// server highlights do — a short phrase, not the opening sentence of the
+/// summary prose. The label is cut at the first clause separator: `:`, `;`,
+/// `—`, or a sentence end (`.`, `!`, `?`) followed by whitespace or the
+/// end, with two guards. A comma separates only when at least three words
+/// precede it, so list-like openings keep their list. A period closing an
+/// abbreviation token (`vs`, `e.g`) never cuts. A separator that would
+/// leave no visible text is skipped, and the whole label stands when no
+/// separator survives.
+#[must_use]
+pub fn claude_first_clause(label: &str) -> String {
+    let mut words_before = 0_usize;
+    let mut in_word = false;
+    for (index, character) in label.char_indices() {
+        if character.is_whitespace() {
+            in_word = false;
+            continue;
+        }
+        if !in_word {
+            words_before += 1;
+            in_word = true;
+        }
+        if !is_clause_separator(character, label, index, words_before) {
+            continue;
+        }
+        let clause = label[..index].trim_end();
+        if !clause.is_empty() {
+            return clause.to_owned();
+        }
+    }
+    label.trim().to_owned()
+}
+
+/// Whether `character` at `index` ends the first clause of `label`.
+///
+/// Every separator must sit at the end of a whitespace-delimited token;
+/// `words_before` counts the tokens already crossed, so the comma rule can
+/// ask for a substantial clause before it cuts.
+fn is_clause_separator(character: char, label: &str, index: usize, words_before: usize) -> bool {
+    let rest = &label[index + character.len_utf8()..];
+    if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
+        return false;
+    }
+    match character {
+        ':' | ';' | '\u{2014}' | '!' | '?' => true,
+        ',' => words_before >= 3,
+        '.' => !is_abbreviation_token(&label[..index]),
+        _ => false,
+    }
+}
+
+/// Whether the token before a period is an abbreviation fragment (`vs`,
+/// `e.g`) whose period must not cut the clause.
+fn is_abbreviation_token(prefix: &str) -> bool {
+    let token = prefix
+        .trim_end()
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default();
+    !token.is_empty()
+        && token.len() <= 3
+        && token
+            .chars()
+            .all(|character| character.is_ascii_alphabetic() || character == '.')
+}
+
 /// Characters that carry Markdown structure rather than label content.
 fn is_markdown_marker(character: char) -> bool {
     character.is_whitespace() || "*_~`#>-+=|[]()!:.".contains(character)
