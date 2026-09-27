@@ -120,15 +120,25 @@ nothing.
 
 ### Stages
 
-Both stages compile with the same optimization (Cargo profiles `production`
-and `production-debug`): opt-level 3, fat LTO, one codegen unit, `panic =
-"abort"`, mimalloc, and an x86-64-v3 CPU baseline. They differ only in what is
-added for debugging:
+Both stages are optimized builds (opt-level 3, `panic = "abort"`, mimalloc, an
+x86-64-v3 CPU baseline): an unoptimized GPUI Editor renders at a small fraction
+of its frame rate, so neither stage drops optimization. They differ in what they
+spend build time on:
 
-| Stage | Cargo profile | Adds |
-| --- | --- | --- |
-| Debug | `production-debug` | full debug info, debug assertions, overflow checks, the GPUI inspector (`artisan-frontend/debug-tools`) |
-| Production | `production` | line tables only, stripped, the release trust anchor |
+| Stage | Cargo profile | Codegen | Adds |
+| --- | --- | --- | --- |
+| Debug | `production-debug` | crate-local ThinLTO, 16 codegen units per crate, every core; mold (Linux) and lld (MinGW) linkers | full debug info for workspace crates, line tables for dependencies, debug assertions, overflow checks, the GPUI inspector (`artisan-frontend/debug-tools`) |
+| Production | `production` | fat LTO, one codegen unit, GNU ld | line tables only, stripped, the release trust anchor |
+
+Debug is the development loop, so it favours build time: without a
+whole-program LTO pass each binary links in seconds instead of re-optimizing
+the program for minutes, and each crate's LLVM work runs in parallel. It keeps
+opt-level 3 and gives up only the whole-program optimization of fat LTO over a
+single codegen unit, so it runs smoothly but is not the stage to measure
+performance with; use Production for frame and latency numbers. Debug info
+stays complete where you debug: variables and stepping in the workspace's own
+crates, and line tables (backtraces, breakpoints by line) through GPUI, wgpu,
+and the other dependencies.
 
 `nix build .#linux-debug`, `.#linux-production`, `.#windows-debug`, and
 `.#windows-production` build the payloads directly: `bin/{editor,forge,ae,installer}`
@@ -144,12 +154,23 @@ For automatic activation, install direnv, add its hook to your shell, and run
 or launch the Editor. Configure nix-direnv on the host for cached activation.
 
 The shell defaults to two Cargo jobs. Override `CARGO_BUILD_JOBS` when appropriate.
-Nix builder concurrency is separate. Every payload ends in fat-LTO links of several GB
-each (the Editor's peaks near 14 GB in Debug, 5.5 GB in Production), so the pipeline
-bounds them itself: `nix run .#dev` builds one derivation at a time (`--max-jobs 1`),
-and a payload's final Cargo build runs one job, so links never overlap. On a 16 GB
-machine a Production build leaves about 9 GB free; a Debug build leaves under 1 GB and
-leans on swap while the Editor links, so stop other heavy work during a Debug build.
+Nix builder concurrency is separate, and the pipeline sets it per stage:
+
+- **Debug** payloads compile with every core and have no whole-program link, so
+  `nix run .#dev` builds the Linux and Windows payloads side by side
+  (`--max-jobs 2`). On an 8-core, 16 GB WSL machine, a rebuild after a
+  workspace source change takes about 4 minutes (Linux runner about 25 s, then
+  both payloads and the Windows runner about 3.5 min) and peaks near 9 GB. A
+  change to `Cargo.toml` or `Cargo.lock` also rebuilds the dependency caches,
+  about 10 minutes once.
+- **Production** payloads end in fat-LTO links of several GB each (the Editor's peaks
+  near 5.5 GB), so `nix run .#dev -- --production` builds one derivation at a time
+  (`--max-jobs 1`) and a payload's final Cargo build runs one job, so links never
+  overlap. On a 16 GB machine a Production build leaves about 9 GB free.
+
+Debug payloads link with mold (Linux) and LLVM lld in MinGW mode (Windows), keep
+the store paths in their debug info (so debuggers find the toolchain and vendored
+sources), and skip the stdenv strip. Production keeps GNU ld and the defaults.
 
 ## Nix outputs
 
