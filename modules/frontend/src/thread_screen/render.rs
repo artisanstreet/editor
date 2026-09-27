@@ -47,7 +47,8 @@ fn workspace_body_tracking(theme: &ArtisanTheme) -> f32 {
 
 impl ThreadScreen {
     /// Renders the transcript column: the live conversation host at full
-    /// card width, plus the honest empty state for a scene with no turns yet.
+    /// card width. A thread with no turns yet shows nothing here; the
+    /// new-thread screen owns the empty prompt.
     ///
     /// The host owns the full column so the surface root — the turn
     /// navigator rail's positioning context — spans the card, not the prose
@@ -56,44 +57,16 @@ impl ThreadScreen {
     /// each turn root carries the shared max-width, auto margins, and
     /// gutters, so standalone surface fixtures keep the identical column
     /// without this frame. The 40 px top spacing lives inside the scroll
-    /// content (owned by the surface); the empty overlay stays centered on
-    /// the column itself, not the content.
-    fn render_transcript_column(
-        &self,
-        theme: &ArtisanTheme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let empty = show_empty_transcript(self.host.read(cx).controller_view().turn_views.len())
-            && !self.host.read(cx).surface().read(cx).has_pending_messages();
-        let mut column = div()
+    /// content (owned by the surface).
+    fn render_transcript_column(&self) -> impl IntoElement {
+        div()
             .relative()
             .min_h_0()
             .flex_1()
             .overflow_hidden()
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned())
-            .child(div().w_full().h_full().child(self.host.clone()));
-        if empty {
-            column = column.child(
-                div()
-                    .absolute()
-                    .top(px(TRANSCRIPT_PAD_TOP_PX))
-                    .left(px(0.0))
-                    .right(px(0.0))
-                    .flex()
-                    .justify_center()
-                    .debug_selector(|| THREAD_SCREEN_EMPTY_SELECTOR.to_owned())
-                    .child(
-                        div()
-                            .text_size(theme.typography.control_text)
-                            .font_weight(ProseTypography::BODY_WEIGHT)
-                            .letter_spacing(px(workspace_body_tracking(theme)))
-                            .text_color(theme.colors.muted_foreground.to_paint())
-                            .child("No messages yet."),
-                    ),
-            );
-        }
-        column
+            .child(div().w_full().h_full().child(self.host.clone()))
     }
 
     /// Renders one environment-card row: glyph, flexible label, truncating value.
@@ -614,7 +587,7 @@ impl ThreadScreen {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .bg(shell_black())
-            .child(self.render_transcript_column(theme, cx))
+            .child(self.render_transcript_column())
             .child(self.render_composer_overlay(pad_bottom, cx));
         let mut row = div()
             .flex()

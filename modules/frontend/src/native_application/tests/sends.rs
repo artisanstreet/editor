@@ -1312,7 +1312,7 @@ fn two_sends_leave_the_outbox_independently(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppContext) {
+fn desktop_new_task_carries_the_draft_without_creating_a_thread(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([Ok(())]);
     cx.update(|_, app| {
@@ -1321,24 +1321,32 @@ fn desktop_new_task_preserves_draft_and_blocks_repeat_creation(cx: &mut TestAppC
             install_ready_message_surface(application, cx, old.clone(), "keep this draft", sink);
             let project = application.selected_project.clone().expect("project");
             application.begin_new_task(cx);
+            assert!(
+                !commands
+                    .borrow()
+                    .iter()
+                    .any(|command| matches!(command, NativeTransportCommand::CreateTask(_))),
+                "opening the new-thread screen creates no thread"
+            );
+            assert!(matches!(
+                application.route(),
+                NativeRoute::NewThread { project: Some(shown) } if shown == &project
+            ));
+            assert_eq!(application.composer.read(cx).draft(), "keep this draft");
             assert_eq!(
-                *commands.borrow(),
-                vec![NativeTransportCommand::CreateTask(project)]
+                application.composer.read(cx).draft_scope(),
+                Some(artisan_domain::ComposerDraftScope::Project(project))
             );
-            assert_eq!(application.selected_thread.as_ref(), Some(&old));
-            assert_eq!(application.composer.read(cx).draft(), "keep this draft");
+            // The old thread is still retiring: nothing sends to it.
             assert!(!application.message_submission_is_admissible(cx));
-            application.begin_new_task(cx);
             application.begin_message_submission(cx);
-            assert_eq!(commands.borrow().len(), 1);
-            application.handle_intake_failed(
-                NativeProjectIntakeOperation::CreateThread,
-                message_failure(),
-                false,
-                cx,
+            assert!(
+                !commands.borrow().iter().any(|command| matches!(
+                    command,
+                    NativeTransportCommand::SubmitComposerDraft(_)
+                ))
             );
             assert_eq!(application.composer.read(cx).draft(), "keep this draft");
-            assert!(!application.message_submission_is_admissible(cx));
         });
     });
 }

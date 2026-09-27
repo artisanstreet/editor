@@ -216,13 +216,15 @@ impl NativeApplication {
             && !self.composer.read(cx).is_submitting()
             && self.message_flight.is_none()
         {
-            // The unsent prompt follows the workspace into a fresh task,
-            // without replacing a destination conversation's saved draft.
+            // The unsent prompt follows the workspace into the destination's
+            // new-task draft, without replacing a destination conversation's
+            // saved draft. Its threads stay unlisted here (no remembered
+            // thread opens over the prompt); sending lists the project again.
             self.selected_project = Some(project_id.clone());
             self.intake_failure_operation = None;
             self.intake_retry_available = false;
             self.intake_restore_state = None;
-            self.thread_listing = None;
+            self.thread_listing = Some(empty_thread_listing());
             self.pending_thread = None;
             self.pending_snapshot = None;
             self.retained_switch_listings.clear();

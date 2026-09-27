@@ -31,6 +31,7 @@ pub(crate) struct PendingMessageRow {
 }
 
 impl ConversationSurface {
+    #[cfg(test)]
     pub(crate) fn has_pending_messages(&self) -> bool {
         !self.pending_messages.is_empty()
     }
