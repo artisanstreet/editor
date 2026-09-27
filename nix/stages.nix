@@ -1,5 +1,6 @@
-# Build stages: the product payload for each platform, in two stages that
-# share one codegen (Cargo.toml `production` / `production-debug`).
+# Build stages: the product payload for each platform, in two stages
+# (Cargo.toml `production-debug` / `production`): Debug built for speed,
+# Production for runtime performance.
 #
 # A payload is the four product binaries plus the build identity the
 # installed binaries report (resources/build-info.json). Nix owns everything
@@ -19,14 +20,41 @@
   graphicsLibraryPath,
 }:
 let
+  # Debug favours build speed; Production favours runtime speed (Cargo.toml
+  # has the codegen of each). `payload` holds each stage's own derivation
+  # attributes.
   stages = {
     debug = {
       profile = "production-debug";
       features = [ "artisan-frontend/debug-tools" ];
+      # mold / lld instead of GNU ld (`fastLinker` per platform).
+      fastLink = true;
+      payload = {
+        # No CARGO_BUILD_JOBS limit: without whole-program LTO the links are
+        # fast and small, so Cargo uses every core (crane's default,
+        # NIX_BUILD_CORES). The stdenv fixup would strip the debug info this
+        # stage exists to keep.
+        dontStrip = true;
+        # Rewriting every toolchain and vendored-source path out of a GB of
+        # debug info takes about a minute per payload, and those paths are
+        # what lets a debugger find the sources. The Debug payload is only
+        # ever installed on the machine that built it.
+        doNotRemoveReferencesToVendorDir = true;
+        doNotRemoveReferencesToRustToolchain = true;
+      };
     };
     production = {
       profile = "production";
       features = [ ];
+      fastLink = false;
+      payload = {
+        # Each binary ends in a single-threaded fat-LTO link; the Editor's
+        # peaks near 5.5 GB. At one job per core four links overlap and
+        # exhaust a 16 GB machine. The dependencies are already compiled,
+        # so linking one at a time mostly serializes work that was
+        # single-threaded anyway.
+        CARGO_BUILD_JOBS = 1;
+      };
     };
   };
   binaries = [
@@ -108,6 +136,13 @@ let
         buildInputs = libraries;
         LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
       };
+      # mold, wrapped by nixpkgs like the default linker (so store rpaths and
+      # the dynamic linker still apply), links in seconds what GNU ld takes
+      # minutes over.
+      fastLinker = environment // {
+        nativeBuildInputs = nativeTools ++ [ pkgs.mold ];
+        NIX_CFLAGS_LINK = "-fuse-ld=mold";
+      };
     };
     windows = rec {
       target = "x86_64-pc-windows-gnu";
@@ -117,6 +152,39 @@ let
       );
       build = attrs: windowsPkgs.callPackage ({ ... }: craneLib.buildPackage attrs) { };
       deps = attrs: windowsPkgs.callPackage ({ ... }: craneLib.buildDepsOnly attrs) { };
+      # LLVM's lld in its MinGW mode, wrapped by nixpkgs for this target so
+      # it sees the same library paths as GNU ld. GCC finds it as its `ld` in
+      # a directory of its own (`-B`); only the linker is exposed, since the
+      # rest of the LLVM binutils (llvm-windres above all) would shadow the
+      # GNU tools the build scripts expect. MinGW GCC 15 asks the linker for
+      # `-pie`, which only GNU ld understands; lld's PE output is
+      # relocatable anyway (Rust passes `--dynamicbase` itself).
+      lld = pkgs.runCommand "x86_64-w64-mingw32-lld" { } ''
+        mkdir -p "$out/bin"
+        ln -s ${windowsPkgs.buildPackages.llvmPackages.bintools}/bin/${windowsPkgs.stdenv.cc.targetPrefix}ld.lld "$out/bin/ld"
+      '';
+      fastLinker = environment // {
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " (
+          rustflags
+          ++ [
+            "-C link-arg=-B${lld}/bin/"
+            "-C link-arg=-no-pie"
+          ]
+        );
+      };
+      # nixpkgs builds MinGW GCC with the mcf thread model: C code using
+      # thread-locals (mimalloc) pulls in the GCC runtime's emutls, which
+      # needs mcfgthread. Link its static archive (a plain -lmcfgthread
+      # picks the DLL import library) and the NT libraries it calls, so
+      # every .exe imports only Windows system DLLs. This replaces the
+      # target's rustflags from .cargo/config.toml, so it repeats them.
+      rustflags = [
+        "-C target-cpu=x86-64-v3"
+        "-C target-feature=+crt-static"
+        "-C link-arg=-l:libmcfgthread.a"
+        "-C link-arg=-lntdll"
+        "-C link-arg=-lkernel32"
+      ];
       environment =
         let
           cc = windowsPkgs.stdenv.cc;
@@ -129,19 +197,7 @@ let
             windowsPkgs.windows.pthreads
             windowsPkgs.windows.mcfgthreads
           ];
-          # nixpkgs builds MinGW GCC with the mcf thread model: C code using
-          # thread-locals (mimalloc) pulls in the GCC runtime's emutls, which
-          # needs mcfgthread. Link its static archive (a plain -lmcfgthread
-          # picks the DLL import library) and the NT libraries it calls, so
-          # every .exe imports only Windows system DLLs. This replaces the
-          # target's rustflags from .cargo/config.toml, so it repeats them.
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " [
-            "-C target-cpu=x86-64-v3"
-            "-C target-feature=+crt-static"
-            "-C link-arg=-l:libmcfgthread.a"
-            "-C link-arg=-lntdll"
-            "-C link-arg=-lkernel32"
-          ];
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " rustflags;
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "${cc}/bin/${cc.targetPrefix}cc";
           TARGET_CC = "${cc}/bin/${cc.targetPrefix}cc";
           TARGET_CXX = "${cc}/bin/${cc.targetPrefix}c++";
@@ -162,7 +218,7 @@ let
       host = platforms.${platform};
       settings = stages.${stage};
       common =
-        host.environment
+        (if settings.fastLink then host.fastLinker else host.environment)
         // lib.optionalAttrs (stage == "production") releaseTrust
         // {
           inherit src version;
@@ -181,22 +237,14 @@ let
       // {
         pname = "artisan-${platform}-${stage}";
         cargoArtifacts = dependencies;
-        # The stdenv fixup would strip the debug info the Debug stage exists
-        # to keep; Production is already stripped to line tables by Cargo.
-        dontStrip = stage == "debug";
         # One Cargo invocation builds all four binaries, so shared crates
         # compile once; the payload holds exactly those four and the identity.
-        # Each binary ends in a single-threaded fat-LTO link; the Editor's
-        # peaks near 14 GB in Debug (full debug info) and 5.5 GB in
-        # Production. At one job per core four links overlap and exhaust a
-        # 16 GB machine, and even two leave under 1.5 GB free. The
-        # dependencies are already compiled, so linking one at a time mostly
-        # serializes work that was single-threaded anyway.
-        CARGO_BUILD_JOBS = 1;
+        # Moving rather than copying them saves copying a GB of Debug
+        # binaries.
         installPhaseCommand = ''
           mkdir -p "$out/bin"
           for binary in ${lib.concatMapStringsSep " " (binary: host.exe binary.name) binaries}; do
-            install -m755 "${profileDirectory}/$binary" "$out/bin/$binary"
+            mv "${profileDirectory}/$binary" "$out/bin/$binary"
           done
           ${identityScript {
             inherit stage channel;
@@ -205,6 +253,7 @@ let
         '';
         passthru = { inherit platform stage; };
       }
+      // settings.payload
     );
   # The dev runner installs payloads; a plain release build is enough for a
   # tool. Its installer library compiles as a release build, so it carries
