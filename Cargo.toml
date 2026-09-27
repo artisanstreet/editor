@@ -121,16 +121,29 @@ debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "debuginfo"
 
-# Debug: Production's codegen unchanged, plus debugging facilities: full
-# debug info kept in the binary, debug assertions, and overflow checks. The
-# Debug stage also enables the `debug-tools` features (GPUI inspector).
+# Debug: the development loop's build, so it trades Production's last few
+# percent of runtime speed for build time while staying fully optimized (an
+# unoptimized GPUI Editor renders at a small fraction of its frame rate).
+# opt-level 3 with Cargo's default 16 codegen units per crate and only
+# crate-local ThinLTO: no whole-program LTO pass re-optimizing every binary
+# at link time, and each crate's LLVM work runs on every core. Debug adds
+# debugging facilities: debug assertions, overflow checks, full debug info
+# (variables, stepping) for the workspace's own crates and line tables for
+# dependencies, so backtraces and breakpoints reach every frame without
+# linking gigabytes of dependency type information. The Debug stage also
+# enables the `debug-tools` features (GPUI inspector).
 [profile.production-debug]
 inherits = "production"
+lto = false
+codegen-units = 16
 debug = "full"
 split-debuginfo = "off"
 strip = "none"
 debug-assertions = true
 overflow-checks = true
+
+[profile.production-debug.package."*"]
+debug = "line-tables-only"
 
 # Payload integrity hashing covers every binary of a payload, several times
 # per install; unoptimized SHA-256 made that the slowest part of installer
