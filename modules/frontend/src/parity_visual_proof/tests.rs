@@ -208,13 +208,31 @@ fn reference_settled_projects_session_with_thought_for_six_seconds() {
         ),
         "settled span is six seconds"
     );
-    assert!(
-        group.reasoning_summary.is_none(),
-        "settled rows carry no live summary line"
+    // The settled group keeps its thinking body as the collapsed chip's
+    // label source; the chip itself is a Claude-policy presentation, so this
+    // untyped case still paints the plain `Thought for 6s` header. The live
+    // summary line stays absent on settled rows.
+    assert_eq!(
+        group.reasoning_summary.as_deref(),
+        Some("Planning a playful response.")
     );
     assert_eq!(
         status_narration(&scene),
         TurnNarration::ThoughtFor { millis: 6_000 }
+    );
+    assert_eq!(
+        scene
+            .turn_scenes()
+            .first()
+            .expect("one turn")
+            .blocks()
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => status.reasoning_summary.clone(),
+                _ => None,
+            }),
+        None,
+        "settled status rows carry no live summary line"
     );
     let reply = scene
         .turn_scenes()

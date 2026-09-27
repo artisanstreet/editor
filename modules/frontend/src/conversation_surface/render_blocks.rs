@@ -60,27 +60,17 @@ impl ConversationSurface {
             .blocks()
             .iter()
             .filter_map(|block| {
-                if let TurnBlock::TurnStatus(status) = block {
-                    // Same paint decision as render_status: structural rule
-                    // plus identical-duplicate suppression, so measured
-                    // children and identities stay one-to-one.
-                    let copy = turn_status_block_copy(status, self.active_now_ms);
-                    let owner = if matches!(
-                        status.narration,
-                        TurnNarration::Thinking | TurnNarration::Working
-                    ) {
-                        turn_owner_header(turn, self.active_now_ms)
-                    } else {
-                        None
-                    };
-                    if !turn_status_paints(
+                // Shared paint entry point with render_status, so measured
+                // children and identities stay one-to-one.
+                if let TurnBlock::TurnStatus(status) = block
+                    && !turn_status_block_paints(
+                        Some(turn),
+                        status,
                         turn_has_work_group,
-                        status.narration,
-                        copy.as_deref(),
-                        owner.as_deref(),
-                    ) {
-                        return None;
-                    }
+                        self.active_now_ms,
+                    )
+                {
+                    return None;
                 }
                 if let TurnBlock::TurnFooter(footer) = block
                     && !footer_has_content(footer)
@@ -471,7 +461,7 @@ impl ConversationSurface {
         // turn's live Thinking/Working line once (see render_turn). Earlier
         // groups and the separate status row stand down, so the line paints
         // exactly once per turn.
-        let terminal = work_group_header_copy(block.label);
+        let terminal = self.group_header_terminal(turn_id, block);
         let header = terminal.or(live_header);
         // Engine handoffs fold into the header far end, never as standalone
         // timeline rows while a session hosts them.

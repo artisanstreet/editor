@@ -397,8 +397,9 @@ pub struct WorkGroupBlock {
     /// Whether later content in the same turn supersedes this session: a
     /// superseded session never narrates live status.
     pub superseded: bool,
-    /// Newest non-empty reasoning body for the one live summary line;
-    /// never present on settled rows.
+    /// Newest non-empty reasoning body in the session: the one live summary
+    /// line while the turn is active, and the source of the collapsed
+    /// thinking chip label once the group settles.
     pub reasoning_summary: Option<String>,
     /// Newest-phase computation for reply-phase disclosure folding.
     pub progress: ProgressPhase,

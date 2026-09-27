@@ -215,7 +215,7 @@ Implementation facts that affect the design:
 - Streaming currently drops content-block boundaries and thinking payloads. Message identity alone cannot distinguish multiple thinking stretches around tools.
 - The frontend appends deltas and replaces their text when a completion carries authoritative text. Exploit this reconciliation instead of appending a buffered snapshot twice.
 - `summary_line()` prefers the newest headline or a finished sentence. An unpunctuated title can disappear through this formatter. Do not reuse it unchanged for Claude.
-- The current scene intentionally removes summaries from settled status rows. This release preserves that lifecycle. A persistent collapsed thinking history would be a separate product change.
+- The current scene intentionally removes summaries from settled status rows. This release preserves that lifecycle. A persistent collapsed thinking history would be a separate product change. (Happened on 2026-09-26 as the collapsed-chip presentation: the session group now keeps its newest thinking body when it settles; see `docs/decisions/CLAUDE_THINKING_DISPLAY.md`.)
 - Artisan executes one finite Claude process per turn and reopens provider state with `--resume`. A next-turn display change can use new launch arguments; it does not require an in-process control request.
 - File-size enforcement compares against the allowlist, not the current working size. Already oversized touched files must shrink to their allowed size, not merely avoid growth. Recheck actual counts before editing; never raise allowances to land this feature.
 

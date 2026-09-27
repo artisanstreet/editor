@@ -1211,13 +1211,17 @@ fn late_reasoning_joins_the_session_without_a_visible_row() {
         })
         .collect();
     assert_eq!(kinds, vec!["user", "session", "reply", "status", "footer"]);
-    // Settled reasoning is invisible, period: no member rows and no live
-    // summary on a settled turn.
+    // Settled reasoning paints no member rows and no live summary on a
+    // settled turn; the group keeps the newest body only as the source of
+    // its collapsed thinking chip label.
     for block in blocks {
         if let TurnBlock::WorkGroup(group) = block {
             assert!(group.items.is_empty());
             assert!(group.session_details.is_empty());
-            assert_eq!(group.reasoning_summary, None);
+            assert_eq!(
+                group.reasoning_summary.as_deref(),
+                Some("Planning playful ambiguous response")
+            );
         }
     }
 }

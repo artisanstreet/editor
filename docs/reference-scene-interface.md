@@ -5,6 +5,11 @@ Implements audit R1/R7/R8 conclusion sentences + H through the existing
 state+scene architecture. Renderer worker consumes exactly this surface; no
 other projection output is contractual.
 
+Revision 2026-09-26: `WorkGroupBlock.reasoning_summary` is no longer live-only
+— the group keeps the newest thinking body when it settles, so the renderer
+can title its collapsed thinking chip (`docs/decisions/CLAUDE_THINKING_DISPLAY.md`).
+The additive-field and total-build promises below are unchanged.
+
 Ground truth: `C:/Users/sander/Desktop/artisan-editor`
 (`modules/frontend/src/lib/conversation/store.ts`,
 `trace.ts`, `presentation.ts`, `activity-status.ts`;
@@ -189,8 +194,9 @@ single promoted reply (same rule, single source); contract unchanged.
 - `WorkGroupBlock { …, pub session: Option<SceneId>, pub session_run: Option<RunId>, pub superseded: bool, pub reasoning_summary: Option<String>, pub progress: ProgressPhase, pub transition: Option<ModelTransitionBlock>, pub session_details: Vec<SessionDetail> }` —
   `session` is the `session-{turn_id}` anchor (disclosure/scroll key) when
   this group is a session, `None` for legacy positional groups (which never
-  carry the other new fields); `reasoning_summary` is the one live line
-  (never settled); `transition` folds the handoff into the header;
+  carry the other new fields); `reasoning_summary` is the newest thinking
+  body — the one live line while the turn is active, and the source of the
+  collapsed thinking chip label once the group settles; `transition` folds the handoff into the header;
   commentary/non-final-assistant/activity/compaction/native details live in
   `session_details` in ordinal order (every variant carries its exact
   `ordinal: u64` for merge); session mode leaves `items` empty and legacy
@@ -241,7 +247,9 @@ single promoted reply (same rule, single source); contract unchanged.
   `disclosure` + `session_details.is_empty()`; details = `session_details`
   in ordinal order (assistant/commentary/activity/compaction/native, never
   reasoning; `items` stays empty in session mode); thinking line =
-  `reasoning_summary` else verb; superseded ⇒ no live line; `transition`
+  `reasoning_summary` reduced under the turn's summary policy — a collapsed
+  `label · duration` chip on a Claude thinking stretch, the verb otherwise;
+  superseded ⇒ no live line; `transition`
   ⇒ header far-end handoff.
 - Top-level reply: single `AssistantMessage` with `phase == Final` (or
   promoted `Unspecified`); `provenance` (run + lifecycle) rides the block

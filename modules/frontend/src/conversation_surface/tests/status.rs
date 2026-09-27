@@ -36,19 +36,19 @@ fn terminal_duration_prefers_the_group_header() {
 #[test]
 fn live_line_is_owned_by_the_latest_group_once() {
     assert_eq!(
-        live_group_header_copy(TurnNarration::Working, Some(0), Some(65_000)),
+        live_group_header_copy(TurnNarration::Working, Some(0), Some(65_000), None),
         Some("Working for 1m 5s".to_owned())
     );
     assert_eq!(
-        live_group_header_copy(TurnNarration::Thinking, None, None),
+        live_group_header_copy(TurnNarration::Thinking, None, None, None),
         Some("Thinking".to_owned())
     );
     assert_eq!(
-        live_group_header_copy(TurnNarration::ProviderWait, Some(0), Some(5_000)),
+        live_group_header_copy(TurnNarration::ProviderWait, Some(0), Some(5_000), None),
         None
     );
     assert_eq!(
-        live_group_header_copy(TurnNarration::Failed, None, None),
+        live_group_header_copy(TurnNarration::Failed, None, None, None),
         None
     );
     assert!(status_row_visible(true, TurnNarration::Thinking));
@@ -338,23 +338,27 @@ fn status_copy_and_paint_share_one_decision() {
         TurnNarration::Working,
         Some("Working for 1m 5s"),
         Some("Working for 1m 5s"),
+        None,
     ));
     assert!(turn_status_paints(
         true,
         TurnNarration::Working,
         Some("Planning it"),
         Some("Working for 1m 5s"),
+        None,
     ));
     assert!(turn_status_paints(
         false,
         TurnNarration::Working,
         Some("Working for 1m 5s"),
         None,
+        None,
     ));
     assert!(!turn_status_paints(
         true,
         TurnNarration::WorkedFor { millis: 1_000 },
         Some("Worked for 1s"),
+        None,
         None,
     ));
 }
@@ -372,6 +376,124 @@ fn identical_status_and_header_paint_once() {
     assert!(!status_duplicates_owner(Some("Working"), None));
     assert!(!status_duplicates_owner(None, Some("Working for 1m 5s")));
     assert!(!status_duplicates_owner(None, None));
+}
+
+#[test]
+fn thinking_stretch_titles_the_collapsed_header_as_a_chip() {
+    // The chip form is the Claude app's collapsed thinking header:
+    // `label · duration`, with the label already trimmed to its first clause.
+    assert_eq!(
+        thinking_chip("Checking pairwise sums of the values", 13_000),
+        "Checking pairwise sums of the values · 13s"
+    );
+    let prose = "I'm checking pairwise sums to find the closest match to 51: \
+                 within the first set, 42+9=51 is closest.\n\nSecond paragraph.";
+    let label = status_summary_copy(Some(prose), Some(EngineId::Claude)).expect("label");
+    assert_eq!(
+        label,
+        "I'm checking pairwise sums to find the closest match to 51"
+    );
+    assert_eq!(
+        thinking_header_copy(
+            Some(crate::conversation_scene::WorkGroupLabel::ThoughtFor { millis: 13_000 }),
+            Some(label.as_str()),
+        ),
+        Some("I'm checking pairwise sums to find the closest match to 51 · 13s".to_owned())
+    );
+    // Live thinking counts on the same elapsed basis, inside the chip.
+    assert_eq!(
+        live_group_header_copy(
+            TurnNarration::Thinking,
+            Some(0),
+            Some(13_000),
+            Some(label.as_str()),
+        ),
+        Some("I'm checking pairwise sums to find the closest match to 51 · 13s".to_owned())
+    );
+    // No elapsed basis still keeps the title, without a duration.
+    assert_eq!(
+        live_group_header_copy(TurnNarration::Thinking, None, None, Some(label.as_str())),
+        Some(label.clone())
+    );
+    // Working keeps its elapsed verb: chips title thinking stretches only.
+    assert_eq!(
+        live_group_header_copy(
+            TurnNarration::Working,
+            Some(0),
+            Some(13_000),
+            Some(label.as_str())
+        ),
+        Some("Working for 13s".to_owned())
+    );
+    // A worked session keeps its work header even beside a thinking body.
+    assert_eq!(
+        thinking_header_copy(
+            Some(crate::conversation_scene::WorkGroupLabel::WorkedFor { millis: 13_000 }),
+            Some(label.as_str()),
+        ),
+        Some("Worked for 13s".to_owned())
+    );
+}
+
+#[test]
+fn only_the_claude_policy_becomes_a_chip_label() {
+    let prose = "Checking the pair sums. Then comparing the margins.";
+    assert_eq!(
+        thinking_chip_label(Some(prose), Some(EngineId::Claude)),
+        Some("Checking the pair sums".to_owned())
+    );
+    for engine in [Some(EngineId::Codex), Some(EngineId::Cursor), None] {
+        assert_eq!(thinking_chip_label(Some(prose), engine), None);
+    }
+    assert_eq!(thinking_chip_label(None, Some(EngineId::Claude)), None);
+}
+
+#[test]
+fn a_chipped_thinking_label_never_paints_a_second_row() {
+    let label = Some("Checking pairwise sums of the values");
+    // The collapsed chip titles the stretch inside the owning header, so the
+    // live Thinking row never repeats that label.
+    assert!(!turn_status_paints(
+        true,
+        TurnNarration::Thinking,
+        label,
+        Some("Checking pairwise sums of the values · 13s"),
+        label,
+    ));
+    // A label-less thinking line duplicates its own elapsed header and
+    // paints once, in the header.
+    assert!(!turn_status_paints(
+        true,
+        TurnNarration::Thinking,
+        Some("Thinking for 13s"),
+        Some("Thinking for 13s"),
+        None,
+    ));
+    // A summary that never became a chip (other engines) stays a distinct
+    // line beside the elapsed header, exactly like the reference.
+    assert!(turn_status_paints(
+        true,
+        TurnNarration::Thinking,
+        label,
+        Some("Thinking for 13s"),
+        None,
+    ));
+    // Without an owning group the row is the thinking line's only surface.
+    assert!(turn_status_paints(
+        false,
+        TurnNarration::Thinking,
+        label,
+        None,
+        label,
+    ));
+    // Working rows are never chip-owned: the summary line still paints.
+    assert!(turn_status_paints(
+        true,
+        TurnNarration::Working,
+        label,
+        Some("Working for 13s"),
+        label,
+    ));
 }
 
 #[gpui::test]

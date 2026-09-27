@@ -6,8 +6,8 @@
 //! summary reduction.
 
 use artisan_ui::inline_code_text::{
-    CLAUDE_LABEL_MAX_CHARS, InlineFragment, claude_label_line, flatten_fragments, fragment_runs,
-    inline_fragments, summary_line,
+    CLAUDE_LABEL_MAX_CHARS, InlineFragment, claude_first_clause, claude_label_line,
+    flatten_fragments, fragment_runs, inline_fragments, summary_line,
 };
 
 #[test]
@@ -80,6 +80,65 @@ fn claude_label_grows_with_the_streaming_first_line() {
     );
     // The Codex reducer keeps its sentence policy for the same text.
     assert_eq!(summary_line("I'm checking pairwise sums\n\nIf"), None);
+}
+
+#[test]
+fn first_clause_titles_the_chip_like_the_app_highlight() {
+    // Clause separators cut the opening clause out of summary prose.
+    assert_eq!(
+        claude_first_clause(
+            "I'm checking pairwise sums to find the closest match to 51: within the first set."
+        ),
+        "I'm checking pairwise sums to find the closest match to 51"
+    );
+    assert_eq!(
+        claude_first_clause("Checking pairwise sums of the values, starting with numbers.txt."),
+        "Checking pairwise sums of the values"
+    );
+    assert_eq!(
+        claude_first_clause("Checking pairwise sums of the values. Next I compare totals."),
+        "Checking pairwise sums of the values"
+    );
+    // Unpunctuated titles stand whole, exactly like the app's highlights.
+    assert_eq!(
+        claude_first_clause("Recommending a modern tech stack for a SaaS product"),
+        "Recommending a modern tech stack for a SaaS product"
+    );
+}
+
+#[test]
+fn first_clause_guards_commas_and_abbreviation_periods() {
+    // A list-like opening keeps its list: the first comma has too little
+    // before it to end a clause.
+    assert_eq!(
+        claude_first_clause("Comparing a, b and c to the totals"),
+        "Comparing a, b and c to the totals"
+    );
+    // A later comma can still end a substantial clause.
+    assert_eq!(
+        claude_first_clause("Comparing a, b and c to the totals, then checking X"),
+        "Comparing a, b and c to the totals"
+    );
+    // Abbreviation periods never cut; a sentence-ending number does.
+    assert_eq!(
+        claude_first_clause("Weighing vs. checking the totals first"),
+        "Weighing vs. checking the totals first"
+    );
+    assert_eq!(
+        claude_first_clause("Weighing the totals first. Then checking X"),
+        "Weighing the totals first"
+    );
+    // A separator that would leave no text is skipped.
+    assert_eq!(claude_first_clause(": then comparing"), ": then comparing");
+}
+
+#[test]
+fn first_clause_counts_words_not_scalars_across_scripts() {
+    assert_eq!(
+        claude_first_clause("Проверяем парные суммы, затем сравниваем итоги"),
+        "Проверяем парные суммы"
+    );
+    assert_eq!(claude_first_clause("Checking sums"), "Checking sums");
 }
 
 fn plain(text: &str) -> InlineFragment {
