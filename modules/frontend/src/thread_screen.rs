@@ -102,9 +102,6 @@ pub const THREAD_SCREEN_RETRY_SELECTOR: &str = "artisan-thread-screen-retry";
 /// Stable debug selector for the transcript column.
 pub const THREAD_SCREEN_TRANSCRIPT_SELECTOR: &str = "artisan-thread-screen-transcript";
 
-/// Stable debug selector for the empty-transcript state.
-pub const THREAD_SCREEN_EMPTY_SELECTOR: &str = "artisan-thread-screen-empty";
-
 /// Stable debug selector for the inspector column.
 pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspector";
 
@@ -126,9 +123,6 @@ const PROSE_WIDTH_PX: f32 = 768.0;
 
 /// `px-6` on the transcript column and composer dock.
 const COLUMN_PAD_X_PX: f32 = 24.0;
-
-/// `pt-10` on the transcript column.
-const TRANSCRIPT_PAD_TOP_PX: f32 = 40.0;
 
 /// `pb-4` under the composer frame below the `sm` breakpoint.
 const COMPOSER_PAD_BOTTOM_PX: f32 = 16.0;
@@ -205,14 +199,6 @@ pub(crate) fn thread_inspector_visible(content_width_px: f32) -> bool {
 )]
 pub(crate) fn thread_inspector_width(content_width_px: f32) -> f32 {
     desktop_inspector_column_pixels(f64::from(content_width_px)) as f32
-}
-
-/// Returns whether the empty-transcript overlay shows for a live turn count.
-///
-/// Only a genuinely empty conversation (zero turns) shows it; the first
-/// message removes it, and a thread change remounts with a fresh count.
-pub(crate) const fn show_empty_transcript(turn_view_count: usize) -> bool {
-    turn_view_count == 0
 }
 
 /// Inspector glass-card inner inset: the card child's `p-1`
@@ -417,13 +403,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_overlay_shows_only_for_zero_turns() {
-        assert!(show_empty_transcript(0));
-        assert!(!show_empty_transcript(1));
-        assert!(!show_empty_transcript(24));
-    }
-
-    #[test]
     fn composer_frame_inset_follows_the_640px_viewport_rule() {
         assert_eq!(composer_pad_bottom(0.0), COMPOSER_PAD_BOTTOM_PX);
         assert_eq!(composer_pad_bottom(639.0), COMPOSER_PAD_BOTTOM_PX);
@@ -464,8 +443,7 @@ mod tests {
     }
 
     /// At mounted-1280 content the inspector and its reserved space are gone
-    /// while the composer stays inside the transcript column; the fresh mount
-    /// (zero turns) still shows the empty state.
+    /// while the composer stays inside the transcript column.
     #[gpui::test]
     fn narrow_content_omits_inspector_and_contains_composer(cx: &mut gpui::TestAppContext) {
         let (_view, cx) = cx.add_window_view(|_, cx| {
@@ -482,10 +460,6 @@ mod tests {
         let composer = cx
             .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
             .expect("composer dock lays out");
-        assert!(
-            cx.debug_bounds(THREAD_SCREEN_EMPTY_SELECTOR).is_some(),
-            "zero turns still show the empty state"
-        );
         let transcript_left = f32::from(transcript.origin.x);
         let transcript_right = transcript_left + f32::from(transcript.size.width);
         let composer_left = f32::from(composer.origin.x);

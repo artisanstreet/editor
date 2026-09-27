@@ -83,9 +83,8 @@ pub struct ThreadChecklistEntry {
 pub struct ThreadScreen {
     pub(super) host: Entity<ConversationHost>,
     pub(super) composer: Entity<NativeComposer>,
-    /// Live host observation: re-renders the transcript column (including the
-    /// empty overlay) the moment turns arrive, so `No messages yet` can never
-    /// go stale while data exists.
+    /// Live host observation: re-renders the transcript column the moment
+    /// turns arrive.
     _host_observation: Subscription,
     pub(super) retry_focus: FocusHandle,
     pub(super) theme_mode: ThemeMode,

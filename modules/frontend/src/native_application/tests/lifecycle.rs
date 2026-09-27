@@ -974,7 +974,9 @@ fn recovered_thread_opens_on_its_forge_draft_not_the_old_composer(cx: &mut TestA
 }
 
 #[gpui::test]
-fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mut TestAppContext) {
+fn initially_empty_project_moves_its_draft_into_the_destination_new_task_draft(
+    cx: &mut TestAppContext,
+) {
     let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     cx.update(|app| {
@@ -987,7 +989,6 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mu
             .unwrap();
             let alpha = ProjectId::parse("empty-alpha").unwrap();
             let beta = ProjectId::parse("empty-beta").unwrap();
-            let destination = ThreadId::parse("beta-transferred-draft").unwrap();
             application.handle_projects(&projects, cx);
             application.handle_empty_threads(&alpha, cx);
             application
@@ -995,30 +996,24 @@ fn initially_empty_project_moves_its_draft_into_a_new_destination_thread(cx: &mu
                 .update(cx, |composer, _| composer.set_draft("Alpha idea"));
             application.choose_project(beta.clone(), cx);
             assert_eq!(application.selected_project.as_ref(), Some(&beta));
-            assert!(commands.borrow().iter().any(|command| matches!(
-                command,
-                NativeTransportCommand::CreateTask(project) if project == &beta
-            )));
+            assert!(
+                !commands
+                    .borrow()
+                    .iter()
+                    .any(|command| matches!(command, NativeTransportCommand::CreateTask(_))),
+                "the destination thread is created by the draft's send"
+            );
             assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
-            let threads = ThreadListing::new(vec![thread(
-                destination.as_str(),
-                beta.as_str(),
-                "New task",
-            )])
-            .unwrap();
-            application.handle_intake_ready(&projects, beta, &threads, destination.clone(), cx);
-            application
-                .handle_service_event(fresh_start_event(&destination, "home-draft-start", 1), cx);
-            assert_eq!(application.selected_thread.as_ref(), Some(&destination));
-            assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
-            assert!(matches!(application.state, NativeViewState::Ready));
-            assert!(application.project_picker_action_is_admissible());
-            application.composer.update(cx, |composer, cx| {
-                composer.switch_thread(&format!("project:{}", alpha.as_str()), false, cx);
-            });
-            assert_eq!(application.composer.read(cx).draft(), "");
-            application.reopen_with_forge_draft(destination.as_str(), "Alpha idea", cx);
-            assert_eq!(application.composer.read(cx).draft(), "Alpha idea");
+            assert_eq!(
+                application.composer.read(cx).draft_scope(),
+                Some(artisan_domain::ComposerDraftScope::Project(beta.clone()))
+            );
+            assert!(matches!(
+                application.route(),
+                NativeRoute::NewThread { project: Some(shown) } if shown == &beta
+            ));
+            assert!(matches!(application.state, NativeViewState::EmptyThreads));
+            assert!(application.message_submission_is_admissible(cx));
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,
                 NativeTransportCommand::SubmitComposerDraft(_) | NativeTransportCommand::StopRun(_)

@@ -48,25 +48,40 @@ impl NativeApplication {
         let Some(project) = self.selected_project.clone() else {
             return;
         };
-        match self.submit_command(NativeTransportCommand::CreateTask(project)) {
-            Ok(()) => {
-                self.project_navigation.restore_draft = false;
-                self.handle_intake_progress(NativeProjectIntakeStage::CreatingThread, cx);
-                self.state = NativeViewState::Loading;
-                self.navigate(
-                    NativeRoute::NewThread {
-                        project: self.selected_project.clone(),
-                    },
-                    cx,
-                );
+        self.open_new_task_draft(project, cx);
+    }
+
+    /// Opens the new-thread screen on the project's new-task draft.
+    ///
+    /// No thread is created here: the screen asks what to build, and the
+    /// Forge creates the thread when that draft is sent. An open thread is
+    /// retired first (its subscription stops), so the screen never shows an
+    /// empty conversation.
+    fn open_new_task_draft(&mut self, project: ProjectId, cx: &mut Context<Self>) {
+        if self.selected_thread.is_some() {
+            if self.conversation_host.is_some() {
+                self.begin_thread_retirement(cx);
+            } else {
+                self.retire_host(cx);
             }
-            Err(error) => self.handle_intake_failed(
-                NativeProjectIntakeOperation::CreateThread,
-                command_failure(error),
-                false,
-                cx,
-            ),
         }
+        self.pending_thread = None;
+        self.pending_snapshot = None;
+        // Typed text follows into the new task; an empty composer shows the
+        // project's saved draft instead of replacing it.
+        let carry = self.composer.read(cx).has_unsent_draft();
+        self.project_navigation.restore_draft = !carry;
+        let key = format!("project:{}", project.as_str());
+        self.composer
+            .update(cx, |composer, cx| composer.switch_thread(&key, carry, cx));
+        self.navigate(
+            NativeRoute::NewThread {
+                project: Some(project),
+            },
+            cx,
+        );
+        self.sync_composer_availability(cx);
+        cx.notify();
     }
 
     /// Asks the Forge to move one failed prompt into a new thread of the

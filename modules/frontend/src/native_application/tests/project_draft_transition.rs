@@ -35,35 +35,68 @@ fn assert_draft_can_send(application: &NativeApplication, cx: &Context<NativeApp
     assert!(application.composer_controls.read(cx).snapshot().send_ready);
 }
 
-fn finish_new_thread(
+/// The Forge stops the retired source thread's subscription.
+fn stop_source(
     application: &mut NativeApplication,
-    source: Option<&ThreadId>,
-    target: &ThreadId,
+    source: &ThreadId,
     cx: &mut Context<NativeApplication>,
 ) {
-    if let Some(source) = source {
-        application.handle_service_event(
-            NativeTransportEvent::ConversationSubscriptionStopped {
+    application.handle_service_event(
+        NativeTransportEvent::ConversationSubscriptionStopped {
+            thread_id: source.clone(),
+            request_id: request("new-thread-source-stop"),
+            stopped: ConversationSubscriptionStopped {
                 thread_id: source.clone(),
-                request_id: request("intake-source-stop"),
-                stopped: ConversationSubscriptionStopped {
-                    thread_id: source.clone(),
-                },
             },
-            cx,
-        );
-    }
-    application.try_mount_pending_thread(cx);
-    application.handle_service_event(fresh_start_event(target, "intake-target-start", 1), cx);
+        },
+        cx,
+    );
+}
+
+/// No task is created: the source (if any) stopped and the new-thread
+/// screen shows the project's new-task draft, ready to send.
+fn assert_on_new_task_draft(
+    application: &NativeApplication,
+    project: &ProjectId,
+    commands: &std::rc::Rc<std::cell::RefCell<Vec<NativeTransportCommand>>>,
+    cx: &Context<NativeApplication>,
+) {
+    assert!(
+        !commands
+            .borrow()
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::CreateTask(_))),
+        "a new thread is created by its first send, not by opening the screen"
+    );
+    assert_eq!(application.selected_project.as_ref(), Some(project));
+    assert_eq!(application.selected_thread, None);
+    assert!(application.conversation_host.is_none());
+    assert!(matches!(
+        application.route(),
+        NativeRoute::NewThread { project: Some(shown) } if shown == project
+    ));
+    assert_eq!(
+        application.composer.read(cx).draft_scope(),
+        Some(artisan_domain::ComposerDraftScope::Project(project.clone()))
+    );
+    assert!(matches!(application.state, NativeViewState::EmptyThreads));
+    assert!(application.project_picker_action_is_admissible());
+    assert_image_draft(application, cx);
+    assert_draft_can_send(application, cx);
+    assert!(
+        !commands
+            .borrow()
+            .iter()
+            .any(|command| matches!(command, NativeTransportCommand::StopRun(_)))
+    );
 }
 
 #[gpui::test]
-fn new_thread_intake_retires_full_scroll_queue_and_unlocks_projects(cx: &mut TestAppContext) {
+fn new_thread_retires_the_open_thread_and_its_full_scroll_queue(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
     let (sink, commands) = command_sink([]);
     let project = ProjectId::parse("draft-workspace").unwrap();
     let source = ThreadId::parse("draft-source").unwrap();
-    let target = ThreadId::parse("draft-new-thread").unwrap();
     let projects = ProjectListing::new(vec![self::project(project.as_str(), "Workspace")]).unwrap();
     let old_host = cx.update(|_, app| {
         view.update(app, |application, cx| {
@@ -108,29 +141,11 @@ fn new_thread_intake_retires_full_scroll_queue_and_unlocks_projects(cx: &mut Tes
             application.begin_new_task(cx);
             assert!(commands.borrow().iter().any(|command| matches!(
                 command,
-                NativeTransportCommand::CreateTask(id) if id == &project
+                NativeTransportCommand::Unsubscribe { thread_id } if thread_id == &source
             )));
-            let threads = ThreadListing::new(vec![
-                thread(target.as_str(), project.as_str(), "New task"),
-                thread(source.as_str(), project.as_str(), "Source"),
-            ])
-            .unwrap();
-            application.handle_intake_ready(&projects, project, &threads, target.clone(), cx);
-            finish_new_thread(application, Some(&source), &target, cx);
-
-            assert_eq!(application.selected_thread.as_ref(), Some(&target));
-            assert_ne!(application.conversation_host.as_ref(), Some(&old_host));
-            assert!(matches!(application.state, NativeViewState::Ready));
-            assert!(application.project_picker_action_is_admissible());
-            assert_image_draft(application, cx);
-            assert_draft_can_send(application, cx);
+            stop_source(application, &source, cx);
             assert!(application.conversation_effects.is_empty());
-            assert!(
-                !commands
-                    .borrow()
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::StopRun(_)))
-            );
+            assert_on_new_task_draft(application, &project, &commands, cx);
         });
     });
 }
@@ -148,7 +163,6 @@ fn project_choice_moves_draft_and_image(cx: &mut TestAppContext, location: Draft
     let alpha = ProjectId::parse("draft-alpha").unwrap();
     let beta = ProjectId::parse("draft-beta").unwrap();
     let source = ThreadId::parse("alpha-empty-draft").unwrap();
-    let target = ThreadId::parse("beta-new-draft").unwrap();
     let existing = ThreadId::parse("beta-existing-thread").unwrap();
     let projects = ProjectListing::new(vec![
         project(alpha.as_str(), "Alpha"),
@@ -207,7 +221,7 @@ fn project_choice_moves_draft_and_image(cx: &mut TestAppContext, location: Draft
         view.update(app, |application, cx| assert_image_draft(application, cx));
     });
     // Choosing a project (the new-task picker and the command menu both
-    // route here) carries the unsent prompt into a fresh task there.
+    // route here) carries the unsent prompt into its new-task draft.
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             application.choose_project(beta.clone(), cx);
@@ -217,43 +231,15 @@ fn project_choice_moves_draft_and_image(cx: &mut TestAppContext, location: Draft
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             assert_eq!(application.selected_project.as_ref(), Some(&beta));
-            assert_eq!(
-                commands
-                    .borrow()
-                    .iter()
-                    .filter(|command| matches!(
-                        command,
-                        NativeTransportCommand::CreateTask(project) if project == &beta
-                    ))
-                    .count(),
-                1
-            );
             assert!(!commands.borrow().iter().any(|command| matches!(
                 command,
                 NativeTransportCommand::Subscribe { thread_id, .. } if thread_id == &existing
             )));
             assert_image_draft(application, cx);
-
-            let threads = ThreadListing::new(vec![
-                thread(target.as_str(), beta.as_str(), "New task"),
-                thread(existing.as_str(), beta.as_str(), "Existing work"),
-            ])
-            .unwrap();
-            application.handle_intake_ready(&projects, beta.clone(), &threads, target.clone(), cx);
-            let source = (!matches!(location, DraftLocation::Home)).then_some(&source);
-            finish_new_thread(application, source, &target, cx);
-            assert_eq!(application.selected_project.as_ref(), Some(&beta));
-            assert_eq!(application.selected_thread.as_ref(), Some(&target));
-            assert!(matches!(application.state, NativeViewState::Ready));
-            assert!(application.project_picker_action_is_admissible());
-            assert_image_draft(application, cx);
-            assert_draft_can_send(application, cx);
-            assert!(
-                !commands
-                    .borrow()
-                    .iter()
-                    .any(|command| matches!(command, NativeTransportCommand::StopRun(_)))
-            );
+            if !matches!(location, DraftLocation::Home) {
+                stop_source(application, &source, cx);
+            }
+            assert_on_new_task_draft(application, &beta, &commands, cx);
         });
     });
 }
