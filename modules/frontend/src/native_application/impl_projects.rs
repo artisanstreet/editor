@@ -20,6 +20,10 @@ pub(super) struct ProjectNavigation {
     pub(super) last_threads: HashMap<ProjectId, ThreadId>,
     pub(super) restore_draft: bool,
     pub(super) awaiting_threads: bool,
+    /// A thread the user chose to open. Mounting it shows it even from a
+    /// route that shows no conversation, such as Settings; other mounts
+    /// leave such a route alone.
+    pub(super) chosen_thread: Option<ThreadId>,
 }
 
 impl NativeApplication {
