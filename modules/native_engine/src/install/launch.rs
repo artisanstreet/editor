@@ -125,7 +125,7 @@ impl LaunchTarget {
     /// created with private permissions.
     pub fn environment(&self) -> Result<Vec<(OsString, OsString)>, ManagedEngineError> {
         let home = self.home();
-        prepare_home(&home)?;
+        prepare_home(self.engine, &home)?;
         Ok(build_environment(
             self.engine,
             &home,
@@ -358,15 +358,33 @@ pub fn engine_home(state_root: &Path, engine: ManagedEngine) -> PathBuf {
     state_root.join("toolchain").join(engine.id()).join("home")
 }
 
-/// Creates `<state>/toolchain/<engine>/home` (private) and its two managed
-/// ancestors; the Forge state directory itself must already exist.
-fn prepare_home(home: &Path) -> Result<(), ManagedEngineError> {
+/// Creates `<state>/toolchain/<engine>/home` (private), its two managed
+/// ancestors, and the engine's own config directory inside it; the Forge
+/// state directory itself must already exist. Codex refuses to start when
+/// `CODEX_HOME` names a missing directory, so the config directory the
+/// environment points at must exist before any spawn, login included.
+fn prepare_home(engine: ManagedEngine, home: &Path) -> Result<(), ManagedEngineError> {
     let engine_root = home.parent().ok_or(ManagedEngineError::UnsafePath)?;
     let toolchain = engine_root.parent().ok_or(ManagedEngineError::UnsafePath)?;
     for directory in [toolchain, engine_root] {
         native_files::ensure_directory(directory).map_err(|_| ManagedEngineError::Io)?;
     }
-    native_files::ensure_private_directory(home).map_err(|_| ManagedEngineError::UnsafePath)
+    native_files::ensure_private_directory(home).map_err(|_| ManagedEngineError::UnsafePath)?;
+    if let Some(config) = engine_config_dir(engine, home) {
+        native_files::ensure_private_directory(&config)
+            .map_err(|_| ManagedEngineError::UnsafePath)?;
+    }
+    Ok(())
+}
+
+/// The engine's own config directory inside its managed home, when the
+/// engine is pointed at one explicitly.
+fn engine_config_dir(engine: ManagedEngine, home: &Path) -> Option<PathBuf> {
+    match engine {
+        ManagedEngine::Claude => Some(home.join(".claude")),
+        ManagedEngine::Codex => Some(home.join(".codex")),
+        ManagedEngine::Grok | ManagedEngine::Cursor | ManagedEngine::OpenCode2 => None,
+    }
 }
 
 /// Variables copied from the Forge when present. Nothing else crosses.
@@ -441,15 +459,14 @@ pub fn build_environment(
             home.join("AppData").join("Local").into_os_string(),
         );
     }
-    match engine {
-        ManagedEngine::Claude => {
-            set("CLAUDE_CONFIG_DIR", home.join(".claude").into_os_string());
+    let config = engine_config_dir(engine, home).map(PathBuf::into_os_string);
+    match (engine, config) {
+        (ManagedEngine::Claude, Some(config)) => {
+            set("CLAUDE_CONFIG_DIR", config);
             set("DISABLE_UPDATES", OsString::from("1"));
         }
-        ManagedEngine::Codex => {
-            set("CODEX_HOME", home.join(".codex").into_os_string());
-        }
-        ManagedEngine::Grok | ManagedEngine::Cursor | ManagedEngine::OpenCode2 => {}
+        (ManagedEngine::Codex, Some(config)) => set("CODEX_HOME", config),
+        _ => {}
     }
     let locale = variable("LANG")
         .filter(|value| {
