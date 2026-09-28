@@ -43,15 +43,22 @@ use artisan_domain::{
     ConversationLifecycle, ConversationSnapshot, RunId, TerminalActivityState, ToolAction, TurnId,
 };
 
-use crate::conversation_scene::{SCENE_ID_MAX_BYTES, SCENE_MAX_TEXT_BYTES, SceneId};
+use crate::conversation_scene::{
+    SCENE_ID_MAX_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_TEXT_BYTES, SceneId,
+};
 use crate::conversation_state_machine::{SceneFact, SceneFactKind};
 use crate::engine_observation_state::{EngineObservationState, TimelineRow};
 
-/// Maximum activity facts projected in one call.
+/// Number of activity facts one projection keeps: the scene room the
+/// snapshot's durable items leave.
 ///
-/// Bounded so a pathological retained backlog cannot exceed the aggregate
-/// fact registry in one replay; the caller replays again for the remainder.
-pub const MAX_PROJECTED_FACTS: usize = 256;
+/// Activity slides like the rest of the loaded conversation: the newest
+/// facts always fit, and the oldest leave the window first. A long thread
+/// never stalls its live turn behind history it can no longer show.
+#[must_use]
+pub fn activity_window(snapshot: &ConversationSnapshot) -> usize {
+    SCENE_MAX_ITEMS.saturating_sub(snapshot.items().len())
+}
 
 /// Maximum UTF-8 bytes retained in one cumulative reasoning body.
 pub const MAX_CUMULATIVE_REASONING_BYTES: usize = SCENE_MAX_TEXT_BYTES;
@@ -76,6 +83,9 @@ pub struct ActivityProjection {
     /// Attributed rows skipped as foreign (thread mismatch is already
     /// filtered by the state; run mismatches against settled snapshot runs).
     pub rejected: usize,
+    /// Oldest projectable rows that slid out of the [`activity_window`].
+    /// Facts registered for them earlier are no longer part of the window.
+    pub evicted: usize,
 }
 
 /// Builds the stable run-scoped scene id for one provider row.
@@ -137,6 +147,8 @@ pub fn truncate_bounded(text: &str, maximum: usize) -> String {
 /// - Ordinals start above the durable watermark (`max durable ordinal + 1`)
 ///   in `(committed_at, delivery_sequence)` order, so scene order is stable
 ///   without clock sampling and never collides with durable items.
+/// - Only the newest [`activity_window`] facts are kept; older rows count as
+///   `evicted`.
 /// - Bodies are truncated to scene bounds; only the public reasoning summary
 ///   is retained.
 #[must_use]
@@ -153,6 +165,7 @@ pub fn project_activities(
             facts: Vec::new(),
             pending: 0,
             rejected: 0,
+            evicted: 0,
         };
     }
     let known_turns: BTreeSet<&TurnId> =
@@ -405,10 +418,12 @@ pub fn project_activities(
         (left.committed_at_ms, left.delivery_sequence)
             .cmp(&(right.committed_at_ms, right.delivery_sequence))
     });
-    candidates.truncate(MAX_PROJECTED_FACTS);
+    let evicted = candidates.len().saturating_sub(activity_window(snapshot));
 
-    let mut facts = Vec::with_capacity(candidates.len());
-    for (index, candidate) in candidates.into_iter().enumerate() {
+    // Ordinals count every projectable row, evicted ones included, so a fact
+    // keeps its place while the window slides past older rows.
+    let mut facts = Vec::with_capacity(candidates.len() - evicted);
+    for (index, candidate) in candidates.into_iter().enumerate().skip(evicted) {
         let ordinal = durable_watermark
             .saturating_add(1)
             .saturating_add(index as u64);
@@ -442,6 +457,7 @@ pub fn project_activities(
         facts,
         pending,
         rejected,
+        evicted,
     }
 }
 

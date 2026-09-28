@@ -19,7 +19,8 @@ use artisan_domain::{
 use artisan_frontend::conversation_delivery_machine::{
     ConversationDeliveryEffect, ConversationDeliveryEvent,
 };
-use artisan_frontend::conversation_observation_projection::project_activities;
+use artisan_frontend::conversation_observation_projection::{activity_window, project_activities};
+use artisan_frontend::conversation_scene::SCENE_MAX_ITEMS;
 use artisan_frontend::conversation_scene::{
     SceneId, TurnBlock, TurnNarration as SceneTurnNarration,
 };
@@ -1341,4 +1342,96 @@ fn work_keeps_its_first_position_between_assistant_messages_after_completion_and
         projected.facts[0].activity_lifecycle,
         Some(ConversationLifecycle::Failed)
     );
+}
+
+#[test]
+fn activity_slides_to_the_newest_window_and_frees_room_for_live_work() {
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1)],
+    );
+    let window = activity_window(&snapshot);
+    assert_eq!(
+        window,
+        SCENE_MAX_ITEMS - 1,
+        "the durable item keeps its room"
+    );
+    let mut state = EngineObservationState::new(thread_id());
+    let apply_tool = |state: &mut EngineObservationState, index: usize| {
+        let cursor = u64::try_from(index).expect("small index") + 1;
+        let outcome = state.apply(
+            cursor,
+            &attributed_event(
+                tool_observation(
+                    &format!("obs-tool-{index}"),
+                    cursor,
+                    &format!("tool-{index}"),
+                    ToolAction::Completed,
+                ),
+                RUN_A,
+                TURN_A,
+                1_000 + i64::try_from(index).expect("small index"),
+                cursor,
+            ),
+        );
+        assert!(matches!(outcome, ApplyOutcome::Applied { .. }));
+    };
+    for index in 0..window + 3 {
+        apply_tool(&mut state, index);
+    }
+
+    // The newest rows fill the window; the three oldest slid out.
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), window);
+    assert_eq!(projection.evicted, 3);
+    let first = projection
+        .facts
+        .first()
+        .expect("window")
+        .id
+        .as_str()
+        .to_owned();
+    let last = projection
+        .facts
+        .last()
+        .expect("window")
+        .id
+        .as_str()
+        .to_owned();
+    assert!(
+        first.ends_with("-tool-3"),
+        "oldest kept row is the fourth: {first}"
+    );
+    assert!(
+        last.ends_with(&format!("-tool-{}", window + 2)),
+        "newest row is kept: {last}"
+    );
+
+    let mut controller = controller_with_snapshot(snapshot.clone());
+    upsert_all(&mut controller, projection.facts);
+    assert_eq!(controller.derived_fact_ids().len(), window);
+
+    // Live work keeps arriving: the fact that slid out leaves, and the new
+    // row takes its room instead of stalling at the scene bound.
+    apply_tool(&mut state, window + 3);
+    let projection = project_activities(&state, &snapshot);
+    let kept: std::collections::BTreeSet<_> = projection
+        .facts
+        .iter()
+        .map(|fact| fact.id.clone())
+        .collect();
+    for id in controller.derived_fact_ids() {
+        if !kept.contains(&id) {
+            controller.remove_fact(id).expect("slid-out fact leaves");
+        }
+    }
+    upsert_all(&mut controller, projection.facts);
+    let ids = controller.derived_fact_ids();
+    assert_eq!(ids.len(), window);
+    assert!(
+        ids.iter()
+            .any(|id| id.as_str().ends_with(&format!("-tool-{}", window + 3))),
+        "the newest row is shown"
+    );
+    assert!(!ids.iter().any(|id| id.as_str().ends_with("-tool-3")));
 }
