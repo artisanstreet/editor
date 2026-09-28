@@ -273,6 +273,17 @@ impl ConversationStateController {
         }))
     }
 
+    /// Returns the identities of registered facts derived from retained
+    /// engine observations, in identity order.
+    #[must_use]
+    pub fn derived_fact_ids(&self) -> Vec<SceneId> {
+        self.facts
+            .values()
+            .filter(|fact| fact.derived())
+            .map(|fact| fact.id.clone())
+            .collect()
+    }
+
     /// Atomically inserts or updates one bounded non-durable fact.
     ///
     /// An identical fact is a no-op without effects; a changed fact for the

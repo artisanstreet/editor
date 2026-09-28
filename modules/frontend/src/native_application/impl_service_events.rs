@@ -828,10 +828,29 @@ impl NativeApplication {
         };
         let projection =
             crate::conversation_observation_projection::project_activities(state, &snapshot);
-        if projection.facts.is_empty() {
+        // Facts that slid out of the window leave first, so the scene room
+        // they held goes to the newest activity.
+        let window: std::collections::BTreeSet<&crate::conversation_scene::SceneId> =
+            projection.facts.iter().map(|fact| &fact.id).collect();
+        let slid_out: Vec<_> = host
+            .read(cx)
+            .derived_fact_ids()
+            .into_iter()
+            .filter(|id| !window.contains(id))
+            .collect();
+        if projection.facts.is_empty() && slid_out.is_empty() {
             return;
         }
         let mut invalidated = false;
+        for id in slid_out {
+            let remove = crate::conversation_state_machine::SceneFactCommand::Remove { id };
+            match host.update(cx, |host, host_cx| {
+                host.dispatch(ConversationStateEvent::Fact(remove), host_cx)
+            }) {
+                Ok(()) => invalidated = true,
+                Err(_) => break,
+            }
+        }
         for fact in projection.facts {
             let upsert = crate::conversation_state_machine::SceneFactCommand::Upsert(fact);
             match host.update(cx, |host, host_cx| {

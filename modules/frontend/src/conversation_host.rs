@@ -311,6 +311,12 @@ impl ConversationHost {
         self.controller.snapshot().cloned()
     }
 
+    /// Identities of the registered observation-derived facts.
+    #[must_use]
+    pub fn derived_fact_ids(&self) -> Vec<crate::conversation_scene::SceneId> {
+        self.controller.derived_fact_ids()
+    }
+
     /// Returns the one child surface entity.
     #[must_use]
     pub fn surface(&self) -> &Entity<ConversationSurface> {
