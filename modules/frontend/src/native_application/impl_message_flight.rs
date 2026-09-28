@@ -303,6 +303,22 @@ impl NativeApplication {
         self.drop_transient_service_reads();
         self.run_controls.clear_transient_observation();
         self.release_composer_drafts();
+        if let Some(flight) = self.thread_switch_flight.take() {
+            let request = match flight.phase {
+                ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id }
+                | ThreadSwitchPhase::AwaitingSubscriptionStart { request_id } => request_id,
+                ThreadSwitchPhase::HostRetirement { request_id } => Some(request_id),
+                _ => None,
+            };
+            if let Some(request) = request {
+                self.remember_switch_request_id(request);
+            }
+        }
+        self.ordinary_unsubscribe_thread = None;
+        self.pending_thread = None;
+        self.intake_stage = None;
+        self.intake_restore_state = None;
+        self.intake_retry_available = false;
     }
 
     pub(super) fn handle_message_receipt(

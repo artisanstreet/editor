@@ -401,8 +401,6 @@ impl NativeApplication {
             let selected_thread = self.selected_thread.clone();
             self.retire_host_after_switch_stop(cx);
             self.selected_thread = selected_thread;
-            self.intake_stage = None;
-            self.intake_retry_available = false;
             self.active_subscription_request_id = None;
             self.retained_switch_request_ids.clear();
             self.retained_switch_patch_ids.clear();

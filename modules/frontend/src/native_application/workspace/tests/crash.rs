@@ -65,3 +65,36 @@ fn automatic_recovery_does_not_override_integrity_failure_or_quit(cx: &mut TestA
         ));
     });
 }
+
+#[gpui::test]
+fn connection_loss_releases_navigation_waits_and_ignores_old_receipts(cx: &mut TestAppContext) {
+    let (service, _commands, _) = NativeTransportService::pending_for_test();
+    let service = Arc::new(service);
+    let (workspace, cx) = connected_workspace(cx, &service, vec![]);
+    let view = selected(&workspace, cx);
+    set_draft(&view, "keep this draft", cx);
+    cx.update(|_, cx| {
+        view.update(cx, |app, cx| {
+            let source = ThreadId::parse("source-thread").unwrap();
+            let receipt = RequestId::parse("lost-switch-receipt").unwrap();
+            app.thread_switch_flight = Some(ThreadSwitchFlight {
+                source_thread: source.clone(),
+                target_thread: Some(ThreadId::parse("target-thread").unwrap()),
+                generation: 1,
+                carry_draft: false,
+                phase: ThreadSwitchPhase::AwaitingUnsubscribeStop {
+                    request_id: Some(receipt.clone()),
+                },
+            });
+            app.ordinary_unsubscribe_thread = Some(source);
+            app.intake_stage = Some(NativeProjectIntakeStage::RefreshingThreads);
+            app.handle_delivery_lost(command_failure(CommandSendError::Stopped), cx);
+            assert!(app.thread_switch_flight.is_none());
+            assert!(app.ordinary_unsubscribe_thread.is_none());
+            assert!(app.intake_stage.is_none());
+            assert!(app.retained_switch_request_ids.contains(&receipt));
+            assert!(app.project_picker_action_is_admissible());
+        })
+    });
+    assert_eq!(draft(&view, cx), "keep this draft");
+}

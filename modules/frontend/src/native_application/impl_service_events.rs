@@ -137,11 +137,6 @@ impl NativeApplication {
             NativeTransportEvent::Failed(failure) => {
                 self.retain_message_flight(cx);
                 self.clear_transient_service_state();
-                self.intake_stage = None;
-                self.intake_retry_available = false;
-                self.thread_switch_flight = None;
-                self.ordinary_unsubscribe_thread = None;
-                self.pending_thread = None;
                 self.set_picker_disabled(true, cx);
                 self.set_thread_picker_disabled(true, cx);
                 self.reset_profile_usage_for_connection();
@@ -354,13 +349,8 @@ impl NativeApplication {
         self.retain_message_flight(cx);
         self.service_stopped = true;
         self.clear_transient_service_state();
-        self.intake_stage = None;
-        self.intake_retry_available = false;
         self.reset_composer_catalog(cx);
         self.reset_profile_usage_for_connection();
-        self.thread_switch_flight = None;
-        self.ordinary_unsubscribe_thread = None;
-        self.pending_thread = None;
         self.set_picker_disabled(true, cx);
         self.set_thread_picker_disabled(true, cx);
         if matches!(status, ServiceStopStatus::Failed)
@@ -1369,6 +1359,9 @@ impl NativeApplication {
     }
 
     pub(super) fn handle_delivery_lost(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
+        self.retain_message_flight(cx);
+        self.clear_transient_service_state();
+        self.sync_composer_availability(cx);
         // Use mounted host's last-good cursor and existing recovery policy to resubscribe
         if let Some(thread_id) = self.selected_thread.clone()
             && let Some(host) = self.conversation_host.clone()
