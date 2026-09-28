@@ -676,12 +676,20 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
     // shutdown proves that custody has resolved.
     let mut retained_activity = Vec::new();
     let mut claim_failures = 0_u32;
+    let mut recovery_failures = 0_u32;
     loop {
         if stop.is_cancelled() || process_cancel.is_cancelled() {
             break;
         }
-        let proceed =
-            run_recovery_pages(&repository, &config, &origin, &stop, &process_cancel).await;
+        let proceed = run_recovery_pages(
+            &repository,
+            &config,
+            &origin,
+            &stop,
+            &process_cancel,
+            &mut recovery_failures,
+        )
+        .await;
         if stop.is_cancelled() || process_cancel.is_cancelled() {
             break;
         }

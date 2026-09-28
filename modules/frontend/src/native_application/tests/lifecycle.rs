@@ -1021,3 +1021,32 @@ fn initially_empty_project_moves_its_draft_into_the_destination_new_task_draft(
         });
     });
 }
+
+#[gpui::test]
+fn reconnect_remounts_selected_thread_after_old_host_is_retired(cx: &mut TestAppContext) {
+    let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            let project_id = ProjectId::parse("recovery-project").unwrap();
+            let thread_id = ThreadId::parse("recovery-thread").unwrap();
+            application.selected_project = Some(project_id.clone());
+            application.selected_thread = Some(thread_id.clone());
+            assert!(application.conversation_host.is_none());
+            let listing = ThreadListing::new(vec![thread(
+                "recovery-thread",
+                "recovery-project",
+                "Recovered",
+            )])
+            .unwrap();
+            application.handle_threads_without_switch(true, &project_id, &listing, cx);
+            let host = application
+                .conversation_host
+                .as_ref()
+                .expect("reconnect mounts the selected conversation");
+            assert_eq!(
+                host.read(cx).controller_view().delivery.thread_id,
+                thread_id
+            );
+        })
+    });
+}

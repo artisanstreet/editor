@@ -397,14 +397,14 @@ impl StartupReconciliationPatchSource for ForgeStartupReconciliationPatchSource 
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         let turn_patch_id =
             PatchId::parse(candidate.run_id.as_str()).map_err(|_| PatchSourceError)?;
-        let item_patch_id = candidate
-            .assistant_item_id
-            .as_ref()
+        let item_patch_ids = candidate
+            .assistant_item_ids
+            .iter()
             .map(|item_id| PatchId::parse(item_id.as_str()).map_err(|_| PatchSourceError))
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(StartupReconciliationPatches::new(
             turn_patch_id,
-            item_patch_id,
+            item_patch_ids,
         ))
     }
 }
@@ -438,8 +438,9 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     } = context;
 
     if let Err(error) = reconcile_startup(&app).await {
-        let handler = RequestHandler::with_subscriptions(app.repository().clone());
-        return finish(app, handler, custody, None, None, None, Some(error)).await;
+        // The dispatcher retries recovery and fences unresolved threads.
+        // A damaged conversation must not prevent the host from serving others.
+        eprintln!("startup run recovery failed: {error:?}");
     }
 
     let Ok(forge_executable) = std::env::current_exe() else {

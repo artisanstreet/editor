@@ -137,6 +137,8 @@ impl NativeApplication {
             NativeTransportEvent::Failed(failure) => {
                 self.retain_message_flight(cx);
                 self.clear_transient_service_state();
+                self.intake_stage = None;
+                self.intake_retry_available = false;
                 self.thread_switch_flight = None;
                 self.ordinary_unsubscribe_thread = None;
                 self.pending_thread = None;
@@ -352,6 +354,8 @@ impl NativeApplication {
         self.retain_message_flight(cx);
         self.service_stopped = true;
         self.clear_transient_service_state();
+        self.intake_stage = None;
+        self.intake_retry_available = false;
         self.reset_composer_catalog(cx);
         self.reset_profile_usage_for_connection();
         self.thread_switch_flight = None;

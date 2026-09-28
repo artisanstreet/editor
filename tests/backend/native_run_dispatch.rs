@@ -2362,8 +2362,8 @@ impl crate::startup_reconciliation_sweep::StartupReconciliationPatchSource
         let turn_patch_id = PatchId::parse(candidate.run_id.as_str())
             .map_err(|_| crate::startup_reconciliation_sweep::PatchSourceError)?;
         let item_patch_id = candidate
-            .assistant_item_id
-            .as_ref()
+            .assistant_item_ids
+            .first()
             .map(|item_id| {
                 PatchId::parse(item_id.as_str())
                     .map_err(|_| crate::startup_reconciliation_sweep::PatchSourceError)

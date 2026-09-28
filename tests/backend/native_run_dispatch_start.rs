@@ -64,8 +64,8 @@ impl StartupReconciliationPatchSource for LivePatches {
         let next = self.0.fetch_add(2, Ordering::Relaxed);
         let turn = PatchId::parse(format!("live-sweep-{next}")).map_err(|_| PatchSourceError)?;
         let item = candidate
-            .assistant_item_id
-            .as_ref()
+            .assistant_item_ids
+            .first()
             .map(|_| PatchId::parse(format!("live-sweep-{}", next + 1)))
             .transpose()
             .map_err(|_| PatchSourceError)?;

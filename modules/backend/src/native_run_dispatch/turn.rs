@@ -198,11 +198,17 @@ pub(super) async fn consume_turn(
         if state.terminal.is_some() {
             break;
         }
+        if state.progress_uncertain && !cancel_signalled {
+            cancel_signalled = true;
+            turn.cancel();
+        }
     }
     // Persist the coalesced tail before ownership resolution and terminal
     // settlement: an abort, an owner failure, or a held stream must not drop
     // bytes that a per-delta commit would already have written.
-    let _ = flush_pending_deltas(&context, &mut state, &mut turn).await;
+    if !state.progress_uncertain {
+        let _ = flush_pending_deltas(&context, &mut state, &mut turn).await;
+    }
     if !state.progress_uncertain {
         let _ = super::message_parts::finish_history(&context, &mut state, &mut turn).await;
     }
@@ -261,6 +267,16 @@ pub(super) async fn handle_observation(
     turn: &mut AcceptedTurn,
     observation: EngineObservation,
 ) {
+    // Once a commit loses its fence, drain only to release provider custody.
+    // Further observations cannot be committed with the obsolete scope.
+    if state.progress_uncertain {
+        if let EngineObservation::Terminal(observation) = observation
+            && observation.run_id() == &state.scope.launched.run_id
+        {
+            state.terminal = Some(observation.state());
+        }
+        return;
+    }
     match observation {
         EngineObservation::SummaryTitle { run_id, title } => {
             if run_id == state.scope.launched.run_id {

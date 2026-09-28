@@ -36,14 +36,14 @@ impl StartupReconciliationPatchSource for LiveRecoveryPatchSource {
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         let turn_patch_id =
             PatchId::parse(candidate.run_id.as_str()).map_err(|_| PatchSourceError)?;
-        let item_patch_id = candidate
-            .assistant_item_id
-            .as_ref()
+        let item_patch_ids = candidate
+            .assistant_item_ids
+            .iter()
             .map(|item_id| PatchId::parse(item_id.as_str()).map_err(|_| PatchSourceError))
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(StartupReconciliationPatches::new(
             turn_patch_id,
-            item_patch_id,
+            item_patch_ids,
         ))
     }
 
@@ -83,31 +83,28 @@ pub(super) async fn run_recovery_pages(
     origin: &SystemCommandOrigin,
     stop: &CancelHandle,
     process_cancel: &CancelHandle,
+    failures: &mut u32,
 ) -> bool {
-    loop {
-        if stop.is_cancelled() || process_cancel.is_cancelled() {
-            return false;
-        }
-        let Some(operated_at) = wall_clock(origin) else {
-            if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
-                return false;
-            }
-            return false;
-        };
-        if let Ok(report) = perform_live_recovery_page(repository, config, operated_at).await {
-            if report.discovered == 64 {
-                if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
-                    return false;
-                }
-                continue;
-            }
-            return true;
-        }
-        if !wait_for_next_claim(stop, process_cancel, config.poll_interval).await {
-            return false;
-        }
+    if stop.is_cancelled() || process_cancel.is_cancelled() {
         return false;
     }
+    let Some(operated_at) = wall_clock(origin) else {
+        return wait_for_next_claim(stop, process_cancel, config.poll_interval).await;
+    };
+    match perform_live_recovery_page(repository, config, operated_at).await {
+        Ok(_) => *failures = 0,
+        Err(error) => {
+            *failures = failures.saturating_add(1);
+            if failures.is_power_of_two() {
+                eprintln!("run recovery failed (attempt {failures}): {error:?}");
+            }
+            // Keep unrelated threads moving. Claim admission excludes threads
+            // with unresolved runs, even after their lease expires.
+            return wait_for_next_claim(stop, process_cancel, std::time::Duration::from_secs(1))
+                .await;
+        }
+    }
+    true
 }
 
 pub(super) async fn run_final_recovery_page(

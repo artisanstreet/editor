@@ -9,9 +9,7 @@
 //! never claims the whole pass rolled back.
 //!
 //! Identity material is caller-injected through a synchronous patch-ID source.
-//! The coordinator validates patch-shape agreement (`item_patch` is `Some`
-//! exactly when the candidate carries an assistant item, and turn/item
-//! identities are distinct) before any mutation of that candidate. It never
+//! The coordinator validates patch-shape agreement (one patch per unsealed assistant item, with distinct identities) before any mutation of that candidate. It never
 //! mints randomness, reads a clock, or persists secrets.
 
 #![forbid(unsafe_code)]
@@ -108,24 +106,22 @@ pub struct StartupReconciliationSweepReport {
 
 /// Caller-minted patch identities for one candidate.
 ///
-/// `item_patch_id` must be `Some` exactly when the candidate carries an
-/// assistant item; the coordinator validates that agreement before any mutation.
+/// `item_patch_ids` follows candidate item order; every unsealed item has one patch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartupReconciliationPatches {
     /// Minted `turn_lifecycle` patch identity.
     pub turn_patch_id: PatchId,
-    /// Minted `item_lifecycle` patch identity, required iff the candidate has
-    /// an assistant item.
-    pub item_patch_id: Option<PatchId>,
+    /// Minted item lifecycle patch identities in candidate order.
+    pub item_patch_ids: Vec<PatchId>,
 }
 
 impl StartupReconciliationPatches {
     /// Creates patch identities, preserving caller-minted values.
     #[must_use]
-    pub fn new(turn_patch_id: PatchId, item_patch_id: Option<PatchId>) -> Self {
+    pub fn new(turn_patch_id: PatchId, item_patch_ids: impl IntoIterator<Item = PatchId>) -> Self {
         Self {
             turn_patch_id,
-            item_patch_id,
+            item_patch_ids: item_patch_ids.into_iter().collect(),
         }
     }
 }
@@ -347,28 +343,26 @@ where
         };
 
         // Validate shape agreement before any mutation of this candidate.
-        let has_item = candidate.assistant_item_id.is_some();
-        let has_patch = patches.item_patch_id.is_some();
-        if has_item != has_patch {
+        if candidate.assistant_item_ids.len() != patches.item_patch_ids.len() {
             return Err(StartupReconciliationSweepError::PatchShape {
                 report,
                 failing_index: index,
                 failing_run_id: candidate.run_id.clone(),
-                reason: if has_item {
-                    "candidate has an assistant item but no item patch was supplied"
-                } else {
-                    "candidate has no assistant item but an item patch was supplied"
-                },
+                reason: "assistant item and patch counts differ",
             });
         }
-        if let Some(item_patch) = &patches.item_patch_id
-            && item_patch.as_str() == patches.turn_patch_id.as_str()
+        let mut identities = std::collections::HashSet::new();
+        identities.insert(&patches.turn_patch_id);
+        if patches
+            .item_patch_ids
+            .iter()
+            .any(|id| !identities.insert(id))
         {
             return Err(StartupReconciliationSweepError::PatchShape {
                 report,
                 failing_index: index,
                 failing_run_id: candidate.run_id.clone(),
-                reason: "turn and item patch identities collide",
+                reason: "recovery patch identities collide",
             });
         }
 
@@ -378,7 +372,7 @@ where
                     candidate,
                     operated_at: input.operated_at,
                     turn_patch_id: &patches.turn_patch_id,
-                    item_patch_id: patches.item_patch_id.as_ref(),
+                    item_patch_ids: &patches.item_patch_ids,
                 },
                 input.recovery,
             )

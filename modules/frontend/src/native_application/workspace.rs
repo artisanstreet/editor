@@ -49,6 +49,7 @@ pub(super) struct NativeWorkspace {
     host: ConnectedHost,
     switch: Option<HostSwitch>,
     connector: Connector,
+    _recovery_task: Task<()>,
 }
 
 impl NativeWorkspace {
@@ -58,10 +59,61 @@ impl NativeWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let recovery_task = cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if workspace.update(cx, Self::recover_connection).is_err() {
+                    break;
+                }
+            }
+        });
         Self {
+            _recovery_task: recovery_task,
             host: Self::open_host(home, service, window, cx),
             switch: None,
             connector: Box::new(spawn_connection),
+        }
+    }
+
+    /// Retry the registered host after a transport loss. The connector resolves
+    /// the current invitation again, including a changed WSL address. Reuse the
+    /// view so local drafts and navigation survive the connection replacement.
+    fn recover_connection(&mut self, cx: &mut Context<Self>) {
+        if self.switch.is_some() || self.host.home.is_none() {
+            return;
+        }
+        let app = self.host.view.read(cx);
+        if app.shutdown_prepared || app.connection_retry_pending {
+            return;
+        }
+        let NativeViewState::Failure(failure) = &app.state else {
+            return;
+        };
+        if !matches!(
+            failure.category,
+            ServiceFailureCategory::Unavailable
+                | ServiceFailureCategory::LocalSession
+                | ServiceFailureCategory::ChannelClosed
+                | ServiceFailureCategory::Cleanup
+                | ServiceFailureCategory::Authentication
+        ) {
+            return;
+        }
+        let live = app
+            .service
+            .as_ref()
+            .filter(|service| !service.is_finished())
+            .cloned();
+        if let Some(service) = live {
+            let home = self.host.home.clone();
+            self.host.view.update(cx, |view, cx| {
+                view.close_failed_connection(service, home, cx)
+            });
+        } else {
+            let replacement = (self.connector)(self.host.home.clone());
+            self.host.view.update(cx, |view, cx| {
+                view.reconnect_stopped_service(replacement, cx)
+            });
         }
     }
 
@@ -346,7 +398,11 @@ impl NativeApplication {
         if let Some(stopped) = self.service.take() {
             let _ = stopped.join();
             self.handle_service_stopped(ServiceStopStatus::Clean, cx);
+            let selected_thread = self.selected_thread.clone();
             self.retire_host_after_switch_stop(cx);
+            self.selected_thread = selected_thread;
+            self.intake_stage = None;
+            self.intake_retry_available = false;
             self.active_subscription_request_id = None;
             self.retained_switch_request_ids.clear();
             self.retained_switch_patch_ids.clear();
