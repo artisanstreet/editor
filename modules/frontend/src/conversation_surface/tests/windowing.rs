@@ -10,9 +10,10 @@ use artisan_ui::markdown_cache::{
 use super::*;
 use crate::conversation_scene::SCENE_MAX_MESSAGE_BODY_BYTES;
 use crate::conversation_surface::render_budget::{
-    TRANSCRIPT_MAX_BUILT_ROWS, TRANSCRIPT_MAX_MARKDOWN_BYTES_PER_ROW, plan_transcript_window,
-    transcript_markdown_within_budget,
+    TRANSCRIPT_MAX_BUILT_ROWS, TRANSCRIPT_MAX_MARKDOWN_BYTES_PER_ROW, TRANSCRIPT_MAX_ROW_HEIGHT_PX,
+    TRANSCRIPT_TURN_GAP_PX, plan_transcript_window, transcript_markdown_within_budget,
 };
+use crate::conversation_surface::transcript_window::TranscriptHeightTable;
 
 /// One assistant body shared by every turn in the long fixture.
 const ASSISTANT_BODY: &str = "A windowed transcript shapes only this reply.\n";
@@ -31,13 +32,20 @@ fn uniform_offsets(rows: usize, extent: f64) -> Vec<f64> {
 
 /// Builds a transcript with `turns` user/assistant turn pairs.
 fn long_scene(turns: usize) -> ConversationScene {
+    turn_range_scene(0..turns)
+}
+
+/// Builds the turns `range` of the long fixture: the window a thread shows
+/// while its older turns are still unread.
+fn turn_range_scene(range: std::ops::Range<usize>) -> ConversationScene {
+    let turns = range.len();
     let mut turn_inputs = Vec::with_capacity(turns);
     let mut items = Vec::with_capacity(turns * 2);
     let mut narrations = Vec::with_capacity(turns);
     // Turn ordinals share the global ordinal namespace with items, so item
     // ordinals continue after every turn ordinal.
-    let mut ordinal: u64 = u64::try_from(turns).expect("bounded turn count");
-    for index in 0..turns {
+    let mut ordinal: u64 = u64::try_from(range.end).expect("bounded turn count");
+    for index in range {
         let id = turn_id(&format!("turn_{index:03}"));
         turn_inputs.push(SceneTurn::new(
             id.clone(),
@@ -402,4 +410,493 @@ fn markdown_parse_cache_serves_unchanged_bodies_once_and_stays_bounded(cx: &mut 
             assert!(report.bytes <= MARKDOWN_PARSE_CACHE_MAX_BYTES);
         });
     });
+}
+
+/// Builds a transcript whose replies hold `paragraphs(index)` paragraphs.
+fn paragraph_scene(turns: usize, paragraphs: impl Fn(usize) -> usize) -> ConversationScene {
+    let mut turn_inputs = Vec::with_capacity(turns);
+    let mut items = Vec::with_capacity(turns * 2);
+    let mut ordinal: u64 = u64::try_from(turns).expect("bounded turn count");
+    for index in 0..turns {
+        let id = turn_id(&format!("turn_{index:03}"));
+        turn_inputs.push(SceneTurn::new(
+            id.clone(),
+            u64::try_from(index).expect("bounded turn index"),
+            ConversationLifecycle::Completed,
+        ));
+        items.push(
+            SceneItem::new(
+                scene_id(&format!("user-{index:03}")),
+                id.clone(),
+                ordinal,
+                SceneItemKind::UserMessage {
+                    body: format!("Prompt {index}"),
+                },
+                None,
+            )
+            .expect("user message is valid"),
+        );
+        ordinal = ordinal.saturating_add(1);
+        items.push(
+            SceneItem::new(
+                scene_id(&format!("assistant-{index:03}")),
+                id,
+                ordinal,
+                SceneItemKind::AssistantMessage {
+                    body: "A paragraph of the reply.\n\n".repeat(paragraphs(index)),
+                    phase: AssistantPhase::Final,
+                },
+                None,
+            )
+            .expect("assistant message is valid"),
+        );
+        ordinal = ordinal.saturating_add(1);
+    }
+    ConversationScene::build(turn_inputs, items, Vec::new(), Vec::new())
+        .expect("paragraph scene is valid")
+}
+
+#[test]
+fn a_row_taller_than_the_estimate_clamp_keeps_its_exact_height() {
+    let mut table = TranscriptHeightTable::default();
+    table.scene_replaced(&long_scene(3));
+    let tall = 5_816.0_f32;
+    assert!(f64::from(tall) > TRANSCRIPT_MAX_ROW_HEIGHT_PX);
+    table.record(0, tall);
+    table.record(1, 300.0);
+
+    assert_eq!(table.height_px(0), tall);
+    assert_eq!(
+        table.offsets()[1],
+        f64::from(tall) + TRANSCRIPT_TURN_GAP_PX,
+        "the next row starts below the whole tall row"
+    );
+    // The clamp still bounds what the tall row contributes to the estimate
+    // for the row that has not been measured.
+    assert_eq!(
+        f64::from(table.height_px(2)),
+        f64::midpoint(TRANSCRIPT_MAX_ROW_HEIGHT_PX, 300.0)
+    );
+}
+
+#[gpui::test]
+fn a_tall_reply_keeps_its_height_as_a_placeholder(cx: &mut TestAppContext) {
+    const TALL_TURN: &str = "artisan-conversation-surface-turn-turn_011";
+    const TALL_PLACEHOLDER: &str = "artisan-conversation-surface-turn-turn_011-placeholder";
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            paragraph_scene(12, |index| if index == 11 { 120 } else { 1 }),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    let painted = cx
+        .debug_bounds(TALL_TURN)
+        .expect("the reader at the end builds the last turn")
+        .size
+        .height;
+    assert!(
+        f64::from(f32::from(painted)) > TRANSCRIPT_MAX_ROW_HEIGHT_PX,
+        "the fixture must outgrow the estimate clamp: {painted:?}"
+    );
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.scroll_handle().set_offset(point(px(0.0), px(0.0)));
+            cx.notify();
+        });
+    });
+    settle(cx);
+    let placeholder = cx
+        .debug_bounds(TALL_PLACEHOLDER)
+        .expect("the reader at the top leaves the last turn unbuilt");
+    assert_eq!(
+        placeholder.size.height, painted,
+        "a placeholder occupies exactly the space its row painted"
+    );
+}
+
+/// The reader sits at the end of a transcript whose earlier replies outgrow
+/// the estimate clamp while the last turn is short. The tail-anchored and
+/// viewport build windows differ by the first row here, so its placeholder
+/// must not change the content height. When it did, the two layouts chased
+/// each other and the surface never settled: this test then does not
+/// terminate instead of failing.
+#[gpui::test]
+fn the_reader_at_the_end_of_tall_replies_settles(cx: &mut TestAppContext) {
+    const LAST_TURN: &str = "artisan-conversation-surface-turn-turn_005";
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            paragraph_scene(6, |index| match index {
+                5 => 2,
+                4 => 6,
+                _ => 120,
+            }),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(1280.0), px(900.0)));
+    settle(cx);
+    for _ in 0..3 {
+        cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+        settle(cx);
+        cx.update(|window, app| window.simulate_next_frame(app));
+        settle(cx);
+    }
+
+    let (offset, max_offset) = cx.update(|_, app| {
+        let handle = surface.read(app).scroll_handle().clone();
+        (handle.offset().y, handle.max_offset().y)
+    });
+    assert!(
+        (offset + max_offset).abs() < px(0.5),
+        "the reader stays at the end: {offset:?} of {max_offset:?}"
+    );
+    let last = cx
+        .debug_bounds(LAST_TURN)
+        .expect("the last turn is built at the end");
+    assert!(
+        last.top() >= px(0.0) && last.bottom() <= px(900.0),
+        "the last turn is inside the viewport: {last:?}"
+    );
+}
+
+fn earlier_turn_requests(
+    surface: &Entity<ConversationSurface>,
+    cx: &mut VisualTestContext,
+) -> usize {
+    cx.update(|_, app| {
+        surface
+            .read(app)
+            .pending_actions()
+            .iter()
+            .filter(|action| matches!(action, ConversationSurfaceAction::EarlierTurnsWanted))
+            .count()
+    })
+}
+
+/// Turns read on demand land above the loaded ones. The offset moves by
+/// exactly the height they are planned at, so what the reader is looking at
+/// stays where it is.
+#[gpui::test]
+fn older_turns_added_above_leave_the_reader_in_place(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(turn_range_scene(20..40), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    let handle = cx.update(|_, app| surface.read(app).scroll_handle().clone());
+    handle.set_offset(point(px(0.0), px(-300.0)));
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    settle(cx);
+
+    // A turn the reader can see, and where it paints.
+    let seen = (20..40)
+        .map(|index| format!("artisan-conversation-surface-turn-turn_{index:03}"))
+        .find_map(|selector| {
+            let selector: &'static str = Box::leak(selector.into_boxed_str());
+            cx.debug_bounds(selector)
+                .filter(|bounds| bounds.origin.y >= px(0.0))
+                .map(|bounds| (selector, bounds.origin.y))
+        })
+        .expect("a turn paints inside the viewport");
+    let before = offset(&surface, cx).y;
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(turn_range_scene(12..40), cx);
+        });
+    });
+    settle(cx);
+
+    let after = offset(&surface, cx).y;
+    assert!(
+        after < before - px(8.0 * 32.0),
+        "the offset grows by the eight rows added above, got {before:?} -> {after:?}"
+    );
+    let painted = cx
+        .debug_bounds(seen.0)
+        .expect("the turn the reader saw still paints");
+    assert!(
+        (painted.origin.y - seen.1).abs() <= px(0.5),
+        "the turn stays where it was: {:?} -> {:?}",
+        seen.1,
+        painted.origin.y
+    );
+
+    // A replacement that adds nothing above moves nothing.
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(turn_range_scene(12..40), cx);
+        });
+    });
+    settle(cx);
+    assert_eq!(offset(&surface, cx).y, after);
+}
+
+/// A reader within two viewports of the start of the loaded turns asks for
+/// older ones, once per window, and only when the thread has some.
+#[gpui::test]
+fn the_reader_near_the_start_asks_for_older_turns_once_per_window(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(turn_range_scene(20..40), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    // The surface holds a thread's first turn until it is told otherwise.
+    assert_eq!(earlier_turn_requests(&surface, cx), 0);
+
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.set_earlier_turns_available(true, cx)
+        });
+    });
+    settle(cx);
+    assert_eq!(earlier_turn_requests(&surface, cx), 1);
+    // Frames that change nothing do not ask again.
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    settle(cx);
+    assert_eq!(earlier_turn_requests(&surface, cx), 1);
+
+    // The page arrives. The reader is held in place, now more than two
+    // viewports below the new start, so nothing more is asked for.
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(turn_range_scene(4..40), cx);
+        });
+    });
+    settle(cx);
+    assert_eq!(earlier_turn_requests(&surface, cx), 1);
+
+    // Scrolling back to the start of the larger window asks for the next.
+    let handle = cx.update(|_, app| surface.read(app).scroll_handle().clone());
+    handle.set_offset(point(px(0.0), px(0.0)));
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    settle(cx);
+    assert_eq!(earlier_turn_requests(&surface, cx), 2);
+}
+
+/// Draws every pending frame without the refresh [`settle`] ends with: a
+/// refresh re-renders every row, which is exactly what these tests rule out.
+fn run_frames(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.run_until_parked();
+}
+
+/// Render counts for every row of the long fixture's built window.
+fn built_row_renders(
+    surface: &Entity<ConversationSurface>,
+    cx: &mut VisualTestContext,
+) -> Vec<(usize, u64)> {
+    cx.update(|_, app| {
+        let surface = surface.read(app);
+        surface
+            .transcript_window_report()
+            .built_rows
+            .iter()
+            .map(|index| {
+                let turn = turn_id(&format!("turn_{index:03}"));
+                let renders = surface
+                    .turn_row_renders(&turn)
+                    .expect("every built turn has a row");
+                (*index, renders)
+            })
+            .collect()
+    })
+}
+
+/// A surface frame that changes nothing a row paints replays every row: the
+/// surface shell re-renders, the rows do not.
+#[gpui::test]
+fn unchanged_rows_replay_while_the_surface_re_renders(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(long_scene(120), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    // One more frame lets every row reach its cached steady state: a row's
+    // first cached frame still renders once to record what later replays.
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    run_frames(cx);
+
+    let before = built_row_renders(&surface, cx);
+    assert!(before.len() > 1, "the fixture builds several rows");
+    for _ in 0..3 {
+        cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+        run_frames(cx);
+    }
+    assert_eq!(
+        built_row_renders(&surface, cx),
+        before,
+        "notifying the surface must not re-render unchanged rows"
+    );
+    // The report still describes what the built rows paint.
+    let report = cx.update(|_, app| surface.read(app).transcript_window_report());
+    assert_eq!(report.shaped_rows, report.built_rows.len());
+}
+
+/// A changed turn re-renders its own row and no other.
+#[gpui::test]
+fn a_changed_turn_re_renders_only_its_row(cx: &mut TestAppContext) {
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(long_scene(120), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    run_frames(cx);
+    let before = built_row_renders(&surface, cx);
+    let changed = before[1].0;
+
+    // The same transcript with one reply's text edited in place, at the
+    // same height so nothing else moves.
+    let edited = ConversationScene::build(
+        (0..120)
+            .map(|index| {
+                SceneTurn::new(
+                    turn_id(&format!("turn_{index:03}")),
+                    u64::try_from(index).expect("bounded turn index"),
+                    ConversationLifecycle::Completed,
+                )
+            })
+            .collect(),
+        (0..120_usize)
+            .flat_map(|index| {
+                let id = turn_id(&format!("turn_{index:03}"));
+                let base = 120 + 2 * u64::try_from(index).expect("bounded turn index");
+                let reply = if index == changed {
+                    "A windowed transcript shapes only this edit.\n"
+                } else {
+                    ASSISTANT_BODY
+                };
+                [
+                    SceneItem::new(
+                        scene_id(&format!("user-{index:03}")),
+                        id.clone(),
+                        base,
+                        SceneItemKind::UserMessage {
+                            body: format!("Prompt {index}"),
+                        },
+                        None,
+                    )
+                    .expect("user message is valid"),
+                    SceneItem::new(
+                        scene_id(&format!("assistant-{index:03}")),
+                        id.clone(),
+                        base + 1,
+                        SceneItemKind::AssistantMessage {
+                            body: reply.to_owned(),
+                            phase: AssistantPhase::Final,
+                        },
+                        None,
+                    )
+                    .expect("assistant message is valid"),
+                ]
+            })
+            .collect(),
+        (0..120)
+            .map(|index| {
+                TurnNarrationEntry::new(turn_id(&format!("turn_{index:03}")), TurnNarration::Quiet)
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .expect("edited scene is valid");
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.replace_scene(edited, cx)));
+    run_frames(cx);
+
+    let after = built_row_renders(&surface, cx);
+    for ((index, was), (_, now)) in before.iter().zip(&after) {
+        if *index == changed {
+            assert!(now > was, "the edited turn {index} must re-render");
+        } else {
+            assert_eq!(now, was, "turn {index} did not change and must replay");
+        }
+    }
+}
+
+/// The long fixture with its last turn live and thinking: the status line
+/// shimmers, asking for a frame every frame.
+fn live_tail_scene(turns: usize) -> ConversationScene {
+    let mut turn_inputs = Vec::with_capacity(turns);
+    let mut items = Vec::with_capacity(turns);
+    let mut narrations = Vec::with_capacity(turns);
+    let mut ordinal: u64 = u64::try_from(turns).expect("bounded turn count");
+    for index in 0..turns {
+        let id = turn_id(&format!("turn_{index:03}"));
+        let live = index + 1 == turns;
+        turn_inputs.push(SceneTurn::new(
+            id.clone(),
+            u64::try_from(index).expect("bounded turn index"),
+            if live {
+                ConversationLifecycle::Active
+            } else {
+                ConversationLifecycle::Completed
+            },
+        ));
+        narrations.push(TurnNarrationEntry::new(
+            id.clone(),
+            if live {
+                TurnNarration::Thinking
+            } else {
+                TurnNarration::Quiet
+            },
+        ));
+        items.push(
+            SceneItem::new(
+                scene_id(&format!("user-{index:03}")),
+                id,
+                ordinal,
+                SceneItemKind::UserMessage {
+                    body: format!("Prompt {index}"),
+                },
+                None,
+            )
+            .expect("user message is valid"),
+        );
+        ordinal = ordinal.saturating_add(1);
+    }
+    ConversationScene::build(turn_inputs, items, narrations, Vec::new())
+        .expect("live tail scene is valid")
+}
+
+/// A live status line animates its own row: every other built row replays
+/// while the shimmer asks for frame after frame.
+#[gpui::test]
+fn a_live_shimmer_re_renders_only_its_own_row(cx: &mut TestAppContext) {
+    const TURNS: usize = 30;
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(live_tail_scene(TURNS), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
+    run_frames(cx);
+
+    let before = built_row_renders(&surface, cx);
+    let live = TURNS - 1;
+    assert!(
+        before.iter().any(|(index, _)| *index == live),
+        "the live turn is built: {before:?}"
+    );
+    assert!(before.len() > 1, "settled rows are built beside it");
+    for _ in 0..3 {
+        cx.update(|window, app| window.simulate_next_frame(app));
+        run_frames(cx);
+    }
+    let after = built_row_renders(&surface, cx);
+    for ((index, was), (_, now)) in before.iter().zip(&after) {
+        if *index == live {
+            assert!(now > was, "the shimmering row must keep animating");
+        } else {
+            assert_eq!(now, was, "settled turn {index} must replay");
+        }
+    }
 }

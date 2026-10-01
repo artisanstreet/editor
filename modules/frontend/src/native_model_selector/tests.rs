@@ -113,8 +113,10 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     cx.update(|_, app| assert_eq!(view.read(app).model_scroll.target(), expected));
     let expected_pixel = cx.update(|_, app| {
         let picker = view.read(app);
-        (f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y) - 7.0)
-            .clamp(-f32::from(picker.menu_scroll.max_offset_for_scrollbar().y), 0.0)
+        (f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y) - 7.0).clamp(
+            -f32::from(picker.menu_scroll.max_offset_for_scrollbar().y),
+            0.0,
+        )
     });
     cx.simulate_event(ScrollWheelEvent {
         position: row.center(),
@@ -124,7 +126,10 @@ fn wheel_events_accumulate_once_and_precise_pixels_cancel_inertia(cx: &mut gpui:
     });
     cx.update(|_, app| {
         let picker = view.read(app);
-        assert_eq!(f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y), expected_pixel);
+        assert_eq!(
+            f32::from(picker.menu_scroll.scroll_px_offset_for_scrollbar().y),
+            expected_pixel
+        );
         assert!(!picker.model_scroll.active());
     });
 }
@@ -358,6 +363,35 @@ fn million_token_context_uses_millions_even_when_catalog_says_1000k() {
     let label = model_display_label(&snapshot, &policy);
     assert!(label.plain_text().contains(" 1M"));
     assert!(!label.plain_text().contains("1000K"));
+}
+
+#[gpui::test]
+fn context_option_rows_read_millions_even_when_catalog_says_1000k(cx: &mut gpui::TestAppContext) {
+    let catalog_json = include_str!("../../../../tests/fixtures/model_catalog.json")
+        .replace("\"label\": \"1M\"", "\"label\": \"1000K\"");
+    let snapshot = NativeModelCatalog::from_manifest_json(&catalog_json).expect("real catalog");
+    let policy = snapshot
+        .selection_policy_for_model("codex-sol")
+        .expect("codex policy");
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        NativeModelSelector::new(snapshot, Some(policy), ThemeMode::Dark, cx)
+    });
+    cx.run_until_parked();
+    let labels = cx.update(|_, app| {
+        view.read(app)
+            .axis_options(
+                NativePolicyAxis::ContextWindow,
+                &view.read(app).preview_view(),
+            )
+            .into_iter()
+            .map(|option| option.label)
+            .collect::<Vec<_>>()
+    });
+    assert!(labels.iter().any(|label| label == "1M"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|label| label.contains("1000K")),
+        "{labels:?}"
+    );
 }
 
 #[test]
@@ -1022,7 +1056,8 @@ fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::T
     let engine_tab = cx
         .debug_bounds("artisan-native-model-selector-engine-codex")
         .unwrap();
-    let before_scroll = cx.update(|_, app| view.read(app).menu_scroll.scroll_px_offset_for_scrollbar());
+    let before_scroll =
+        cx.update(|_, app| view.read(app).menu_scroll.scroll_px_offset_for_scrollbar());
     cx.simulate_event(ScrollWheelEvent {
         position: engine_tab.center(),
         delta: gpui::ScrollDelta::Pixels(point(px(-120.0), px(-120.0))),
@@ -1035,9 +1070,16 @@ fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::T
             .unwrap(),
         engine_tab
     );
-    cx.update(|_, app| assert_eq!(view.read(app).menu_scroll.scroll_px_offset_for_scrollbar(), before_scroll));
+    cx.update(|_, app| {
+        assert_eq!(
+            view.read(app).menu_scroll.scroll_px_offset_for_scrollbar(),
+            before_scroll
+        )
+    });
     let header = cx.debug_bounds("model-group-go").unwrap();
-    let first_model = cx.debug_bounds("artisan-native-model-selector-row-fixture-0-default").unwrap();
+    let first_model = cx
+        .debug_bounds("artisan-native-model-selector-row-fixture-0-default")
+        .unwrap();
     assert_eq!(f32::from(header.size.height), 28.0);
     assert_eq!(f32::from(first_model.top() - header.bottom()), 3.0);
     cx.simulate_click(header.center(), gpui::Modifiers::none());

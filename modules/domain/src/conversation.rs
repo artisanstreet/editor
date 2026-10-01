@@ -925,6 +925,14 @@ pub struct ConversationSubscribe {
     /// Cursor to resume after, or `None` for a fresh subscription that must
     /// begin with [`ConversationSubscriptionStart`].
     pub after: Option<ConversationCursor>,
+    /// For a fresh subscription: how many of the newest turns the snapshot
+    /// holds. `None` asks for the most the protocol allows. Older turns are
+    /// read on demand with [`crate::ConversationHistoryRequest`].
+    pub newest_turns: Option<QueryTurnCount>,
+    /// For a resumed subscription: the oldest turn the subscriber still
+    /// holds. Activity of turns before it is not replayed. `None` replays
+    /// every turn's.
+    pub history_floor: Option<TurnOrdinal>,
 }
 
 impl ConversationSubscribe {
@@ -934,6 +942,8 @@ impl ConversationSubscribe {
         Self {
             thread_id,
             after: None,
+            newest_turns: None,
+            history_floor: None,
         }
     }
 
@@ -943,7 +953,23 @@ impl ConversationSubscribe {
         Self {
             thread_id,
             after: Some(after),
+            newest_turns: None,
+            history_floor: None,
         }
+    }
+
+    /// Opens a fresh subscription on the newest `count` turns only.
+    #[must_use]
+    pub const fn with_newest_turns(mut self, count: QueryTurnCount) -> Self {
+        self.newest_turns = Some(count);
+        self
+    }
+
+    /// Names the oldest turn a resuming subscriber still holds.
+    #[must_use]
+    pub const fn with_history_floor(mut self, floor: TurnOrdinal) -> Self {
+        self.history_floor = Some(floor);
+        self
     }
 }
 
@@ -966,6 +992,8 @@ pub enum ConversationRequest {
     Subscribe(ConversationSubscribe),
     /// End delivery for one thread.
     Unsubscribe(ConversationUnsubscribe),
+    /// Read one on-demand part of a thread's history.
+    History(crate::ConversationHistoryRequest),
 }
 
 /// Mandatory first value of a fresh conversation subscription.

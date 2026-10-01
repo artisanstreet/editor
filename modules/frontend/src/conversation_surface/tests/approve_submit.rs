@@ -503,9 +503,10 @@ fn surface_drain_takes_sends_and_empties(cx: &mut TestAppContext) {
     });
     cx.update(|_, app| {
         surface.update(app, |surface, cx| {
-            surface.set_answer_context(thread_id(), run_id(), cx);
+            surface.set_answer_thread(thread_id(), cx);
             assert!(surface.submit_approval_gesture(
                 "approval-1",
+                &run_id(),
                 &observation_id("approval-1"),
                 true,
                 cx,
@@ -623,6 +624,7 @@ fn freeform_scene() -> crate::conversation_scene::ConversationScene {
             1,
             SceneItemKind::Question {
                 prompt: String::from("Which runtime?"),
+                answer: None,
             },
             None,
         ),
@@ -631,6 +633,7 @@ fn freeform_scene() -> crate::conversation_scene::ConversationScene {
             2,
             SceneItemKind::Question {
                 prompt: String::from("Which region?"),
+                answer: None,
             },
             None,
         ),
@@ -720,7 +723,7 @@ fn freeform_enter_submits_staged_text(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|_, app| {
         surface.update(app, |surface, cx| {
-            surface.set_answer_context(thread_id(), run_id(), cx);
+            surface.set_answer_thread(thread_id(), cx);
         });
     });
     focus_row(cx, &surface, "question-a");
@@ -749,7 +752,7 @@ fn freeform_empty_enter_rejected(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.update(|_, app| {
         surface.update(app, |surface, cx| {
-            surface.set_answer_context(thread_id(), run_id(), cx);
+            surface.set_answer_thread(thread_id(), cx);
         });
     });
     focus_row(cx, &surface, "question-b");

@@ -120,6 +120,12 @@ pub(crate) fn encode_request(
             respond.set_approval_id(command.approval_id().as_str());
             respond.set_approved(command.approved());
         }
+        ClientRequest::Command(Command::AnswerQuestions(command)) => {
+            crate::codec::interaction::encode_answer_questions(
+                builder.reborrow().init_answer_questions(),
+                command,
+            )?;
+        }
         ClientRequest::Command(Command::RespondQuestion(command)) => {
             let mut respond = builder.reborrow().init_respond_question();
             respond.set_thread_id(command.thread_id().as_str());
@@ -153,12 +159,21 @@ pub(crate) fn encode_request(
         ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
             let mut encoded = builder.reborrow().init_conversation_subscribe();
             encoded.set_thread_id(subscribe.thread_id.as_str());
+            encoded.set_newest_turns(subscribe.newest_turns.map_or(0, QueryTurnCount::get));
+            let mut floor = encoded.reborrow().init_history_floor();
+            match subscribe.history_floor {
+                Some(ordinal) => floor.set_ordinal(ordinal.get()),
+                None => floor.set_everything(()),
+            }
             let mut start = encoded.init_start();
             if let Some(after) = subscribe.after {
                 start.set_resume_after(after.get());
             } else {
                 start.set_fresh(());
             }
+        }
+        ClientRequest::Conversation(ConversationRequest::History(history)) => {
+            encode_conversation_history_request(builder, history);
         }
         ClientRequest::Conversation(ConversationRequest::Unsubscribe(unsubscribe)) => {
             builder
@@ -447,6 +462,12 @@ pub(crate) fn encode_response_payload(
         ResponsePayload::QuestionResponse(receipt) => {
             encode_respond_question_receipt(builder.reborrow().init_question_response(), receipt)?;
         }
+        ResponsePayload::QuestionsAnswered(receipt) => {
+            crate::codec::interaction::encode_answer_questions_receipt(
+                builder.reborrow().init_questions_answered(),
+                receipt,
+            );
+        }
         ResponsePayload::ActiveRun(result) => {
             let mut encoded = builder.reborrow().init_active_run();
             match result {
@@ -503,6 +524,9 @@ pub(crate) fn encode_response_payload(
                     point.set_cursor(cursor.get());
                 }
             }
+        }
+        ResponsePayload::ConversationHistory(page) => {
+            encode_conversation_history_page(builder.reborrow().init_conversation_history(), page)?;
         }
         ResponsePayload::ConversationSubscriptionStopped(stopped) => {
             builder
@@ -704,6 +728,9 @@ pub(crate) fn decode_request(
         request::Which::StopRun(command) => decode_stop_run(command?, request_id),
         request::Which::RespondApproval(command) => decode_respond_approval(command?, request_id),
         request::Which::RespondQuestion(command) => decode_respond_question(command?, request_id),
+        request::Which::AnswerQuestions(command) => {
+            crate::codec::interaction::decode_answer_questions(command?, request_id)
+        }
         request::Which::SetThreadEngineConfig(command) => {
             decode_set_thread_engine_config(command?, request_id)
         }
@@ -713,6 +740,9 @@ pub(crate) fn decode_request(
         }
         request::Which::ConversationUnsubscribe(unsubscribe) => {
             decode_conversation_unsubscribe_request(unsubscribe?)
+        }
+        request::Which::ConversationHistory(history) => {
+            decode_conversation_history_request(history?)
         }
         request::Which::PickDirectory(()) => Ok(ClientRequest::PickDirectory),
         request::Which::ValidateDirectory(path) => Ok(ClientRequest::ValidateDirectory(
@@ -869,6 +899,9 @@ pub(crate) fn decode_response(
         response::Which::QuestionResponse(receipt) => {
             decode_respond_question_receipt(receipt?, &request_id)?
         }
+        response::Which::QuestionsAnswered(receipt) => {
+            crate::codec::interaction::decode_answer_questions_receipt(receipt?, &request_id)?
+        }
         response::Which::ActiveRun(result) => decode_active_run_result(result?)?,
         response::Which::QueuedMessages(value) => ResponsePayload::QueuedMessages(
             crate::composer_state_codec::decode_queued_message_listing(value?)?,
@@ -903,6 +936,9 @@ pub(crate) fn decode_response(
             ResponsePayload::ConversationSubscriptionStarted(
                 decode_conversation_subscription_started(started?)?,
             )
+        }
+        response::Which::ConversationHistory(page) => {
+            ResponsePayload::ConversationHistory(decode_conversation_history_page(page?)?)
         }
         response::Which::ConversationSubscriptionStopped(stopped) => {
             ResponsePayload::ConversationSubscriptionStopped(

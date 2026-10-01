@@ -1130,3 +1130,239 @@ async fn keep_and_opaque_checkpoints_append_nothing() {
     assert_eq!(attribution.delivery_sequence, 1);
     assert_eq!(attribution.committed_at.as_millis(), BATCH_2_MS + 10);
 }
+
+async fn turn_ordinal(database: &DatabaseConnection, turn_id: &str) -> u64 {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    let row = database
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT ordinal FROM conversation_turns WHERE turn_id = ?",
+            [turn_id.to_owned().into()],
+        ))
+        .await
+        .expect("turn ordinal should read")
+        .expect("turn exists");
+    u64::try_from(row.try_get_by_index::<i64>(0).expect("ordinal column"))
+        .expect("ordinal is not negative")
+}
+
+/// A settled turn keeps its work rows on the Forge: a scoped read returns
+/// everything else, a count says what was held back, and the turn's rows are
+/// read on their own when its section opens. A running turn sends everything.
+#[tokio::test]
+async fn settled_turn_work_is_held_back_and_read_on_demand() {
+    use artisan_database::ObservationHistoryScope;
+    use sea_orm::ConnectionTrait;
+
+    let fixture = fixture().await;
+    let first_run = launch_first_run(&fixture).await;
+    let first = vec![
+        run_state(1, RunState::Running),
+        tool(2, ToolAction::Started),
+        tool(3, ToolAction::Completed),
+    ];
+    let body = AssistantBody::parse("ledger run one").expect("body");
+    let item = ItemId::parse("ledger-item-1").expect("item id");
+    let activation = PatchId::parse("ledger-activate-1").expect("patch id");
+    let patch_item = PatchId::parse("ledger-patch-1").expect("patch id");
+    let checkpoint = observation_checkpoint(None, &first);
+    commit_observations(
+        &fixture,
+        &first_run,
+        BOUND_1_MS,
+        1,
+        BATCH_1_MS,
+        Some(&activation),
+        &[AssistantChange::Start {
+            item_id: &item,
+            phase: AssistantMessagePhase::Final,
+            body: &body,
+            patch_id: &patch_item,
+        }],
+        CheckpointUpdate::Replace(&checkpoint),
+    )
+    .await
+    .expect("first run batch should commit");
+    // The first run ends before the next message is claimed.
+    fixture
+        .database
+        .execute_unprepared(&format!(
+            "UPDATE assistant_runs SET lifecycle = 'cancelled', owner = NULL, lease = NULL, \
+             claim_token = NULL, terminal_at_ms = updated_at_ms WHERE run_id = '{RUN_ID_1}'"
+        ))
+        .await
+        .expect("first run settles");
+    fixture
+        .database
+        .execute_unprepared(&format!(
+            "UPDATE message_dispatches SET state = 'completed', lease_owner = NULL, \
+             lease_expires_at_ms = NULL WHERE message_id = '{MESSAGE_ID_1}'"
+        ))
+        .await
+        .expect("first dispatch settles");
+    let second_run = launch_second_run(&fixture).await;
+    let second = vec![
+        run_state(1, RunState::Running),
+        tool(2, ToolAction::Started),
+    ];
+    let body = AssistantBody::parse("ledger run two").expect("body");
+    let item = ItemId::parse("ledger-item-2").expect("item id");
+    let activation = PatchId::parse("ledger-activate-2").expect("patch id");
+    let patch_item = PatchId::parse("ledger-patch-2").expect("patch id");
+    let checkpoint = observation_checkpoint(None, &second);
+    commit_observations(
+        &fixture,
+        &second_run,
+        BOUND_2_MS,
+        1,
+        BATCH_3_MS,
+        Some(&activation),
+        &[AssistantChange::Start {
+            item_id: &item,
+            phase: AssistantMessagePhase::Final,
+            body: &body,
+            patch_id: &patch_item,
+        }],
+        CheckpointUpdate::Replace(&checkpoint),
+    )
+    .await
+    .expect("second run batch should commit");
+    // Every row records its payload's tag.
+    let tags: Vec<String> = ledger_rows(&fixture.database)
+        .await
+        .into_iter()
+        .map(|row| row.observation_tag)
+        .collect();
+    assert_eq!(tags, ["run_state", "tool", "tool", "run_state", "tool"]);
+    fixture
+        .database
+        .execute_unprepared(&format!(
+            "UPDATE conversation_turns SET lifecycle = 'completed' WHERE turn_id = '{TURN_ID_1}'"
+        ))
+        .await
+        .expect("first turn settles");
+
+    let repository = &fixture.repository;
+    let thread = thread_id();
+    let first_ordinal = turn_ordinal(&fixture.database, TURN_ID_1).await;
+    let second_ordinal = turn_ordinal(&fixture.database, TURN_ID_2).await;
+    assert!(first_ordinal < second_ordinal);
+    let tail = repository
+        .observation_history_tail(&thread)
+        .await
+        .expect("tail should read");
+    assert_eq!(tail, 5);
+    let sequences = |events: &[artisan_domain::EngineObservationEvent]| -> Vec<u64> {
+        events
+            .iter()
+            .map(|event| {
+                event
+                    .attribution
+                    .as_ref()
+                    .expect("attribution")
+                    .delivery_sequence
+            })
+            .collect()
+    };
+
+    // The whole thread: the settled turn's two tool rows stay behind, the
+    // running turn's tool row is sent.
+    let whole = ObservationHistoryScope {
+        floor: 0,
+        before: None,
+        tail,
+    };
+    let history = repository
+        .read_scoped_observation_history(&thread, 0, &whole, 64)
+        .await
+        .expect("scoped history should read");
+    assert_eq!(sequences(&history), [1, 4, 5]);
+    assert_eq!(history[0].observation, first[0]);
+    assert_eq!(history[2].observation, second[1]);
+    let held_back = repository
+        .read_held_back_turn_work(&thread, &whole)
+        .await
+        .expect("held-back work should read");
+    assert_eq!(held_back.len(), 1);
+    assert_eq!(held_back[0].turn_id.as_str(), TURN_ID_1);
+    assert_eq!(held_back[0].run_id.as_str(), RUN_ID_1);
+    assert_eq!(held_back[0].row_count, 2);
+    assert_eq!(held_back[0].first_delivery_sequence, 2);
+    assert_eq!(held_back[0].first_committed_at.as_millis(), BATCH_1_MS);
+
+    // Paging continues after a cursor and honours the limit.
+    let page = repository
+        .read_scoped_observation_history(&thread, 1, &whole, 1)
+        .await
+        .expect("scoped page should read");
+    assert_eq!(sequences(&page), [4]);
+
+    // A subscriber holding only the newest turn gets neither the older
+    // turn's rows nor a count for it.
+    let newest = ObservationHistoryScope {
+        floor: second_ordinal,
+        before: None,
+        tail,
+    };
+    let history = repository
+        .read_scoped_observation_history(&thread, 0, &newest, 64)
+        .await
+        .expect("newest-turn history should read");
+    assert_eq!(sequences(&history), [4, 5]);
+    assert!(
+        repository
+            .read_held_back_turn_work(&thread, &newest)
+            .await
+            .expect("held-back work should read")
+            .is_empty()
+    );
+
+    // The older page read later covers exactly the turns before the floor.
+    let earlier = ObservationHistoryScope {
+        floor: 0,
+        before: Some(second_ordinal),
+        tail,
+    };
+    let history = repository
+        .read_scoped_observation_history(&thread, 0, &earlier, 64)
+        .await
+        .expect("earlier history should read");
+    assert_eq!(sequences(&history), [1]);
+    assert_eq!(
+        repository
+            .read_held_back_turn_work(&thread, &earlier)
+            .await
+            .expect("held-back work should read")
+            .len(),
+        1
+    );
+
+    // Rows past the tail are live and belong to the ordinary delivery.
+    let before_second_run = ObservationHistoryScope {
+        floor: 0,
+        before: None,
+        tail: 3,
+    };
+    let history = repository
+        .read_scoped_observation_history(&thread, 0, &before_second_run, 64)
+        .await
+        .expect("bounded history should read");
+    assert_eq!(sequences(&history), [1]);
+
+    // Opening the settled turn's section reads its work rows, in order.
+    let turn = TurnId::parse(TURN_ID_1).expect("turn id");
+    let (work, next) = repository
+        .read_turn_work(&thread, &turn, 0)
+        .await
+        .expect("turn work should read");
+    assert_eq!(sequences(&work), [2, 3]);
+    assert_eq!(work[0].observation, first[1]);
+    assert_eq!(work[1].observation, first[2]);
+    assert_eq!(next, None);
+    let (work, next) = repository
+        .read_turn_work(&thread, &turn, 2)
+        .await
+        .expect("turn work should continue");
+    assert_eq!(sequences(&work), [3]);
+    assert_eq!(next, None);
+}

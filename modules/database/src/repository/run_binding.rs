@@ -46,7 +46,6 @@ WHERE message_id = ?
   AND lease_owner = ?
   AND lease_expires_at_ms = ?
   AND updated_at_ms = ?
-  AND lease_expires_at_ms > ?
 RETURNING message_id
 ";
 
@@ -260,7 +259,6 @@ impl Repository {
                 encoded_owner.into(),
                 millis(claimed.lease_expires_at).into(),
                 expected_launch_at_ms.into(),
-                bound_at_ms.into(),
             ],
         );
         let fenced_dispatch = transaction
@@ -361,15 +359,6 @@ fn validate_bind_inputs(command: &BindRunProvider<'_>) -> Result<(), RunBindingE
             RepositoryError::InvalidChronology {
                 earlier_field: "claimed dispatch updated_at",
                 later_field: "bind expected_launch_at/bound_at",
-            },
-        ));
-    }
-    if millis(command.claimed.lease_expires_at) <= bound_at_ms {
-        return Err(RunBindingError::Repository(
-            RepositoryError::DispatchLeaseExpired {
-                message_id: command.claimed.message_id.clone(),
-                lease_expires_at_ms: millis(command.claimed.lease_expires_at),
-                operated_at_ms: bound_at_ms,
             },
         ));
     }
@@ -606,18 +595,6 @@ fn diagnose_dispatch_snapshot(
         return Err(RunBindingError::SnapshotMismatch {
             message_id: claimed.message_id.clone(),
         });
-    }
-    if dispatch
-        .lease_expires_at_ms
-        .is_some_and(|exp| exp <= bound_at_ms)
-    {
-        return Err(RunBindingError::Repository(
-            RepositoryError::DispatchLeaseExpired {
-                message_id: claimed.message_id.clone(),
-                lease_expires_at_ms: dispatch.lease_expires_at_ms.unwrap_or(0),
-                operated_at_ms: bound_at_ms,
-            },
-        ));
     }
     Ok(())
 }

@@ -1034,7 +1034,7 @@ async fn bound_claude_run_with_content_still_refuses_another_engine() {
 }
 
 #[tokio::test]
-async fn bound_interrupted_claude_run_stays_ambiguous() {
+async fn bound_interrupted_claude_run_resumes_its_stored_session() {
     let (database, repository) = migrated_memory_database().await;
     let claude = select_config(&database, &repository, claude_config(), 1).await;
     seed_run_with_snapshot(
@@ -1048,14 +1048,24 @@ async fn bound_interrupted_claude_run_stays_ambiguous() {
         Some(claude),
     )
     .await;
+    let SessionContinuationLookup::Usable(session) = repository
+        .read_session_continuation(scoped(EngineId::Claude, "profile-claude"))
+        .await
+        .expect("continuation read should succeed")
+    else {
+        panic!("interrupted Claude with a durable session must remain resumable");
+    };
+    assert_eq!(session.session_id.as_str(), "claude-session");
     assert_eq!(
-        repository
-            .read_session_continuation(scoped(EngineId::Claude, "profile-claude"))
-            .await
-            .expect("continuation read should succeed"),
-        SessionContinuationLookup::Unavailable(artisan_database::SessionContinuationUnavailable {
-            run_id: RunId::parse("run-claude-interrupted").expect("run id is valid"),
-            reason: SessionContinuationUnavailableReason::AmbiguousRun,
-        },)
+        session.prior_run.lifecycle,
+        AssistantRunLifecycle::Interrupted
     );
+    let SessionContinuationLookup::Incompatible(mismatch) = repository
+        .read_session_continuation(scoped(EngineId::Claude, "other-profile"))
+        .await
+        .unwrap()
+    else {
+        panic!("recovery must still reject a different profile");
+    };
+    assert_eq!(mismatch.reason, SessionContinuationIncompatibility::Profile);
 }

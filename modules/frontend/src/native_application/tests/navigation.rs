@@ -173,6 +173,12 @@ fn thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
             }];
             application.selected_project = Some(project.clone());
             application.conversation_host = Some(host.clone());
+            // Open the thread whole, as the Forge does: its snapshot, then
+            // the end-of-history marker. Until both arrive the route holds
+            // its loading gate and no composer paints.
+            application.selected_thread = Some(thread.clone());
+            application.dispatch_snapshot(&host, snapshot_for(&thread, 1), application_cx);
+            application.handle_service_event(history_current_event(&thread), application_cx);
             application.navigate(
                 NativeRoute::Thread {
                     project: project.clone(),
@@ -213,6 +219,12 @@ fn thread_composer_click_focuses_for_typing_after_other_control(cx: &mut TestApp
             }];
             application.selected_project = Some(project.clone());
             application.conversation_host = Some(host.clone());
+            // Open the thread whole, as the Forge does: its snapshot, then
+            // the end-of-history marker. Until both arrive the route holds
+            // its loading gate and no composer paints.
+            application.selected_thread = Some(thread.clone());
+            application.dispatch_snapshot(&host, snapshot_for(&thread, 1), application_cx);
+            application.handle_service_event(history_current_event(&thread), application_cx);
             application.navigate(
                 NativeRoute::Thread {
                     project: project.clone(),
@@ -244,6 +256,70 @@ fn thread_composer_click_focuses_for_typing_after_other_control(cx: &mut TestApp
             assert_eq!(application.composer.read(application_cx).draft(), "hello");
         });
     });
+}
+
+#[gpui::test]
+fn thread_presents_only_once_its_history_is_current(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let project = ProjectId::parse("thread-history-project").expect("fixture project");
+    let thread = ThreadId::parse("thread-history-thread").expect("fixture thread");
+    let other = ThreadId::parse("thread-history-other").expect("fixture thread");
+    let host = cx.update(|_, app| {
+        ConversationHost::mount(thread.clone(), ThemeMode::Dark, app).expect("host")
+    });
+
+    // The transcript snapshot alone is not enough: the tool and reasoning
+    // history is still replaying, so the route holds its loading gate.
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            application.project_options = vec![ProjectOption {
+                id: project.clone(),
+                name: "history".to_owned().into(),
+            }];
+            application.selected_project = Some(project.clone());
+            application.conversation_host = Some(host.clone());
+            application.selected_thread = Some(thread.clone());
+            application.dispatch_snapshot(&host, snapshot_for(&thread, 1), application_cx);
+            application.navigate(
+                NativeRoute::Thread {
+                    project: project.clone(),
+                    thread: thread.clone(),
+                },
+                application_cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(crate::native_composer::NATIVE_COMPOSER_EDITOR_SELECTOR)
+            .is_none(),
+        "a thread whose history is still replaying stays on the loading gate"
+    );
+
+    // Another thread's marker is stale and must not open this one.
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            application.handle_service_event(history_current_event(&other), application_cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(crate::native_composer::NATIVE_COMPOSER_EDITOR_SELECTOR)
+            .is_none(),
+        "a marker for another thread leaves the gate closed"
+    );
+
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            application.handle_service_event(history_current_event(&thread), application_cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(crate::native_composer::NATIVE_COMPOSER_EDITOR_SELECTOR)
+            .is_some(),
+        "the thread presents once its history is current"
+    );
 }
 
 #[gpui::test]
@@ -468,6 +544,7 @@ fn conversation_header_waits_for_the_forge_to_resolve_the_placeholder(cx: &mut T
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
+            application.handle_service_event(history_current_event(&thread_id), cx);
             application.handle_service_event(
                 NativeTransportEvent::PatchBatch(echo_batch(
                     &thread_id,
@@ -1200,6 +1277,45 @@ fn retryable_intake_failure_keeps_a_picker_for_the_retry_command(cx: &mut TestAp
             assert!(matches!(&application.state, NativeViewState::Failure(_)));
         });
     });
+}
+
+/// The shell's right junction follows the thread screen's inspector: a wide
+/// window seats the 327 px column and the shell marks where its left rule
+/// meets the titlebar's bottom rule; narrowing the window drops both, and
+/// widening brings both back.
+#[gpui::test]
+fn inspector_junction_follows_the_thread_inspector_across_resizes(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, _commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let thread_id = install_unnamed_title_task(application, cx, "", sink);
+            application.handle_service_event(
+                NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
+                cx,
+            );
+            application.handle_service_event(history_current_event(&thread_id), cx);
+        });
+    });
+    for (width, visible) in [(1800.0, true), (1280.0, false), (1800.0, true)] {
+        cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(900.0)));
+        cx.run_until_parked();
+        let inspector = cx.debug_bounds(crate::thread_screen::THREAD_SCREEN_INSPECTOR_SELECTOR);
+        let junction = cx.debug_bounds(crate::desktop_shell::DESKTOP_INSPECTOR_JUNCTION_SELECTOR);
+        assert_eq!(inspector.is_some(), visible, "inspector at width={width}");
+        assert_eq!(junction.is_some(), visible, "junction at width={width}");
+        if let (Some(inspector), Some(junction)) = (inspector, junction) {
+            assert_eq!(
+                inspector.size.width,
+                gpui::px(crate::desktop_shell::DESKTOP_SIDEBAR_WIDTH_PX)
+            );
+            assert_eq!(
+                junction.center().x,
+                inspector.origin.x,
+                "the junction centers on the inspector's left rule"
+            );
+        }
+    }
 }
 
 #[path = "sidebar_recents.rs"]

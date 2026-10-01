@@ -371,3 +371,114 @@ fn a_save_lost_with_the_connection_is_resent_latest_wins_after_reconnect(cx: &mu
         "the latest text is saved once the service reconnects"
     );
 }
+
+#[gpui::test]
+fn reopening_a_scope_shows_its_draft_at_once_without_asking_the_forge(cx: &mut TestAppContext) {
+    let view = open_view(cx);
+    read_nothing(cx, &view);
+    type_text(cx, &view, "kept while away");
+    let other = ComposerDraftScope::Thread(ThreadId::parse("other-thread").unwrap());
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.composer.update(cx, |composer, cx| {
+                composer.switch_thread("other-thread", false, cx)
+            });
+            application.sync_composer_draft(cx);
+        });
+    });
+    assert!(take_sent(cx, &view).contains(&ComposerDraftCommand::Read(other)));
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application
+                .composer
+                .update(cx, |composer, cx| composer.switch_thread(THREAD, false, cx));
+            application.sync_composer_draft(cx);
+            assert!(!application.composer.read(cx).awaiting_forge_draft());
+        });
+    });
+    assert_eq!(
+        draft_text(cx, &view),
+        "kept while away",
+        "the draft shows the moment its scope reopens"
+    );
+    assert!(
+        !take_sent(cx, &view).contains(&ComposerDraftCommand::Read(scope())),
+        "a draft the view already holds is not read again"
+    );
+}
+
+#[gpui::test]
+fn a_draft_read_lost_with_the_connection_is_read_again_after_reconnect(cx: &mut TestAppContext) {
+    let view = open_view(cx);
+    assert_eq!(
+        take_sent(cx, &view),
+        vec![ComposerDraftCommand::Read(scope())]
+    );
+    // The connection drops before the Forge answers; the view still waits.
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(NativeTransportEvent::Reconnected, cx);
+        });
+    });
+    assert!(
+        take_sent(cx, &view).contains(&ComposerDraftCommand::Read(scope())),
+        "the draft the view waits for is read again"
+    );
+}
+
+#[gpui::test]
+fn an_upload_finishing_after_the_view_left_its_scope_is_saved_there(cx: &mut TestAppContext) {
+    let view = open_view(cx);
+    read_nothing(cx, &view);
+    let (attachment_id, _) = recall_image(cx, &view);
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.composer.update(cx, |composer, cx| {
+                composer.switch_thread("other-thread", false, cx)
+            });
+            application.sync_composer_draft(cx);
+        });
+    });
+    let _ = take_sent(cx, &view);
+    let reference = stored_png("shot.png");
+    deliver(
+        cx,
+        &view,
+        ComposerDraftEvent::Uploaded {
+            scope: scope(),
+            attachment_id,
+            result: Ok(reference.clone()),
+        },
+    );
+    // Earlier saves of the scope are still unacknowledged here, so the one
+    // naming the image is queued behind them; acknowledge until idle.
+    let mut with_image = Vec::new();
+    let mut sequence = 1;
+    loop {
+        deliver(cx, &view, saved(sequence, sequence));
+        let sent = take_sent(cx, &view);
+        let next = saves(&sent);
+        let Some((next_sequence, save)) = next.first() else {
+            break;
+        };
+        with_image.push(save.attachments().to_vec());
+        sequence = *next_sequence;
+    }
+    assert!(
+        with_image
+            .iter()
+            .any(|attachments| attachments == std::slice::from_ref(&reference)),
+        "the scope's draft is saved naming the stored image"
+    );
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application
+                .composer
+                .update(cx, |composer, cx| composer.switch_thread(THREAD, false, cx));
+            let composer = application.composer.read(cx);
+            assert_eq!(composer.draft(), "recalled");
+            assert_eq!(composer.attachment_count(), 1);
+            assert_eq!(composer.draft_body().attachments, vec![reference.clone()]);
+        });
+    });
+}

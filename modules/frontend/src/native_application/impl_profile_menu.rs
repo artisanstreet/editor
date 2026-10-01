@@ -552,11 +552,15 @@ impl NativeApplication {
             .gap(px(6.0))
             .px(px(8.0))
             .py(px(4.0));
+        // The engine header sits a little further from its first cadence
+        // group (6 px block gap + 4 px) than the rows sit from each other,
+        // so the header reads as the block's title, not as one more row.
         let mut title = div()
             .flex()
             .items_center()
             .justify_between()
             .gap(px(8.0))
+            .mb(px(PROFILE_USAGE_TITLE_GAP_PX))
             .child(
                 div()
                     .flex()

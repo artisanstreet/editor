@@ -7,7 +7,7 @@ use artisan_domain::{
 use artisan_native_engine::{CLAUDE_NATIVE_CONTINUATION_VERSION, ClaudeThinkingDisplaySupport};
 use serde_json::Value;
 
-use super::protocol::{CLAUDE_MAX_ID_BYTES, ClaudeTurnError, user_message_line};
+use super::protocol::{CLAUDE_MAX_ID_BYTES, ClaudeTurnError};
 
 /// How the spawned CLI session is identified.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,11 +51,17 @@ pub(crate) fn new_session_id() -> Option<String> {
 
 /// Thinking display Artisan requests for one managed launch.
 ///
-/// Backend-local launch policy, never a persisted selection field: supported
-/// CLIs request public `summarized` prose, every other CLI keeps its
-/// existing arguments. The same value tells the pump whether thinking text is
-/// public summary prose; unrequested display semantics are unknown, so their
-/// thinking text is never projected.
+/// Backend-local launch policy, never a persisted selection field. Supported
+/// CLIs request the internal `highlights` value by default. The 2026-09-27
+/// capture showed Anthropic's server can refuse it for Artisan's execution
+/// context, and the CLI then silently retries with `omitted`, losing that
+/// turn's thinking trace; [`Self::with_refusal`] downgrades later turns of a
+/// refused context to public `summarized` prose (see
+/// [`super::super::operation::ClaudeDisplayRefusals`]). Every other CLI keeps
+/// its existing arguments. The same value tells the pump how to read thinking
+/// content: `summarized` carries public prose, `highlights` carries
+/// recognized server titles, and unrequested display semantics are unknown,
+/// so their thinking content is never projected.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ClaudeThinkingDisplay {
     /// Flag omitted: the CLI keeps its own default.
@@ -63,14 +69,29 @@ pub(crate) enum ClaudeThinkingDisplay {
     Unrequested,
     /// `--thinking-display summarized`.
     Summarized,
+    /// `--thinking-display highlights`; the default for supported CLIs.
+    Highlights,
 }
 
 impl ClaudeThinkingDisplay {
     /// Resolves the requested display from the verified launch capability.
+    ///
+    /// Hosted `highlights` is the default; a context whose server refused
+    /// it falls back to `summarized` through [`Self::with_refusal`].
     pub(crate) const fn for_support(support: ClaudeThinkingDisplaySupport) -> Self {
         match support {
-            ClaudeThinkingDisplaySupport::Summarized => Self::Summarized,
+            ClaudeThinkingDisplaySupport::DisplayControl => Self::Highlights,
             ClaudeThinkingDisplaySupport::Unsupported => Self::Unrequested,
+        }
+    }
+
+    /// Downgrades a requested `highlights` to `summarized` for a context
+    /// whose server refused highlights on an observed prior turn.
+    #[must_use]
+    pub(crate) const fn with_refusal(self, refused: bool) -> Self {
+        match (self, refused) {
+            (Self::Highlights, true) => Self::Summarized,
+            _ => self,
         }
     }
 
@@ -78,6 +99,7 @@ impl ClaudeThinkingDisplay {
         match self {
             Self::Unrequested => None,
             Self::Summarized => Some("summarized"),
+            Self::Highlights => Some("highlights"),
         }
     }
 }
@@ -159,7 +181,7 @@ impl ClaudeSettings {
     /// Base flags mirror the TypeScript spawn (`-p`, stream-JSON stdio,
     /// `--permission-prompt-tool stdio`). `--thinking-display` follows the
     /// resolved display policy identically for fresh starts and native
-    /// resumes, so a supported CLI requests public summaries on every turn.
+    /// resumes, so a supported CLI requests its display value on every turn.
     pub(crate) fn spawn_args(&self, session: &ClaudeSession) -> Vec<String> {
         let mut args = vec![
             "-p".to_owned(),
@@ -225,8 +247,9 @@ impl ClaudeSettings {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn user_message_line(session: &ClaudeSession, text: &str) -> String {
-        user_message_line(session.session_id(), text)
+        super::protocol::user_message_line(session.session_id(), text)
     }
 }
 
@@ -462,14 +485,18 @@ pub(crate) fn read_claude_session_title(transcript_path: &Path) -> Option<String
 /// home names a readable transcript for it.
 ///
 /// Best-effort beside terminal settlement: any failure means "no title yet".
-/// Only the managed `CLAUDE_CONFIG_DIR` override is consulted — ambient home
-/// resolution stays with the CLI until a home-directory source exists.
+/// Only the `CLAUDE_CONFIG_DIR` the launch hands its child is consulted — the
+/// Forge's own environment never carries it — and ambient home resolution
+/// stays with the CLI until a home-directory source exists.
 pub(crate) fn claude_transcript_title_for_session(
+    launch_environment: &[(std::ffi::OsString, std::ffi::OsString)],
     project_root: &RootPath,
     session_id: &str,
 ) -> Option<String> {
-    let home = std::env::var(CLAUDE_CONFIG_DIR_ENV_VAR)
-        .ok()
+    let home = launch_environment
+        .iter()
+        .find(|(key, _)| key == CLAUDE_CONFIG_DIR_ENV_VAR)
+        .and_then(|(_, value)| value.to_str())
         .filter(|value| !value.trim().is_empty())?;
     let path = claude_session_transcript_path(home.trim(), project_root.as_str(), session_id);
     read_claude_session_title(&path)

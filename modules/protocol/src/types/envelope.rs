@@ -18,7 +18,7 @@ use super::catalog::{
     ThreadEngineSettingsResult,
 };
 use super::dispatch::{
-    ActiveRunResult, ClientRequest, ConversationSubscriptionStarted,
+    ActiveRunResult, AnswerQuestionsReceipt, ClientRequest, ConversationSubscriptionStarted,
     ConversationSubscriptionStopped, DirectoryPickOutcome, FirstMessageReceipt,
     QueueMessageReceipt, RespondApprovalReceipt, RespondQuestionReceipt,
     SetThreadEngineConfigResult, StopRunReceipt,
@@ -61,6 +61,8 @@ pub enum ResponsePayload {
     ApprovalResponse(RespondApprovalReceipt),
     /// Correlated question response result with its target outcome.
     QuestionResponse(RespondQuestionReceipt),
+    /// Correlated questionnaire answer result.
+    QuestionsAnswered(AnswerQuestionsReceipt),
     /// Authoritative live-run query result.
     ActiveRun(ActiveRunResult),
     /// Complete bounded conversation projection.
@@ -69,6 +71,8 @@ pub enum ResponsePayload {
     ConversationSubscriptionStarted(ConversationSubscriptionStarted),
     /// Clean conversation subscription stop acknowledgement.
     ConversationSubscriptionStopped(ConversationSubscriptionStopped),
+    /// One on-demand part of a thread's history.
+    ConversationHistory(artisan_domain::ConversationHistoryPage),
     /// Outcome of one explicit native directory-picker interaction.
     DirectoryPicked(DirectoryPickOutcome),
     /// Negotiated native lifecycle status or stop result.
@@ -365,6 +369,12 @@ impl WireEnvelope {
             WireEnvelopeBody::Response(ServerResponse {
                 request_id,
                 payload: ResponsePayload::QuestionResponse(receipt),
+            }) if request_id != &receipt.request_id => {
+                Err(ProtocolValueError::ResponseCorrelationMismatch)
+            }
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id,
+                payload: ResponsePayload::QuestionsAnswered(receipt),
             }) if request_id != &receipt.request_id => {
                 Err(ProtocolValueError::ResponseCorrelationMismatch)
             }

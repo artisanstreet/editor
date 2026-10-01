@@ -38,6 +38,7 @@ pub(super) enum ExpectedResponse {
     CreatedThread,
     Threads(ProjectId),
     Snapshot(ThreadId),
+    ConversationHistory(ThreadId),
     MessageImage(artisan_domain::ImageAttachmentRef),
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
@@ -73,6 +74,10 @@ pub(super) enum ExpectedResponse {
         request_id: RequestId,
     },
     QuestionAnswered {
+        thread_id: ThreadId,
+        request_id: RequestId,
+    },
+    QuestionsAnswered {
         thread_id: ThreadId,
         request_id: RequestId,
     },
@@ -212,6 +217,21 @@ pub(super) fn validate_response_family(
         ) if snapshot.thread_id() == &thread_id => {
             Ok(ResponsePayload::ConversationSnapshot(snapshot))
         }
+        (
+            ExpectedResponse::ConversationHistory(thread_id),
+            ResponsePayload::ConversationHistory(page),
+        ) if page.thread_id == thread_id
+            && page
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.thread_id() == &thread_id)
+            && page
+                .observations
+                .iter()
+                .all(|event| event.thread_id == thread_id) =>
+        {
+            Ok(ResponsePayload::ConversationHistory(page))
+        }
         (ExpectedResponse::ActiveRun(expected), ResponsePayload::ActiveRun(result))
             if match &result {
                 artisan_protocol::ActiveRunResult::NoActive { thread_id }
@@ -327,6 +347,15 @@ pub(super) fn validate_response_family(
             Ok(ResponsePayload::QuestionResponse(receipt))
         }
         (
+            ExpectedResponse::QuestionsAnswered {
+                thread_id,
+                request_id,
+            },
+            ResponsePayload::QuestionsAnswered(receipt),
+        ) if receipt.thread_id == thread_id && receipt.request_id == request_id => {
+            Ok(ResponsePayload::QuestionsAnswered(receipt))
+        }
+        (
             ExpectedResponse::ConversationSubscriptionStarted { thread_id },
             ResponsePayload::ConversationSubscriptionStarted(started),
         ) => {
@@ -368,6 +397,8 @@ pub enum UniDelivery {
     Observation(ServerEvent),
     /// A thread's complete message outbox.
     Outbox(artisan_domain::MessageOutbox),
+    /// A newly subscribed thread's observation history is fully delivered.
+    ObservationHistoryCurrent(ThreadId),
     /// Connection-scoped state the Forge pushed.
     HostState(HostStateEvent),
 }
@@ -385,6 +416,14 @@ pub enum HostStateEvent {
     ThreadRetitled(artisan_domain::ThreadRetitled),
     /// A subscribed thread's live run usage.
     RunUsage(artisan_domain::RunUsageResult),
+    /// What a subscribed thread's live run is thinking right now.
+    LiveThinking(artisan_domain::LiveThinking),
+    /// The work of a subscribed thread's settled turns that stayed on the
+    /// Forge.
+    HeldBackWork(artisan_domain::HeldBackWork),
+    /// The user messages of a subscribed thread's turns before the loaded
+    /// ones.
+    EarlierTurnMarkers(artisan_domain::EarlierTurnMarkers),
     /// The recent threads across every project.
     RecentThreads(artisan_domain::RecentThreadListing),
     /// The attached-project catalog.
@@ -416,6 +455,9 @@ pub fn validate_uni_envelope(
                 Ok(UniDelivery::Observation(server_event.clone()))
             }
             artisan_domain::Event::MessageOutbox(outbox) => Ok(UniDelivery::Outbox(outbox.clone())),
+            artisan_domain::Event::ObservationHistoryCurrent(current) => Ok(
+                UniDelivery::ObservationHistoryCurrent(current.thread_id.clone()),
+            ),
             artisan_domain::Event::AccountUsage(usage) => Ok(UniDelivery::HostState(
                 HostStateEvent::AccountUsage(usage.clone()),
             )),
@@ -427,6 +469,15 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::RunUsage(usage) => Ok(UniDelivery::HostState(
                 HostStateEvent::RunUsage(usage.clone()),
+            )),
+            artisan_domain::Event::LiveThinking(thinking) => Ok(UniDelivery::HostState(
+                HostStateEvent::LiveThinking(thinking.clone()),
+            )),
+            artisan_domain::Event::HeldBackWork(work) => Ok(UniDelivery::HostState(
+                HostStateEvent::HeldBackWork(work.clone()),
+            )),
+            artisan_domain::Event::EarlierTurnMarkers(markers) => Ok(UniDelivery::HostState(
+                HostStateEvent::EarlierTurnMarkers(markers.clone()),
             )),
             artisan_domain::Event::RecentThreads(listing) => Ok(UniDelivery::HostState(
                 HostStateEvent::RecentThreads(listing.clone()),

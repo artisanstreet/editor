@@ -37,31 +37,38 @@ impl NativeComposer {
             let name = attachment.name.clone();
             let view_entity = entity.clone();
             // Reference (`attachment-tray.svelte:32`): `card relative size-18
-            // overflow-hidden rounded-xl`. The tile is a regular card, not a
-            // card-glass surface.
+            // overflow-hidden`. The tile is a regular card, not a card-glass
+            // surface. Its corner is concentric with the card: the 18px card
+            // radius minus the 8px card padding and the 4px tray inset.
+            let tile_radius = RadiusTokens::nested(px(18.0), px(8.0 + 4.0));
             let mut tile = div()
                 .id(format!("artisan-native-composer-attachment-{position}"))
                 .relative()
                 .size(px(NATIVE_COMPOSER_ATTACHMENT_SIZE))
                 .flex_none()
                 .overflow_hidden()
-                .rounded(px(14.0))
+                .rounded(tile_radius)
                 .shadow(card_shadows(theme))
                 .bg(desktop_theme.field)
                 .cursor_pointer()
                 .role(gpui::Role::Button)
                 .aria_label(format!("View {name}"))
                 .debug_selector(|| "artisan-native-composer-attachment".to_owned())
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     view_entity.update(cx, |composer, composer_cx| {
-                        composer.view_attachment(&attachment_id, composer_cx);
+                        if composer.view_attachment(&attachment_id, composer_cx) {
+                            composer.attachment_viewer_focus.focus(window, composer_cx);
+                        }
                     });
                 });
 
             if let Some(thumbnail) = attachment.thumbnail.clone() {
                 tile = tile.child(
+                    // GPUI's `overflow_hidden` clips to the rectangle, not
+                    // the rounded corner, so the image carries the radius.
                     img(ImageSource::Render(thumbnail))
                         .size_full()
+                        .rounded(tile_radius)
                         .object_fit(ObjectFit::Cover),
                 );
             } else {
@@ -134,12 +141,14 @@ impl NativeComposer {
             .aria_label("Attachments")
             .child(row);
         if let Some(error) = self.attachment_error.clone() {
-            tray = tray.child(
+            tray = tray.child(crate::dismissible_notice::DismissibleNotice::new(
+                format!("attachment-error-{error}"),
                 div()
                     .text_color(desktop_theme.secondary)
                     .text_size(px(12.0))
                     .child(error),
-            );
+                *theme,
+            ));
         }
         if !self.attachment_delivery_enabled {
             tray = tray.child(
@@ -178,12 +187,24 @@ impl NativeComposer {
             .into_any_element()
     }
 
+    /// Builds the open attachment preview as a full-window modal.
+    ///
+    /// The shared [`image_preview_overlay`] chrome — the same one persisted
+    /// message images open — mounts in the deferred layer at the window
+    /// origin and viewport size, so the preview covers the whole window
+    /// instead of sitting inside the composer card. The draft thumbnail
+    /// stands in until the full decode lands.
     fn attachment_viewer(
         &self,
-        entity: &Entity<Self>,
-        theme: DesktopTheme,
-    ) -> Option<impl IntoElement> {
+        theme: ArtisanTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let viewed_id = self.viewed_attachment.as_ref()?;
+        let attachment = self
+            .attachments
+            .iter()
+            .find(|attachment| attachment.id == *viewed_id)?;
         let preview = self
             .attachment_preview
             .as_ref()
@@ -193,94 +214,55 @@ impl NativeComposer {
                     && preview.request == self.attachment_preview_request
             })
             .map(|preview| preview.image.clone());
-        let preview_error = self.attachment_preview_error.clone();
-
-        let dismiss_entity = entity.clone();
-        let dismiss = div()
-            .id("artisan-native-composer-attachment-viewer-dismiss")
-            .absolute()
-            .left(Pixels::ZERO)
-            .top(Pixels::ZERO)
-            .right(Pixels::ZERO)
-            .bottom(Pixels::ZERO)
-            .on_click(move |_, _, cx| {
-                dismiss_entity.update(cx, |composer, composer_cx| {
-                    composer.close_attachment_viewer(composer_cx);
-                });
-            });
-
-        let close_entity = entity.clone();
-        let close = div()
-            .id("artisan-native-composer-attachment-viewer-close")
-            .absolute()
-            .top(px(8.0))
-            .right(px(8.0))
-            .size(px(28.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(theme.chrome.opacity(0.9))
-            .text_color(theme.foreground)
-            .cursor_pointer()
-            .tab_index(0)
-            .role(gpui::Role::Button)
-            .aria_label("Close image preview")
-            .debug_selector(|| "artisan-native-composer-attachment-viewer-close".to_owned())
-            .on_click(move |_, _, cx| {
-                close_entity.update(cx, |composer, composer_cx| {
-                    composer.close_attachment_viewer(composer_cx);
-                });
-            })
-            .child(asset_glyph(AssetId::TABLER_X).size(px(16.0)));
-
-        let mut content = div()
-            .id("artisan-native-composer-attachment-viewer-content")
-            .relative()
-            .max_w(px(960.0))
-            .max_h(px(720.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .on_click(|_, _, cx| cx.stop_propagation());
-        if let Some(preview) = preview {
-            content = content.child(
-                img(ImageSource::Render(preview))
-                    .max_w(px(960.0))
-                    .max_h(px(720.0))
-                    .object_fit(ObjectFit::Contain),
-            );
-        } else if let Some(error) = preview_error {
-            content = content
-                .px(px(16.0))
-                .py(px(12.0))
-                .text_color(theme.secondary)
-                .child(format!("Preview unavailable: {error}"));
+        let status = if let Some(error) = self.attachment_preview_error.as_ref() {
+            Some(SharedString::from(format!("Preview unavailable: {error}")))
+        } else if preview.is_some() {
+            None
         } else {
-            content = content
-                .px(px(16.0))
-                .py(px(12.0))
-                .text_color(theme.secondary)
-                .child("Preparing preview…");
-        }
+            Some(SharedString::from("Preparing preview…"))
+        };
 
+        let composer = cx.entity();
+        let viewport = window.viewport_size();
+        let overlay = image_preview_overlay(
+            ImagePreview {
+                selectors: NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTORS,
+                image: preview.or_else(|| attachment.thumbnail.clone()),
+                status,
+                on_close: Rc::new(move |window, app| {
+                    composer.update(app, |composer, composer_cx| {
+                        composer.close_attachment_viewer(window, composer_cx);
+                    });
+                }),
+            },
+            theme,
+            viewport,
+        );
+        let viewer = div()
+            .id(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
+            .relative()
+            .w(viewport.width)
+            .h(viewport.height)
+            .track_focus(&self.attachment_viewer_focus)
+            .tab_group()
+            .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR.to_owned())
+            .on_key_down(
+                cx.listener(|composer, event: &gpui::KeyDownEvent, window, cx| {
+                    if event.keystroke.key.as_str() == "escape" {
+                        cx.stop_propagation();
+                        composer.close_attachment_viewer(window, cx);
+                    }
+                }),
+            )
+            .child(overlay);
         Some(
-            div()
-                .id(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
-                .absolute()
-                .left(Pixels::ZERO)
-                .top(Pixels::ZERO)
-                .right(Pixels::ZERO)
-                .bottom(Pixels::ZERO)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(theme.chrome.opacity(0.97))
-                .occlude()
-                .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR.to_owned())
-                .child(dismiss)
-                .child(content)
-                .child(close),
+            deferred(
+                anchored()
+                    .position(point(Pixels::ZERO, Pixels::ZERO))
+                    .child(viewer),
+            )
+            .with_priority(IMAGE_PREVIEW_DEFERRED_PRIORITY)
+            .into_any_element(),
         )
     }
 }
@@ -290,7 +272,7 @@ impl Render for NativeComposer {
         clippy::too_many_lines,
         reason = "one GPUI render builder assembles the composer chrome, text layout, and overlays that share reactive state"
     )]
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prune_attachment_tasks();
         let entity = cx.entity();
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
@@ -347,7 +329,10 @@ impl Render for NativeComposer {
         }
         self.placeholder_was_visible = placeholder_visible;
         if placeholder_visible {
-            let phrase = composer_placeholder_phrase(self.placeholder_generation);
+            let phrase: SharedString = match self.answer_placeholder() {
+                Some(prompt) => prompt.into(),
+                None => composer_placeholder_phrase(self.placeholder_generation).into(),
+            };
             editor = editor.child(
                 div()
                     .absolute()
@@ -516,17 +501,23 @@ impl Render for NativeComposer {
                 });
             });
 
+        // Open agent questions extend the card upward, above the editor.
+        if let Some(panel) = self.render_questionnaires(&entity, desktop_theme) {
+            root = root.child(panel);
+        }
         if self.attachments.is_empty() || self.state.submission_is_eager() {
             self.tray_was_open = false;
             if let Some(error) = self.attachment_error.clone() {
-                root = root.child(
+                root = root.child(crate::dismissible_notice::DismissibleNotice::new(
+                    format!("attachment-error-{error}"),
                     div()
                         .id(NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR)
                         .text_color(desktop_theme.secondary)
                         .text_size(px(12.0))
                         .debug_selector(|| NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR.to_owned())
                         .child(error),
-                );
+                    theme,
+                ));
             }
         } else {
             // Reference open motion (`attachment-tray.svelte:25`): the tray
@@ -549,7 +540,7 @@ impl Render for NativeComposer {
         } else if let Some(legacy_toolbar) = legacy_toolbar {
             root = root.child(legacy_toolbar);
         }
-        if let Some(viewer) = self.attachment_viewer(&entity, desktop_theme) {
+        if let Some(viewer) = self.attachment_viewer(theme, window, cx) {
             root = root.child(viewer);
         }
         // Reference (`thread-composer.svelte:526-543`): jump, failure, and

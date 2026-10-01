@@ -84,9 +84,9 @@ pub fn model_display_label(
 /// Resolves the active context-window label for a configurable window.
 ///
 /// The policy's exact option id wins; a missing or stale id falls back to the
-/// capability default and then the first option. The catalog's display label
-/// is used below one million tokens. Larger windows use the token count so
-/// a catalog label such as `1000K` reads `1M`.
+/// capability default and then the first option. The label follows the
+/// catalog option's display rule, so a snapshot label such as `1000K` reads
+/// `1M` here and in the option list alike.
 fn context_window_label(
     model: &NativeModelDefinition,
     policy: &NativeModelPolicy,
@@ -111,13 +111,7 @@ fn context_window_label(
                 .find(|option| option.id == capability.default)
         })
         .or_else(|| capability.options.first())?;
-    Some(
-        if selected.tokens >= 1_000_000 || selected.label.trim().is_empty() {
-            format_context_tokens(selected.tokens)
-        } else {
-            selected.label.clone()
-        },
-    )
+    Some(selected.display_label())
 }
 
 /// Resolves the reasoning-effort label using the shared thinking vocabulary.
@@ -880,22 +874,6 @@ pub(super) fn rebase_selection_policy(
         rebased.profile_id.clone_from(&policy.profile_id);
     }
     Some(rebased)
-}
-
-fn format_context_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let millions = tokens / 1_000_000 + u64::from(tokens % 1_000_000 >= 500_000);
-        format!("{millions}M")
-    } else if tokens >= 1_000 {
-        let thousands = tokens / 1_000 + u64::from(tokens % 1_000 >= 500);
-        if thousands == 1_000 {
-            "1M".to_owned()
-        } else {
-            format!("{thousands}K")
-        }
-    } else {
-        tokens.to_string()
-    }
 }
 
 pub(super) fn humanize_variant(value: &str) -> String {

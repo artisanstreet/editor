@@ -112,6 +112,12 @@ WHERE m.thread_id = ?
   AND r.message_id = m.message_id
   AND d.state = 'failed'
   AND d.last_error IS NOT NULL
+  AND NOT (
+      d.last_error = 'run cancelled'
+      AND EXISTS (
+          SELECT 1 FROM conversation_items AS i WHERE i.source_message_id = d.message_id
+      )
+  )
   AND NOT EXISTS (
       SELECT 1
       FROM queued_message_withdrawals AS w
@@ -155,6 +161,12 @@ WHERE m.thread_id = ?
   AND r.message_id = m.message_id
   AND d.state = 'failed'
   AND d.last_error IS NOT NULL
+  AND NOT (
+      d.last_error = 'run cancelled'
+      AND EXISTS (
+          SELECT 1 FROM conversation_items AS i WHERE i.source_message_id = d.message_id
+      )
+  )
   AND NOT EXISTS (
       SELECT 1
       FROM queued_message_withdrawals AS w
@@ -294,7 +306,12 @@ impl Repository {
     /// The dispatcher never claims a failed row by itself; only an explicit
     /// retry requeues it. Withdrawn and recovered rows are excluded, and so
     /// is a failure superseded by a later message of the thread that reached
-    /// the transcript. `retryable` is true while the message never reached
+    /// the transcript. A run the user stopped is not a failed send either:
+    /// cancelling settles the run's own dispatch as `failed` with the reason
+    /// `run cancelled`, and once that message reached the transcript it was
+    /// delivered and stopped on request, so it is not listed. A cancel that
+    /// landed before the message reached the transcript stays listed, since
+    /// its prompt would otherwise be lost. `retryable` is true while the message never reached
     /// the transcript, so its stored payload can be dispatched again. Every
     /// returned row
     /// carries its persisted dispatcher reason verbatim, so the reader sees

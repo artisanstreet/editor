@@ -7,7 +7,7 @@
 //! the injected notifier and returns to the claim loop.
 
 use artisan_database::Repository;
-use artisan_domain::{PatchId, UnixMillis};
+use artisan_domain::{ErrorChain, PatchId, UnixMillis};
 use artisan_transport::CancelHandle;
 
 use crate::{
@@ -22,11 +22,13 @@ use crate::{
 
 use super::{
     NativeRunDispatcherConfig,
+    claim_lease::LiveClaims,
     dispatch_support::{wait_for_next_claim, wall_clock},
 };
 
 struct LiveRecoveryPatchSource {
     notifier: ConversationCommitNotifier,
+    live_claims: LiveClaims,
 }
 
 impl StartupReconciliationPatchSource for LiveRecoveryPatchSource {
@@ -45,6 +47,10 @@ impl StartupReconciliationPatchSource for LiveRecoveryPatchSource {
             turn_patch_id,
             item_patch_ids,
         ))
+    }
+
+    fn holds(&mut self, candidate: &artisan_database::StartupReconciliationCandidate) -> bool {
+        self.live_claims.holds(&candidate.message_id)
     }
 
     fn on_durable_disposition(
@@ -67,6 +73,7 @@ async fn perform_live_recovery_page(
         StartupReconciliationSweepInput::live_lease_expiry(operated_at, 64).map_err(Box::new)?;
     let mut source = LiveRecoveryPatchSource {
         notifier: config.conversation_commit_notifier(),
+        live_claims: config.live_claims(),
     };
     crate::startup_reconciliation_sweep::sweep_startup_reconciliation(
         repository,
@@ -96,7 +103,10 @@ pub(super) async fn run_recovery_pages(
         Err(error) => {
             *failures = failures.saturating_add(1);
             if failures.is_power_of_two() {
-                eprintln!("run recovery failed (attempt {failures}): {error:?}");
+                eprintln!(
+                    "run recovery sweep failed ({failures} consecutive failure(s); expired runs stay unsettled until it succeeds): {}",
+                    ErrorChain(error.as_ref())
+                );
             }
             // Keep unrelated threads moving. Claim admission excludes threads
             // with unresolved runs, even after their lease expires.
@@ -113,9 +123,15 @@ pub(super) async fn run_final_recovery_page(
     origin: &SystemCommandOrigin,
 ) {
     let Some(operated_at) = wall_clock(origin) else {
+        eprintln!("final run recovery sweep skipped: the clock could not be read");
         return;
     };
-    let _ = perform_live_recovery_page(repository, config, operated_at).await;
+    if let Err(error) = perform_live_recovery_page(repository, config, operated_at).await {
+        eprintln!(
+            "final run recovery sweep failed (expired runs are settled at the next start): {}",
+            ErrorChain(error.as_ref())
+        );
+    }
 }
 
 /// Shuts the owner down exactly once and returns its bounded verdict.

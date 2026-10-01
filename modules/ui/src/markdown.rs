@@ -11,12 +11,13 @@
 //!
 //! - Raw HTML is recognized only so it can be carried as inert source text.
 //!   It is never interpreted, rewritten, sanitized into markup, or rendered.
-//! - Only `CommonMark` core constructs are modeled, plus task-list markers:
-//!   GFM extensions such as tables and strikethrough remain disabled until
-//!   the renderer phase selects them deliberately. Task markers need
-//!   [`Options::ENABLE_TASKLISTS`], which only affects list-item marker
-//!   scanning, because `pulldown-cmark` never emits `TaskListMarker`
-//!   otherwise.
+//! - Only `CommonMark` core constructs are modeled, plus task-list markers
+//!   and GFM tables: other GFM extensions such as strikethrough remain
+//!   disabled until the renderer phase selects them deliberately. Task
+//!   markers need [`Options::ENABLE_TASKLISTS`], which only affects
+//!   list-item marker scanning, because `pulldown-cmark` never emits
+//!   `TaskListMarker` otherwise; tables need [`Options::ENABLE_TABLES`] and
+//!   arrive as owned [`Table`] blocks of inline-only cells.
 //! - Ordered, unordered, nested, tight, loose, and task lists are preserved
 //!   through the shared `pulldown-cmark` event stream; no parallel parser is
 //!   introduced. Tight item text becomes paragraph blocks so loose and tight
@@ -40,6 +41,11 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use syntect::highlighting::ScopeSelectors;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use thiserror::Error;
+
+mod table;
+
+use table::TableBuilder;
+pub use table::{Table, TableAlignment, TableCell};
 
 /// Failure crossing the Markdown engine boundary.
 ///
@@ -197,6 +203,8 @@ pub enum Block {
         /// Half-open byte range covering the list in the parsed input.
         range: Range<usize>,
     },
+    /// A GFM table of inline-only cells.
+    Table(Table),
 }
 
 impl Block {
@@ -217,6 +225,7 @@ impl Block {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
+            Self::Table(table) => table.text_content(),
         }
     }
 }
@@ -310,28 +319,63 @@ impl MarkdownEngine {
     /// Returns [`MarkdownError`] when `syntect` fails while highlighting a
     /// recognized closed fence.
     pub fn parse_document(&self, source: &str) -> Result<MarkdownDocument, MarkdownError> {
-        let mut document = DocumentBuilder::default().build(source);
+        self.parse_document_with_fence_memo(source, &mut NoFenceTokenMemo)
+    }
 
-        for block in &mut document.blocks {
-            if let Block::Code(fence) = block
-                && fence.closed
-            {
-                self.highlight_fence(fence)?;
+    /// Parses like [`Self::parse_document`], consulting `memo` before
+    /// classifying each closed fence.
+    ///
+    /// A streaming reply re-parses its whole body on every delta, but only
+    /// the fence being written changes: the memo lets every settled fence
+    /// reuse its tokens instead of running `syntect` again.
+    pub(crate) fn parse_document_with_fence_memo(
+        &self,
+        source: &str,
+        memo: &mut dyn FenceTokenMemo,
+    ) -> Result<MarkdownDocument, MarkdownError> {
+        let mut document = DocumentBuilder::default().build(source);
+        self.highlight_blocks(&mut document.blocks, memo)?;
+        Ok(document)
+    }
+
+    /// Highlights every closed fence in `blocks`, including fences nested
+    /// inside list items.
+    fn highlight_blocks(
+        &self,
+        blocks: &mut [Block],
+        memo: &mut dyn FenceTokenMemo,
+    ) -> Result<(), MarkdownError> {
+        for block in blocks {
+            match block {
+                Block::Code(fence) if fence.closed => self.highlight_fence(fence, memo)?,
+                Block::List { items, .. } => {
+                    for item in items {
+                        self.highlight_blocks(&mut item.blocks, memo)?;
+                    }
+                }
+                _ => {}
             }
         }
-
-        Ok(document)
+        Ok(())
     }
 
     /// Fills `fence.tokens` when the language resolves to a bundled grammar;
     /// leaves `None` for unknown languages and bare or indented fences.
-    fn highlight_fence(&self, fence: &mut CodeFence) -> Result<(), MarkdownError> {
+    fn highlight_fence(
+        &self,
+        fence: &mut CodeFence,
+        memo: &mut dyn FenceTokenMemo,
+    ) -> Result<(), MarkdownError> {
         let Some(language) = fence.language.as_deref() else {
             return Ok(());
         };
         let Some(syntax) = self.syntax_set.find_syntax_by_token(language) else {
             return Ok(());
         };
+        if let Some(tokens) = memo.cached(language, &fence.source) {
+            fence.tokens = Some(tokens);
+            return Ok(());
+        }
 
         let mut parse_state = ParseState::new(syntax);
         let mut scope_stack = ScopeStack::new();
@@ -354,6 +398,7 @@ impl MarkdownEngine {
             merged.push(CodeToken { kind, range });
         }
 
+        memo.remember(language, &fence.source, &merged);
         fence.tokens = Some(merged);
         Ok(())
     }
@@ -431,6 +476,33 @@ impl MarkdownEngine {
             .find(|(selectors, _)| selectors.does_match(scopes).is_some())
             .map(|(_, kind)| *kind)
     }
+}
+
+/// Memo of classified fence tokens consulted while parsing.
+///
+/// Tokens are a pure function of the fence language and source bytes, so a
+/// memo may serve any earlier classification of the same pair. Only
+/// successful classifications are remembered; a `syntect` failure fails the
+/// parse and is never cached.
+pub(crate) trait FenceTokenMemo {
+    /// Returns previously classified tokens for this exact language and
+    /// source, if the memo holds them.
+    fn cached(&mut self, language: &str, source: &str) -> Option<Vec<CodeToken>>;
+
+    /// Records the tokens just classified for this language and source.
+    fn remember(&mut self, language: &str, source: &str, tokens: &[CodeToken]);
+}
+
+/// The memo behind the uncached [`MarkdownEngine::parse_document`]: every
+/// fence classifies from scratch.
+struct NoFenceTokenMemo;
+
+impl FenceTokenMemo for NoFenceTokenMemo {
+    fn cached(&mut self, _language: &str, _source: &str) -> Option<Vec<CodeToken>> {
+        None
+    }
+
+    fn remember(&mut self, _language: &str, _source: &str, _tokens: &[CodeToken]) {}
 }
 
 /// Yields each physical line together with its starting byte offset.
@@ -576,6 +648,8 @@ fn fence_is_closed(region: &str) -> bool {
 /// nested lists, and fences inside items keep source order with no dropped
 /// or duplicated text. Inline emphasis, strong, and links nest through a
 /// small format stack over the same single `pulldown-cmark` event stream.
+/// Table cells assemble in the same inline buffer as paragraph text, one
+/// cell at a time.
 ///
 /// `pulldown-cmark` always emits balanced `Start`/`End` pairs, including at
 /// end of truncated input, so no end-of-input recovery layer exists: every
@@ -596,6 +670,8 @@ struct DocumentBuilder {
     code: Option<FenceBuilder>,
     /// Raw text of the HTML block being assembled, if any.
     html: Option<String>,
+    /// Accumulation state for the table being assembled, if any.
+    table: Option<TableBuilder>,
     /// Open lists, outermost first.
     lists: Vec<ActiveList>,
     /// Open items, outermost first; an item always belongs to the list at
@@ -662,8 +738,9 @@ impl FormatFrame {
 
 /// Parser options for the shared engine: `CommonMark` core plus task-list
 /// markers (`- [ ]` / `- [x]`), which `pulldown-cmark` only scans when
-/// [`Options::ENABLE_TASKLISTS`] is set. No other GFM extension is enabled.
-const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS;
+/// [`Options::ENABLE_TASKLISTS`] is set, and GFM tables. No other GFM
+/// extension is enabled.
+const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_TABLES);
 
 impl DocumentBuilder {
     /// Walks every offset-tagged event of `source` into blocks.
@@ -744,6 +821,10 @@ impl DocumentBuilder {
             self.html.is_none(),
             "balanced HTML events settle every block"
         );
+        debug_assert!(
+            self.table.is_none(),
+            "balanced table events settle every table"
+        );
     }
 
     fn start_tag(&mut self, tag: Tag<'_>, start: usize) {
@@ -799,15 +880,20 @@ impl DocumentBuilder {
                 destination: dest_url.to_string(),
             }),
             Tag::Image { .. } => self.formats.push(FormatFrame::ImageAlt(Vec::new())),
-            Tag::BlockQuote(_)
+            Tag::Table(alignments) => {
+                self.flush_tight_before_block();
+                self.table = Some(TableBuilder::new(&alignments, start));
+            }
+            Tag::TableCell => self.clear_inline(start),
+            // Table rows carry no state of their own: their `TagEnd`
+            // settles the cells collected since the previous row.
+            Tag::TableHead
+            | Tag::TableRow
+            | Tag::BlockQuote(_)
             | Tag::FootnoteDefinition(_)
             | Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
-            | Tag::Table(_)
-            | Tag::TableHead
-            | Tag::TableRow
-            | Tag::TableCell
             | Tag::MetadataBlock(_)
             | Tag::Strikethrough
             | Tag::Superscript
@@ -890,6 +976,27 @@ impl DocumentBuilder {
                 if let Some(frame) = self.formats.pop() {
                     let span = frame.into_span();
                     self.push_inline(span);
+                }
+            }
+            TagEnd::TableCell => {
+                let spans = self.take_inline();
+                if let Some(table) = self.table.as_mut() {
+                    table.push_cell(spans);
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some(table) = self.table.as_mut() {
+                    table.finish_header();
+                }
+            }
+            TagEnd::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.finish_row();
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    self.push_block(Block::Table(table.finish(range.end)));
                 }
             }
             _ => {}

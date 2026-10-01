@@ -144,6 +144,10 @@ pub(crate) fn thread_resume_params(
         "threadId".to_owned(),
         Value::String(stored_thread_id.to_owned()),
     );
+    // Only the thread identity is read back. Without this the reply carries
+    // the whole history, which outgrows the frame bound once a thread holds
+    // a few inline images.
+    object.insert("excludeTurns".to_owned(), Value::Bool(true));
     Some(params)
 }
 

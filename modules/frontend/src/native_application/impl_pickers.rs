@@ -320,7 +320,13 @@ impl NativeApplication {
                 }
             }
             (None, _) => {
-                self.pending_thread = self.remembered_project_thread(project_id, listing);
+                // The new-task screen the user opened is never replaced by
+                // a remembered thread.
+                self.pending_thread = if self.project_navigation.new_task_open {
+                    None
+                } else {
+                    self.remembered_project_thread(project_id, listing)
+                };
                 if self.pending_thread.is_none() {
                     self.state = NativeViewState::EmptyThreads;
                 } else {

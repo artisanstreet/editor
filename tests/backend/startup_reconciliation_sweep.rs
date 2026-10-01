@@ -397,6 +397,23 @@ impl StartupReconciliationPatchSource for PanickingSource {
     }
 }
 
+/// Holds every candidate, like the live sweep for claims its own workers
+/// are still executing; patches must never be requested.
+struct HoldingSource;
+
+impl StartupReconciliationPatchSource for HoldingSource {
+    fn patch_ids_for(
+        &mut self,
+        _candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        panic!("a held candidate must never be disposed");
+    }
+
+    fn holds(&mut self, _candidate: &StartupReconciliationCandidate) -> bool {
+        true
+    }
+}
+
 struct FailingSource {
     fail_at: usize,
     calls: usize,
@@ -1360,4 +1377,32 @@ fn live_lease_expiry_input_selects_the_live_recovery_text() {
         StartupReconciliationSweepInput::live_lease_expiry(at, 0),
         Err(StartupReconciliationSweepError::InvalidLimit { limit: 0 })
     ));
+}
+
+#[tokio::test]
+async fn held_candidates_are_never_reaped() {
+    let (database, repository) = memory_repository().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (_claimed, _receipt, _sk, _creds) =
+        queue_claim_launch(&repository, "thread-1", "message-1", "run-1", "turn-1").await;
+    let before = fetch_all(&database).await;
+
+    let input =
+        StartupReconciliationSweepInput::new(UnixMillis::from_millis(SWEEP_OPERATED_AT_MS), 10)
+            .expect("input");
+    let report = sweep_startup_reconciliation(&repository, input, &mut HoldingSource)
+        .await
+        .expect("sweep");
+
+    assert_eq!(
+        report,
+        StartupReconciliationSweepReport {
+            discovered: 1,
+            attempted: 0,
+            interrupted: 0,
+            already_interrupted: 0,
+            skipped_moved: 0,
+        }
+    );
+    assert_eq!(fetch_all(&database).await, before);
 }

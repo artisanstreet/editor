@@ -60,7 +60,7 @@ impl ThreadScreenGate {
 /// unavailable, and the control renders disabled rather than faking a retry.
 pub type ThreadScreenRetry = Rc<dyn Fn(&mut Window, &mut App)>;
 
-/// One owned checklist entry for the inspector checklist card.
+/// One owned checklist entry for the inspector's Checklist section.
 ///
 /// [`ChecklistEntry`] borrows, so entries are stored owned and projected per
 /// render through [`crate::thread_panel_policy::present_checklist_entry`].
@@ -74,8 +74,45 @@ pub struct ThreadChecklistEntry {
     pub text: String,
 }
 
-/// The native thread screen: header, transcript column, inspector cards, and
-/// composer dock.
+impl ThreadChecklistEntry {
+    /// Copies one engine plan entry, keeping its identity and text exactly
+    /// and mapping its status through [`checklist_entry_state`].
+    #[must_use]
+    pub fn from_plan_entry(entry: &PlanEntry) -> Self {
+        Self {
+            id: entry.id().as_str().to_owned(),
+            state: checklist_entry_state(entry.status()),
+            text: entry.text().to_owned(),
+        }
+    }
+
+    /// Returns whether this entry is exactly what
+    /// [`Self::from_plan_entry`] would copy from `entry`, without copying.
+    #[must_use]
+    pub fn presents(&self, entry: &PlanEntry) -> bool {
+        self.id == entry.id().as_str()
+            && self.state == checklist_entry_state(entry.status())
+            && self.text == entry.text()
+    }
+}
+
+/// Maps a provider-neutral plan status onto the checklist policy state.
+///
+/// The protocol carries three statuses (`pending`, `inProgress`,
+/// `completed`); in-progress is the panel's active entry. The policy's
+/// fourth state, [`ChecklistEntryState::Skipped`], has no protocol status
+/// behind it, so a live plan never renders one.
+#[must_use]
+pub const fn checklist_entry_state(status: PlanEntryStatus) -> ChecklistEntryState {
+    match status {
+        PlanEntryStatus::Pending => ChecklistEntryState::Pending,
+        PlanEntryStatus::InProgress => ChecklistEntryState::Active,
+        PlanEntryStatus::Completed => ChecklistEntryState::Completed,
+    }
+}
+
+/// The native thread screen: transcript column, the ruled inspector column
+/// (Context, Checklist, and Terminals sections), and composer dock.
 ///
 /// State arrives through the small setters below; every render projects the
 /// retained facts through the existing policies, so this view owns no
@@ -92,12 +129,16 @@ pub struct ThreadScreen {
     pub(super) on_retry: Option<ThreadScreenRetry>,
     /// Latest content width (window minus desktop sidebar, logical pixels)
     /// published by the route integrator; `None` until the first publish.
-    /// Drives inspector visibility and width.
+    /// Drives inspector visibility; the column width itself is fixed.
     content_width_px: Option<f32>,
+    /// Display name of the thread's project for the Context section's
+    /// Project row; `None` omits the row.
+    pub(super) project_label: Option<String>,
     pub(super) environment: ThreadEnvironmentInput,
     pub(super) terminals: Vec<TerminalSession>,
     pub(super) terminals_loading: bool,
     pub(super) checklist: Vec<ThreadChecklistEntry>,
+    pub(super) agents: Vec<ThreadAgentEntry>,
 }
 
 impl ThreadScreen {
@@ -126,10 +167,12 @@ impl ThreadScreen {
             gate: ThreadScreenGate::default(),
             on_retry: None,
             content_width_px: None,
+            project_label: None,
             environment: ThreadEnvironmentInput::default(),
             terminals: Vec::new(),
             terminals_loading: false,
             checklist: Vec::new(),
+            agents: Vec::new(),
         }
     }
 
@@ -190,9 +233,12 @@ impl ThreadScreen {
         &self.composer
     }
 
-    /// Publishes which legacy gate branch the screen renders.
-    pub fn set_gate(&mut self, gate: ThreadScreenGate) {
+    /// Publishes which legacy gate branch the screen renders, returning
+    /// whether it changed so a per-render caller notifies only on a change.
+    pub fn set_gate(&mut self, gate: ThreadScreenGate) -> bool {
+        let changed = self.gate != gate;
         self.gate = gate;
+        changed
     }
 
     /// Installs the gate retry callback (or clears it when `None`).
@@ -205,8 +251,8 @@ impl ThreadScreen {
     /// The route integrator calls this every render from live window bounds
     /// minus the live [`DesktopShellStyle::sidebar_width`](crate::desktop_shell::DesktopShellStyle)
     /// (both in logical pixels, never a scaled screenshot reading); the
-    /// inspector appears, disappears, and resizes across the content-width
-    /// threshold in both directions with no reserved space while hidden.
+    /// inspector resizes, appears, and disappears with the content width in
+    /// both directions with no reserved space while hidden.
     /// Returns whether the width changed; the caller notifies only then, so
     /// GPUI cannot retain a stale child across a resize yet never repaints
     /// when nothing moved.
@@ -219,22 +265,62 @@ impl ThreadScreen {
         }
     }
 
-    /// Returns whether the inspector column renders at the published width.
+    /// Returns the inspector column width at the published content width.
     ///
-    /// `None` (no publish yet) keeps the legacy always-show behavior.
-    pub(super) fn inspector_visible(&self) -> bool {
-        self.content_width_px.is_none_or(thread_inspector_visible)
+    /// `None` (no publish yet) keeps the legacy always-show behavior at the
+    /// full column width.
+    pub(super) fn inspector_width(&self) -> Option<f32> {
+        match self.content_width_px {
+            None => Some(THREAD_INSPECTOR_WIDTH_PX),
+            Some(content_width_px) => thread_inspector_width(content_width_px),
+        }
     }
 
-    /// Resolves the live inspector column width.
-    pub(super) fn inspector_width(&self) -> f32 {
-        self.content_width_px
-            .map_or(INSPECTOR_WIDTH_PX, thread_inspector_width)
+    /// Returns the inspector column's width while it is on screen, `None`
+    /// while it is not.
+    ///
+    /// On screen means the opened-route branch renders and the published
+    /// content width fits the column. The application feeds this to
+    /// [`desktop_shell`](crate::desktop_shell::desktop_shell) each frame,
+    /// after the route body has published this frame's gate and content
+    /// width, so the shell's right junction crosshair appears and disappears
+    /// with the column's left rule.
+    #[must_use]
+    pub fn visible_inspector_width(&self) -> Option<Pixels> {
+        if self.gate_branch() == ThreadRouteGateRender::OpenedRoute {
+            self.inspector_width().map(px)
+        } else {
+            None
+        }
     }
 
-    /// Replaces the owned environment-card input.
-    pub fn set_environment(&mut self, environment: ThreadEnvironmentInput) {
+    /// Publishes the display name of the thread's project for the Context
+    /// section's Project row (`None` omits the row), returning whether it
+    /// changed so a per-render caller notifies only on a change.
+    pub fn set_project_label(&mut self, project_label: Option<String>) -> bool {
+        let changed = self.project_label != project_label;
+        self.project_label = project_label;
+        changed
+    }
+
+    /// Returns the published project label behind the Project row.
+    #[must_use]
+    pub fn project_label(&self) -> Option<&str> {
+        self.project_label.as_deref()
+    }
+
+    /// Replaces the owned environment input behind the Context section's
+    /// Machine, Changes, Branch, and Worktree rows, returning whether it
+    /// changed so a per-render caller notifies only on a change.
+    pub fn set_environment(&mut self, environment: ThreadEnvironmentInput) -> bool {
+        let changed = self.environment != environment;
         self.environment = environment;
+        changed
+    }
+
+    /// Returns the retained environment input the Context rows project from.
+    pub fn environment(&self) -> &ThreadEnvironmentInput {
+        &self.environment
     }
 
     /// Replaces the owned terminal sessions.
@@ -247,9 +333,59 @@ impl ThreadScreen {
         self.terminals_loading = terminals_loading;
     }
 
-    /// Replaces the owned checklist entries.
-    pub fn set_checklist(&mut self, checklist: Vec<ThreadChecklistEntry>) {
+    /// Replaces the owned checklist entries, returning whether they changed
+    /// so a per-render caller notifies only on a change.
+    pub fn set_checklist(&mut self, checklist: Vec<ThreadChecklistEntry>) -> bool {
+        let changed = self.checklist != checklist;
         self.checklist = checklist;
+        changed
+    }
+
+    /// Replaces the owned agent entries, returning whether they changed so
+    /// a per-render caller notifies only on a change.
+    pub fn set_agents(&mut self, agents: Vec<ThreadAgentEntry>) -> bool {
+        let changed = self.agents != agents;
+        self.agents = agents;
+        changed
+    }
+
+    /// Returns the retained agent entries in the order they started.
+    #[must_use]
+    pub fn agents(&self) -> &[ThreadAgentEntry] {
+        &self.agents
+    }
+
+    /// Returns whether the retained agents already present exactly `rows`,
+    /// compared borrowed so an unchanged frame copies no entry.
+    #[must_use]
+    pub fn agents_present(&self, rows: &[&crate::engine_observation_state::ToolRow]) -> bool {
+        self.agents.len() == rows.len()
+            && self
+                .agents
+                .iter()
+                .zip(rows)
+                .all(|(entry, row)| entry.presents(row))
+    }
+
+    /// Returns the retained checklist entries in plan order.
+    #[must_use]
+    pub fn checklist(&self) -> &[ThreadChecklistEntry] {
+        &self.checklist
+    }
+
+    /// Returns whether the retained checklist already presents exactly
+    /// `plan`, entry for entry and in order.
+    ///
+    /// A per-render caller asks this before building owned entries, so an
+    /// unchanged plan costs a borrowed comparison and no allocation.
+    #[must_use]
+    pub fn checklist_presents(&self, plan: &[PlanEntry]) -> bool {
+        self.checklist.len() == plan.len()
+            && self
+                .checklist
+                .iter()
+                .zip(plan)
+                .all(|(entry, plan_entry)| entry.presents(plan_entry))
     }
 
     /// Forwards a theme-mode change into the transcript surface.

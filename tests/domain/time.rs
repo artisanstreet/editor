@@ -66,6 +66,7 @@ fn summaries_carry_schema_timestamps() {
     let thread = ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("th-time").expect("the fixture is valid"),
         project_id: project.project_id.clone(),
@@ -80,6 +81,7 @@ fn summaries_carry_schema_timestamps() {
     let inverted = ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("th-inverted").expect("the fixture is valid"),
         project_id: project.project_id,

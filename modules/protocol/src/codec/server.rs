@@ -102,6 +102,50 @@ pub(crate) fn encode_directory_picked(
     }
 }
 
+/// Encodes one observation with its optional delivery attribution.
+pub(crate) fn encode_engine_observation_event(
+    mut observation: artisan_capnp::engine_observation_event::Builder<'_>,
+    event: &EngineObservationEvent,
+) -> Result<(), ProtocolEncodeError> {
+    observation.set_thread_id(event.thread_id.as_str());
+    encode_engine_observation(
+        observation.reborrow().init_observation(),
+        &event.observation,
+    )?;
+    match &event.attribution {
+        Some(attribution) => {
+            let mut encoded = observation.reborrow().init_attribution().init_attribution();
+            encoded.set_run_id(attribution.run_id.as_str());
+            encoded.set_turn_id(attribution.turn_id.as_str());
+            encoded.set_committed_at_millis(attribution.committed_at.as_millis());
+            encoded.set_delivery_sequence(attribution.delivery_sequence);
+        }
+        None => {
+            observation
+                .reborrow()
+                .init_attribution()
+                .set_no_attribution(());
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one observation with its optional delivery attribution.
+pub(crate) fn decode_engine_observation_event(
+    value: artisan_capnp::engine_observation_event::Reader<'_>,
+) -> Result<EngineObservationEvent, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(value.get_thread_id(), "event.engineObservation.threadId")?,
+        "event.engineObservation.threadId",
+    )?;
+    let attribution = decode_engine_observation_attribution(value.get_attribution())?;
+    Ok(EngineObservationEvent {
+        thread_id,
+        observation: decode_engine_observation(value.get_observation()?)?,
+        attribution,
+    })
+}
+
 pub(crate) fn encode_event(
     mut builder: artisan_capnp::event::Builder<'_>,
     value: &ServerEvent,
@@ -122,27 +166,19 @@ pub(crate) fn encode_event(
             queued.set_body(event.message.body.as_str());
         }
         Event::EngineObservation(event) => {
-            let mut observation = builder.reborrow().init_engine_observation();
-            observation.set_thread_id(event.thread_id.as_str());
-            encode_engine_observation(
-                observation.reborrow().init_observation(),
-                &event.observation,
-            )?;
-            match &event.attribution {
-                Some(attribution) => {
-                    let mut encoded = observation.reborrow().init_attribution().init_attribution();
-                    encoded.set_run_id(attribution.run_id.as_str());
-                    encoded.set_turn_id(attribution.turn_id.as_str());
-                    encoded.set_committed_at_millis(attribution.committed_at.as_millis());
-                    encoded.set_delivery_sequence(attribution.delivery_sequence);
-                }
-                None => {
-                    observation
-                        .reborrow()
-                        .init_attribution()
-                        .set_no_attribution(());
-                }
-            }
+            encode_engine_observation_event(builder.reborrow().init_engine_observation(), event)?;
+        }
+        Event::HeldBackWork(work) => {
+            encode_held_back_work(builder.reborrow().init_held_back_work(), work)?;
+        }
+        Event::EarlierTurnMarkers(markers) => {
+            encode_earlier_turn_markers(builder.reborrow().init_earlier_turn_markers(), markers)?;
+        }
+        Event::ObservationHistoryCurrent(current) => {
+            builder
+                .reborrow()
+                .init_observation_history_current()
+                .set_thread_id(current.thread_id.as_str());
         }
         Event::MessageOutbox(outbox) => {
             crate::composer_state_codec::encode_message_outbox(
@@ -161,6 +197,23 @@ pub(crate) fn encode_event(
             let mut encoded = builder.reborrow().init_thread_retitled();
             encoded.set_thread_id(retitled.thread_id.as_str());
             encoded.set_title(retitled.title.as_str());
+        }
+        Event::LiveThinking(thinking) => {
+            let mut encoded = builder.reborrow().init_live_thinking();
+            encoded.set_thread_id(thinking.thread_id.as_str());
+            let mut current = encoded.init_current();
+            match &thinking.current {
+                None => current.set_none(()),
+                Some(block) => {
+                    let mut encoded = current.init_block();
+                    encoded.set_run_id(block.run_id.as_str());
+                    encoded.set_turn_id(block.turn_id.as_str());
+                    encoded.set_item_id(block.item_id.as_str());
+                    encoded.set_text(block.text.as_str());
+                    encoded.set_started_at_millis(block.started_at.as_millis());
+                    encoded.set_updated_at_millis(block.updated_at.as_millis());
+                }
+            }
         }
         Event::RunUsage(usage) => crate::composer_state_codec::encode_run_usage_result(
             builder.reborrow().init_run_usage(),
@@ -249,6 +302,12 @@ pub(crate) fn encode_thread(
     value: &ThreadSummary,
 ) {
     builder.set_has_active_work(value.has_active_work);
+    builder.set_attention(match value.attention {
+        ThreadAttention::None => artisan_capnp::ThreadAttention::None,
+        ThreadAttention::AwaitingAnswer => artisan_capnp::ThreadAttention::AwaitingAnswer,
+        ThreadAttention::Finished => artisan_capnp::ThreadAttention::Finished,
+        ThreadAttention::Failed => artisan_capnp::ThreadAttention::Failed,
+    });
     builder.set_has_started_response(value.has_started_response);
     builder.set_has_last_message(value.last_message_at.is_some());
     if let Some(at) = value.last_message_at {
@@ -378,16 +437,16 @@ pub(crate) fn decode_event(
             })
         }
         event::Which::EngineObservation(value) => {
-            let value = value?;
-            let thread_id = parse_thread_id(
-                read_text(value.get_thread_id(), "event.engineObservation.threadId")?,
-                "event.engineObservation.threadId",
-            )?;
-            let attribution = decode_engine_observation_attribution(value.get_attribution())?;
-            Event::EngineObservation(EngineObservationEvent {
-                thread_id,
-                observation: decode_engine_observation(value.get_observation()?)?,
-                attribution,
+            Event::EngineObservation(decode_engine_observation_event(value?)?)
+        }
+        event::Which::HeldBackWork(work) => Event::HeldBackWork(decode_held_back_work(work?)?),
+        event::Which::EarlierTurnMarkers(markers) => {
+            Event::EarlierTurnMarkers(decode_earlier_turn_markers(markers?)?)
+        }
+        event::Which::ObservationHistoryCurrent(current) => {
+            let field = "event.observationHistoryCurrent.threadId";
+            Event::ObservationHistoryCurrent(ObservationHistoryCurrent {
+                thread_id: parse_thread_id(read_text(current?.get_thread_id(), field)?, field)?,
             })
         }
         event::Which::MessageOutbox(outbox) => {
@@ -410,6 +469,28 @@ pub(crate) fn decode_event(
                 )?)
                 .map_err(|source| ProtocolDecodeError::ThreadTitle { source })?,
             })
+        }
+        event::Which::LiveThinking(thinking) => {
+            let thinking = thinking?;
+            let field = "event.liveThinking.threadId";
+            let thread_id = parse_thread_id(read_text(thinking.get_thread_id(), field)?, field)?;
+            let current = match thinking.get_current().which()? {
+                live_thinking::current::Which::None(()) => None,
+                live_thinking::current::Which::Block(block) => {
+                    let block = block?;
+                    let run = "event.liveThinking.block.runId";
+                    let turn = "event.liveThinking.block.turnId";
+                    Some(LiveThinkingBlock {
+                        run_id: parse_run_id(read_text(block.get_run_id(), run)?, run)?,
+                        turn_id: parse_turn_id(read_text(block.get_turn_id(), turn)?, turn)?,
+                        item_id: read_text(block.get_item_id(), "event.liveThinking.block.itemId")?,
+                        text: read_text(block.get_text(), "event.liveThinking.block.text")?,
+                        started_at: UnixMillis::from_millis(block.get_started_at_millis()),
+                        updated_at: UnixMillis::from_millis(block.get_updated_at_millis()),
+                    })
+                }
+            };
+            Event::LiveThinking(LiveThinking { thread_id, current })
         }
         event::Which::RunUsage(usage) => Event::RunUsage(
             crate::composer_state_codec::decode_run_usage_result(usage?)?,
@@ -613,6 +694,12 @@ pub(crate) fn decode_thread(
     Ok(ThreadSummary {
         has_started_response: value.get_has_started_response(),
         has_active_work: value.get_has_active_work(),
+        attention: match value.get_attention()? {
+            artisan_capnp::ThreadAttention::None => ThreadAttention::None,
+            artisan_capnp::ThreadAttention::AwaitingAnswer => ThreadAttention::AwaitingAnswer,
+            artisan_capnp::ThreadAttention::Finished => ThreadAttention::Finished,
+            artisan_capnp::ThreadAttention::Failed => ThreadAttention::Failed,
+        },
         last_message_at: value
             .get_has_last_message()
             .then(|| UnixMillis::from_millis(value.get_last_message_at_millis())),

@@ -37,6 +37,7 @@ fn summary(index: usize) -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: thread_id(index),
         project_id: project(index / 2),

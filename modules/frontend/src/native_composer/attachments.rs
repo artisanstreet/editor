@@ -360,19 +360,21 @@ impl NativeComposer {
         cx.notify();
     }
 
-    pub(super) fn view_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {
+    /// Opens the full preview of one ready draft attachment, returning
+    /// whether a preview is now open so the caller can move focus into it.
+    pub(super) fn view_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) -> bool {
         let Some(attachment) = self
             .attachments
             .iter()
             .find(|attachment| attachment.id == attachment_id && attachment.is_ready())
         else {
-            return;
+            return false;
         };
         let Some(format) = attachment.format else {
-            return;
+            return false;
         };
         let Some(bytes) = attachment.bytes.clone() else {
-            return;
+            return false;
         };
 
         self.viewed_attachment = Some(attachment_id.to_owned());
@@ -412,11 +414,15 @@ impl NativeComposer {
         });
         self.attachment_preview_task = Some(task);
         cx.notify();
+        true
     }
 
-    pub(super) fn close_attachment_viewer(&mut self, cx: &mut Context<Self>) {
+    /// Closes the open attachment preview and hands focus back to the
+    /// editor, so typing continues where it left off.
+    pub(super) fn close_attachment_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.viewed_attachment.take().is_some() {
             self.clear_attachment_preview();
+            self.focus_handle.focus(window, cx);
             cx.notify();
         }
     }

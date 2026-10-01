@@ -154,6 +154,9 @@ impl TurnNarration {
         match self {
             Self::WorkedFor { millis } => Some(WorkGroupLabel::WorkedFor { millis }),
             Self::ThoughtFor { millis } => Some(WorkGroupLabel::ThoughtFor { millis }),
+            Self::Failed => Some(WorkGroupLabel::Failed),
+            Self::Interrupted => Some(WorkGroupLabel::Interrupted),
+            Self::Cancelled => Some(WorkGroupLabel::Cancelled),
             _ => None,
         }
     }

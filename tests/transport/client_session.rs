@@ -511,6 +511,7 @@ fn thread_summary() -> Result<ThreadSummary, Box<dyn Error>> {
     Ok(ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("fixture-thread")?,
         project_id: ProjectId::parse("fixture-project")?,

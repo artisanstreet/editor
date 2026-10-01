@@ -6,11 +6,14 @@
 //! so a mixed frame never loses thinking to text (or the reverse) and never
 //! counts usage twice. Stream `content_block_*` frames keep their block
 //! index: message identity alone cannot tell several thinking stretches of
-//! one message apart. Signatures, redacted payloads, and unknown fields never
-//! cross this boundary.
+//! one message apart. A thinking block also carries its newest recognized
+//! server title from the internal `summaries` array, used only when the
+//! launch requested hosted highlights. Signatures, redacted payloads, and
+//! unknown fields never cross this boundary.
 
 use serde_json::{Map, Value};
 
+use super::protocol::CLAUDE_MAX_TEXT_FIELD_BYTES;
 use super::protocol::ClaudeEvent;
 use super::tools::ClaudeToolUse;
 use super::usage::ClaudeUsageSample;
@@ -22,11 +25,38 @@ pub(crate) enum ClaudeAssistantContent {
     /// (`commentary` when the same frame carries a tool use, otherwise
     /// `unspecified`), placed at the first text part.
     Text { text: String, phase: &'static str },
-    /// One thinking block's text. Empty when the display omits thinking;
-    /// public summary prose only when the launch requested `summarized`.
-    Thinking { text: String },
+    /// One thinking block's text. Empty when the display omits thinking or
+    /// returns titles; public summary prose only when the launch requested
+    /// `summarized`.
+    Thinking {
+        text: String,
+        /// Newest recognized server title from the block's `summaries`, when
+        /// the display returned hosted highlights.
+        title: Option<String>,
+    },
     /// One tool call with its complete input.
     ToolUse(ClaudeToolUse),
+}
+
+/// Selects one thinking block's newest recognized server title.
+///
+/// Mirrors the claude.ai client's selection: the last non-empty
+/// `summaries[].summary` text wins. Entries without a summary string, blank
+/// entries, and entries over the bounded field ceiling are skipped rather
+/// than truncated; the field is internal and only recognized text ever
+/// crosses this boundary.
+fn summary_title(block: &Value) -> Option<String> {
+    let mut title = None;
+    for entry in block.get("summaries")?.as_array()? {
+        let Some(text) = entry.get("summary").and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.trim();
+        if !text.is_empty() && text.len() <= CLAUDE_MAX_TEXT_FIELD_BYTES {
+            title = Some(text.to_owned());
+        }
+    }
+    title
 }
 
 /// One buffered assistant frame after bounded decoding.
@@ -94,6 +124,7 @@ pub(crate) fn assistant_content(
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned(),
+                title: summary_title(item),
             }),
             _ => {}
         }
@@ -121,15 +152,18 @@ fn block_index(event: &Map<String, Value>) -> Option<u64> {
 }
 
 /// Decodes one stream `content_block_start`: thinking blocks open a tracked
-/// stretch and tool-use blocks mark the message's text as commentary; every
-/// other block kind stays bookkeeping.
+/// stretch with their newest recognized title, and tool-use blocks mark the
+/// message's text as commentary; every other block kind stays bookkeeping.
 pub(crate) fn decode_block_start(event: &Map<String, Value>) -> ClaudeEvent {
     let kind = event
         .get("content_block")
         .and_then(|block| block.get("type"))
         .and_then(Value::as_str);
     match (kind, block_index(event)) {
-        (Some("thinking"), Some(index)) => ClaudeEvent::ThinkingStarted { index },
+        (Some("thinking"), Some(index)) => ClaudeEvent::ThinkingStarted {
+            index,
+            title: event.get("content_block").and_then(summary_title),
+        },
         (Some("tool_use"), _) => ClaudeEvent::ToolUseStarted,
         _ => ClaudeEvent::Unknown,
     }

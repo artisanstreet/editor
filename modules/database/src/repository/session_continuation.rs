@@ -385,7 +385,9 @@ async fn inspect_candidate<C: ConnectionTrait>(
                 },
             ));
         }
-        AssistantRunLifecycle::Interrupted if query.engine_id != EngineId::Codex => {
+        AssistantRunLifecycle::Interrupted
+            if !matches!(query.engine_id, EngineId::Codex | EngineId::Claude) =>
+        {
             return Ok(SessionContinuationLookup::Unavailable(
                 SessionContinuationUnavailable {
                     run_id: run_id.clone(),
@@ -393,8 +395,8 @@ async fn inspect_candidate<C: ConnectionTrait>(
                 },
             ));
         }
-        // Codex resumes the exact durable session and sends only the new prompt.
-        // Its thread/resume handshake remains authoritative if the rollout is missing.
+        // Codex and Claude reopen the exact stored session with only the new prompt.
+        // Their resume handshake must succeed; missing sessions never start fresh.
         AssistantRunLifecycle::Interrupted
         | AssistantRunLifecycle::Completed
         | AssistantRunLifecycle::Failed

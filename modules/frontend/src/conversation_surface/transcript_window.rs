@@ -120,6 +120,139 @@ pub struct TranscriptShapeLedger {
     pub over_budget_rows: usize,
 }
 
+impl TranscriptShapeLedger {
+    /// Notes one Markdown row shaped (or skipped).
+    fn record(&mut self, bytes: usize, within_budget: bool) {
+        self.rows = self.rows.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        if !within_budget {
+            self.over_budget_rows = self.over_budget_rows.saturating_add(1);
+        }
+    }
+
+    /// Adds another ledger's counts.
+    fn add(&mut self, other: Self) {
+        self.rows = self.rows.saturating_add(other.rows);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        self.over_budget_rows = self.over_budget_rows.saturating_add(other.over_budget_rows);
+    }
+}
+
+/// The budgeted Markdown shaper shared by the surface and its turn rows.
+///
+/// Rows render as their own views, after the surface's render has returned,
+/// so the parse cache, the rich-link title table, and the misses recorded
+/// while links flatten live here behind one shared handle rather than on the
+/// surface. The renderer only ever borrows the table; the surface mutates it
+/// from its setters, never while a row renders.
+pub(super) struct TranscriptShaper {
+    renderer: MarkdownRenderer,
+    /// Bounded resolved rich-link titles for this surface's markdown links.
+    rich_link_titles: RefCell<RichLinkTitleTable>,
+    /// Destinations observed as unresolved since the last flush.
+    rich_link_missing: RefCell<Vec<String>>,
+    /// Markdown shaped since the surface's current frame started.
+    frame_ledger: Cell<TranscriptShapeLedger>,
+    /// One host clock sample per frame for the rich-link request gate, read
+    /// on first use: a transcript of links must not read the clock per body.
+    frame_now_ms: Cell<Option<i64>>,
+}
+
+impl TranscriptShaper {
+    pub(super) fn new() -> Self {
+        Self {
+            renderer: MarkdownRenderer::new()
+                .with_prose_measure(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX)),
+            rich_link_titles: RefCell::new(RichLinkTitleTable::new()),
+            rich_link_missing: RefCell::new(Vec::new()),
+            frame_ledger: Cell::new(TranscriptShapeLedger::default()),
+            frame_now_ms: Cell::new(None),
+        }
+    }
+
+    /// Starts one surface frame: resets the ledger and the clock sample.
+    pub(super) fn begin_frame(&self) {
+        self.frame_ledger.set(TranscriptShapeLedger::default());
+        self.frame_now_ms.set(None);
+    }
+
+    pub(super) fn frame_ledger(&self) -> TranscriptShapeLedger {
+        self.frame_ledger.get()
+    }
+
+    pub(super) fn parse_report(&self) -> MarkdownParseReport {
+        self.renderer.parse_report()
+    }
+
+    pub(super) fn titles(&self) -> &RefCell<RichLinkTitleTable> {
+        &self.rich_link_titles
+    }
+
+    pub(super) fn has_missing_links(&self) -> bool {
+        !self.rich_link_missing.borrow().is_empty()
+    }
+
+    pub(super) fn take_missing_links(&self) -> Vec<String> {
+        std::mem::take(&mut *self.rich_link_missing.borrow_mut())
+    }
+
+    fn now_ms(&self) -> i64 {
+        if let Some(now) = self.frame_now_ms.get() {
+            return now;
+        }
+        let now = crate::conversation_host::host_now_millis();
+        self.frame_now_ms.set(Some(now));
+        now
+    }
+
+    /// Shapes one Markdown body under the per-row byte budget.
+    ///
+    /// Within budget the shared renderer parses and shapes normally. Over
+    /// budget the exact full text renders through the plain selectable leaf
+    /// instead, so no frame parses an unbounded document; accepted scenes
+    /// never reach this path because their body ceiling equals the budget.
+    pub(super) fn render(
+        &self,
+        body: &str,
+        theme: &ArtisanTheme,
+        selector: String,
+        tone: MarkdownBodyTone,
+        row_ledger: Option<&Cell<TranscriptShapeLedger>>,
+    ) -> AnyElement {
+        let within_budget = transcript_markdown_within_budget(body.len());
+        let mut frame = self.frame_ledger.get();
+        frame.record(body.len(), within_budget);
+        self.frame_ledger.set(frame);
+        if let Some(row_ledger) = row_ledger {
+            let mut row = row_ledger.get();
+            row.record(body.len(), within_budget);
+            row_ledger.set(row);
+        }
+        if !within_budget {
+            let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
+            return div()
+                .w_full()
+                .max_w(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX))
+                .debug_selector(|| format!("{selector}-markdown"))
+                .child(SelectableText::retained(
+                    plain_id,
+                    body.to_owned(),
+                    *theme,
+                    Vec::new(),
+                ))
+                .into_any_element();
+        }
+        let titles = self.rich_link_titles.borrow();
+        let probe = SurfaceRichLinkTitles {
+            titles: &titles,
+            missing: &self.rich_link_missing,
+            now_ms: self.now_ms(),
+        };
+        self.renderer
+            .render_source_with_tone_and_titles(body, *theme, selector, tone, &probe)
+    }
+}
+
 /// Measured turn heights plus cached prefix offsets for window planning.
 ///
 /// Heights are remembered by stable turn identity so a scene replacement
@@ -134,8 +267,13 @@ pub(super) struct TranscriptHeightTable {
     /// `offsets[i]` is the top of turn `i`; `offsets[rows]` the total height.
     offsets: Vec<f64>,
     /// Last measured height per turn identity, retained across replacements.
+    ///
+    /// Stored exactly as painted: a placeholder stands in for its row at
+    /// this height, so any rounding here moves the transcript whenever the
+    /// row enters or leaves the build window.
     measured: HashMap<String, f64>,
-    /// Running sum/count of measured heights for unmeasured estimates.
+    /// Running sum/count of measured heights for unmeasured estimates, each
+    /// height clamped before it joins the sum.
     measured_sum: f64,
     measured_count: u32,
 }
@@ -166,28 +304,31 @@ impl TranscriptHeightTable {
     /// Records one measured height for the turn at `index`.
     ///
     /// A measurement only rewrites offsets when it actually changed, so a
-    /// steady frame does no offset work at all. Heights are clamped before
-    /// they enter the running estimate.
+    /// steady frame does no offset work at all. The row remembers its exact
+    /// height; only its share of the running estimate is clamped. Clamping
+    /// the remembered height made a reply taller than the clamp shrink the
+    /// moment it became a placeholder: the content height then depended on
+    /// the build window, the window on the content height, and a reader at
+    /// the transcript end flipped between the two layouts every frame.
     pub(super) fn record(&mut self, index: usize, height: f32) {
-        if !height.is_finite() {
+        if !height.is_finite() || height < 0.0 {
             return;
         }
         let Some(id) = self.order.get(index).cloned() else {
             return;
         };
-        let clamped =
-            f64::from(height).clamp(TRANSCRIPT_MIN_ROW_HEIGHT_PX, TRANSCRIPT_MAX_ROW_HEIGHT_PX);
+        let measured = f64::from(height);
         let previous = self.measured.get(&id).copied();
-        if previous == Some(clamped) {
+        if previous == Some(measured) {
             return;
         }
         if let Some(previous) = previous {
-            self.measured_sum += clamped - previous;
+            self.measured_sum += estimate_share(measured) - estimate_share(previous);
         } else {
-            self.measured_sum += clamped;
+            self.measured_sum += estimate_share(measured);
             self.measured_count = self.measured_count.saturating_add(1);
         }
-        self.measured.insert(id, clamped);
+        self.measured.insert(id, measured);
         self.recompute_from(index);
     }
 
@@ -201,6 +342,16 @@ impl TranscriptHeightTable {
             return TRANSCRIPT_UNMEASURED_ROW_HEIGHT_PX as f32;
         };
         self.height_for(id) as f32
+    }
+
+    /// The measured height for one turn, exactly as painted, if any.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "measurements are stored as f64 but originate from GPUI's f32 pixel bounds, so the narrowing is exact"
+    )]
+    pub(super) fn measured_px(&self, index: usize) -> Option<f32> {
+        let id = self.order.get(index)?;
+        self.measured.get(id).map(|height| *height as f32)
     }
 
     /// The cached offsets: `offsets[i]` is the top of turn `i`.
@@ -261,14 +412,19 @@ impl TranscriptHeightTable {
     }
 }
 
+/// What one measured height contributes to the unmeasured-row estimate.
+///
+/// The clamp keeps a single pathological row from dragging the estimate for
+/// every row that has not been measured yet.
+fn estimate_share(height: f64) -> f64 {
+    height.clamp(TRANSCRIPT_MIN_ROW_HEIGHT_PX, TRANSCRIPT_MAX_ROW_HEIGHT_PX)
+}
+
 /// Surface-owned windowing state: remembered heights and frame diagnostics.
 #[derive(Default)]
 pub(super) struct TranscriptWindowState {
     table: TranscriptHeightTable,
     report: TranscriptWindowReport,
-    shaped_rows: usize,
-    shaped_bytes: usize,
-    over_budget_rows: usize,
 }
 
 impl TranscriptWindowState {
@@ -277,24 +433,28 @@ impl TranscriptWindowState {
         self.table.scene_replaced(scene);
     }
 
-    /// Starts one render pass: loads heights if needed, resets the ledger.
+    /// The planned top of the turn at `index`: the height of everything
+    /// above it, measured or estimated, gaps included.
+    pub(super) fn top_of(&self, index: usize) -> Option<f64> {
+        self.table.offsets().get(index).copied()
+    }
+
+    /// Starts one render pass: loads heights if needed.
     fn begin_frame(&mut self, scene: &ConversationScene) {
         self.table.ensure_current(scene);
-        self.shaped_rows = 0;
-        self.shaped_bytes = 0;
-        self.over_budget_rows = 0;
     }
 
-    /// Notes one Markdown row shaped (or skipped) this frame.
-    fn record_shaping(&mut self, bytes: usize, within_budget: bool) {
-        self.shaped_rows = self.shaped_rows.saturating_add(1);
-        self.shaped_bytes = self.shaped_bytes.saturating_add(bytes);
-        if !within_budget {
-            self.over_budget_rows = self.over_budget_rows.saturating_add(1);
-        }
+    /// The painted height of the turn at `index`, if it was ever measured.
+    pub(super) fn measured_px(&self, index: usize) -> Option<f32> {
+        self.table.measured_px(index)
     }
 
-    /// Publishes the frame's window and shaping diagnostics.
+    /// Publishes the frame's window diagnostics.
+    ///
+    /// Shaping counts are not part of this snapshot: rows shape during their
+    /// own renders, after this runs, and a cached row shapes nothing at all.
+    /// [`ConversationSurface::transcript_window_report`] adds them from the
+    /// built rows' latest renders when the report is read.
     fn finish_frame(&mut self, built: &TranscriptBuildWindow, total_rows: usize) {
         self.report = TranscriptWindowReport {
             total_rows,
@@ -303,19 +463,10 @@ impl TranscriptWindowState {
             forced_row: built.forced,
             capped: built.capped,
             built_rows: built.indices().collect(),
-            shaped_rows: self.shaped_rows,
-            shaped_bytes: self.shaped_bytes,
-            over_budget_rows: self.over_budget_rows,
+            shaped_rows: 0,
+            shaped_bytes: 0,
+            over_budget_rows: 0,
         };
-    }
-
-    /// The live shaping ledger, before the next frame resets it.
-    fn shape_ledger(&self) -> TranscriptShapeLedger {
-        TranscriptShapeLedger {
-            rows: self.shaped_rows,
-            bytes: self.shaped_bytes,
-            over_budget_rows: self.over_budget_rows,
-        }
     }
 }
 
@@ -326,7 +477,38 @@ impl ConversationSurface {
     /// render pass and is never read by product code.
     #[must_use]
     pub fn transcript_window_report(&self) -> TranscriptWindowReport {
-        self.transcript_window.borrow().report.clone()
+        let mut report = self.transcript_window.borrow().report.clone();
+        // Shaping is summed from each built row's latest render: a row that
+        // replayed its previous frame shaped nothing new, but what it paints
+        // is still exactly what that render shaped.
+        let mut shaped = TranscriptShapeLedger::default();
+        for index in &report.built_rows {
+            let row = self
+                .scene
+                .turn_scenes()
+                .get(*index)
+                .and_then(|turn| self.turn_rows.get(turn.turn_id.as_str()));
+            if let Some(row) = row {
+                shaped.add(row.stats.ledger());
+            }
+        }
+        report.shaped_rows = shaped.rows;
+        report.shaped_bytes = shaped.bytes;
+        report.over_budget_rows = shaped.over_budget_rows;
+        report
+    }
+
+    /// Returns how many times the row for `turn_id` has rendered, if the
+    /// surface holds one.
+    ///
+    /// Test and review seam for row caching: a row that replays its previous
+    /// frame does not render, so an unchanged transcript keeps these counts
+    /// still while the surface itself re-renders.
+    #[must_use]
+    pub fn turn_row_renders(&self, turn_id: &TurnId) -> Option<u64> {
+        self.turn_rows
+            .get(turn_id.as_str())
+            .map(|row| row.stats.renders())
     }
 
     /// Returns the live Markdown shaping ledger for the current frame.
@@ -336,7 +518,7 @@ impl ConversationSurface {
     /// read exactly what it shaped.
     #[must_use]
     pub fn transcript_shape_ledger(&self) -> TranscriptShapeLedger {
-        self.transcript_window.borrow().shape_ledger()
+        self.shaper.frame_ledger()
     }
 
     /// Returns the Markdown parse-cache counters for this surface's renderer.
@@ -346,7 +528,7 @@ impl ConversationSurface {
     /// parse. The cache stays inside its entry and byte bounds.
     #[must_use]
     pub fn markdown_parse_report(&self) -> MarkdownParseReport {
-        self.markdown_renderer.parse_report()
+        self.shaper.parse_report()
     }
 
     /// Plans this frame's built rows from remembered heights and scroll state.
@@ -355,6 +537,7 @@ impl ConversationSurface {
     /// budget; the FIFO head of the pending scroll-target queue is forced in
     /// when it falls outside, so a scroll to a far turn still finds an anchor.
     pub(super) fn plan_transcript_build(&self) -> TranscriptBuildWindow {
+        self.shaper.begin_frame();
         let mut state = self.transcript_window.borrow_mut();
         state.begin_frame(&self.scene);
         let offset_y = f64::from(self.scroll_handle.offset().y);
@@ -406,16 +589,80 @@ impl ConversationSurface {
     /// not built.
     pub(super) fn render_turn_placeholder(&self, index: usize) -> AnyElement {
         let height = self.transcript_window.borrow().table.height_px(index);
-        let selector = self
-            .scene
-            .turn_scenes()
-            .get(index)
-            .map_or_else(String::new, |turn| turn_placeholder_selector(&turn.turn_id));
+        // The selector is formatted only by test builds, which call the
+        // closure; production builds drop it unevaluated.
+        let turn = self.scene.turn_scenes().get(index);
         div()
             .w_full()
             .h(px(height))
-            .debug_selector(move || selector.clone())
+            .debug_selector(|| {
+                turn.map_or_else(String::new, |turn| turn_placeholder_selector(&turn.turn_id))
+            })
             .into_any_element()
+    }
+
+    /// Builds one transcript child per turn: a synced row view for built
+    /// turns, a height placeholder for the rest.
+    ///
+    pub(super) fn render_turn_rows(
+        &mut self,
+        built: &TranscriptBuildWindow,
+        status_motion: MotionPolicy,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let turn_count = self.scene.turn_scenes().len();
+        let mut children = Vec::with_capacity(turn_count);
+        self.scroll_anchors.clear();
+        let services = TurnRowServices {
+            surface: cx.entity().downgrade(),
+            shaper: self.shaper.clone(),
+            trace_groups_open: self.trace_groups_open.clone(),
+            scroll_handle: self.scroll_handle.clone(),
+            disclosure_focus: self.disclosure_focus.clone(),
+            answer_focus: self.answer_focus.clone(),
+        };
+        // A waiting scroll target resolves in the rows' own prepaint
+        // listeners, which a replayed row never runs, and an executed anchor
+        // scroll reads origins only an uncached row records in content
+        // coordinates.
+        let force_render =
+            !self.pending_scroll_targets.is_empty() || self.anchor_scrolls_in_flight > 0;
+        let reduce_motion = cx.reduce_motion();
+        for index in 0..turn_count {
+            if !built.contains(index) {
+                // One placeholder per off-window turn keeps the child count
+                // and order stable for every prepaint listener.
+                children.push(self.render_turn_placeholder(index));
+                continue;
+            }
+            let turn = &self.scene.turn_scenes()[index];
+            let key = footer_key(&turn.turn_id);
+            let row = self
+                .turn_rows
+                .entry(turn.turn_id.as_str().to_owned())
+                .or_insert_with(|| TurnRowHandle::new(turn, &services, cx));
+            let source = TurnRowSource {
+                turn,
+                scene_generation: self.scene_generation,
+                theme_mode: self.theme_mode,
+                status_motion,
+                reduce_motion,
+                active_now_ms: self.active_now_ms,
+                footer_mirror: self.footer_mirrors.get(&key),
+                footer_focus: self.footer_focus.get(&key),
+                footer_revealed: self.footer_revealed.as_deref() == Some(key.as_str()),
+                approval_gates: &self.approval_gates,
+                answer_ready: self.answer_thread.is_some(),
+                send_entrance: self.send_entrance.as_ref(),
+                message_images: self.message_images.as_ref(),
+                rich_link_generation: self.rich_link_generation,
+            };
+            let measured = self.transcript_window.borrow().measured_px(index);
+            let child = row.child(source, measured, force_render, cx);
+            self.scroll_anchors.push(row.anchors.clone());
+            children.push(child);
+        }
+        children
     }
 
     /// Publishes this frame's window diagnostics after the row loop.
@@ -425,12 +672,11 @@ impl ConversationSurface {
             .finish_frame(built, self.scene.turn_scenes().len());
     }
 
-    /// Shapes one Markdown body under the per-row byte budget.
+    /// Shapes one Markdown body through the shared budgeted shaper.
     ///
-    /// Within budget the shared renderer parses and shapes normally. Over
-    /// budget the exact full text renders through the plain selectable leaf
-    /// instead, so no frame parses an unbounded document; accepted scenes
-    /// never reach this path because their body ceiling equals the budget.
+    /// Rows shape through the same shaper from their own renders; this entry
+    /// point is the direct seam for budget and parse-cache tests.
+    #[cfg(test)]
     pub(super) fn render_budgeted_markdown(
         &self,
         body: &str,
@@ -438,32 +684,7 @@ impl ConversationSurface {
         selector: String,
         tone: MarkdownBodyTone,
     ) -> AnyElement {
-        let within_budget = transcript_markdown_within_budget(body.len());
-        self.transcript_window
-            .borrow_mut()
-            .record_shaping(body.len(), within_budget);
-        if !within_budget {
-            let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
-            let root_selector = format!("{selector}-markdown");
-            return div()
-                .w_full()
-                .debug_selector(move || root_selector)
-                .child(SelectableText::retained(
-                    plain_id,
-                    body.to_owned(),
-                    *theme,
-                    Vec::new(),
-                ))
-                .into_any_element();
-        }
-        let rich_link_titles = self.rich_link_probe(crate::conversation_host::host_now_millis());
-        self.markdown_renderer.render_source_with_tone_and_titles(
-            body,
-            *theme,
-            selector,
-            tone,
-            &rich_link_titles,
-        )
+        self.shaper.render(body, theme, selector, tone, None)
     }
 
     /// Prunes scene-keyed footer state and rebuilds the height table.
@@ -479,6 +700,15 @@ impl ConversationSurface {
             .collect();
         self.footer_mirrors.retain(|key, _| live.contains(key));
         self.footer_focus.retain(|key, _| live.contains(key));
+        let live_turns: HashSet<&str> = self
+            .scene
+            .turn_scenes()
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect();
+        self.turn_rows
+            .retain(|id, _| live_turns.contains(id.as_str()));
+        self.scene_generation = self.scene_generation.wrapping_add(1);
         self.transcript_window
             .borrow_mut()
             .scene_replaced(&self.scene);
@@ -511,13 +741,13 @@ impl ConversationSurface {
     /// in the build window contribute measurements; the running estimate for
     /// never-seen rows stays unpolluted.
     fn record_measured_turn_heights(&self, children_bounds: &[gpui::Bounds<gpui::Pixels>]) {
-        let built = self.transcript_window.borrow().report.built_rows.clone();
         let mut state = self.transcript_window.borrow_mut();
-        for index in built {
+        let TranscriptWindowState { table, report } = &mut *state;
+        for &index in &report.built_rows {
             let Some(bounds) = children_bounds.get(index) else {
                 continue;
             };
-            state.table.record(index, f32::from(bounds.size.height));
+            table.record(index, f32::from(bounds.size.height));
         }
     }
 
@@ -598,13 +828,19 @@ impl ConversationSurface {
         }
 
         let mut newly_painted = false;
-        for anchor in &mut self.scroll_anchors {
-            if !anchor.painted {
-                anchor.painted = true;
-                newly_painted = true;
+        for anchors in &self.scroll_anchors {
+            for anchor in anchors.borrow_mut().iter_mut() {
+                if !anchor.painted {
+                    anchor.painted = true;
+                    newly_painted = true;
+                }
             }
         }
-        if newly_painted && !self.pending_scroll_targets.is_empty() {
+        // A target the render could not resolve waits exactly like an
+        // unpainted one: the rows rendered their anchors this frame, so the
+        // next frame resolves or drops it.
+        let awaiting_rows = self.scroll_targets_await_rows;
+        if (newly_painted || awaiting_rows) && !self.pending_scroll_targets.is_empty() {
             // The retained target needs one more frame before its freshly
             // painted anchor can execute. A notification raised inside
             // prepaint does not itself request a frame on every platform

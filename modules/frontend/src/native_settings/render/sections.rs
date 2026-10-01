@@ -611,8 +611,15 @@ impl SettingsScreen {
             theme,
             "performance",
             "Performance",
-            self.frame_rate_control.error.as_deref(),
             None,
+            self.frame_rate_control.error.as_ref().map(|error| {
+                crate::dismissible_notice::DismissibleNotice::new(
+                    format!("frame-rate-error-{error}"),
+                    div().text_sm().child(error.clone()),
+                    *theme,
+                )
+                .into_any_element()
+            }),
             settings_card(
                 theme,
                 vec![
@@ -1402,7 +1409,7 @@ impl SettingsScreen {
 
     /// Paints the unverified-policy warning banner above the retention card.
     fn retention_unverified_banner(&self, theme: &artisan_ui::theme::ArtisanTheme) -> Div {
-        div()
+        let notice = div()
             .w_full()
             .flex()
             .flex_row()
@@ -1450,7 +1457,12 @@ impl SettingsScreen {
                     || div().into_any_element(),
                     IntoElement::into_any_element,
                 ),
-            )
+            );
+        div().child(crate::dismissible_notice::DismissibleNotice::new(
+            format!("retention-error-{}", self.retention.failure_title()),
+            notice,
+            *theme,
+        ))
     }
 
     /// Paints the retention card: loading copy or the two policy rows.

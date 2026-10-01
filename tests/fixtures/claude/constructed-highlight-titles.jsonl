@@ -1,0 +1,9 @@
+{"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_fixture_hl"}}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": "", "summaries": [{"summary": "Checking pairwise sums"}, {"summary": "  "}, {"summary": "Checking pairwise sums of the values"}]}}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "assistant", "message": {"id": "msg_fixture_hl", "content": [{"type": "thinking", "thinking": "", "signature": "", "summaries": [{"summary": "Checking pairwise sums"}, {"summary": "  "}, {"summary": "Checking pairwise sums of the values"}]}]}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "All six pair sums are distinct."}}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "assistant", "message": {"id": "msg_fixture_hl", "content": [{"type": "text", "text": "All six pair sums are distinct."}]}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "stream_event", "event": {"type": "content_block_stop", "index": 1}, "session_id": "fixture-session-highlights", "parent_tool_use_id": null}
+{"type": "result", "subtype": "success", "is_error": false, "session_id": "fixture-session-highlights"}

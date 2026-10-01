@@ -149,6 +149,15 @@ pub trait StartupReconciliationPatchSource {
     /// implementations require no change, and the hook must not perform I/O,
     /// mint randomness, or retain provider material.
     fn on_durable_disposition(&mut self, _candidate: &StartupReconciliationCandidate) {}
+
+    /// Whether a claim this process is still executing holds `candidate`.
+    /// A held candidate is skipped without mutation: its owner is alive and
+    /// settles the run itself, however long ago the lease lapsed (a stalled
+    /// event loop delays renewal, it does not end the claim). The default
+    /// holds nothing, as at startup where no claim of this process exists.
+    fn holds(&mut self, _candidate: &StartupReconciliationCandidate) -> bool {
+        false
+    }
 }
 
 /// Bounded, content-free patch-source failure.
@@ -330,6 +339,9 @@ where
     let candidates_vec = candidates.into_vec();
 
     for (index, candidate) in candidates_vec.iter().enumerate() {
+        if patch_source.holds(candidate) {
+            continue;
+        }
         let patches = match patch_source.patch_ids_for(candidate) {
             Ok(value) => value,
             Err(source) => {

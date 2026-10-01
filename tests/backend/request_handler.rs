@@ -4383,6 +4383,7 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
         request_id: command_id,
         message_id,
         text,
+        images,
     } = envelope.command
     else {
         panic!("expected a steer envelope");
@@ -4390,6 +4391,7 @@ async fn steer_routes_original_command_identity_and_open_retry_reroutes_it() {
     assert_eq!(command_id, request("request-steer-1"));
     assert_eq!(message_id.as_str(), "message-steer-1");
     assert_eq!(text, "follow up");
+    assert!(images.is_empty(), "a text-only steer carries no images");
     envelope
         .respond
         .send(RunInteractionAck::Steered)
@@ -4594,70 +4596,114 @@ async fn steer_failed_replay_reproduces_typed_refusal_without_second_write() {
 }
 
 #[tokio::test]
-async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained() {
+async fn steer_images_route_with_the_envelope_and_payload_retained() {
     let (_temporary, storage) = opened_storage("steer-images").await;
     seed_conversation(storage.repository(), "thread-steer", "steer").await;
-    // The run stays live: the image gate fires before any provider contact.
     let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
-    let origin = ScriptedOriginHandle::scripted(
-        vec![Ok("message-steer-3".to_owned())],
-        vec![
-            Ok(UnixMillis::from_millis(600)),
-            Ok(UnixMillis::from_millis(650)),
-        ],
-    );
+    let origin = ScriptedOriginHandle::deterministic(&["message-steer-3"], 600);
 
     let handler =
         scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
-    let failure = failure_of(
+    let first = tokio::spawn(async move {
         handler
             .respond(
                 &request("request-steer-3"),
                 &image_steer_command("request-steer-3", "thread-steer", "run-steer"),
             )
-            .await,
+            .await
+    });
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("image steer envelope should arrive promptly")
+        .expect("image steer envelope should arrive");
+    let OwnedInteractionCommand::Steer {
+        request_id: command_id,
+        message_id,
+        text,
+        images,
+    } = envelope.command
+    else {
+        panic!("expected a steer envelope");
+    };
+    assert_eq!(command_id, request("request-steer-3"));
+    assert_eq!(message_id.as_str(), "message-steer-3");
+    assert!(text.is_empty(), "an image-only steer carries no text");
+    assert_eq!(
+        images,
+        vec![
+            ImageAttachment::new("image/png", vec![0x89, 0x50, 0x4e, 0x47], "chart.png")
+                .expect("valid image attachment")
+        ],
+        "the envelope must carry the full ordered image payload"
     );
-    assert_eq!(failure.code, ErrorCode::UnsupportedFeature);
-    assert!(!failure.retryable);
-    assert!(
-        failure.detail.as_str().contains("image attachments"),
-        "refusal should name the image limitation"
-    );
-    assert!(
-        inbox.try_recv().is_err(),
-        "image refusal must not contact the provider"
-    );
+    envelope
+        .respond
+        .send(RunInteractionAck::Steered)
+        .expect("ack should send");
+    let receipt = queued_message_of(first.await.expect("task").expect("steer should route"));
+    assert_eq!(receipt.message_id.as_str(), "message-steer-3");
+    assert_eq!(receipt.disposition, ReceiptDisposition::Accepted);
 
     let message_id = MessageId::parse("message-steer-3").expect("valid message id");
-    let (state, reason, _) = storage
+    let (state, _, _) = storage
         .repository()
         .read_steered_dispatch_state(&message_id)
         .await
         .expect("dispatch state should read");
-    assert!(matches!(state, DispatchState::Failed));
-    assert_eq!(
-        reason.as_deref(),
-        Some("steer does not support image attachments")
-    );
+    assert!(matches!(state, DispatchState::Queued));
     let retained = storage
         .repository()
         .read_queue_message_dispatch_payload(&message_id)
         .await
         .expect("dispatch payload should read")
-        .expect("failed steer must keep its payload");
+        .expect("routed steer must keep its payload");
     assert_eq!(retained.payload.attachments().len(), 1);
-    assert_eq!(
-        retained
-            .steer_target
-            .as_ref()
-            .expect("failed steer must keep its target")
-            .run_id()
-            .as_str(),
-        "run-steer"
-    );
 
-    // The retry reproduces the typed refusal instead of a generic input
-    // error, with the original payload still retained.
+    storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn legacy_image_steer_refusal_replays_its_typed_code() {
+    let (_temporary, storage) = opened_storage("steer-images-legacy").await;
+    seed_conversation(storage.repository(), "thread-steer", "steer").await;
+    let (registry, _lease, mut inbox) = live_steer("thread-steer", "run-steer");
+    let origin = ScriptedOriginHandle::deterministic(&["message-steer-3"], 600);
+
+    // Route once and answer transiently so the row stays open, then fail
+    // it with the reason older builds stored before steers carried images.
+    let handler =
+        scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
+    let first = tokio::spawn(async move {
+        handler
+            .respond(
+                &request("request-steer-3"),
+                &image_steer_command("request-steer-3", "thread-steer", "run-steer"),
+            )
+            .await
+    });
+    let envelope = tokio::time::timeout(std::time::Duration::from_secs(5), inbox.recv())
+        .await
+        .expect("image steer envelope should arrive promptly")
+        .expect("image steer envelope should arrive");
+    envelope
+        .respond
+        .send(RunInteractionAck::Unavailable)
+        .expect("ack should send");
+    let failure = failure_of(first.await.expect("task"));
+    assert!(failure.retryable);
+    let message_id = MessageId::parse("message-steer-3").expect("valid message id");
+    storage
+        .repository()
+        .fail_steered_dispatch(
+            &message_id,
+            "steer does not support image attachments",
+            UnixMillis::from_millis(650),
+        )
+        .await
+        .expect("legacy refusal should store");
+
+    // The retry reproduces the legacy typed refusal instead of a generic
+    // input error, without provider contact, with the payload retained.
     let handler =
         scripted_handler(&storage, &origin).with_run_interaction_registry(registry.clone());
     let failure = failure_of(
@@ -4676,7 +4722,7 @@ async fn steer_images_refused_unsupported_first_and_retry_with_payload_retained(
     );
     assert!(
         inbox.try_recv().is_err(),
-        "image retry must not contact the provider"
+        "a failed row must not contact the provider"
     );
     let retained = storage
         .repository()
@@ -4835,6 +4881,7 @@ async fn steer_second_send_while_first_active_routes_both() {
         request_id: command_id,
         message_id,
         text,
+        images,
     } = envelope.command
     else {
         panic!("expected a steer envelope");
@@ -4842,6 +4889,7 @@ async fn steer_second_send_while_first_active_routes_both() {
     assert_eq!(command_id, request("request-steer-5b"));
     assert_eq!(message_id.as_str(), "message-steer-5b");
     assert_eq!(text, "second follow up");
+    assert!(images.is_empty(), "a text-only steer carries no images");
     envelope
         .respond
         .send(RunInteractionAck::Steered)
@@ -4923,6 +4971,7 @@ async fn steer_inbox_full_is_transient_and_row_stays_open_for_retry() {
                     message_id: MessageId::parse(format!("fill-{index}"))
                         .expect("valid message id"),
                     text: String::new(),
+                    images: Vec::new(),
                 },
                 respond: ack,
             })

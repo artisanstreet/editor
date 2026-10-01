@@ -21,7 +21,7 @@ pub const CONVERSATION_VIEWPORT_SELECTOR: &str = "artisan-conversation-surface-v
 /// Stable debug selector for the detached-reader jump control.
 pub const JUMP_TO_LATEST_SELECTOR: &str = "artisan-conversation-surface-jump-to-latest";
 
-/// Stable debug selector for the loaded-turn navigator rail.
+/// Stable debug selector for the loaded-turn navigator's tick rail.
 pub const TURN_NAVIGATOR_SELECTOR: &str = "artisan-conversation-surface-turn-navigator";
 
 /// Stable debug-selector prefix for one navigator control; the target's
@@ -29,7 +29,10 @@ pub const TURN_NAVIGATOR_SELECTOR: &str = "artisan-conversation-surface-turn-nav
 pub const TURN_NAVIGATOR_CONTROL_PREFIX: &str =
     "artisan-conversation-surface-turn-navigator-control";
 
-/// Stable debug selector for the navigator's own capped label list.
+/// Stable debug selector for the navigator's floating menu card.
+pub const TURN_NAVIGATOR_MENU_SELECTOR: &str = "artisan-conversation-surface-turn-navigator-menu";
+
+/// Stable debug selector for the menu's own capped, scrolling label list.
 pub const TURN_NAVIGATOR_LIST_SELECTOR: &str = "artisan-conversation-surface-turn-navigator-list";
 
 /// Stable debug selector for the navigator's shared hover pill.
@@ -54,6 +57,14 @@ pub(super) const TRANSCRIPT_PROSE_WIDTH_PX: f32 = 768.0;
 
 /// Transcript reading-column gutters shared with the thread frame (`px-6`).
 pub(super) const TRANSCRIPT_GUTTER_PX: f32 = 24.0;
+
+/// Assistant prose measure inside the reading column
+/// (`--prose-body-width: prose − 6rem`).
+///
+/// Only reading blocks stop here. A code fence spans the whole turn column
+/// (the reading column less its gutters), so the Markdown renderer is handed
+/// the full column and bounds prose to this measure itself.
+pub(super) const TRANSCRIPT_PROSE_BODY_WIDTH_PX: f32 = 672.0;
 
 /// Top spacing inside the scroll content, shared with the thread frame.
 ///
@@ -155,6 +166,9 @@ pub enum ConversationSurfaceAction {
     ViewportObserved(ViewportObservation),
     /// Measured content or viewport dimensions changed, without reader input.
     ViewportExtentChanged,
+    /// The reader is near the start of the loaded turns: older ones, if the
+    /// thread has any, should be read so scrolling on finds them there.
+    EarlierTurnsWanted,
     /// Ask the viewport controller to return to the latest transcript content.
     JumpToLatestRequested,
     /// Direct wheel input interrupted the animated jump.
@@ -344,7 +358,13 @@ pub fn footer_selector(turn_id: &TurnId) -> String {
     format!("{}-footer", turn_selector(turn_id))
 }
 
+/// A session continuation selects by its own segment anchor so it never
+/// repeats the first segment's selector; every other group keeps the
+/// first-item derivation with the turn id as the session fallback.
 pub(super) fn work_group_selector_id(turn_id: &TurnId, block: &WorkGroupBlock) -> String {
+    if let Some(continuation) = &block.continuation {
+        return continuation.as_str().to_owned();
+    }
     block
         .items
         .first()
@@ -453,25 +473,4 @@ pub const fn file_change_status_label(status: FileChangeStatus) -> &'static str 
         FileChangeStatus::Removed => "Removed",
         FileChangeStatus::Renamed => "Renamed",
     }
-}
-
-/// Copy confirmation uses the shared icon-swap recipe, holds, then returns.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "unit opacity is bounded before narrowing to GPUI f32"
-)]
-pub(super) fn copy_feedback_progress(elapsed: Duration, motion: MotionPolicy) -> f32 {
-    let hold_until = Duration::from_millis(1500);
-    let MotionPlan::Animate(animation) = motion.resolve(MotionRecipe::IconSwap) else {
-        return if elapsed < hold_until { 1.0 } else { 0.0 };
-    };
-    let duration = animation.duration().as_secs_f64();
-    let progress = if elapsed < animation.duration() {
-        elapsed.as_secs_f64() / duration
-    } else if elapsed < hold_until {
-        1.0
-    } else {
-        1.0 - (elapsed.saturating_sub(hold_until).as_secs_f64() / duration).min(1.0)
-    };
-    animation.curve().sample(progress) as f32
 }

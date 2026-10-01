@@ -189,7 +189,8 @@ fn startup_load() -> &'static Loaded {
         let loaded = match artisan_editor_cli::paths::Layout::discover() {
             Ok(layout) => storage::load(&layout.root),
             Err(error) => Loaded::detached(vec![format!(
-                "install root unavailable ({error}); changes apply for this session only"
+                "install root unavailable ({}); changes apply for this session only",
+                artisan_domain::ErrorChain(&error)
             )]),
         };
         for diagnostic in &loaded.diagnostics {

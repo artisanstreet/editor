@@ -10,6 +10,23 @@ Revision 2026-09-26: `WorkGroupBlock.reasoning_summary` is no longer live-only
 can title its collapsed thinking chip (`docs/decisions/CLAUDE_THINKING_DISPLAY.md`).
 The additive-field and total-build promises below are unchanged.
 
+Revision 2026-09-30: thinking summaries are never stored. The Forge keeps the
+live run's current block in memory and pushes it as `Event::LiveThinking`;
+the Editor projects at most one Reasoning fact, for that block, and drops it
+when the run moves on. A settled turn therefore has no thinking chip and its
+`reasoning_summary` is `None`; the build rules below still apply whenever a
+Reasoning fact exists. Ledger rows written before this are deleted by
+migration 24. In the same revision a subscription opens on the newest eight
+turns and a settled turn's work rows (tool, terminal, file, search, subagent
+transcript) stay on the Forge until its section opens: the observation
+projection stands one Activity fact of kind `held_back` in for them (body
+`Loading N steps…`, id `obs-held-{turn_id}`), so the section exists, is
+disclosable, and the turn narrates `Worked for`. Derived fact ordinals are
+`DERIVED_FACT_ORDINAL_BASE + 2 × first delivery sequence` (the stand-in one
+less), fixed by the row's own first event, so rows read later slot in
+without moving anything. See `modules/frontend/src/native_application/history_paging.rs`
+for the reads (`ConversationRequest::History`).
+
 Ground truth: `C:/Users/sander/Desktop/artisan-editor`
 (`modules/frontend/src/lib/conversation/store.ts`,
 `trace.ts`, `presentation.ts`, `activity-status.ts`;
@@ -73,13 +90,11 @@ per turn with a session:
 - explicit commentary assistants (`phase == Commentary`);
 - non-final assistants (every assistant that is NOT the one promoted reply).
 - Frozen fragments: EXPLICIT LIMITATION. The domain carries no
-  `steering_fragment_boundaries`, so frozen/post-steer fragment splitting
-  cannot be implemented here. Post-steering USER messages and assistant
-  items after an exact steering anchor are real and handled below; fragment
-  ranges are not claimed.
+  `steering_fragment_boundaries`, so frozen fragment ranges are not claimed.
+  Work after a mid-run user message joins the same session (below).
 
-Top-level per turn: user messages, the ONE promoted reply, approvals,
-questions, errors, usage interruptions, post-steering items (below), and the
+Top-level per turn: user messages (mid-run ones included), the ONE promoted
+reply, approvals, questions, errors, usage interruptions, and the
 model transition ONLY when the turn has no session (with a session it folds
 into the group header — see fields).
 
@@ -88,12 +103,42 @@ reaches the renderer ONLY through `reasoning_summary` (below). The variant
 stays for exhaustive matches; matching it may treat it as unreachable from
 this builder.
 
-Post-steering rule (exact evidence only): steering placements carry exact
-anchor `ItemId`s; an item in the same turn with a greater ordinal than any
-anchor is post-steering and renders top-level in ordinal order after its
-anchor. `superseded = true` iff the session group is not the turn's last
-content block. A superseded session never narrates (renderer hides its live
-line); the turn-level status row at turn end narrates current work.
+Steering rule (a deliberate departure from the old reference, which split
+the turn at a steer): a steer is a user message other than the turn's first
+that arrives after the session began. It never starts a new section, header,
+or turn. The session keeps ONE header and ONE disclosure for the turn's whole
+life, and work and non-promoted prose after the steer stay session details.
+
+- Seam. The steer bubble stays a top-level `UserMessage`, moved from its
+  ordinal to its visual seam: directly before the first non-empty assistant
+  message (any phase, the promoted reply included) with a greater ordinal,
+  the prose acknowledging it. Until that prose exists the bubble sits after
+  all work the session holds, so tool calls that ran after the steer keep
+  growing the chain above it. Steers acknowledged by the same prose sit
+  together before it in ordinal order; unacknowledged ones stack after the
+  work in ordinal order. `SteeringLabel` blocks still follow their exact
+  anchor message.
+- Segments. The session paints as ordered `WorkGroup` segments around the
+  bubble: the first carries the header; each later one is a continuation
+  (`continuation = Some(session-{turn_id}.{n})`, n from 1) with the same
+  `session` and `disclosure`, its own scroll identity, and no header, label,
+  transition, or trigger. A continuation that would hold no rows is dropped.
+- Ownership. The live line and the terminal label belong to the first
+  segment only. Steers, their labels, and continuations never supersede the
+  session: `superseded = true` iff some other block follows the first
+  segment. A superseded session never narrates (renderer hides its live
+  line); the turn-level status row at turn end narrates current work.
+- Disclosure. A section cannot be collapsed before its turn settles: while
+  the turn lifecycle is live the panel is forced open and the header has no
+  chevron or toggle; the disclosure machine refuses a close for active work
+  and reopens on re-activation. Once settled, one toggle hides the rows of
+  every segment while the steer bubbles stay visible.
+- Backend ordering. The Forge opens an assistant item ahead of its first
+  text; a steer projected while that item is still empty retires it, so the
+  acknowledging prose opens a new item after the steer and the seam rule
+  holds. Text-less assistant items are not rows.
+- Legacy positional turns (no run attribution, or several content runs) keep
+  user messages as group barriers.
 
 ## Final promotion (mirrors store.ts:626-702)
 
@@ -250,7 +295,11 @@ single promoted reply (same rule, single source); contract unchanged.
   `reasoning_summary` reduced under the turn's summary policy — a collapsed
   `label · duration` chip on a Claude thinking stretch, the verb otherwise;
   superseded ⇒ no live line; `transition`
-  ⇒ header far-end handoff.
+  ⇒ header far-end handoff. A disclosable section is always titled from the
+  turn's own state: the terminal label or live line when one reached it,
+  otherwise the turn's elapsed `Working for …` line while live and its
+  lifecycle outcome (`Worked`, `Failed`, `Interrupted`, `Cancelled`) once
+  settled. There is no generic title and never a bare chevron.
 - Top-level reply: single `AssistantMessage` with `phase == Final` (or
   promoted `Unspecified`); `provenance` (run + lifecycle) rides the block
   for streaming treatment and attribution without text inference.

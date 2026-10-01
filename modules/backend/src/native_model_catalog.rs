@@ -533,11 +533,7 @@ fn discovered_context_policy(row: &DiscoveredModel) -> Option<NativeContextWindo
         advisory: None,
         description: None,
         id: id.to_owned(),
-        label: if tokens % 1000 == 0 {
-            format!("{}K", tokens / 1000)
-        } else {
-            tokens.to_string()
-        },
+        label: artisan_catalog::context_window_label(tokens),
         native_config,
         native_suffix: String::new(),
         tokens,

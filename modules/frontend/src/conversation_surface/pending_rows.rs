@@ -84,6 +84,23 @@ impl ConversationSurface {
             .map(|entrance| entrance.message_id.as_str())
     }
 
+    /// The send-rise clock for the outbox row at `index`, when the running
+    /// entrance belongs to it and motion is allowed.
+    pub(super) fn pending_row_entrance(
+        &self,
+        index: usize,
+        reduce_motion: bool,
+    ) -> Option<Instant> {
+        let entrance = self.send_entrance.as_ref()?;
+        let owns = !reduce_motion
+            && entrance.target.is_none()
+            && self
+                .pending_messages
+                .get(index)
+                .is_some_and(|row| row.message_id == entrance.message_id);
+        owns.then_some(entrance.started)
+    }
+
     /// Carries a running entrance over to the transcript item the Forge
     /// delivered for its message.
     pub(crate) fn bind_send_entrance(&mut self, message_id: &str, item_id: &str) {

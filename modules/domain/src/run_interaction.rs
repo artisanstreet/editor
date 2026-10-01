@@ -143,6 +143,23 @@ pub enum RunInteractionError {
         /// The documented ceiling in UTF-8 bytes.
         maximum: usize,
     },
+    /// A questionnaire answer named no question.
+    #[error("a questionnaire answer must name at least one question")]
+    NoQuestions,
+    /// A questionnaire answer named more questions than one group may hold.
+    #[error("a questionnaire answer names {count} questions; the maximum is {maximum}")]
+    TooManyQuestions {
+        /// Offending question count.
+        count: usize,
+        /// The documented ceiling.
+        maximum: usize,
+    },
+    /// A questionnaire answer named the same question twice.
+    #[error("questionnaire answer {index} repeats an earlier question")]
+    DuplicateQuestion {
+        /// Zero-based position of the repeated question.
+        index: usize,
+    },
 }
 
 /// Answers one pending approval request with an explicit decision.
@@ -329,6 +346,102 @@ impl RespondQuestion {
 }
 
 /// Validates one answer list against the shared observation bounds.
+/// Maximum questions one questionnaire (one provider question request) may
+/// hold, and so the most one [`AnswerQuestions`] may answer at once.
+pub const QUESTIONNAIRE_MAX_QUESTIONS: usize = 16;
+
+/// The answers to one question inside a questionnaire.
+///
+/// An empty list skips that question.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct QuestionAnswer {
+    /// Provider question identity being answered.
+    pub question_id: ObservationId,
+    /// Chosen or typed answers; empty for a skipped question.
+    pub answers: Vec<String>,
+}
+
+/// Answers one open questionnaire on a thread.
+///
+/// Unlike [`RespondQuestion`], this names the questionnaire rather than a
+/// run: the Forge routes each named question to the run that asked it, which
+/// resolves it durably and hands the answer back to the provider request
+/// still waiting on it. A question skipped here (an empty answer list)
+/// resolves with no answer; skipping every question dismisses the
+/// questionnaire and the provider learns the user declined.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct AnswerQuestions {
+    request_id: RequestId,
+    thread_id: ThreadId,
+    group_id: ObservationId,
+    answers: Vec<QuestionAnswer>,
+}
+
+impl AnswerQuestions {
+    /// Creates a questionnaire answer after validating its bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunInteractionError`] when no question is named, more than
+    /// [`QUESTIONNAIRE_MAX_QUESTIONS`] are, one is named twice, or any
+    /// answer list violates the observation answer bounds.
+    pub fn new(
+        request_id: RequestId,
+        thread_id: ThreadId,
+        group_id: ObservationId,
+        answers: Vec<QuestionAnswer>,
+    ) -> Result<Self, RunInteractionError> {
+        if answers.is_empty() {
+            return Err(RunInteractionError::NoQuestions);
+        }
+        if answers.len() > QUESTIONNAIRE_MAX_QUESTIONS {
+            return Err(RunInteractionError::TooManyQuestions {
+                count: answers.len(),
+                maximum: QUESTIONNAIRE_MAX_QUESTIONS,
+            });
+        }
+        for (index, answer) in answers.iter().enumerate() {
+            if answers[..index]
+                .iter()
+                .any(|earlier| earlier.question_id == answer.question_id)
+            {
+                return Err(RunInteractionError::DuplicateQuestion { index });
+            }
+            validate_answers(&answer.answers)?;
+        }
+        Ok(Self {
+            request_id,
+            thread_id,
+            group_id,
+            answers,
+        })
+    }
+
+    /// Returns the stable request identity.
+    #[must_use]
+    pub const fn request_id(&self) -> &RequestId {
+        &self.request_id
+    }
+
+    /// Returns the thread the questionnaire was asked on.
+    #[must_use]
+    pub const fn thread_id(&self) -> &ThreadId {
+        &self.thread_id
+    }
+
+    /// Returns the questionnaire identity.
+    #[must_use]
+    pub const fn group_id(&self) -> &ObservationId {
+        &self.group_id
+    }
+
+    /// Returns the per-question answers in display order.
+    #[must_use]
+    pub fn answers(&self) -> &[QuestionAnswer] {
+        &self.answers
+    }
+}
+
 fn validate_answers(answers: &[String]) -> Result<(), RunInteractionError> {
     if answers.len() > OBSERVATION_ANSWERS_MAX {
         return Err(RunInteractionError::TooManyAnswers {

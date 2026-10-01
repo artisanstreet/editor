@@ -19,7 +19,9 @@
 //!   durable item kinds;
 //! - [`commands`] and [`events`] hold the workflow's mutations with their
 //!   request correlation and its durable facts;
-//! - [`time`] carries the schema's signed Unix epoch milliseconds.
+//! - [`time`] carries the schema's signed Unix epoch milliseconds;
+//! - [`error_chain`] renders an error with every cause beneath it, the one
+//!   diagnostic rendering every process shares.
 //!
 //! The domain is independent of Cap'n Proto, Quinn, `SeaORM`, GPUI, Tokio,
 //! filesystem APIs, and wall-clock acquisition; it depends only on
@@ -32,8 +34,10 @@
 pub mod bounds;
 pub mod commands;
 pub mod conversation;
+pub mod conversation_history;
 pub mod engine_config;
 pub mod engine_socket;
+pub mod error_chain;
 pub mod events;
 pub mod identifiers;
 mod legacy_workspace_id;
@@ -73,6 +77,11 @@ pub use conversation::{
     ItemOrdinal, LifecycleTransitionError, MultimodalUserMessageItem, PatchBatch, PatchBatchError,
     PatchSequence, QueryTurnCount, QueryTurnCountError, Revision, TurnOrdinal, UserMessageItem,
 };
+pub use conversation_history::{
+    ConversationHistoryPage, ConversationHistoryPart, ConversationHistoryRequest,
+    EARLIER_TURN_MARKER_LABEL_MAX_BYTES, EARLIER_TURN_MARKERS_MAX, EarlierTurnMarker,
+    EarlierTurnMarkers, HeldBackTurnWork, HeldBackWork, TURN_WORK_PAGE_MAX_ROWS,
+};
 pub use engine_config::{
     ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
     CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
@@ -88,9 +97,10 @@ pub use engine_socket::{
     EngineOpenResult, EngineProbe, EngineResumeToken, EngineRun, EngineRunTerminalState,
     EngineSocket, EngineSocketSession,
 };
+pub use error_chain::ErrorChain;
 pub use events::{
-    EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued,
-    ProjectAttached, ThreadCreated, ThreadRetitled,
+    EngineObservationAttribution, EngineObservationEvent, Event, FirstMessageQueued, LiveThinking,
+    LiveThinkingBlock, ObservationHistoryCurrent, ProjectAttached, ThreadCreated, ThreadRetitled,
 };
 pub use identifiers::{
     DirectoryId, EngineAgentId, EngineModelId, EngineProfileId, EngineProfileIdError,
@@ -105,7 +115,7 @@ pub use message::{
 pub use model::{
     CommandReceipt, DirectoryEntry, DirectoryKind, DirectoryListing, DirectoryListingError,
     DirectoryPlace, PlaceKind, ProjectListing, ProjectListingError, ProjectSummary, QueuedMessage,
-    ReceiptDisposition, ThreadListing, ThreadListingError, ThreadSummary,
+    ReceiptDisposition, ThreadAttention, ThreadListing, ThreadListingError, ThreadSummary,
 };
 pub use observation::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
@@ -170,7 +180,8 @@ pub use message_outbox::{
 };
 mod run_interaction;
 pub use run_interaction::{
-    InteractionKind, InteractionOutcome, RespondApproval, RespondQuestion, RunInteractionError,
+    AnswerQuestions, InteractionKind, InteractionOutcome, QUESTIONNAIRE_MAX_QUESTIONS,
+    QuestionAnswer, RespondApproval, RespondQuestion, RunInteractionError,
 };
 
 pub use model_favorites::MODEL_FAVORITE_ID_MAX_BYTES;

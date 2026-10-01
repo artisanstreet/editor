@@ -12,6 +12,15 @@
 //! minimum, while the fit predicate conservatively returns `false`. This
 //! keeps malformed measurements from producing `NaN` or infinity in a layout
 //! decision.
+//!
+//! The desktop shell does not use the TypeScript viewport clamp for its
+//! columns: the chat keeps [`desktop_chat_min_pixels`] and the two ruled
+//! columns (left sidebar and thread inspector) share what remains, each up to
+//! the caller's full column width. [`desktop_sidebar_pixels`] and
+//! [`desktop_inspector_pixels`] take that width from the caller, which keeps
+//! this module free of shell dependencies (the integration suite includes it
+//! by path) while the shell's sidebar constant stays the single source of the
+//! width.
 
 /// The tight reading-column width in pixels.
 pub const TIGHT_PROSE_WIDTH_PIXELS: f64 = 672.0;
@@ -94,49 +103,85 @@ pub const fn prose_column_pixels(prose_width: ProseWidth) -> f64 {
 #[must_use]
 pub fn inspector_column_pixels(viewport_width: f64) -> f64 {
     let viewport_width = sanitize_viewport_width(viewport_width);
-    clamp_inspector_width(viewport_width * INSPECTOR_VIEWPORT_RATIO)
+    (viewport_width * INSPECTOR_VIEWPORT_RATIO)
+        .clamp(INSPECTOR_MIN_WIDTH_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS)
 }
 
-/// Resolves the inspector column width from actual content width.
-///
-/// Same clamp as [`inspector_column_pixels`], but measured from the width
-/// left after the desktop sidebar instead of the total window: the legacy
-/// formula's total-window fraction overstates the room beside a 218 px
-/// desktop rail and would squeeze the conversation column.
+/// Clearance kept on each side of the centred desktop reading column: the
+/// navigator rail's 8 px inset plus its 40 px width, so the rail never
+/// overlaps prose.
+pub const DESKTOP_RAIL_CLEARANCE_PIXELS: f64 = 48.0;
+
+/// The narrowest either ruled desktop column (left sidebar or thread
+/// inspector) shrinks to before the chat gives up any width.
+pub const DESKTOP_COLUMN_MIN_PIXELS: f64 = 240.0;
+
+/// The chat's minimum desktop width: the reading column plus the rail
+/// clearance on both sides. The chat never shrinks below it; the ruled
+/// columns shrink instead.
 #[must_use]
-pub fn desktop_inspector_column_pixels(content_width: f64) -> f64 {
-    clamp_inspector_width(sanitize_viewport_width(content_width) * INSPECTOR_VIEWPORT_RATIO)
+pub const fn desktop_chat_min_pixels(prose_width: ProseWidth) -> f64 {
+    prose_width.pixels() + 2.0 * DESKTOP_RAIL_CLEARANCE_PIXELS
 }
 
-fn clamp_inspector_width(raw_width: f64) -> f64 {
-    raw_width.clamp(INSPECTOR_MIN_WIDTH_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS)
-}
+/// The narrowest the chat itself gets: below the comfortable
+/// [`desktop_chat_min_pixels`] both ruled columns are gone and the reading
+/// column narrows inside the window, down to this floor.
+pub const DESKTOP_CHAT_FLOOR_PIXELS: f64 = 480.0;
 
-/// Returns whether the inspector fits in actual desktop content width.
-///
-/// Same band arithmetic as [`thread_inspector_fits_beside_rail`], but measured
-/// from the width left after the desktop sidebar (`content_width =
-/// window − sidebar`, both in logical pixels) instead of the total window:
-/// the legacy total-window form assumes a 56 px rail, while the desktop rail
-/// is 218 px expanded (58 px collapsed), so the legacy form would seat an
-/// inspector beside a conversation it then squeezes. At 1280 px total with an
-/// expanded rail the content is 1062 px (band −19.5 → hidden); at 1400 px
-/// total it is 1182 px (band 70.5 → still hidden, no squeeze); the balanced
-/// column returns once content reaches 1280 px (window ≥ 1498 px expanded).
-/// Invalid geometry never fits.
+/// The narrowest desktop window: the chat alone at its floor. Navigation
+/// columns are hidden there; the conversation stays usable.
 #[must_use]
-pub fn desktop_thread_inspector_fits(content_width: f64, prose_width: ProseWidth) -> bool {
-    if !is_valid_viewport_width(content_width) {
-        return false;
+pub const fn desktop_min_window_pixels() -> f64 {
+    DESKTOP_CHAT_FLOOR_PIXELS
+}
+
+/// The window width that seats the chat and both ruled columns at their
+/// full `column_max` width.
+#[must_use]
+pub const fn desktop_full_window_pixels(prose_width: ProseWidth, column_max: f64) -> f64 {
+    desktop_chat_min_pixels(prose_width) + 2.0 * column_max
+}
+
+/// Resolves the left sidebar width for a desktop window, or `None` while
+/// it is hidden.
+///
+/// The chat keeps its comfortable minimum first; the sidebar takes what
+/// remains up to `column_max`, shrinks no further than
+/// [`DESKTOP_COLUMN_MIN_PIXELS`], and hides below that so the window can
+/// narrow to the chat alone. The inspector only appears once the sidebar is
+/// at full width, so the sidebar never jumps as the window grows. The
+/// comparison is inclusive. Invalid geometry resolves to `column_max`.
+#[must_use]
+pub fn desktop_sidebar_pixels(
+    window_width: f64,
+    prose_width: ProseWidth,
+    column_max: f64,
+) -> Option<f64> {
+    if !is_valid_viewport_width(window_width) || !is_valid_viewport_width(column_max) {
+        return Some(column_max);
     }
+    let room = window_width - desktop_chat_min_pixels(prose_width);
+    (room >= DESKTOP_COLUMN_MIN_PIXELS.min(column_max)).then(|| room.min(column_max))
+}
 
-    let band_width = content_width
-        - desktop_inspector_column_pixels(content_width)
-        - prose_column_pixels(prose_width)
-        - PROSE_GUTTER_PIXELS
-        - THREAD_RAIL_GAP_PIXELS;
-
-    band_width >= THREAD_RAIL_BAND_PIXELS
+/// Resolves the thread inspector width for the desktop content width (the
+/// window minus the left sidebar), or `None` while it does not fit.
+///
+/// The inspector takes what the minimum chat leaves, up to `column_max`,
+/// and hides below [`DESKTOP_COLUMN_MIN_PIXELS`] rather than squeezing the
+/// chat. The comparison is inclusive. Invalid geometry never fits.
+#[must_use]
+pub fn desktop_inspector_pixels(
+    content_width: f64,
+    prose_width: ProseWidth,
+    column_max: f64,
+) -> Option<f64> {
+    if !is_valid_viewport_width(content_width) || !is_valid_viewport_width(column_max) {
+        return None;
+    }
+    let room = content_width - desktop_chat_min_pixels(prose_width);
+    (room >= DESKTOP_COLUMN_MIN_PIXELS).then(|| room.min(column_max))
 }
 
 /// Returns whether the inspector fits beside the transcript proximity rail.

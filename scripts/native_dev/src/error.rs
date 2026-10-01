@@ -7,6 +7,25 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+/// Renders `error` and every source beneath it as `top: cause: cause`.
+///
+/// A source whose message the chain already ends with is skipped, so an
+/// error that embeds its source in its own message is not printed twice.
+#[must_use]
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut current = error.source();
+    while let Some(source) = current {
+        let message = source.to_string();
+        if !message.is_empty() && !rendered.ends_with(&message) {
+            rendered.push_str(": ");
+            rendered.push_str(&message);
+        }
+        current = source.source();
+    }
+    rendered
+}
+
 /// Bounded failure for one dev stage.
 #[derive(Debug, Error)]
 pub enum DevError {

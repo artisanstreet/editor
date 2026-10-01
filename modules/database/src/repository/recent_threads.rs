@@ -12,22 +12,31 @@ use crate::entities;
 use super::project_threads::thread_summary;
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
-/// Saved threads (assistant text started) by last activity, newest first.
+/// Saved threads by last activity, newest first. A thread is saved once the
+/// user sent a message in it, assistant text started, or a run is live: a
+/// running thread whose engine has only called tools so far is listed with
+/// its work, not lost until the first reply. Only a provisional draft (none
+/// of those) stays out.
 const RECENT_THREAD_IDS_SQL: &str = r"
 SELECT t.thread_id,
        COALESCE((SELECT MAX(m.accepted_at_ms) FROM messages AS m WHERE m.thread_id = t.thread_id),
                 t.updated_at_ms) AS activity
 FROM threads AS t
-WHERE EXISTS (SELECT 1 FROM conversation_items AS c
+WHERE EXISTS (SELECT 1 FROM messages AS m WHERE m.thread_id = t.thread_id)
+   OR EXISTS (SELECT 1 FROM conversation_items AS c
               WHERE c.thread_id = t.thread_id AND c.item_kind = 'assistant_message'
                 AND c.body <> '')
+   OR EXISTS (SELECT 1 FROM assistant_runs AS r
+              WHERE r.thread_id = t.thread_id
+                AND r.lifecycle IN ('queued', 'launching', 'running', 'waiting', 'cancel_requested'))
 ORDER BY activity DESC, t.thread_id ASC
 LIMIT ?
 ";
 
 /// Cheap aggregate over every input of the recent-threads listing: the
-/// project and thread catalogs, titles, messages, started threads, and live
-/// runs. Any change the listing shows changes at least one component.
+/// project and thread catalogs, titles, messages, started threads, live and
+/// settled runs, open approvals and questions, and the reader's last opens.
+/// Any change the listing shows changes at least one component.
 const RECENT_THREADS_FINGERPRINT_SQL: &str = r"
 SELECT (SELECT COUNT(*) FROM attached_projects),
        (SELECT COUNT(*) FROM threads),
@@ -41,18 +50,24 @@ SELECT (SELECT COUNT(*) FROM attached_projects),
                           AND c.body <> '')),
        (SELECT COUNT(*) FROM assistant_runs
           WHERE lifecycle IN ('queued', 'launching', 'running', 'waiting', 'cancel_requested')),
-       (SELECT COALESCE(SUM(length(display_name)), 0) FROM attached_projects)
+       (SELECT COALESCE(SUM(length(display_name)), 0) FROM attached_projects),
+       (SELECT COUNT(*) FROM assistant_runs
+          WHERE lifecycle IN ('completed', 'failed', 'interrupted', 'cancelled')),
+       (SELECT COUNT(*) FROM pending_run_interactions WHERE state = 'requested'),
+       (SELECT COUNT(*) + COALESCE(SUM(read_at_ms % 1000003), 0) FROM thread_reads)
 ";
 
 /// Opaque summary of the recent-threads inputs; equal fingerprints mean the
 /// listing has not changed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RecentThreadsFingerprint([i64; 8]);
+pub struct RecentThreadsFingerprint([i64; 11]);
 
 impl Repository {
     /// Lists the most recently active saved threads across every project,
-    /// newest first: by the latest message, else by the last update. Drafts
-    /// (no assistant text yet) are not listed. Ties order by thread id.
+    /// newest first: by the latest message, else by the last update. A
+    /// thread is saved by a sent message, started assistant text, or a live
+    /// run; provisional drafts with none of those are not listed. Ties order
+    /// by thread id.
     ///
     /// # Errors
     ///
@@ -124,7 +139,7 @@ impl Repository {
                     "recent threads fingerprint returned no row",
                 )
             })?;
-        let mut parts = [0_i64; 8];
+        let mut parts = [0_i64; 11];
         for (index, part) in parts.iter_mut().enumerate() {
             *part = row
                 .try_get_by_index::<i64>(index)

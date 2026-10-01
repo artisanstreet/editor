@@ -146,11 +146,130 @@ fn every_conversation_request_roundtrips() -> Result<(), Box<dyn Error>> {
             ConversationSubscribe::resume(thread_id(), ConversationCursor::new(cursor)),
         )))?;
     }
+    // A windowed subscriber names how many newest turns it opens on, and on
+    // resume the oldest turn it still holds.
+    assert_roundtrip(&conversation_request(ConversationRequest::Subscribe(
+        ConversationSubscribe::fresh(thread_id()).with_newest_turns(QueryTurnCount::new(8)?),
+    )))?;
+    for floor in [0, 41] {
+        assert_roundtrip(&conversation_request(ConversationRequest::Subscribe(
+            ConversationSubscribe::resume(thread_id(), ConversationCursor::new(9))
+                .with_history_floor(TurnOrdinal::new(floor)),
+        )))?;
+    }
+    for minimum_turn_ordinal in [None, Some(TurnOrdinal::new(2))] {
+        assert_roundtrip(&conversation_request(ConversationRequest::History(
+            artisan_domain::ConversationHistoryRequest {
+                thread_id: thread_id(),
+                part: artisan_domain::ConversationHistoryPart::EarlierTurns {
+                    before_turn_ordinal: TurnOrdinal::new(12),
+                    minimum_turn_ordinal,
+                    maximum_turn_count: QueryTurnCount::new(8)?,
+                },
+            },
+        )))?;
+    }
+    assert_roundtrip(&conversation_request(ConversationRequest::History(
+        artisan_domain::ConversationHistoryRequest {
+            thread_id: thread_id(),
+            part: artisan_domain::ConversationHistoryPart::TurnWork {
+                turn_id: turn_id(),
+                after_sequence: 256,
+            },
+        },
+    )))?;
     assert_roundtrip(&conversation_request(ConversationRequest::Unsubscribe(
         ConversationUnsubscribe {
             thread_id: thread_id(),
         },
     )))
+}
+
+fn held_back_turn() -> artisan_domain::HeldBackTurnWork {
+    artisan_domain::HeldBackTurnWork {
+        turn_id: turn_id(),
+        run_id: artisan_domain::RunId::parse("run-history").expect("run id"),
+        row_count: 42,
+        first_committed_at: UnixMillis::from_millis(1_234),
+        first_delivery_sequence: 17,
+    }
+}
+
+fn history_observation() -> artisan_domain::EngineObservationEvent {
+    artisan_domain::EngineObservationEvent {
+        thread_id: thread_id(),
+        observation: artisan_domain::Observation::Tool(
+            artisan_domain::ToolObservation::new(
+                artisan_domain::ObservationId::parse("obs-history").expect("observation id"),
+                artisan_domain::ObservationSequence::new(3).expect("sequence"),
+                artisan_domain::ObservationId::parse("tool-history").expect("tool id"),
+                "read".to_owned(),
+                artisan_domain::ToolAction::Completed,
+                Some("read 42 lines".to_owned()),
+            )
+            .expect("tool row"),
+        ),
+        attribution: Some(artisan_domain::EngineObservationAttribution {
+            run_id: artisan_domain::RunId::parse("run-history").expect("run id"),
+            turn_id: turn_id(),
+            committed_at: UnixMillis::from_millis(1_234),
+            delivery_sequence: 17,
+        }),
+    }
+}
+
+#[test]
+fn history_pages_and_held_back_work_roundtrip() -> Result<(), Box<dyn Error>> {
+    // Older turns: a snapshot, the rows that show while sections are closed,
+    // and what stayed behind.
+    assert_roundtrip(&response(
+        "server-conversation-history-earlier",
+        ResponsePayload::ConversationHistory(artisan_domain::ConversationHistoryPage {
+            thread_id: thread_id(),
+            snapshot: Some(snapshot()),
+            observations: vec![history_observation()],
+            held_back: vec![held_back_turn()],
+            next_after_sequence: None,
+        }),
+    ))?;
+    // One turn's work rows, with more to read.
+    assert_roundtrip(&response(
+        "server-conversation-history-work",
+        ResponsePayload::ConversationHistory(artisan_domain::ConversationHistoryPage {
+            thread_id: thread_id(),
+            snapshot: None,
+            observations: vec![history_observation(), history_observation()],
+            held_back: Vec::new(),
+            next_after_sequence: Some(17),
+        }),
+    ))?;
+    assert_roundtrip(&envelope(
+        "server-earlier-turn-markers",
+        WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+            cursor: artisan_protocol::EventCursor::new(4)?,
+            event: artisan_domain::Event::EarlierTurnMarkers(artisan_domain::EarlierTurnMarkers {
+                thread_id: thread_id(),
+                markers: vec![artisan_domain::EarlierTurnMarker {
+                    item_id: item_id(),
+                    turn_ordinal: TurnOrdinal::new(3),
+                    label: "How does the window open?".to_owned(),
+                }],
+            }),
+        }),
+    ))?;
+    for turns in [Vec::new(), vec![held_back_turn()]] {
+        assert_roundtrip(&envelope(
+            "server-held-back-work",
+            WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+                cursor: artisan_protocol::EventCursor::new(3)?,
+                event: artisan_domain::Event::HeldBackWork(artisan_domain::HeldBackWork {
+                    thread_id: thread_id(),
+                    turns,
+                }),
+            }),
+        ))?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -504,24 +504,166 @@ fn long_navigator_list_centers_the_cap_not_the_content(cx: &mut TestAppContext) 
         .debug_bounds(TURN_NAVIGATOR_SELECTOR)
         .expect("rail paints");
     cx.simulate_mouse_move(rail.center(), None::<gpui::MouseButton>, Modifiers::none());
-    // Two geometry passes follow the reveal: the probe reports the capped
-    // list height, then the metrics listener re-centers the rail from it.
     settle(cx);
-    let expanded = cx
-        .debug_bounds(TURN_NAVIGATOR_SELECTOR)
-        .expect("expanded rail paints");
+    let menu = cx
+        .debug_bounds(TURN_NAVIGATOR_MENU_SELECTOR)
+        .expect("the open menu paints");
     let viewport = cx
         .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
         .expect("viewport paints");
-    let height = f64::from(expanded.size.height);
-    let top = f64::from(expanded.origin.y) - f64::from(viewport.origin.y);
+    let height = f64::from(menu.size.height);
+    let top = f64::from(menu.origin.y) - f64::from(viewport.origin.y);
     assert!(
         (height - 336.0).abs() <= 4.0,
-        "the expanded list caps at 70 % of the 480 px viewport, got {height}"
+        "the menu caps at 70 % of the 480 px viewport, got {height}"
     );
     assert!(
         (top - 72.0).abs() <= 4.0,
-        "the capped rail centers instead of pinning top at zero, got {top}"
+        "the capped menu centers instead of pinning top at zero, got {top}"
+    );
+}
+
+/// A menu whose rows all fit has nothing to scroll to: a wheel over it leaves
+/// every row where it was instead of sliding them into empty space.
+#[gpui::test]
+fn navigator_menu_that_fits_does_not_scroll(cx: &mut TestAppContext) {
+    const FIRST_ROW: &str = "artisan-conversation-surface-turn-navigator-control-nav-first-row";
+    cx.update(|app| app.set_reduce_motion(true));
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    settle(cx);
+    let rail = cx
+        .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+        .expect("rail paints");
+    cx.simulate_mouse_move(rail.center(), None::<gpui::MouseButton>, Modifiers::none());
+    settle(cx);
+    let first = cx.debug_bounds(FIRST_ROW).expect("first row paints");
+    cx.simulate_mouse_move(first.center(), None::<gpui::MouseButton>, Modifiers::none());
+    settle(cx);
+    for lines in [-6.0f32, 6.0] {
+        cx.simulate_event(ScrollWheelEvent {
+            position: first.center(),
+            delta: ScrollDelta::Lines(point(0.0f32, lines)),
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::default(),
+        });
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds(FIRST_ROW),
+            Some(first),
+            "a wheel of {lines} lines moves nothing in a menu that fits"
+        );
+        cx.update(|_, app| {
+            assert_eq!(surface.read(app).navigator_scroll.offset().y, px(0.0));
+        });
+    }
+}
+
+/// The menu floats beside the rail: opening it leaves the rail exactly where
+/// it was, the card sits left of the rail inside the transcript column, and
+/// the pointer can travel from the rail into the menu and along its rows
+/// without the menu closing or moving.
+#[gpui::test]
+fn navigator_menu_floats_beside_a_rail_that_never_moves(cx: &mut TestAppContext) {
+    const FIRST_ROW: &str = "artisan-conversation-surface-turn-navigator-control-nav-first-row";
+    const SECOND_ROW: &str = "artisan-conversation-surface-turn-navigator-control-nav-second-row";
+    cx.update(|app| app.set_reduce_motion(true));
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(tall_navigator_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    settle(cx);
+    let resting = cx
+        .debug_bounds(TURN_NAVIGATOR_SELECTOR)
+        .expect("rail paints");
+    assert!(
+        cx.debug_bounds(TURN_NAVIGATOR_MENU_SELECTOR).is_none(),
+        "the menu stays closed at rest"
+    );
+
+    cx.simulate_mouse_move(
+        resting.center(),
+        None::<gpui::MouseButton>,
+        Modifiers::none(),
+    );
+    settle(cx);
+    let opened = cx
+        .debug_bounds(TURN_NAVIGATOR_MENU_SELECTOR)
+        .expect("rail hover opens the menu");
+    let viewport = cx
+        .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+        .expect("viewport paints");
+    assert_eq!(
+        cx.debug_bounds(TURN_NAVIGATOR_SELECTOR),
+        Some(resting),
+        "opening the menu neither moves nor resizes the rail"
+    );
+    assert!(
+        opened.right() <= resting.left(),
+        "the menu {opened:?} sits beside the rail {resting:?}, not over it"
+    );
+    assert!(
+        opened.left() >= viewport.left(),
+        "the menu {opened:?} stays inside the transcript column {viewport:?}"
+    );
+    assert!(
+        (opened.center().y - viewport.center().y).abs() <= px(1.0),
+        "the menu centers on the viewport like the rail"
+    );
+
+    // Across the gap and along the rows: still open, still in place.
+    let first = cx.debug_bounds(FIRST_ROW).expect("first row paints");
+    let second = cx.debug_bounds(SECOND_ROW).expect("second row paints");
+    for position in [
+        point(opened.right() + px(2.0), first.center().y),
+        first.center(),
+        second.center(),
+    ] {
+        cx.simulate_mouse_move(position, None::<gpui::MouseButton>, Modifiers::none());
+        settle(cx);
+        assert_eq!(
+            cx.debug_bounds(TURN_NAVIGATOR_MENU_SELECTOR),
+            Some(opened),
+            "the menu holds its place with the pointer at {position:?}"
+        );
+        assert_eq!(cx.debug_bounds(FIRST_ROW), Some(first));
+    }
+
+    // A menu row is a pointer target for the same marker as its tick.
+    cx.update(|_, app| {
+        surface.update(app, |surface, _| drop(surface.take_actions()));
+    });
+    cx.simulate_click(second.center(), Modifiers::none());
+    let targets = cx.update(|_, app| {
+        surface.update(app, |surface, _| {
+            surface
+                .take_actions()
+                .into_iter()
+                .filter_map(|action| match action {
+                    ConversationSurfaceAction::ScrollIntent { target } => Some(target),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    assert_eq!(
+        targets,
+        vec![ConversationSurfaceTarget::Item(
+            ItemId::parse("nav-second").expect("user message id"),
+        )]
+    );
+
+    cx.simulate_mouse_move(
+        point(viewport.left() + px(4.0), viewport.top() + px(4.0)),
+        None::<gpui::MouseButton>,
+        Modifiers::none(),
+    );
+    settle(cx);
+    assert!(
+        cx.debug_bounds(TURN_NAVIGATOR_MENU_SELECTOR).is_none(),
+        "leaving the rail and the menu closes it"
     );
 }
 
@@ -712,6 +854,373 @@ fn jump_to_latest_interpolates_and_reaches_the_bottom(cx: &mut TestAppContext) {
         }
     }
     panic!("jump animation did not settle");
+}
+
+#[gpui::test]
+fn a_travelling_jump_reports_the_end_when_it_settles(cx: &mut TestAppContext) {
+    // The controller stays in its scrolling state until the reader is
+    // reported at the end. The last report before the jump already said
+    // "at the end" (the surface starts that way), so a settled jump must
+    // report it again rather than leave the controller ignoring every
+    // extent change that streaming brings afterwards.
+    let body = "long transcript line\n".repeat(80);
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(vec![item(
+                "jump-body",
+                1,
+                SceneItemKind::UserMessage { body },
+                None,
+            )]),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(240.0)));
+    settle(cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            let _ = surface.take_actions();
+            surface.smooth_scroll_to_bottom(cx);
+        });
+    });
+    cx.run_until_parked();
+    for _ in 0..80 {
+        std::thread::sleep(Duration::from_millis(16));
+        cx.update(|window, app| {
+            surface.update(app, |surface, cx| {
+                surface.advance_transcript_scroll(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let active = cx.update(|_, app| surface.read(app).smooth_bottom_active);
+        if !active {
+            let actions =
+                cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()));
+            assert!(
+                actions.contains(&ConversationSurfaceAction::ViewportObserved(
+                    ViewportObservation {
+                        first_visible: None,
+                        last_visible: None,
+                        at_bottom: true,
+                    }
+                )),
+                "a settled jump must report the reader at the end: {actions:?}"
+            );
+            return;
+        }
+    }
+    panic!("jump animation did not settle");
+}
+
+#[gpui::test]
+fn a_new_tail_turn_is_brought_into_view_through_its_reserved_space(cx: &mut TestAppContext) {
+    // A sent message becomes the transcript's new last turn. The end space
+    // reserves exactly the room that aligns it at the top of the viewport,
+    // and the automatic follow must take the reader there even though that
+    // reserve is far larger than the base end space. Growth of that same
+    // turn afterwards is absorbed by the reserve, not followed.
+    fn transcript(with_new_turn: bool) -> ConversationScene {
+        let mut turns = vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Completed,
+        )];
+        let mut items = vec![
+            SceneItem::new(
+                scene_id("older"),
+                turn_id("turn_a"),
+                2,
+                SceneItemKind::UserMessage {
+                    body: body().repeat(10),
+                },
+                None,
+            )
+            .unwrap(),
+        ];
+        if with_new_turn {
+            turns.push(SceneTurn::new(
+                turn_id("turn_b"),
+                1,
+                ConversationLifecycle::Active,
+            ));
+            items.push(
+                SceneItem::new(
+                    scene_id("latest"),
+                    turn_id("turn_b"),
+                    3,
+                    SceneItemKind::UserMessage {
+                        body: "New turn".to_owned(),
+                    },
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        ConversationScene::build(turns, items, Vec::new(), Vec::new()).unwrap()
+    }
+    let (surface, cx) = cx
+        .add_window_view(|_, cx| ConversationSurface::new(transcript(false), ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    assert_eq!(
+        offset(&surface, cx).y,
+        px(0.0),
+        "the reader starts at the top"
+    );
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(transcript(true), cx);
+            surface.follow_to_bottom(cx);
+        });
+    });
+    settle(cx);
+    settle(cx);
+    cx.update(|_, app| {
+        let handle = surface.read(app).scroll_handle();
+        assert!(handle.max_offset().y > px(0.0));
+        assert!(
+            (handle.offset().y + handle.max_offset().y).abs() < px(0.5),
+            "a new tail turn is brought into view: {:?} of {:?}",
+            handle.offset().y,
+            handle.max_offset().y
+        );
+    });
+    assert!(
+        cx.debug_bounds(TRANSCRIPT_END_SPACE_SELECTOR)
+            .unwrap()
+            .size
+            .height
+            > px(TRANSCRIPT_END_SPACE_PX),
+        "the new turn keeps its reserved reading space"
+    );
+    let aligned = offset(&surface, cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.follow_to_bottom(cx)));
+    settle(cx);
+    assert_eq!(
+        offset(&surface, cx),
+        aligned,
+        "following the same tail leaves the reserved space in control"
+    );
+}
+
+#[gpui::test]
+fn a_sent_row_is_a_new_tail_to_follow(cx: &mut TestAppContext) {
+    // The Forge outbox row of a sent message paints at the transcript tail
+    // before its turn is delivered; an automatic follow brings it into view
+    // exactly like a new turn.
+    let (surface, cx) = cx.add_window_view(|_, cx| {
+        ConversationSurface::new(
+            scene(vec![item(
+                "older",
+                1,
+                SceneItemKind::UserMessage {
+                    body: body().repeat(10),
+                },
+                None,
+            )]),
+            ThemeMode::Dark,
+            cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    assert_eq!(offset(&surface, cx).y, px(0.0));
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.show_queued_text("Sent just now".to_owned(), cx);
+            surface.follow_to_bottom(cx);
+        });
+    });
+    settle(cx);
+    settle(cx);
+    cx.update(|_, app| {
+        let handle = surface.read(app).scroll_handle();
+        assert!(handle.max_offset().y > px(0.0));
+        assert!(
+            (handle.offset().y + handle.max_offset().y).abs() < px(0.5),
+            "the sent row is brought into view"
+        );
+    });
+}
+
+#[gpui::test]
+fn showing_jump_to_latest_re_reports_the_reader_at_the_end(cx: &mut TestAppContext) {
+    // A detach the surface never observed (a disclosure toggle, an
+    // interrupted jump) shows the jump control. The reader's next return to
+    // the end must be reported even when the last report already said so,
+    // or the controller could never re-attach within the follow leeway.
+    let long_scene = scene(vec![item(
+        "reply",
+        1,
+        SceneItemKind::AssistantMessage {
+            body: "Streaming paragraph.\n\n".repeat(40),
+            phase: AssistantPhase::Final,
+        },
+        None,
+    )]);
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(long_scene, ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            let _ = surface.take_actions();
+            let maximum = f32::from(surface.scroll_handle.max_offset().y);
+            surface.observe_wheel_destination(-maximum + 8.0, maximum, cx);
+            assert!(
+                surface.pending_actions().is_empty(),
+                "an unchanged at-the-end report is not repeated"
+            );
+            surface.set_jump_to_latest_visible(true, cx);
+            surface.observe_wheel_destination(-maximum + 8.0, maximum, cx);
+            assert!(
+                matches!(
+                    surface.pending_actions().last(),
+                    Some(ConversationSurfaceAction::ViewportObserved(
+                        ViewportObservation {
+                            at_bottom: true,
+                            ..
+                        }
+                    )),
+                ),
+                "{:?}",
+                surface.pending_actions()
+            );
+        });
+    });
+}
+
+#[gpui::test]
+fn a_jump_with_nothing_to_scroll_completes_at_once_and_reports_the_end(cx: &mut TestAppContext) {
+    // A transcript that fits its viewport has no travel: the jump is done
+    // on request, the reader is reported at the end so the controller
+    // leaves its scrolling state, and the next wheel tick is an ordinary
+    // scroll, never an interrupted jump that would detach the reader.
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            scene(vec![item(
+                "short-body",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "One short line.".to_owned(),
+                },
+                None,
+            )]),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    settle(cx);
+    cx.update(|_, app| {
+        assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0));
+        surface.update(app, |surface, _| {
+            let _ = surface.take_actions();
+        });
+    });
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.smooth_scroll_to_bottom(cx)));
+    settle(cx);
+    let actions = cx.update(|_, app| {
+        surface.update(app, |surface, _| {
+            assert!(
+                !surface.smooth_bottom_active,
+                "a jump with no travel must not stay armed"
+            );
+            surface.take_actions()
+        })
+    });
+    assert!(
+        actions.contains(&ConversationSurfaceAction::ViewportObserved(
+            ViewportObservation {
+                first_visible: None,
+                last_visible: None,
+                at_bottom: true,
+            }
+        )),
+        "the completed jump must report the reader at the end: {actions:?}"
+    );
+    let viewport = cx
+        .debug_bounds(CONVERSATION_VIEWPORT_SELECTOR)
+        .expect("viewport paints");
+    cx.simulate_event(ScrollWheelEvent {
+        position: viewport.center(),
+        delta: ScrollDelta::Lines(point(0.0f32, 3.0f32)),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::default(),
+    });
+    settle(cx);
+    let actions = cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()));
+    assert!(
+        !actions.contains(&ConversationSurfaceAction::BottomScrollInterrupted),
+        "a wheel tick after a no-op jump is not an interrupted jump: {actions:?}"
+    );
+    assert!(
+        !actions.iter().any(|action| matches!(
+            action,
+            ConversationSurfaceAction::ViewportObserved(ViewportObservation {
+                at_bottom: false,
+                ..
+            })
+        )),
+        "nothing overflows, so the reader can never leave the end: {actions:?}"
+    );
+}
+
+#[gpui::test]
+fn content_that_stops_overflowing_reports_the_end_again(cx: &mut TestAppContext) {
+    // The reader detached while the transcript overflowed; once it shrinks
+    // to fit, there is nowhere to be but the end. The report repeats even
+    // though the last one already said so, because the controller may have
+    // detached in between without any observation recording it.
+    fn transcript(lines: usize) -> ConversationScene {
+        scene(vec![item(
+            "shrinking",
+            1,
+            SceneItemKind::UserMessage {
+                body: "A transcript line.\n".repeat(lines),
+            },
+            None,
+        )])
+    }
+    let (surface, cx) =
+        cx.add_window_view(|_, cx| ConversationSurface::new(transcript(60), ThemeMode::Dark, cx));
+    cx.simulate_resize(size(px(720.0), px(240.0)));
+    settle(cx);
+    cx.update(|_, app| surface.update(app, |surface, cx| surface.scroll_to_bottom(cx)));
+    settle(cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            let _ = surface.take_actions();
+            // The last report already says "at the end".
+            let _ = surface.observe_viewport(
+                ViewportObservation {
+                    first_visible: None,
+                    last_visible: None,
+                    at_bottom: true,
+                },
+                cx,
+            );
+            let _ = surface.take_actions();
+            surface.replace_scene(transcript(1), cx);
+        })
+    });
+    settle(cx);
+    let actions = cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()));
+    cx.update(|_, app| assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0)));
+    assert!(actions.contains(&ConversationSurfaceAction::ViewportExtentChanged));
+    assert!(
+        actions.contains(&ConversationSurfaceAction::ViewportObserved(
+            ViewportObservation {
+                first_visible: None,
+                last_visible: None,
+                at_bottom: true,
+            }
+        )),
+        "content that fits must report the reader at the end: {actions:?}"
+    );
 }
 
 #[gpui::test]

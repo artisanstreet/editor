@@ -4,7 +4,8 @@
 //! actions on its stored payload: `Retry` (only when the Forge reports the
 //! failure retryable) dispatches it again, and `Start new chat` moves the
 //! prompt into a new thread as an unsent draft. Both name the failure by
-//! identity; no prompt text leaves this view.
+//! identity; no prompt text leaves this view. Dismiss hides the notice locally
+//! while preserving the stored prompt and its failure.
 
 use super::*;
 
@@ -169,7 +170,8 @@ impl NativeComposerControls {
                         .child("Images move with the prompt."),
                 );
             }
-            cards = cards.child(
+            cards = cards.child(crate::dismissible_notice::DismissibleNotice::new(
+                format!("failed-{}-{generation}", row.command_id()),
                 div()
                     .w_full()
                     .flex()
@@ -188,7 +190,8 @@ impl NativeComposerControls {
                     .py(px(12.0))
                     .child(body)
                     .child(actions),
-            );
+                theme,
+            ));
         }
         Some(cards)
     }

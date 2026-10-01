@@ -175,6 +175,22 @@ async fn apply_navigation(
     let remembered = thread
         .cloned()
         .or_else(|| current.navigation.last_thread(project).cloned());
+    // The reader has seen the thread being left up to now, and opens the
+    // next one now: both count as read, whether or not the route moves.
+    let left = current
+        .navigation
+        .route()
+        .and_then(|route| route.thread_id.as_ref());
+    for seen in left.into_iter().chain(remembered.as_ref()) {
+        execute(
+            transaction,
+            "INSERT INTO thread_reads (thread_id, read_at_ms) VALUES (?, ?) \
+             ON CONFLICT(thread_id) DO UPDATE SET read_at_ms = MAX(read_at_ms, excluded.read_at_ms)",
+            [text(seen.as_str()), Value::BigInt(Some(at.as_millis()))],
+            "record thread read",
+        )
+        .await?;
+    }
     let unchanged =
         current.navigation.projects().first().is_some_and(|first| {
             &first.project_id == project && first.last_thread_id == remembered

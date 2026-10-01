@@ -51,7 +51,7 @@ pub(crate) use super::process::StartDiagnostic;
 #[allow(unused_imports)]
 pub(crate) use self::claude::read_claude_line;
 #[allow(unused_imports)]
-pub(crate) use self::claude::service_claude_steer_delivery;
+pub(crate) use self::claude::service_claude_delivery;
 #[allow(unused_imports)]
 pub(crate) use self::codex::{
     ack_codex_steer_response, service_codex_delivery, service_codex_steer_delivery,
@@ -67,4 +67,6 @@ pub(crate) use super::codex::{
 // Owner entry points re-exported for `engine_owner::mod` and the seeded owner
 // tests.
 #[allow(unused_imports)]
-pub(crate) use self::owner::{run_configured_owner, run_owner, run_owner_with_allocator};
+pub(crate) use self::owner::{
+    ClaudeDisplayRefusals, run_configured_owner, run_owner, run_owner_with_allocator,
+};

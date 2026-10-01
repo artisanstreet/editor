@@ -109,6 +109,7 @@ fn thread() -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("thread-1").expect("fixture thread id is valid"),
         project_id: ProjectId::parse("project-1").expect("fixture project id is valid"),
@@ -570,6 +571,7 @@ fn every_response_family_roundtrips_with_independent_server_frames() -> Result<(
             payload: ResponsePayload::ThreadListing(ThreadListing::new(vec![ThreadSummary {
                 has_started_response: true,
                 has_active_work: true,
+                attention: artisan_domain::ThreadAttention::AwaitingAnswer,
                 last_message_at: Some(UnixMillis::from_millis(12345)),
                 ..thread()
             }])?),

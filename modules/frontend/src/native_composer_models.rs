@@ -50,10 +50,14 @@ impl NativeApplication {
     ) {
         // The Forge makes the configuration a choice saves the default new
         // threads start from, and pushes it.
-        self.composer_model_choice = Some((self.selected_thread.clone(), policy.clone()));
+        let scope = self.composer.read(cx).draft_scope();
+        self.composer_model_choices.insert(scope, policy.clone());
         self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
-        let Some(thread) = self.selected_thread.clone() else {
+        // Only a thread's own draft saves the choice onto it: a choice made
+        // in a new task's draft (or while its thread is being left) is sent
+        // with that draft instead.
+        let Some(thread) = self.model_choice_thread(cx) else {
             return;
         };
         if self.engine_settings.pending_save_request_id().is_some() {
@@ -63,6 +67,27 @@ impl NativeApplication {
         self.deferred_composer_policy = None;
         self.request_selection_resolution(thread, policy);
         self.sync_composer_model_policy(cx);
+    }
+
+    /// The model chosen in the draft the composer shows.
+    pub(super) fn composer_model_choice(
+        &self,
+        cx: &App,
+    ) -> Option<&crate::native_model_catalog::NativeModelPolicy> {
+        self.composer_model_choices
+            .get(&self.composer.read(cx).draft_scope())
+    }
+
+    /// The thread the composer's choice is saved onto: the selected thread,
+    /// while the composer shows its draft (or no draft at all) and no switch
+    /// is leaving it. A composer on another draft, such as a new task's,
+    /// saves nothing onto it.
+    pub(super) fn model_choice_thread(&self, cx: &App) -> Option<ThreadId> {
+        let thread = self.selected_thread.as_ref()?;
+        let own_draft = self.composer.read(cx).draft_scope().is_none_or(|scope| {
+            scope == artisan_domain::ComposerDraftScope::Thread(thread.clone())
+        });
+        (self.thread_switch_flight.is_none() && own_draft).then(|| thread.clone())
     }
 
     /// Asks the Forge to resolve the displayed choice into the configuration
@@ -115,11 +140,11 @@ impl NativeApplication {
                 if self.engine_settings.pending_save_request_id().is_some() {
                     // A save began meanwhile; its acknowledgement resolves
                     // the latest choice again.
+                    let scope = artisan_domain::ComposerDraftScope::Thread(thread_id.clone());
                     self.deferred_composer_policy = self
-                        .composer_model_choice
-                        .as_ref()
-                        .filter(|(thread, _)| thread.as_ref() == Some(&thread_id))
-                        .map(|(_, choice)| (thread_id.clone(), choice.clone()));
+                        .composer_model_choices
+                        .get(&Some(scope))
+                        .map(|choice| (thread_id.clone(), choice.clone()));
                 } else if self.engine_settings.authoritative_config() != Some(&*config)
                     && !self.submit_direct_save(thread_id, *config)
                 {
@@ -142,18 +167,15 @@ impl NativeApplication {
     /// error recovers a stranded selection exactly like the original one.
     /// Returns whether a resolution was requested.
     fn retry_policy_save(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(thread_id) = self.selected_thread.clone() else {
+        let Some(thread_id) = self.model_choice_thread(cx) else {
             return false;
         };
         if self.engine_settings.pending_save_request_id().is_some() {
             return false;
         }
-        let Some((choice_thread, choice)) = self.composer_model_choice.clone() else {
+        let Some(choice) = self.composer_model_choice(cx).cloned() else {
             return false;
         };
-        if choice_thread != self.selected_thread {
-            return false;
-        }
         self.composer_model_run_error = None;
         self.request_selection_resolution(thread_id, &choice);
         self.sync_composer_model_policy(cx);
@@ -312,12 +334,11 @@ impl NativeApplication {
     }
 
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
-        if self
-            .composer_model_choice
-            .as_ref()
-            .is_some_and(|(thread, _)| thread != &self.selected_thread)
-        {
-            self.composer_model_choice = None;
+        // A run error belongs to the draft it was shown for; the choice of
+        // every draft stays with it.
+        let scope = self.composer.read(cx).draft_scope();
+        if self.composer_model_scope != scope {
+            self.composer_model_scope.clone_from(&scope);
             self.composer_model_run_error = None;
         }
         // The saved configuration displays as the catalog row and options
@@ -334,22 +355,32 @@ impl NativeApplication {
             *choice = rebased;
         }
 
-        if let Some((_, choice)) = self.composer_model_choice.as_mut()
+        if let Some(choice) = self.composer_model_choices.get_mut(&scope)
             && let Some(rebased) = snapshot.rebase_policy(choice)
         {
             *choice = rebased;
         }
+        // A thread's choice has done its work once its saved configuration
+        // carries it; the saved configuration then speaks for the thread.
+        let pending_save = self.engine_settings.pending_save_request_id().is_some();
+        if saved_policy.is_some()
+            && !pending_save
+            && self.pending_resolution.is_none()
+            && self.model_choice_thread(cx).is_some()
+            && self.composer_model_choices.get(&scope) == saved_policy.as_ref()
+        {
+            self.composer_model_choices.remove(&scope);
+        }
 
         let policy = self
-            .composer_model_choice
-            .as_ref()
-            .and_then(|(_, choice)| snapshot.rebase_policy(choice))
+            .composer_model_choices
+            .get(&scope)
+            .and_then(|choice| snapshot.rebase_policy(choice))
             .or_else(|| saved_policy.clone())
             .or_else(|| self.default_display_policy(&snapshot));
         // The displayed choice is authoritative exactly when it is the saved
         // configuration's own display.
         let authoritative = policy.is_some() && policy == saved_policy;
-        let pending_save = self.engine_settings.pending_save_request_id().is_some();
         let saving = pending_save
             || self.pending_resolution.is_some()
             || self.catalog_controller.catalog_loading()

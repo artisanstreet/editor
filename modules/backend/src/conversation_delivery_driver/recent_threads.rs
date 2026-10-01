@@ -27,6 +27,11 @@ pub(crate) struct RequestFollowUp {
     /// The engine installs a read or version change served: the connection
     /// now receives their changes.
     pub(crate) engine_installs: Option<artisan_domain::EngineInstallSnapshot>,
+    /// The oldest turn a windowed subscriber holds, by ordinal: its thread's
+    /// activity replay covers the turns from there on and leaves the work
+    /// rows of settled turns on the Forge. `None` for a subscriber that did
+    /// not ask for a window, which receives every row.
+    pub(crate) history_floor: Option<(ThreadId, u64)>,
 }
 
 impl RequestFollowUp {
@@ -54,11 +59,32 @@ impl RequestFollowUp {
             Some(ResponsePayload::EngineInstalls(snapshot)) => Some(snapshot.clone()),
             _ => None,
         };
+        let history_floor = match (request, payload) {
+            (
+                ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)),
+                Some(ResponsePayload::ConversationSubscriptionStarted(started)),
+            ) => match started {
+                artisan_protocol::ConversationSubscriptionStarted::Fresh(start) => {
+                    subscribe.newest_turns.map(|_| {
+                        let oldest = start.snapshot().turns().first();
+                        (
+                            subscribe.thread_id.clone(),
+                            oldest.map_or(0, |turn| turn.ordinal.get()),
+                        )
+                    })
+                }
+                artisan_protocol::ConversationSubscriptionStarted::Resumed { .. } => subscribe
+                    .history_floor
+                    .map(|floor| (subscribe.thread_id.clone(), floor.get())),
+            },
+            _ => None,
+        };
         Self {
             stopped_thread,
             recent_threads,
             project_catalog,
             engine_installs,
+            history_floor,
         }
     }
 }

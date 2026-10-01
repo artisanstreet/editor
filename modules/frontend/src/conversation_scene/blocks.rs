@@ -68,10 +68,17 @@ pub enum SceneItemKind {
     FileChange { file: SceneFileChange },
     /// Plan/checklist card.
     Plan { title: String, entries: Vec<String> },
-    /// Approval request card.
-    Approval { prompt: String },
-    /// Question card.
-    Question { prompt: String },
+    /// Approval request card: the bounded prompt and the engine's own
+    /// approval identity, which the answer submits back.
+    Approval {
+        prompt: String,
+        approval_id: ObservationId,
+    },
+    /// Agent question with its answer once given.
+    Question {
+        prompt: String,
+        answer: Option<String>,
+    },
     /// Error card.
     Error { message: String },
     /// Usage or provider interruption card.
@@ -194,6 +201,12 @@ pub enum WorkGroupLabel {
     ThoughtFor { millis: u64 },
     /// Completed ordinary work.
     WorkedFor { millis: u64 },
+    /// The turn failed.
+    Failed,
+    /// The turn was interrupted.
+    Interrupted,
+    /// The turn was cancelled.
+    Cancelled,
 }
 
 impl WorkGroupLabel {
@@ -203,6 +216,9 @@ impl WorkGroupLabel {
         match self {
             Self::ThoughtFor { millis } => format!("Thought for {millis}ms"),
             Self::WorkedFor { millis } => format!("Worked for {millis}ms"),
+            Self::Failed => "Failed".to_owned(),
+            Self::Interrupted => "Interrupted".to_owned(),
+            Self::Cancelled => "Cancelled".to_owned(),
         }
     }
 }
@@ -395,8 +411,21 @@ pub struct WorkGroupBlock {
     /// The session's run, when run evidence identified one.
     pub session_run: Option<RunId>,
     /// Whether later content in the same turn supersedes this session: a
-    /// superseded session never narrates live status.
+    /// superseded session never narrates live status. Mid-run user messages
+    /// (steers), their steering labels, and the session's own continuation
+    /// segments are not later content; a continuation itself is never
+    /// superseded because it never narrates.
     pub superseded: bool,
+    /// Present when this block continues the turn's one session after a
+    /// mid-run user message: the render-only segment anchor
+    /// (`session-{turn_id}.{n}`, `n` counting from 1) that gives the segment
+    /// its own scroll and selector identity. A continuation shares
+    /// [`Self::session`], [`Self::session_run`], and [`Self::disclosure`] with
+    /// the session's first segment, but carries no label, transition, or
+    /// reasoning summary: the first segment's header titles the whole
+    /// section and owns its live line, terminal label, and toggle. `None`
+    /// for the first segment and for legacy positional groups.
+    pub continuation: Option<SceneId>,
     /// Newest non-empty reasoning body in the session: the one live summary
     /// line while the turn is active, and the source of the collapsed
     /// thinking chip label once the group settles.
@@ -451,6 +480,10 @@ pub struct PlanBlock {
 pub struct ApprovalBlock {
     /// Scene identity.
     pub id: SceneId,
+    /// Owning run from the item's provenance; an answer submits against it.
+    pub run_id: Option<RunId>,
+    /// The engine's approval identity; an answer submits it verbatim.
+    pub approval_id: ObservationId,
     /// Bounded prompt.
     pub prompt: String,
     /// Explicit disclosure.
@@ -464,6 +497,9 @@ pub struct QuestionBlock {
     pub id: SceneId,
     /// Bounded prompt.
     pub prompt: String,
+    /// The answer once given: the chosen or typed answers joined, empty when
+    /// the question was skipped. [`None`] while it is still open.
+    pub answer: Option<String>,
     /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
@@ -555,7 +591,9 @@ pub struct TurnStatusBlock {
 /// stay fixed once set.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnFooterSettlement {
-    response_text: String,
+    /// Shared so a footer rendering every frame of a copy feedback clones a
+    /// handle, not the whole response.
+    response_text: gpui::SharedString,
     settled_at_ms: i64,
 }
 
@@ -574,7 +612,7 @@ impl TurnFooterSettlement {
             });
         }
         Ok(Self {
-            response_text,
+            response_text: gpui::SharedString::from(response_text),
             settled_at_ms,
         })
     }
@@ -583,6 +621,12 @@ impl TurnFooterSettlement {
     #[must_use]
     pub fn response_text(&self) -> &str {
         &self.response_text
+    }
+
+    /// Returns the response text as a cheaply cloned shared handle.
+    #[must_use]
+    pub fn response_text_shared(&self) -> gpui::SharedString {
+        self.response_text.clone()
     }
 
     /// Returns the authoritative Forge settlement time in Unix millis.

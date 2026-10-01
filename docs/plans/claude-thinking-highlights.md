@@ -1,6 +1,6 @@
 # Claude thinking highlights: reverse-engineering notes and integration plan
 
-- Status: research baseline retained; integration plan revised 2026-09-25; Packets A and B (public-summary release) implemented 2026-09-25 per [the decision](../decisions/CLAUDE_THINKING_DISPLAY.md); Packets C and D not started
+- Status: research baseline retained; integration plan revised 2026-09-25; Packets A and B (public-summary release) implemented 2026-09-25 per [the decision](../decisions/CLAUDE_THINKING_DISPLAY.md); Packets C and D partially implemented 2026-09-27 (`summarized` is the shipped default, with summaries decoding and the observed-refusal fallback implemented and tested behind an evidence gate that is currently closed). Eligibility verification is settled negatively for every client-constructible request: the API extends the display enum only for sessions carrying `x-claude-remote-session-id`, which the CLI sends solely from `CLAUDE_CODE_REMOTE_SESSION_ID`, so a local subscription launch can never qualify
 - Research frozen: 2026-09-25
 - Scope: how the Claude app produces its one-line thinking label, what the Claude Code CLI supports, and how to bring it to Artisan
 - Evidence baseline: Claude desktop app 1.40609.1 (MSIX `Claude_2.9939.2.0_x64__pzs8sxrjxfjjc`), embedded Claude Code 2.1.255, claude.ai web build `b1fcb81587`
@@ -271,6 +271,15 @@ Do not claim that receipt time of the first public summary is model thinking sta
 Acceptance: a supported Claude turn shows a useful live line through the durable observation pipeline, survives replay, and leaves answer text, tools, usage, child attribution, Codex rendering, and older-CLI execution intact.
 
 ### 2.6 Packet C: hosted highlights experiment
+
+Evidence update (2026-09-27): the capture ran through Artisan's managed argv
+and answered the first question negatively for the only context available: the
+server rejects `highlights` with HTTP 400, the CLI silently retries with
+`omitted`, and no rejection signal reaches stdout, stderr, or the result frame
+(see `tests/fixtures/claude/highlights-refused.jsonl` and the decision).
+The questions below remain open for an eligible context; until one is
+captured, title arrival timing and live replacement semantics are unverified
+and the implementation projects only titles it actually recognizes.
 
 Use Part 1's `--thinking-display highlights` finding directly in a separate fixture capture with the same execution context as Artisan. A paid subscription alone is not proof of Anthropic-hosted eligibility. Record success or rejection as an observed property of that context.
 

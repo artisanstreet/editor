@@ -19,7 +19,7 @@ use std::fmt;
 
 use artisan_domain::{
     AssistantMessagePhase, ConversationItem, ConversationLifecycle, ConversationPatch,
-    ConversationSnapshot, ConversationTurn, ItemId, RunId, ThreadId, TurnId,
+    ConversationSnapshot, ConversationTurn, ItemId, ObservationId, RunId, ThreadId, TurnId,
 };
 use thiserror::Error;
 
@@ -67,6 +67,7 @@ pub struct ConversationStateController {
     /// turns that leave the authoritative snapshot are pruned during
     /// synchronization.
     turn_engine_labels: BTreeMap<TurnId, TurnEngineLabel>,
+    optimistic_cancelled_turn: Option<TurnId>,
     disclosures: BTreeMap<SceneId, DisclosureController>,
     facts: BTreeMap<SceneId, SceneFact>,
     viewport: ViewportController,

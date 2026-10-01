@@ -740,21 +740,33 @@ fn decode_observation(object: &Map<String, Value>) -> Result<Observation, Observ
             .map_err(ObservationCommitError::InvalidObservation)
         }
         "question" => {
-            require_keys(
-                object,
-                &[
-                    "tag",
-                    "id",
-                    "sequence",
-                    "question_id",
-                    "state",
-                    "text",
-                    "header",
-                    "multi_select",
-                    "options",
-                    "answers",
-                ],
-            )?;
+            const QUESTION_KEYS: [&str; 10] = [
+                "tag",
+                "id",
+                "sequence",
+                "question_id",
+                "state",
+                "text",
+                "header",
+                "multi_select",
+                "options",
+                "answers",
+            ];
+            // A questionnaire member also stores its group; a question asked
+            // alone (and every row written before questionnaires) omits it.
+            let group_id = if object.contains_key("group_id") {
+                let mut keys = QUESTION_KEYS.to_vec();
+                keys.push("group_id");
+                require_keys(object, &keys)?;
+                Some(
+                    ObservationId::parse(get_str(object, "group_id")?.to_owned())
+                        .map_err(ObservationError::Identifier)
+                        .map_err(ObservationCommitError::InvalidObservation)?,
+                )
+            } else {
+                require_keys(object, &QUESTION_KEYS)?;
+                None
+            };
             let (id, sequence) = header(object)?;
             let input = QuestionInput {
                 question_id: ObservationId::parse(get_str(object, "question_id")?.to_owned())
@@ -780,6 +792,10 @@ fn decode_observation(object: &Map<String, Value>) -> Result<Observation, Observ
                     Err(ObservationError::MissingField { field: "answers" })
                 }
             }
+            .map(|question| match group_id {
+                Some(group_id) => question.with_group(group_id),
+                None => question,
+            })
             .map(Observation::Question)
             .map_err(ObservationCommitError::InvalidObservation)
         }

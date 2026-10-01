@@ -18,6 +18,7 @@
   nativeTools,
   releaseTrust,
   graphicsLibraryPath,
+  rerunnableBuild,
 }:
 let
   # Debug favours build speed; Production favours runtime speed (Cargo.toml
@@ -220,6 +221,7 @@ let
       common =
         (if settings.fastLink then host.fastLinker else host.environment)
         // lib.optionalAttrs (stage == "production") releaseTrust
+        // rerunnableBuild
         // {
           inherit src version;
           strictDeps = true;
@@ -266,6 +268,7 @@ let
       common =
         host.environment
         // releaseTrust
+        // rerunnableBuild
         // lib.optionalAttrs (platform == "linux") {
           ARTISAN_DEV_GRAPHICS_LIBRARY_PATH = graphicsLibraryPath;
         }

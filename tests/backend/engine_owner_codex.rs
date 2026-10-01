@@ -37,7 +37,7 @@ use super::codex::{
     CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
     CodexLineError, CodexPendingTracker, CodexQuotaWindowKind, CodexSettings,
     CodexTerminalLifecycle, CodexToolAction, CodexTurnState, CodexUsageAttribution,
-    CodexUsageContext, CodexUsageScope, answer_approval, answer_questions, apply_event,
+    CodexUsageContext, CodexUsageScope, answer_approval, apply_event,
     check_codex_native_continuation, clamp_codex_percent_used, classify_codex_quota_window_kind,
     classify_exit, codex_account_read_line, codex_cli_meets_minimum, codex_rate_limits_read_line,
     codex_requires_group_termination, codex_reset_at_iso, codex_usage_report, has_stalled,
@@ -423,7 +423,7 @@ fn delta_turn_approval_question_subagent_frames_decode() {
     }
 
     let question = parse_frame(
-        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"}]}}"#,
+        r#"{"id":4,"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"}]}}"#,
         4,
     )
     .expect("question decodes");
@@ -478,8 +478,8 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
     let run = run_id();
 
     for (approval_id, approved, decision) in [
-        ("approval-1", false, "denied"),
-        ("approval-2", true, "approved"),
+        ("approval-1", false, "decline"),
+        ("approval-2", true, "accept"),
     ] {
         let event = parse_frame(
             &format!(
@@ -531,40 +531,83 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
 async fn question_answer_and_steer_verbs_shape_lines() {
     let mut tracker = CodexPendingTracker::new();
     let event = parse_frame(
-        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"}]}}"#,
+        r#"{"id":9,"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"t-1","turnId":"turn-1","questions":[{"header":"Pick","id":"q1","question":"Which?"},{"id":"q2","question":"Anything else?"}]}}"#,
         1,
     )
     .expect("question decodes");
     let CodexEvent::QuestionRequested(request) = event else {
         panic!("expected question")
     };
-    assert_eq!(tracker.note_questions(&request), 1);
+    assert_eq!(tracker.note_question_request(&request).len(), 2);
+    assert!(
+        tracker.waiting_on_user(),
+        "an open request keeps the turn alive"
+    );
+    assert!(
+        tracker.note_question_request(&request).is_empty(),
+        "a repeated request never asks its questions twice"
+    );
 
+    // The request is answered only once every question has an answer; a
+    // skipped question is left out of the reply.
+    assert_eq!(
+        tracker
+            .record_question_answer("q-1:q2", &[])
+            .expect("the first answer records"),
+        None
+    );
+    assert_eq!(tracker.pending_questions(), 1);
+    assert!(
+        tracker
+            .record_question_answer("q-1:q2", &["twice".to_owned()])
+            .is_err(),
+        "an answered question never answers twice"
+    );
+    assert!(
+        tracker
+            .record_question_answer("q-9:q1", &["stray".to_owned()])
+            .is_err(),
+        "an unknown question is refused"
+    );
+    let reply = tracker
+        .record_question_answer("q-1:q1", &["first".to_owned()])
+        .expect("the last answer records")
+        .expect("the whole request replies");
+    assert!(!tracker.waiting_on_user());
     let (mut client, server) = tokio::io::duplex(65_536);
     let mut server = BufReader::new(server);
-    answer_questions(
-        &mut client,
-        &mut tracker,
-        "9",
-        &[("q1".to_owned(), vec!["first".to_owned()])],
-    )
-    .await
-    .expect("question answer writes");
+    write_line(&mut client, &reply).await.expect("reply writes");
     let mut line = String::new();
     server.read_line(&mut line).await.expect("answer readable");
     let value: serde_json::Value = serde_json::from_str(line.trim()).expect("answer json");
+    assert_eq!(value["id"], 9);
     assert_eq!(value["result"]["answers"]["q1"]["answers"][0], "first");
+    assert!(
+        value["result"]["answers"].get("q2").is_none(),
+        "a skipped question carries no answer"
+    );
 
     let mut request_id = 41;
-    steer_live_turn(&mut client, &mut request_id, "t-1", "turn-1", "follow up")
-        .await
-        .expect("steer writes");
+    steer_live_turn(
+        &mut client,
+        &mut request_id,
+        "t-1",
+        "turn-1",
+        "follow up",
+        &[],
+    )
+    .await
+    .expect("steer writes");
     assert_eq!(request_id, 42);
     line.clear();
     server.read_line(&mut line).await.expect("steer readable");
     let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
     assert_eq!(steer["method"], "turn/steer");
     assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+    assert_eq!(
+        steer["params"]["input"],
+        serde_json::json!([{ "text": "follow up", "text_elements": [], "type": "text" }])
+    );
 
     interrupt_live_turn(&mut client, &mut request_id, "t-1", "turn-1")
         .await
@@ -710,6 +753,79 @@ async fn steer_servicing_registers_ack_without_resolving_on_write() {
 }
 
 #[tokio::test]
+async fn steer_servicing_writes_images_as_native_user_input() {
+    // `turn/steer` takes the same ordered `UserInput` array as
+    // `turn/start`: text first, then native data-URL image items, and an
+    // image-only steer carries no empty text item.
+    use base64::Engine as _;
+
+    let bytes = vec![0, 127, 128, 255];
+    let image = artisan_domain::ImageAttachment::new("image/png", bytes.clone(), "pasted.png")
+        .expect("valid image attachment");
+    let data_url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    );
+    let (mut pump_end, provider_end) = tokio::io::duplex(65_536);
+    let mut provider_end = BufReader::new(provider_end);
+    let mut pending = std::collections::HashMap::new();
+    let mut next_id = 41u64;
+    let mut line = String::new();
+
+    let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+    service_codex_steer_delivery(
+        &mut pump_end,
+        &mut next_id,
+        "t-1",
+        Some("turn-1"),
+        SteerDelivery::new("req-steer-img".to_owned(), "look".to_owned(), ack_tx)
+            .with_images(vec![image.clone()]),
+        &mut pending,
+    )
+    .await;
+    provider_end
+        .read_line(&mut line)
+        .await
+        .expect("steer bytes readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(
+        steer["params"]["input"],
+        serde_json::json!([
+            { "text": "look", "text_elements": [], "type": "text" },
+            { "type": "image", "url": data_url },
+        ])
+    );
+
+    let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+    service_codex_steer_delivery(
+        &mut pump_end,
+        &mut next_id,
+        "t-1",
+        Some("turn-1"),
+        SteerDelivery::new("req-steer-img-only".to_owned(), String::new(), ack_tx)
+            .with_images(vec![image]),
+        &mut pending,
+    )
+    .await;
+    line.clear();
+    provider_end
+        .read_line(&mut line)
+        .await
+        .expect("image-only steer bytes readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    assert_eq!(
+        steer["params"]["input"],
+        serde_json::json!([{ "type": "image", "url": data_url }])
+    );
+    assert_eq!(
+        pending.len(),
+        2,
+        "both steers await their correlated result"
+    );
+}
+
+#[tokio::test]
 async fn steer_servicing_rejects_missing_turn_id_without_inventing_one() {
     // Pre-turn-start input with no known provider id rejects typed and
     // consumes no request id: the pump never fabricates an `expectedTurnId`.
@@ -736,7 +852,7 @@ async fn steer_servicing_rejects_missing_turn_id_without_inventing_one() {
 }
 
 #[tokio::test]
-async fn steer_text_without_channel_is_typed_unsupported() {
+async fn steer_message_without_channel_is_typed_unsupported() {
     // Cursor/grok/opencode2 turns never carry a sender: the attempt
     // resolves `Unsupported` without touching any pump or hanging.
     let (_prepared_tx, prepared_rx) = tokio::sync::oneshot::channel::<
@@ -759,13 +875,14 @@ async fn steer_text_without_channel_is_typed_unsupported() {
     );
     drop(authorize_rx);
     assert_eq!(
-        turn.steer_text("req-unsupported", "follow up").await,
+        turn.steer_message("req-unsupported", "follow up", Vec::new())
+            .await,
         Err(SteerError::Unsupported)
     );
 }
 
 #[tokio::test]
-async fn steer_text_future_holds_no_turn_borrow() {
+async fn steer_message_future_holds_no_turn_borrow() {
     // Frozen split-borrow shape (§1/§7): the dispatch arm builds the
     // steer future, then drains observations through `&mut turn` while
     // driving it. This compiles only if the future owns its clones and
@@ -793,7 +910,7 @@ async fn steer_text_future_holds_no_turn_borrow() {
         control,
         None,
     );
-    let pending = require_send_static(turn.steer_text("req-borrow", "follow up"));
+    let pending = require_send_static(turn.steer_message("req-borrow", "follow up", Vec::new()));
     // Mutable drain-side use BEFORE the first poll: borrows `turn`
     // mutably while the future is alive but unpolled.
     turn.authorize()
@@ -1183,7 +1300,7 @@ async fn fixture_approval_question_steer_shapes_before_close() {
     let responses = format!(
         "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n{}\n{}\n",
         r#"{"id":20,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-21","command":"echo hi","reason":"say hi"}}"#,
-        r#"{"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"thread-fixture-1","turnId":"turn-1","questions":[{"id":"q1","question":"Which?"}]}}"#,
+        r#"{"id":21,"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"thread-fixture-1","turnId":"turn-1","questions":[{"id":"q1","question":"Which?"}]}}"#,
         r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-9","parentThreadId":"thread-fixture-1"}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
     );
@@ -3865,4 +3982,44 @@ fn codex_image_only_input_has_native_images_without_placeholder_text() {
     let params = settings.turn_start_params_with_images("thread-images", "", &[image]);
     assert_eq!(params["input"].as_array().unwrap().len(), 1);
     assert_eq!(params["input"][0]["type"], "image");
+}
+
+#[test]
+fn blocking_question_requests_keep_options_and_join_one_questionnaire() {
+    let event = parse_frame(
+        r#"{"id":7,"method":"item/tool/requestUserInput","params":{"itemId":"call-9","threadId":"t-1","turnId":"turn-1","isBlocking":true,"questions":[{"header":"Scope","id":"scope","question":"How far should this go?","options":[{"label":"Only the API","description":"Leave the UI alone"},{"label":"Everything","description":""}]},{"header":"","id":"notes","question":"Anything else?"}]}}"#,
+        1,
+    )
+    .expect("question request decodes");
+    let CodexEvent::QuestionRequested(request) = event else {
+        panic!("expected a question request")
+    };
+    let [scope, notes] = request.questions() else {
+        panic!("both questions are kept")
+    };
+    // Provider ids are per-request keys; the questionnaire prefix keeps
+    // them unique on the thread.
+    assert_eq!(scope.question_id(), "call-9:scope");
+    assert_eq!(scope.group_id(), "call-9");
+    assert_eq!(notes.group_id(), "call-9");
+    // A blocking request with no answer yet keeps the pump waiting on the
+    // user instead of stalling the turn.
+    let mut tracker = CodexPendingTracker::new();
+    assert_eq!(tracker.note_question_request(&request).len(), 2);
+    assert!(tracker.waiting_on_user());
+    let input = scope
+        .to_domain_input()
+        .expect("the question fits the domain");
+    let options = input.options.expect("suggested answers are kept");
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0].label(), "Only the API");
+    assert_eq!(options[0].description(), Some("Leave the UI alone"));
+    assert_eq!(options[1].description(), None);
+    assert_eq!(input.header.as_deref(), Some("Scope"));
+    // No options means a free-text question; an empty header is no header.
+    let free = notes
+        .to_domain_input()
+        .expect("the question fits the domain");
+    assert!(free.options.is_none());
+    assert!(free.header.is_none());
 }

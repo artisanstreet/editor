@@ -111,13 +111,39 @@ pub(super) fn finite_duration(milliseconds: u64) -> Result<Duration, StartupErro
     Ok(Duration::from_millis(milliseconds))
 }
 
-fn build_snapshot_query(thread_id: ThreadId) -> Result<ConversationRequest, ServiceFailure> {
-    let maximum_turn_count = QueryTurnCount::new(u64::from(CONVERSATION_QUERY_MAX_TURNS))
-        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
-    Ok(ConversationRequest::Query(ConversationQuery {
+/// How many of a thread's newest turns a subscription opens on.
+///
+/// A thread shows its end first, so only the turns a reader can see, plus a
+/// few above for the first scroll, are read up front. Older turns arrive in
+/// pages of [`HISTORY_PAGE_TURNS`] as the reader scrolls toward them.
+pub const OPENING_TURNS: u16 = 8;
+
+/// How many older turns one on-demand page reads.
+pub const HISTORY_PAGE_TURNS: u16 = 8;
+
+/// [`OPENING_TURNS`] as a validated query count.
+pub(super) fn opening_turn_count() -> QueryTurnCount {
+    QueryTurnCount::new(u64::from(OPENING_TURNS)).expect("the opening window is within bounds")
+}
+
+/// Builds the request for one on-demand part of a thread's history.
+pub(super) fn history_request(
+    thread_id: ThreadId,
+    part: artisan_domain::ConversationHistoryPart,
+) -> ClientRequest {
+    ClientRequest::Conversation(ConversationRequest::History(
+        artisan_domain::ConversationHistoryRequest { thread_id, part },
+    ))
+}
+
+fn build_snapshot_query(thread_id: ThreadId) -> ConversationRequest {
+    // A recovery read replaces the window, so it is the opening window too:
+    // older turns are read again as the reader scrolls toward them.
+    let maximum_turn_count = opening_turn_count();
+    ConversationRequest::Query(ConversationQuery {
         thread_id,
         bounds: ConversationQueryBounds::Window { maximum_turn_count },
-    }))
+    })
 }
 
 pub(super) fn query_request(request: Query) -> ClientRequest {
@@ -132,10 +158,8 @@ pub(super) fn threads_request(project_id: ProjectId) -> ClientRequest {
     query_request(Query::ListProjectThreads(ListProjectThreads { project_id }))
 }
 
-pub(super) fn snapshot_request(thread_id: ThreadId) -> Result<ClientRequest, ServiceFailure> {
-    Ok(ClientRequest::Conversation(build_snapshot_query(
-        thread_id,
-    )?))
+pub(super) fn snapshot_request(thread_id: ThreadId) -> ClientRequest {
+    ClientRequest::Conversation(build_snapshot_query(thread_id))
 }
 
 pub(super) fn thread_engine_settings_request(thread_id: ThreadId) -> ClientRequest {
@@ -275,6 +299,27 @@ pub(super) fn approval_stable_mutation(
         frame_id,
         sent_at,
         command: Command::RespondApproval(command),
+    })
+}
+
+pub(super) fn answer_questions_stable_mutation(
+    command: artisan_domain::AnswerQuestions,
+) -> Result<StableMutation, ServiceFailure> {
+    let request_id = command.request_id().clone();
+    let frame_id = FrameId::parse(request_id.as_str().to_owned())
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    let frame_request_id = frame_id
+        .to_request_id()
+        .map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    if frame_request_id != request_id {
+        return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
+    }
+    let sent_at =
+        real_unix_millis().map_err(|_| ServiceFailure::invalid(ServiceFailureStage::Request))?;
+    Ok(StableMutation {
+        frame_id,
+        sent_at,
+        command: Command::AnswerQuestions(command),
     })
 }
 

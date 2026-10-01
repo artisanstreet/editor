@@ -12,12 +12,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
-use crate::native_composer_material::{
+use artisan_assets::AssetId;
+use artisan_ui::asset_seam::asset_glyph;
+use artisan_ui::glass::{
     GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
     glass_highlight_layer, glass_material_layer,
 };
-use artisan_assets::AssetId;
-use artisan_ui::asset_seam::asset_glyph;
 use artisan_ui::separator::{SeparatorAxis, separator};
 use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 use gpui::{

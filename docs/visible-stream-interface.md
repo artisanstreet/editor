@@ -33,6 +33,10 @@ per-observation batch commits).
    observations (activity/tool rows via `Replace` checkpoints into the
    observation ledger), interleaved on the same delivery stream in commit
    order, each carrying its thread-scoped `delivery_sequence`.
+   Thinking summaries are not among them: they are never committed to the
+   ledger. The live run's current block is pushed as `Event(LiveThinking)`
+   whenever it changes and cleared (`current: none`) when the run moves on
+   to a tool, prose, or its end.
 6. Terminal `TurnLifecycle` patch (`Cancelled`/`Completed`/`Failed`) only
    after the run actually settles. No terminal is emitted while the
    provider turn is held.
@@ -87,3 +91,25 @@ cursors; nothing is ever re-minted.
   cancelled terminal is asserted only after interrupt. Replays and the
   composer-facing receipt path are covered by the request-handler and
   steer-drive suites, not duplicated here.
+
+## Windowed subscriptions (2026-09-30)
+
+An Editor subscribes with `newestTurns` (8): the fresh snapshot holds the
+newest eight turns only, and the activation replay covers the turns from the
+snapshot's oldest one on. Within that, a settled turn's work rows (tags
+`tool`, `terminal_activity`, `file`, `search`, `subagent_transcript`) stay on
+the Forge; the replay ends with `Event(HeldBackWork)` naming each such turn
+with its row count and first row, then `Event(EarlierTurnMarkers)` naming
+the user messages of the turns before the window, then
+`ObservationHistoryCurrent`. The subscription's observation cursor is moved
+past the held-back rows, so ordinary delivery afterwards carries only what
+is committed from then on. A resumed subscription names its `historyFloor`
+and gets the same split from there.
+
+Everything else is request/response (`ConversationRequest::History`):
+`EarlierTurns { before, minimum, maximum }` answers with the older turns'
+snapshot, the rows that show while their sections are closed, and their
+held-back counts; `TurnWork { turn, afterSequence }` answers pages of one
+turn's held-back rows (256 rows / 4 MiB, `next.afterSequence` to continue).
+Ledger rows carry their observation tag in `observation_tag` (migration 25)
+so these reads never decode a payload to classify it.

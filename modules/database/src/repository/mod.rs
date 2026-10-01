@@ -9,10 +9,12 @@ mod dispatch_payload;
 mod draft_submission;
 mod first_message;
 mod message_dispatch;
+mod observation_history;
 mod observation_ledger;
 mod project_catalog;
 mod project_draft_submission;
 mod project_threads;
+mod questionnaire;
 mod queue_message;
 mod recent_threads;
 mod run_binding;
@@ -21,6 +23,7 @@ mod run_launch;
 mod run_observation;
 mod startup_reconciliation;
 mod startup_reconciliation_disposition;
+mod thread_attention;
 mod thread_engine_config;
 
 use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
@@ -51,10 +54,12 @@ pub use message_dispatch::{
     DispatchFailureReasonError, DispatchLeaseOwner, DispatchLeaseOwnerError, FailMessageDispatch,
     RequeueMessageDispatch, TransitionedMessageDispatch,
 };
+pub use observation_history::ObservationHistoryScope;
 pub use project_draft_submission::{ProjectDraftSubmission, SubmitProjectDraftInput};
 pub use project_threads::{
     AttachProjectInput, AttachProjectResult, CreateThreadInput, CreateThreadResult,
 };
+pub use questionnaire::LedgerQuestion;
 pub use queue_message::{MessageImageRead, QueueMessageInput, QueueMessageResult};
 pub use recent_threads::RecentThreadsFingerprint;
 pub use run_binding::{

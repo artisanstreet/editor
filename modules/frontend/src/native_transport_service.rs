@@ -27,14 +27,13 @@ use crate::forge_dev_endpoint as dev_endpoint;
 use crate::native_profile_usage::{NativeUsageEntry, ProfileUsageGeneration};
 use crate::native_transport::CatalogLoadGeneration;
 use artisan_domain::{
-    AttachProject, CONVERSATION_QUERY_MAX_TURNS, Command, ConversationCursor, ConversationQuery,
-    ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSubscribe,
-    ConversationUnsubscribe, CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects,
-    ListProjectThreads, ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing,
-    ProjectSummary, Query, QueryTurnCount, ReadComposerCatalog, ReadModelFavorites,
-    ReadThreadEngineSettings, RequestId, RespondApproval, RespondQuestion, SetModelFavorite,
-    SetThreadEngineConfig, SubmitComposerDraft, ThreadId, ThreadListing, ThreadSummary,
-    ThreadTitle, UnixMillis,
+    AttachProject, Command, ConversationCursor, ConversationQuery, ConversationQueryBounds,
+    ConversationRequest, ConversationSnapshot, ConversationSubscribe, ConversationUnsubscribe,
+    CreateThread, DirectoryId, EngineRunConfig, ListAttachedProjects, ListProjectThreads,
+    ListRegisteredEngineProfiles, PatchBatch, ProjectId, ProjectListing, ProjectSummary, Query,
+    QueryTurnCount, ReadComposerCatalog, ReadModelFavorites, ReadThreadEngineSettings, RequestId,
+    RespondApproval, RespondQuestion, SetModelFavorite, SetThreadEngineConfig, SubmitComposerDraft,
+    ThreadId, ThreadListing, ThreadSummary, ThreadTitle, UnixMillis,
 };
 use artisan_editor_cli::{
     credentials::{
@@ -125,6 +124,9 @@ pub enum NativeTransportCommand {
     /// Answer one pending question with explicit answers; identity rules
     /// match [`Self::RespondApproval`].
     RespondQuestion(Box<RespondQuestion>),
+    /// Answer (or dismiss) one open questionnaire on a thread; identity rules
+    /// match [`Self::RespondApproval`].
+    AnswerQuestions(Box<artisan_domain::AnswerQuestions>),
     /// Start a fresh opaque-directory project intake.
     BeginProjectIntake,
     /// A host-native path chosen in the local Windows WSL folder dialog.
@@ -154,6 +156,14 @@ pub enum NativeTransportCommand {
     },
     /// Request a real snapshot for a host mounted on a known thread.
     RequestSnapshot(ThreadId),
+    /// Read one on-demand part of a mounted thread's history: the turns
+    /// before the loaded ones, or a settled turn's held-back work rows.
+    ReadConversationHistory {
+        /// Thread whose history is read.
+        thread_id: ThreadId,
+        /// Which part.
+        part: artisan_domain::ConversationHistoryPart,
+    },
     /// Load one persisted image named by a bounded history reference.
     ReadMessageImage(artisan_domain::ImageAttachmentRef),
     /// Load authoritative engine settings for one thread and generation.
@@ -310,6 +320,18 @@ pub enum NativeTransportEvent {
     /// Identity rules match [`Self::ApprovalFailed`].
     QuestionFailed {
         command: artisan_domain::RespondQuestion,
+        failure: AnswerFailure,
+    },
+    /// One questionnaire answer settled by Forge with its correlated receipt.
+    QuestionsAnswered {
+        /// Exact dispatched answer.
+        command: artisan_domain::AnswerQuestions,
+        /// Correlated Forge receipt.
+        receipt: artisan_protocol::AnswerQuestionsReceipt,
+    },
+    /// One questionnaire answer failed before Forge settled it.
+    QuestionsAnswerFailed {
+        command: artisan_domain::AnswerQuestions,
         failure: AnswerFailure,
     },
     /// Original image data loaded for an exact history reference.
@@ -580,6 +602,23 @@ pub enum NativeTransportEvent {
         /// Stop payload.
         stopped: ConversationSubscriptionStopped,
     },
+    /// One on-demand part of a thread's history arrived.
+    ConversationHistory {
+        /// The part that was asked for.
+        part: artisan_domain::ConversationHistoryPart,
+        /// The answered page.
+        page: Box<artisan_domain::ConversationHistoryPage>,
+    },
+    /// One on-demand part of a thread's history could not be read; it stays
+    /// unread.
+    ConversationHistoryFailed {
+        /// Thread whose history was asked for.
+        thread_id: ThreadId,
+        /// The part that was asked for.
+        part: artisan_domain::ConversationHistoryPart,
+        /// Bounded path-free failure.
+        failure: ServiceFailure,
+    },
     /// Uni-stream patch batch.
     PatchBatch(PatchBatch),
     /// Uni-stream engine observation with its connection replay cursor.
@@ -590,6 +629,9 @@ pub enum NativeTransportEvent {
     /// The subscribed thread's complete message outbox, pushed by the Forge
     /// whenever its undelivered messages change.
     MessageOutbox(artisan_domain::MessageOutbox),
+    /// The subscribed thread's observation history has been delivered
+    /// through its durable tail; live observations follow.
+    ObservationHistoryCurrent(ThreadId),
     /// Connection-scoped state the Forge pushed whenever it changed.
     HostState(HostStateEvent),
     /// Bounded path-free delivery loss.
@@ -713,6 +755,8 @@ use request_construction::{
     reconnect_hello_with_capability, registered_profiles_request, rich_link_request,
     snapshot_request, thread_engine_settings_request, threads_request,
 };
+pub use request_construction::{HISTORY_PAGE_TURNS, OPENING_TURNS};
+use request_construction::{history_request, opening_turn_count};
 
 #[path = "native_transport_service/response_validation.rs"]
 mod response_validation;
@@ -772,8 +816,9 @@ mod answer_handlers;
 use answer_handlers::{respond_approval, respond_question};
 use handlers::{
     durable_save_request, known_thread_for_queue, list_registered_profiles, load_initial_catalog,
-    load_thread_engine_settings, query_project_repository, read_message_image, request_snapshot,
-    resolve_rich_link, select_project, set_thread_engine_config, submit_composer_draft,
+    load_thread_engine_settings, query_project_repository, read_conversation_history,
+    read_message_image, request_snapshot, resolve_rich_link, select_project,
+    set_thread_engine_config, submit_composer_draft,
 };
 
 #[cfg(test)]

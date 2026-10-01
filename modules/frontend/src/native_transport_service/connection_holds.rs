@@ -277,7 +277,9 @@ impl NativeTransportCommand {
                 | ComposerStateCommand::RetryFailedMessage { .. },
             ) => Some(HoldKind::QueueChange),
             Self::StopRun(_) => Some(HoldKind::StopRequest),
-            Self::RespondApproval(_) | Self::RespondQuestion(_) => Some(HoldKind::Answer),
+            Self::RespondApproval(_) | Self::RespondQuestion(_) | Self::AnswerQuestions(_) => {
+                Some(HoldKind::Answer)
+            }
             Self::CreateTask(_) | Self::RecoverFailedMessage { .. } => Some(HoldKind::NewTask),
             Self::BeginProjectIntake | Self::BeginProjectIntakeAt(_) | Self::RetryProjectIntake => {
                 Some(HoldKind::ProjectIntake)
@@ -313,6 +315,7 @@ impl NativeTransportCommand {
             | Self::ReadRecentThreads
             | Self::ReadProjects
             | Self::RequestSnapshot(_)
+            | Self::ReadConversationHistory { .. }
             | Self::ReadMessageImage(_)
             | Self::LoadThreadEngineSettings { .. }
             | Self::ReadComposerCatalog { .. }

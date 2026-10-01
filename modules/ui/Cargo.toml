@@ -1,7 +1,7 @@
 [package]
 name = "artisan-ui"
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
@@ -58,6 +58,10 @@ path = "../../tests/ui/button.rs"
 [[test]]
 name = "markdown_seam"
 path = "../../tests/ui/markdown_seam.rs"
+
+[[test]]
+name = "markdown_table"
+path = "../../tests/ui/markdown_table.rs"
 
 [[test]]
 name = "selectable_text"

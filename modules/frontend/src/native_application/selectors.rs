@@ -56,8 +56,16 @@ pub(crate) const NATIVE_RAIL_ADD_PROJECT_SELECTOR: &str = "artisan-native-rail-a
 pub(crate) const NATIVE_RAIL_ADD_PROJECT_LABEL: &str = "Add project";
 
 pub(super) const NATIVE_KEY_CONTEXT: &str = "artisan-native-application";
+/// Test window geometry.
+#[cfg(test)]
 pub(super) const SURFACE_WIDTH: f32 = 1_024.0;
+#[cfg(test)]
 pub(super) const SURFACE_HEIGHT: f32 = 720.0;
+/// Launch window height, clamped to the display.
+pub(super) const LAUNCH_WINDOW_HEIGHT: f32 = 900.0;
+/// Shortest window that still seats the titlebar, a few transcript lines,
+/// and the docked composer.
+pub(super) const MIN_WINDOW_HEIGHT: f32 = 420.0;
 pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(16);
 pub(super) const SIDEBAR_NEW_THREAD_HOVER_ID: &str = "new-thread";
 pub(super) const SIDEBAR_MARKETPLACE_HOVER_ID: &str = "marketplace";
@@ -65,6 +73,10 @@ pub(super) const SIDEBAR_PROFILE_HOVER_ID: &str = "profile";
 
 pub(super) const PROFILE_SETTINGS_HOVER_ID: &str = "profile-settings";
 pub(super) const PROFILE_USAGE_HOVER_ID: &str = "profile-usage";
+/// Extra space under a usage engine's header (mark, name, refresh), on top
+/// of the block's 6 px row gap, so the header stands apart from its first
+/// cadence group.
+pub(super) const PROFILE_USAGE_TITLE_GAP_PX: f32 = 4.0;
 /// Breathing room kept between the profile panel top edge and the viewport.
 pub(super) const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
 /// Vertical gap between the panel bottom and the profile trigger top,

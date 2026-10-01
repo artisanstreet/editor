@@ -67,10 +67,6 @@ use crate::native_composer::{NativeComposer, NativeComposerEvent};
 use crate::native_composer_controls::{
     NativeComposerControls, NativeComposerControlsEvent, NativeComposerControlsSnapshot,
 };
-use crate::native_composer_material::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{
@@ -104,8 +100,12 @@ use crate::onboarding_harness_presentation::{
 };
 use crate::onboarding_screen::{OnboardingHarnessEntry, OnboardingScreen};
 use crate::repository_mark::repository_mark_for;
-use crate::thread_environment_presentation::{HostIdentitySnapshot, ThreadEnvironmentInput};
-use crate::thread_screen::{ThreadScreen, ThreadScreenGate, shell_black};
+use crate::thread_agents::{thread_agent_entry, thread_agent_rows};
+use crate::thread_environment_presentation::{
+    HostMachineKind, HostMachineSnapshot, HostMachinesSnapshot, ProjectRepository,
+    ThreadEnvironmentInput,
+};
+use crate::thread_screen::{ThreadChecklistEntry, ThreadScreen, ThreadScreenGate, shell_black};
 use crate::titlebar_header_presentation::{
     TITLEBAR_HEADER_THREAD_SEPARATOR, TitlebarHeaderInput, TitlebarHeaderSegment,
     TitlebarRepository, present_titlebar_header,
@@ -124,6 +124,10 @@ use crate::{
     },
     native_thread_picker::{NativeThreadPicker, ThreadPickerAction},
     project_picker::{ProjectOption, ProjectPickerAction, ProjectPickerView},
+};
+use artisan_ui::glass::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
 };
 
 /// The label of a new-thread route before its thread exists; native task
@@ -154,6 +158,7 @@ mod composer_drafts;
 mod impl_lifecycle;
 mod impl_machines;
 mod machine_submenu;
+mod sidebar_view;
 mod workspace;
 #[cfg(windows)]
 mod wsl_project_picker;
@@ -172,6 +177,9 @@ mod impl_service_events;
 
 #[path = "native_application/impl_answer_events.rs"]
 mod impl_answer_events;
+
+#[path = "native_application/questionnaires.rs"]
+mod questionnaires;
 
 #[path = "native_application/impl_engine_settings.rs"]
 mod impl_engine_settings;
@@ -226,14 +234,17 @@ mod impl_failure;
 use app_entry::bind_native_actions;
 pub use app_entry::run;
 
+#[cfg(test)]
+use selectors::{SURFACE_HEIGHT, SURFACE_WIDTH};
 use selectors::{
     MAX_RETAINED_SWITCH_LISTINGS, MAX_RETAINED_SWITCH_PATCH_IDS, MAX_RETAINED_SWITCH_REQUEST_IDS,
-    NATIVE_KEY_CONTEXT, NATIVE_ROOT_SELECTOR, POLL_INTERVAL, PROFILE_MENU_ANCHOR_GAP_PX,
+    LAUNCH_WINDOW_HEIGHT, MIN_WINDOW_HEIGHT, NATIVE_KEY_CONTEXT, NATIVE_ROOT_SELECTOR, POLL_INTERVAL, PROFILE_MENU_ANCHOR_GAP_PX,
     PROFILE_MENU_VIEWPORT_MARGIN_PX, PROFILE_SETTINGS_HOVER_ID, PROFILE_USAGE_HOVER_ID,
-    SIDEBAR_MARKETPLACE_HOVER_ID, SIDEBAR_NEW_THREAD_HOVER_ID, SIDEBAR_PROFILE_HOVER_ID,
-    SURFACE_HEIGHT, SURFACE_WIDTH, TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR,
-    TITLEBAR_REPOSITORY_LABEL_SELECTOR, TITLEBAR_REPOSITORY_MARK_SELECTOR,
-    TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR,
+    PROFILE_USAGE_TITLE_GAP_PX, SIDEBAR_MARKETPLACE_HOVER_ID, SIDEBAR_NEW_THREAD_HOVER_ID,
+    SIDEBAR_PROFILE_HOVER_ID, TITLEBAR_HEADER_SELECTOR,
+    TITLEBAR_PROJECT_FOLDER_SELECTOR, TITLEBAR_REPOSITORY_LABEL_SELECTOR,
+    TITLEBAR_REPOSITORY_MARK_SELECTOR, TITLEBAR_ROUTE_TITLE_SELECTOR,
+    TITLEBAR_THREAD_SEPARATOR_SELECTOR,
 };
 #[cfg(test)]
 use selectors::{
@@ -258,8 +269,8 @@ use state::{
 #[cfg(test)]
 use presentation::message_status_detail;
 use presentation::{
-    capitalize_label, profile_usage_now_ms, repository_logo_asset, status_panel,
-    titlebar_context_tone, titlebar_repository_for_project,
+    capitalize_label, environment_repository_for_project, profile_usage_now_ms,
+    repository_logo_asset, status_panel, titlebar_context_tone, titlebar_repository_for_project,
 };
 
 actions!(
@@ -335,10 +346,17 @@ pub struct NativeApplication {
     composer_controls: Entity<NativeComposerControls>,
     model_selector: Entity<NativeModelSelector>,
     deferred_composer_policy: Option<(ThreadId, crate::native_model_selector::SelectPolicy)>,
-    composer_model_choice: Option<(
-        Option<ThreadId>,
+    /// The model chosen in each composer draft (a thread's, or a
+    /// project's new task; `None` for a composer without a scope). A choice
+    /// stays with its draft whatever the view opens meanwhile, and a
+    /// thread's leaves once the thread's saved configuration carries it.
+    composer_model_choices: HashMap<
+        Option<artisan_domain::ComposerDraftScope>,
         crate::native_model_catalog::NativeModelPolicy,
-    )>,
+    >,
+    /// The draft scope the model selector last showed; its run error is
+    /// that draft's.
+    composer_model_scope: Option<artisan_domain::ComposerDraftScope>,
     /// The Forge's default engine configuration, shown on threads without
     /// their own until they save one.
     default_engine_config: Option<artisan_domain::EngineRunConfig>,
@@ -398,6 +416,8 @@ pub struct NativeApplication {
     profile_tip_tween: Rc<RefCell<ProfileTipTween>>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
+    /// The sidebar region, mounted as its own cached view.
+    sidebar: Entity<sidebar_view::SidebarView>,
     sidebar_collapsed: bool,
     sidebar_navigation_focus: FocusHandle,
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
@@ -426,6 +446,14 @@ pub struct NativeApplication {
     /// root and are never synthesized; the titlebar renders real inspected
     /// repository data or nothing.
     titlebar_repository: Option<TitlebarRepository>,
+    /// The same repository observation projected for the thread inspector's
+    /// Branch row.
+    ///
+    /// Retained from the one `QueryProjectRepository` reply that also feeds
+    /// [`Self::titlebar_repository`], under the same fence and cleared with
+    /// it; unlike the titlebar facts it keeps a repository without a
+    /// browsable remote, because its branch is still real.
+    project_repository: Option<ProjectRepository>,
     /// The project whose repository facts are retained (or requested).
     ///
     /// Fences stale replies: a repository observation for a project that is
@@ -461,6 +489,26 @@ pub struct NativeApplication {
     /// independent of host mounting; the state resets when the selected
     /// thread changes.
     engine_observations: Option<EngineObservationState>,
+    /// The mounted thread whose observation history the Forge has delivered
+    /// through its durable tail.
+    ///
+    /// The subscription snapshot carries only the transcript; tool and
+    /// reasoning history follows on the delivery stream. Until this names
+    /// the selected thread, retained observations are not projected and the
+    /// thread screen stays on its loading gate, so a thread never presents
+    /// half its history. Cleared on every mount; a reconnect resubscribes
+    /// without remounting and leaves it set.
+    observation_history_current: Option<ThreadId>,
+    /// Set while `poll_service` drains one tick's events: live observations
+    /// then only mark the activity replay pending, and it runs once after
+    /// the drain instead of once per observation.
+    observation_replay_deferred: bool,
+    /// A live observation arrived during the drain and the full replay has
+    /// not run since.
+    observation_replay_pending: bool,
+    /// On-demand reads of the selected thread's older turns and held-back
+    /// work rows.
+    history_paging: history_paging::HistoryPaging,
     last_picker_action: Option<ProjectPickerAction>,
     state: NativeViewState,
     route_history: RouteHistory,
@@ -510,5 +558,6 @@ mod impl_sidebar_threads;
 
 mod draft_send;
 mod forge_outbox;
+mod history_paging;
 mod host_state;
 mod preferences;

@@ -186,6 +186,7 @@ impl NativeApplication {
         }
         self.titlebar_repository_project.clone_from(&selected);
         self.titlebar_repository = None;
+        self.project_repository = None;
         let Some(project_id) = selected else {
             cx.notify();
             return;
@@ -199,10 +200,12 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// Retains one inspected repository observation for the titlebar header.
+    /// Retains one inspected repository observation for the titlebar header
+    /// and the thread inspector's Branch row.
     ///
     /// A reply for a project that is no longer selected is dropped: the
-    /// selection fence, not arrival order, decides what the header shows.
+    /// selection fence, not arrival order, decides what the header and the
+    /// inspector show.
     pub(super) fn handle_project_repository(
         &mut self,
         project_id: &ProjectId,
@@ -213,6 +216,7 @@ impl NativeApplication {
             return;
         }
         self.titlebar_repository = repository.and_then(titlebar_repository_for_project);
+        self.project_repository = repository.map(environment_repository_for_project);
         cx.notify();
     }
 
@@ -224,6 +228,7 @@ impl NativeApplication {
     ) {
         if self.selected_project.as_ref() == Some(project_id) {
             self.titlebar_repository = None;
+            self.project_repository = None;
             cx.notify();
         }
     }
@@ -247,9 +252,7 @@ impl NativeApplication {
                     .block_mouse_except_scroll()
                     .line_height(px(22.0))
                     .cursor_pointer()
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.navigate(NativeRoute::NewThread { project: None }, cx);
-                    }))
+                    .on_click(cx.listener(|app, _, _, cx| app.go_home(cx)))
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
                     .text_size(px(20.0))
@@ -576,7 +579,7 @@ impl NativeApplication {
                     .child(
                         div()
                             .h(px(1.0))
-                            .mx(px(-10.0))
+                            .mx(px(-crate::desktop_shell::DESKTOP_COLUMN_INSET_PX))
                             .bg(theme.line)
                             .debug_selector(|| "artisan-sidebar-footer-divider".to_owned()),
                     )
@@ -589,7 +592,7 @@ impl NativeApplication {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .p(px(10.0))
+            .p(px(crate::desktop_shell::DESKTOP_COLUMN_INSET_PX))
             .child(navigation)
     }
 

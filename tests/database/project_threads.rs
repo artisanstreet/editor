@@ -587,8 +587,11 @@ async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
     seed_recent(&database, "project-2", "updated-only", 600, None, "Hi").await;
     // Equal activity orders by thread id.
     seed_recent(&database, "project-1", "tie-b", 600, None, "Hi").await;
-    // Assistant text has not started: a draft is not a recent thread.
-    seed_recent(&database, "project-1", "draft", 950, Some(950), "").await;
+    // A sent message saves the thread before any assistant text: a running
+    // engine that has only called tools so far is listed, not lost.
+    seed_recent(&database, "project-1", "sent-only", 950, Some(950), "").await;
+    // Neither a message nor assistant text: a draft is not a recent thread.
+    seed_recent(&database, "project-1", "draft", 960, None, "").await;
 
     let recent = repository
         .list_recent_threads(10)
@@ -596,12 +599,19 @@ async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
         .expect("recent threads should list");
     assert_eq!(
         thread_ids(&recent),
-        ["new-message", "tie-b", "updated-only", "old-message"]
+        [
+            "sent-only",
+            "new-message",
+            "tie-b",
+            "updated-only",
+            "old-message"
+        ]
     );
-    assert!(recent.iter().all(|thread| thread.has_started_response));
-    assert_eq!(recent[0].project_id, project_id("project-2"));
+    assert!(!recent[0].has_started_response);
+    assert!(recent[1..].iter().all(|thread| thread.has_started_response));
+    assert_eq!(recent[1].project_id, project_id("project-2"));
     assert_eq!(
-        recent[0].last_message_at,
+        recent[1].last_message_at,
         Some(UnixMillis::from_millis(900))
     );
 
@@ -609,7 +619,7 @@ async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
         .list_recent_threads(2)
         .await
         .expect("a bounded page should list");
-    assert_eq!(thread_ids(&bounded), ["new-message", "tie-b"]);
+    assert_eq!(thread_ids(&bounded), ["sent-only", "new-message"]);
 }
 
 #[tokio::test]

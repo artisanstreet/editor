@@ -7,7 +7,9 @@
 //! turn end answers transiently and leaves the row open for redelivery.
 
 use artisan_database::{ProjectSteeredMessage, ProjectSteeredMessageOutcome, RunLaunchError};
-use artisan_domain::{EngineId, MessageId, ObservationId, RequestId, RunId, ThreadId};
+use artisan_domain::{
+    EngineId, ErrorChain, ImageAttachment, MessageId, ObservationId, RequestId, RunId, ThreadId,
+};
 
 use crate::{
     CommandOrigin,
@@ -16,6 +18,7 @@ use crate::{
     run_interaction::RunInteractionAck,
 };
 
+use super::diagnostics::{RunLabel, StepError, report_steer_failure};
 use super::dispatch_support::{mint_item_id, mint_patch_id};
 use super::turn::{TurnConsumptionContext, TurnConsumptionState, handle_observation};
 
@@ -91,6 +94,8 @@ pub(crate) fn steer_stored_refusal(reason: Option<&str>) -> RunInteractionAck {
             Some("steered projection failed") => "steered projection failed",
             Some("steer write to the provider failed") => "steer write to the provider failed",
             Some("steer target run is no longer live") => "steer target run is no longer live",
+            // Legacy: rows failed before steers carried images keep
+            // reproducing their original refusal on redelivery.
             Some("steer does not support image attachments") => {
                 "steer does not support image attachments"
             }
@@ -121,16 +126,38 @@ async fn project_known_acked_steer(
     respond: tokio::sync::oneshot::Sender<RunInteractionAck>,
 ) {
     let Some(item_id) = mint_item_id(context.origin) else {
+        report_steer_failure(
+            &state.scope,
+            message_id,
+            &StepError::refused(
+                "minting the steered message's item id: entropy or identifier validation failed",
+            ),
+        );
         let _ = respond.send(RunInteractionAck::Unavailable);
         return;
     };
     let Some(patch_id) = mint_patch_id(context.origin) else {
+        report_steer_failure(
+            &state.scope,
+            message_id,
+            &StepError::refused(
+                "minting the steered message's patch id: entropy or identifier validation failed",
+            ),
+        );
         let _ = respond.send(RunInteractionAck::Unavailable);
         return;
     };
-    let Ok(operated_at) = context.origin.acceptance_instant() else {
-        let _ = respond.send(RunInteractionAck::Unavailable);
-        return;
+    let operated_at = match context.origin.acceptance_instant() {
+        Ok(operated_at) => operated_at,
+        Err(error) => {
+            report_steer_failure(
+                &state.scope,
+                message_id,
+                &StepError::failed("reading the clock to project the steered message", error),
+            );
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
     };
     match context
         .repository
@@ -149,13 +176,36 @@ async fn project_known_acked_steer(
             ProjectSteeredMessageOutcome::Projected(_)
             | ProjectSteeredMessageOutcome::AlreadyProjected(_),
         ) => {
+            // The acknowledging prose must open after the steer it answers.
+            super::message_parts::retire_unwritten_item(state, message_id);
             let _ = context.config.notifier.publish(thread_id);
             let _ = respond.send(RunInteractionAck::Steered);
         }
-        Err(RunLaunchError::Repository(artisan_database::RepositoryError::Database { .. })) => {
+        Err(
+            error @ RunLaunchError::Repository(artisan_database::RepositoryError::Database {
+                ..
+            }),
+        ) => {
+            // The row stays open, so the sender's retry projects it.
+            report_steer_failure(
+                &state.scope,
+                message_id,
+                &StepError::failed(
+                    "projecting the acknowledged steer into the transcript (left open for retry)",
+                    error,
+                ),
+            );
             let _ = respond.send(RunInteractionAck::Unavailable);
         }
-        Err(_) => {
+        Err(error) => {
+            report_steer_failure(
+                &state.scope,
+                message_id,
+                &StepError::failed(
+                    "projecting the acknowledged steer into the transcript",
+                    error,
+                ),
+            );
             fail_steered_row(context, message_id, "steered projection failed").await;
             let _ = respond.send(RunInteractionAck::Refused {
                 reason: "steered projection failed",
@@ -170,12 +220,14 @@ async fn project_known_acked_steer(
 /// send-time engine against the live turn's engine → nonmutating ledger
 /// preflight (eligible heads to the provider; duplicates consult durable
 /// delivery state instead of touching the provider) → drive the owned
-/// provider-ack future while draining observations inline (the bounded
-/// observation channel would otherwise deadlock the pump: full channel
-/// stalls its sends, stalled sends stall the steer read, and the ack
-/// never comes) → on ack, record the ledger resolution and then project
-/// the follow-up text keyed by the steered message id, completing the
-/// row atomically, or fail the row typed with the payload preserved.
+/// provider-ack future for the text and ordered image attachments while
+/// draining observations inline (the bounded observation channel would
+/// otherwise deadlock the pump: full channel stalls its sends, stalled
+/// sends stall the steer read, and the ack never comes) → on ack, record
+/// the ledger resolution and then project the steered message keyed by
+/// its id (the transcript reads its attachments from the source message),
+/// completing the row atomically, or fail the row typed with the payload
+/// preserved.
 ///
 /// The resolution is recorded ONLY after the actual ack and before
 /// projection: a projection retry then observes `Duplicate` (known acked)
@@ -197,22 +249,39 @@ pub(super) async fn handle_steer(
     request_id: RequestId,
     message_id: MessageId,
     text: String,
+    images: Vec<ImageAttachment>,
     respond: tokio::sync::oneshot::Sender<RunInteractionAck>,
 ) {
     if thread_id != state.scope.launched.thread_id || run_id != state.scope.launched.run_id {
         let _ = respond.send(RunInteractionAck::WrongRun);
         return;
     }
-    if context.origin.acceptance_instant().is_err() {
+    if let Err(error) = context.origin.acceptance_instant() {
+        report_steer_failure(
+            &state.scope,
+            &message_id,
+            &StepError::failed("reading the clock before the steer", error),
+        );
         let _ = respond.send(RunInteractionAck::Unavailable);
         return;
     }
-    let Ok(target_id) = ObservationId::parse(message_id.as_str()) else {
-        fail_steered_row(context, &message_id, "steer message identity invalid").await;
-        let _ = respond.send(RunInteractionAck::Refused {
-            reason: "steer message identity invalid",
-        });
-        return;
+    let target_id = match ObservationId::parse(message_id.as_str()) {
+        Ok(target_id) => target_id,
+        Err(error) => {
+            report_steer_failure(
+                &state.scope,
+                &message_id,
+                &StepError::failed(
+                    "using the steered message id as the interaction target",
+                    error,
+                ),
+            );
+            fail_steered_row(context, &message_id, "steer message identity invalid").await;
+            let _ = respond.send(RunInteractionAck::Refused {
+                reason: "steer message identity invalid",
+            });
+            return;
+        }
     };
     // Same-engine recheck against the ACCEPTED (captured) settings, not
     // current thread settings: a selection change after send must fail
@@ -224,22 +293,44 @@ pub(super) async fn handle_steer(
     {
         Ok(Some(settings)) => Some(settings),
         Ok(None) => None,
-        Err(_) => {
+        Err(error) => {
+            report_steer_failure(
+                &state.scope,
+                &message_id,
+                &StepError::failed(
+                    "reading the engine settings captured when the steer was sent",
+                    error,
+                ),
+            );
             let _ = respond.send(RunInteractionAck::Unavailable);
             return;
         }
     };
     let captured_engine = match captured.as_ref() {
         Some(settings) => Some(settings.config().selection().engine_id()),
-        None => context
+        None => match context
             .repository
             .read_thread_engine_settings(&thread_id)
             .await
-            .ok()
-            .flatten()
-            .map(|settings| settings.config().selection().engine_id()),
+        {
+            Ok(settings) => settings.map(|settings| settings.config().selection().engine_id()),
+            Err(error) => {
+                // Treated as no engine, which refuses the steer below.
+                report_steer_failure(
+                    &state.scope,
+                    &message_id,
+                    &StepError::failed("reading the thread's engine settings", error),
+                );
+                None
+            }
+        },
     };
     if captured_engine != Some(state.engine) {
+        eprintln!(
+            "native run steer refused ({}, message {message_id}): the steer was sent for engine {captured_engine:?} but the live turn runs {:?}",
+            RunLabel(&state.scope),
+            state.engine
+        );
         fail_steered_row(context, &message_id, "steer target engine changed").await;
         let _ = respond.send(RunInteractionAck::Refused {
             reason: "steer target engine changed",
@@ -313,13 +404,26 @@ pub(super) async fn handle_steer(
                         }
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    report_steer_failure(
+                        &state.scope,
+                        &message_id,
+                        &StepError::failed(
+                            "reading the stored state of an already acknowledged steer",
+                            error,
+                        ),
+                    );
                     let _ = respond.send(RunInteractionAck::Unavailable);
                 }
             }
             return;
         }
-        Err(_) => {
+        Err(error) => {
+            report_steer_failure(
+                &state.scope,
+                &message_id,
+                &StepError::failed("checking the steer against the turn's ledger", error),
+            );
             fail_steered_row(context, &message_id, "steer target already resolved").await;
             let _ = respond.send(RunInteractionAck::Refused {
                 reason: "steer target already resolved",
@@ -332,7 +436,7 @@ pub(super) async fn handle_steer(
     // once inside `drive_steer_ack`: polling by value across iterations
     // would move it after the first poll.
     let outcome = {
-        let pending = turn.steer_text(request_id.as_str(), text.as_str());
+        let pending = turn.steer_message(request_id.as_str(), text.as_str(), images);
         drive_steer_ack(context, state, turn, pending).await
     };
     match outcome {
@@ -342,15 +446,20 @@ pub(super) async fn handle_steer(
             // (known acked) while a pre-ack interruption never wrote
             // anything. The serialized turn loop prevents competing steer
             // handling, so a miss here is a genuine terminal race.
-            if turn
-                .deliver_interaction_response(
-                    request_id.as_str(),
-                    &target_id,
-                    InteractionTarget::Steer,
-                    &intent,
-                )
-                .is_err()
-            {
+            if let Err(error) = turn.deliver_interaction_response(
+                request_id.as_str(),
+                &target_id,
+                InteractionTarget::Steer,
+                &intent,
+            ) {
+                report_steer_failure(
+                    &state.scope,
+                    &message_id,
+                    &StepError::failed(
+                        "recording the provider-acknowledged steer in the turn's ledger",
+                        error,
+                    ),
+                );
                 fail_steered_row(context, &message_id, "steer target already resolved").await;
                 let _ = respond.send(RunInteractionAck::Refused {
                     reason: "steer target already resolved",
@@ -378,17 +487,28 @@ pub(super) async fn handle_steer(
                 reason: "steer is not supported on this engine path",
             });
         }
-        SteerDriveOutcome::Acked(Err(SteerError::DeliveryFailed)) => {
+        SteerDriveOutcome::Acked(Err(error @ SteerError::DeliveryFailed)) => {
+            report_steer_failure(
+                &state.scope,
+                &message_id,
+                &StepError::failed("writing the steer to the provider", error),
+            );
             fail_steered_row(context, &message_id, "steer write to the provider failed").await;
             let _ = respond.send(RunInteractionAck::Refused {
                 reason: "steer write to the provider failed",
             });
         }
-        SteerDriveOutcome::Cancelled | SteerDriveOutcome::TurnEnded => {
+        outcome @ (SteerDriveOutcome::Cancelled | SteerDriveOutcome::TurnEnded) => {
             // The run is dying or dead: leave the row open for the orphan
             // sweep or a redelivery, and answer transiently so the sender
             // retries against a live loop instead of recording a false
             // terminal refusal.
+            let ended = if matches!(outcome, SteerDriveOutcome::Cancelled) {
+                "waiting for the provider to acknowledge the steer: the run was cancelled first (left open for redelivery)"
+            } else {
+                "waiting for the provider to acknowledge the steer: the turn ended first (left open for redelivery)"
+            };
+            report_steer_failure(&state.scope, &message_id, &StepError::refused(ended));
             let _ = respond.send(RunInteractionAck::Unavailable);
         }
     }
@@ -401,12 +521,25 @@ async fn fail_steered_row(
     message_id: &MessageId,
     reason: &'static str,
 ) {
-    let Ok(operated_at) = context.origin.acceptance_instant() else {
-        return;
+    let operated_at = match context.origin.acceptance_instant() {
+        Ok(operated_at) => operated_at,
+        Err(error) => {
+            eprintln!(
+                "native run steer row could not be marked failed (message {message_id}, reason \"{reason}\"): reading the clock: {}",
+                ErrorChain(&error)
+            );
+            return;
+        }
     };
-    let _ = context
+    if let Err(error) = context
         .repository
         .fail_steered_dispatch(message_id, reason, operated_at)
-        .await;
+        .await
+    {
+        eprintln!(
+            "native run steer row could not be marked failed (message {message_id}, reason \"{reason}\"): {}",
+            ErrorChain(&error)
+        );
+    }
     context.config.notifier.wake_any();
 }

@@ -24,6 +24,11 @@ pub struct SubscriptionCustody {
     /// the UI ack is still queued behind other commands. It never marks
     /// application acceptance and never seeds a resubscribe baseline.
     received_cursor: Option<ConversationCursor>,
+    /// Ordinal of the oldest turn the application holds for the active
+    /// thread. A subscription opens on the newest turns and older ones are
+    /// read on demand, so a resumed subscription names this floor and the
+    /// Forge replays activity for the held turns only.
+    history_floor: Option<u64>,
 }
 
 impl SubscriptionCustody {
@@ -38,6 +43,7 @@ impl SubscriptionCustody {
         if self.active_thread.as_ref() != Some(&thread_id) {
             self.active_thread = Some(thread_id);
             self.last_accepted_cursor = None;
+            self.history_floor = None;
         }
         self.pending_after = after;
         self.received_cursor = None;
@@ -82,7 +88,49 @@ impl SubscriptionCustody {
             ));
         }
         self.pending_after = Some(cursor);
+        if let ConversationSubscriptionStarted::Fresh(start) = started {
+            self.on_window_snapshot(start.snapshot());
+        }
         Ok(())
+    }
+
+    /// Records the oldest turn of a snapshot that replaces the window: a
+    /// fresh subscription's, or a recovery read's.
+    pub fn on_window_snapshot(&mut self, snapshot: &ConversationSnapshot) {
+        if self.active_thread.as_ref() == Some(snapshot.thread_id()) {
+            self.history_floor = Some(
+                snapshot
+                    .turns()
+                    .first()
+                    .map_or(0, |turn| turn.ordinal.get()),
+            );
+        }
+    }
+
+    /// Lowers the floor to the oldest turn of a page read on demand.
+    pub fn on_earlier_turns(&mut self, page: &ConversationSnapshot) {
+        if self.active_thread.as_ref() != Some(page.thread_id()) {
+            return;
+        }
+        if let Some(oldest) = page.turns().first().map(|turn| turn.ordinal.get()) {
+            self.history_floor = Some(self.history_floor.map_or(oldest, |floor| floor.min(oldest)));
+        }
+    }
+
+    /// The subscribe request for the active thread: a fresh one opens on the
+    /// newest turns, a resumed one names the oldest turn still held.
+    #[must_use]
+    pub fn subscribe_request(
+        &self,
+        thread_id: ThreadId,
+        after: Option<ConversationCursor>,
+    ) -> ConversationSubscribe {
+        match after {
+            Some(cursor) => ConversationSubscribe::resume(thread_id, cursor).with_history_floor(
+                artisan_domain::TurnOrdinal::new(self.history_floor.unwrap_or(0)),
+            ),
+            None => ConversationSubscribe::fresh(thread_id).with_newest_turns(opening_turn_count()),
+        }
     }
 
     /// Advances cursor only after explicit application acknowledgement.
@@ -126,6 +174,7 @@ impl SubscriptionCustody {
             self.pending_after = None;
             self.last_accepted_cursor = None;
             self.received_cursor = None;
+            self.history_floor = None;
         }
     }
 
@@ -290,10 +339,7 @@ impl ServiceRuntime {
             return Ok(());
         }
         self.custody.on_subscribe(thread_id.clone(), after);
-        let subscribe = match after {
-            Some(cursor) => ConversationSubscribe::resume(thread_id.clone(), cursor),
-            None => ConversationSubscribe::fresh(thread_id.clone()),
-        };
+        let subscribe = self.custody.subscribe_request(thread_id.clone(), after);
         let request = ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe));
         let protocol_version = self
             .session
@@ -343,10 +389,7 @@ pub(super) async fn handle_subscribe(
     // Thread switch tombstones old thread but does not restart the session delivery receiver.
     // Do not create an empty projection authority; the ConversationHost is the authority.
     runtime.custody.on_subscribe(thread_id.clone(), after);
-    let subscribe = match after {
-        Some(cursor) => ConversationSubscribe::resume(thread_id.clone(), cursor),
-        None => ConversationSubscribe::fresh(thread_id.clone()),
-    };
+    let subscribe = runtime.custody.subscribe_request(thread_id.clone(), after);
     let request = ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe));
     let protocol_version = runtime
         .session

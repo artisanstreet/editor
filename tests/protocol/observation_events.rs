@@ -18,10 +18,10 @@ use artisan_domain::{
     ApprovalRequest, ArtisanCode, CompactionObservation, CompactionState, DiagnosticLevel,
     DisplayName, EngineErrorRef, EngineErrorRefInput, EngineObservationEvent, Event, FileAction,
     FileObservation, FirstMessageQueued, LimitScope, MessageBody, MessageId, MessagePhase,
-    NativeActionObservation, Observation, ObservationId, ObservationSequence, PlanEntry,
-    PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation, ProjectAttached, ProjectId,
-    ProjectSummary, ProtocolDiagnosticObservation, QuestionInput, QuestionObservation,
-    QuestionOption, QueuedMessage, ReasoningSummaryCompletedObservation,
+    NativeActionObservation, Observation, ObservationHistoryCurrent, ObservationId,
+    ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation,
+    ProjectAttached, ProjectId, ProjectSummary, ProtocolDiagnosticObservation, QuestionInput,
+    QuestionObservation, QuestionOption, QueuedMessage, ReasoningSummaryCompletedObservation,
     ReasoningSummaryDeltaObservation, RequestId, RetryAttemptState, RetryObservation, RootPath,
     RunState, RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation,
     SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
@@ -989,6 +989,7 @@ fn thread_fixture() -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("thread-1").expect("fixture thread id is valid"),
         project_id: ProjectId::parse("project-1").expect("fixture project id is valid"),
@@ -1084,4 +1085,47 @@ fn v1_event_bytes_decode_unchanged() -> Result<(), Box<dyn Error>> {
         })
     );
     Ok(())
+}
+
+#[test]
+fn observation_history_current_marker_roundtrips() -> Result<(), Box<dyn Error>> {
+    assert_roundtrip(&envelope(
+        "frame-history-current",
+        WireEnvelopeBody::Event(ServerEvent {
+            cursor: EventCursor::new(9).expect("fixture event cursor is positive"),
+            event: Event::ObservationHistoryCurrent(ObservationHistoryCurrent {
+                thread_id: thread_id(),
+            }),
+        }),
+    ))
+}
+
+#[test]
+fn observation_history_current_marker_rejects_an_invalid_thread_id() {
+    let encoded = {
+        let mut message = raw_envelope();
+        let mut root = message.init_root::<envelope::Builder>();
+        root.set_protocol_version(1);
+        root.set_message_id("frame-history-current-invalid");
+        let mut event = root.reborrow().init_body().init_event();
+        event.set_cursor(9);
+        event.init_observation_history_current().set_thread_id("");
+        serialize::write_message_to_words(&message)
+    };
+    assert!(decode_envelope(&encoded).is_err());
+}
+
+#[test]
+fn a_questionnaire_member_keeps_its_group_across_the_wire() -> Result<(), Box<dyn Error>> {
+    let Observation::Question(question) = question_requested(4) else {
+        panic!("fixture builds a question");
+    };
+    let grouped = Observation::Question(question.with_group(observation_id("item-questions")));
+    assert_roundtrip(&observation_envelope("frame-grouped-question", 12, grouped))?;
+    // A question asked alone still decodes as its own questionnaire.
+    assert_roundtrip(&observation_envelope(
+        "frame-lone-question",
+        13,
+        question_requested(5),
+    ))
 }

@@ -433,7 +433,7 @@ pub(crate) fn decode_conversation_subscribe_request(
         )?,
         "request.conversationSubscribe.threadId",
     )?;
-    let value = match subscribe.get_start().which()? {
+    let mut value = match subscribe.get_start().which()? {
         conversation_subscribe_request::start::Which::Fresh(()) => {
             ConversationSubscribe::fresh(thread_id)
         }
@@ -441,6 +441,17 @@ pub(crate) fn decode_conversation_subscribe_request(
             ConversationSubscribe::resume(thread_id, ConversationCursor::new(cursor))
         }
     };
+    // Zero is what a client without windowing sends: the most allowed.
+    let newest_turns = subscribe.get_newest_turns();
+    if newest_turns != 0 {
+        value = value.with_newest_turns(QueryTurnCount::new(u64::from(newest_turns))?);
+    }
+    match subscribe.get_history_floor().which()? {
+        conversation_subscribe_request::history_floor::Which::Everything(()) => {}
+        conversation_subscribe_request::history_floor::Which::Ordinal(ordinal) => {
+            value = value.with_history_floor(TurnOrdinal::new(ordinal));
+        }
+    }
     Ok(ClientRequest::Conversation(ConversationRequest::Subscribe(
         value,
     )))

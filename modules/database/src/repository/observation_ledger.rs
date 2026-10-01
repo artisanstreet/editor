@@ -40,6 +40,7 @@ pub(super) struct LedgerInsert {
     pub(super) binding_version: i64,
     pub(super) observation_version: i64,
     pub(super) observation_bytes: Vec<u8>,
+    pub(super) observation_tag: &'static str,
 }
 
 /// Allocates the first free delivery sequence for `count` rows on one thread.
@@ -122,6 +123,7 @@ pub(super) async fn insert_rows(
             binding_version: Set(row.binding_version),
             observation_version: Set(row.observation_version),
             observation_bytes: Set(OpaqueBytes::new(row.observation_bytes.clone())),
+            observation_tag: Set(row.observation_tag.to_owned()),
         })
         .exec(transaction)
         .await
@@ -181,7 +183,7 @@ impl Repository {
 }
 
 /// Rebuilds one attributed delivery event from its immutable ledger row.
-fn ledger_event(
+pub(super) fn ledger_event(
     row: &observation_ledger::Model,
 ) -> Result<EngineObservationEvent, RepositoryError> {
     let thread_id = ThreadId::parse(row.thread_id.clone())

@@ -29,6 +29,7 @@ fn row(thread: &str, project: &str, subtitle: &str, last_message: Option<i64>) -
         thread: ThreadSummary {
             has_started_response: true,
             has_active_work: last_message.is_none(),
+            attention: artisan_domain::ThreadAttention::None,
             last_message_at: last_message.map(UnixMillis::from_millis),
             thread_id: ThreadId::parse(thread).expect("thread id"),
             project_id: ProjectId::parse(project).expect("project id"),

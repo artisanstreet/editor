@@ -35,6 +35,39 @@ pub fn session_anchor_id(turn_id: &TurnId) -> Result<SceneId, SceneBuildError> {
     })
 }
 
+/// Derives the render-only anchor for one continuation segment of a turn's
+/// session: `session-{turn_id}.{segment}`, with `segment` counting from 1.
+///
+/// A continuation is the part of the session painted after a mid-run user
+/// message. It shares the session's disclosure through
+/// [`WorkGroupBlock::session`] and needs this distinct identity only so
+/// scroll anchors and selectors never repeat within one turn.
+fn session_continuation_anchor_id(
+    turn_id: &TurnId,
+    segment: usize,
+) -> Result<SceneId, SceneBuildError> {
+    let text = format!("session-{}.{segment}", turn_id.as_str());
+    let length = text.len();
+    let too_long = || SceneBuildError::SessionContinuationAnchorTooLong {
+        turn_id: turn_id.clone(),
+        segment,
+        length,
+        maximum: SCENE_ID_MAX_BYTES,
+    };
+    if length > SCENE_ID_MAX_BYTES {
+        return Err(too_long());
+    }
+    SceneId::parse(text).map_err(|_| too_long())
+}
+
+/// Whether one input item is a user message (plain or multimodal).
+fn is_user_message(item: &SceneItem) -> bool {
+    matches!(
+        &item.kind,
+        SceneItemKind::UserMessage { .. } | SceneItemKind::MultimodalUserMessage { .. }
+    )
+}
+
 #[derive(Clone, Copy)]
 enum AnchorKind {
     UserMessage,
@@ -126,7 +159,12 @@ impl ConversationScene {
     /// - ordinary blocks are followed by a terminal change card, one status,
     ///   and one footer;
     /// - each steering placement appears once immediately after its exact
-    ///   user-message anchor.
+    ///   user-message anchor;
+    /// - a mid-run user message (steer) never starts a new section: work on
+    ///   both sides of it stays in the turn's one session, the bubble sits
+    ///   before the first non-empty assistant message after it (or after the
+    ///   session's work while none exists), and work after that seam renders
+    ///   as a headerless continuation segment of the same session.
     ///
     /// The build is atomic: any validation failure returns only a typed error
     /// and no partial scene.
@@ -337,28 +375,6 @@ impl ConversationScene {
             let turn_items = items_by_turn.remove(&turn.turn_id).unwrap_or_default();
 
             // --- Session derivation pre-pass (R1/H): exact run evidence only.
-            // Steering anchors in this turn, by ordinal: items after an
-            // anchor render top-level and never join session details.
-            let mut steer_anchor_ordinals: Vec<u64> = Vec::new();
-            let mut saw_user_message = false;
-            for item in &turn_items {
-                if !matches!(
-                    &item.kind,
-                    SceneItemKind::UserMessage { .. } | SceneItemKind::MultimodalUserMessage { .. }
-                ) {
-                    continue;
-                }
-                // Durable mid-run sends are user messages in the existing
-                // turn. They are boundaries even without an optional label.
-                if saw_user_message || steerings_by_anchor.contains_key(item.id.as_str()) {
-                    steer_anchor_ordinals.push(item.ordinal);
-                }
-                saw_user_message = true;
-            }
-            let min_steer_ordinal: Option<u64> = steer_anchor_ordinals.into_iter().min();
-            let is_post_steer =
-                |ordinal: u64| min_steer_ordinal.is_some_and(|anchor| ordinal > anchor);
-
             // Runs with session content: assistant runs plus work-fact runs
             // carrying run attribution. Runs are never parsed, guessed, or
             // defaulted; unattributed content selects the legacy layout.
@@ -493,8 +509,8 @@ impl ConversationScene {
             }
 
             // Detail membership (session mode): work kinds, commentary, and
-            // non-promoted assistants — except post-steer items, which stay
-            // top-level, and WorkSession markers, which the session consumes.
+            // non-promoted assistants, before or after a mid-run user
+            // message alike; WorkSession markers are consumed by the session.
             // The anchor sits at the earliest session-owned position so late
             // work joins before the final reply.
             let mut detail_ids: HashSet<String> = HashSet::new();
@@ -508,9 +524,6 @@ impl ConversationScene {
                 for item in &turn_items {
                     if promoted_id.as_ref().is_some_and(|reply| &item.id == reply) {
                         track_anchor(item.ordinal);
-                    }
-                    if is_post_steer(item.ordinal) {
-                        continue;
                     }
                     match &item.kind {
                         SceneItemKind::ReasoningSummary { .. }
@@ -537,11 +550,64 @@ impl ConversationScene {
                 }
             }
 
+            // Steer placement (session mode). A steer is a user message other
+            // than the turn's first that arrives after the session began. It
+            // never starts a new section: the session keeps one header and one
+            // disclosure, and the bubble sits at its visual seam instead of
+            // its ordinal. The seam is the first non-empty assistant message
+            // (any phase, the promoted reply included) after the steer: the
+            // model acknowledging it in prose. Until that prose exists, the
+            // bubble sits after all work the session holds, so tool calls that
+            // ran after the steer keep growing the chain above it. Several
+            // steers acknowledged by the same prose sit together before it in
+            // ordinal order; unacknowledged ones stack after the work in
+            // ordinal order. Placement keys order `(position, rank, ordinal)`:
+            // rank 0 sorts before the seam item, rank 1 is an item at its own
+            // ordinal, rank 2 sorts after the session's last member.
+            let mut steer_keys: HashMap<String, (u64, u8, u64)> = HashMap::new();
+            if session_mode && let Some(session_start) = anchor_pos {
+                let last_member = turn_items
+                    .iter()
+                    .filter(|item| detail_ids.contains(item.id.as_str()))
+                    .map(|item| item.ordinal)
+                    .max();
+                let mut saw_prompt = false;
+                for item in &turn_items {
+                    if !is_user_message(item) {
+                        continue;
+                    }
+                    let is_prompt = !saw_prompt;
+                    saw_prompt = true;
+                    if is_prompt || item.ordinal < session_start {
+                        continue;
+                    }
+                    // Items are ordinal-sorted, so the first match is the
+                    // earliest acknowledgement.
+                    let seam = turn_items
+                        .iter()
+                        .find_map(|candidate| match &candidate.kind {
+                            SceneItemKind::AssistantMessage { body, .. }
+                                if candidate.ordinal > item.ordinal && !body.is_empty() =>
+                            {
+                                Some(candidate.ordinal)
+                            }
+                            _ => None,
+                        });
+                    let key = match (seam, last_member) {
+                        (Some(seam), _) => (seam, 0, item.ordinal),
+                        (None, Some(last)) if last > item.ordinal => (last, 2, item.ordinal),
+                        (None, _) => (item.ordinal, 1, 0),
+                    };
+                    steer_keys.insert(item.id.as_str().to_owned(), key);
+                }
+            }
+
             // Live-reply and tool-progress inputs (session mode only): a
             // genuine reply (Final/Unspecified, live lifecycle, non-empty,
             // and the newest phase) suppresses the row as its own status,
             // while commentary never does; a live tool chain newer than
-            // model prose suppresses it the same way. Tool liveness comes
+            // model prose keeps the block for the group header but drops
+            // the row's own summary. Tool liveness comes
             // from typed lifecycles only — unknown or settled tools never
             // wait. Model prose is non-empty assistant text of any phase
             // plus non-empty reasoning summaries. Legacy inputs never
@@ -618,14 +684,24 @@ impl ConversationScene {
             let mut summary_all: Option<(u64, String)> = None;
             let mut summary_scoped: Option<(u64, String)> = None;
             let mut engine_label: Option<String> = None;
+            // The segment session details currently append into: the first
+            // segment (`group_index`) until a steer is placed, then the
+            // continuation opened for the work after it.
+            let mut segment_index: Option<usize> = None;
+            // A steer was placed after the session began: the next
+            // session-owned item opens a continuation segment.
+            let mut segment_pending = false;
+            let mut continuation_count: usize = 0;
 
             // The session group emits at the anchor position even when later
             // details are still ahead: later members append into the emitted
-            // group by index, so bodies move exactly once.
+            // group by index, so bodies move exactly once. Continuations emit
+            // the same way at their own first session-owned position; they
+            // never carry the transition, which folds into the first header.
             let emit_session_group =
                 |blocks: &mut Vec<TurnBlock>,
-                 group_index: &mut Option<usize>,
-                 pending_transition: &mut Option<ModelTransitionBlock>| {
+                 continuation: Option<SceneId>,
+                 transition: Option<ModelTransitionBlock>| {
                     blocks.push(TurnBlock::WorkGroup(WorkGroupBlock {
                         items: Vec::new(),
                         label: None,
@@ -633,13 +709,27 @@ impl ConversationScene {
                         session: anchor_id.clone(),
                         session_run: session_run.clone(),
                         superseded: false,
+                        continuation,
                         reasoning_summary: None,
                         progress,
-                        transition: pending_transition.take(),
+                        transition,
                         session_details: Vec::new(),
                     }));
-                    *group_index = Some(blocks.len() - 1);
+                    blocks.len() - 1
                 };
+
+            // Steers move to their visual seam; every other item keeps its
+            // ordinal position. Turns without a placed steer keep the exact
+            // ordinal order.
+            let mut turn_items = turn_items;
+            if !steer_keys.is_empty() {
+                turn_items.sort_by_key(|item| {
+                    steer_keys
+                        .get(item.id.as_str())
+                        .copied()
+                        .unwrap_or((item.ordinal, 1, 0))
+                });
+            }
 
             for item in turn_items {
                 // Session-owned content never reaches the positional arms.
@@ -649,11 +739,28 @@ impl ConversationScene {
                     && group_index.is_none()
                     && anchor_pos.is_some_and(|pos| item.ordinal >= pos)
                 {
-                    emit_session_group(&mut blocks, &mut group_index, &mut pending_transition);
+                    let index = emit_session_group(&mut blocks, None, pending_transition.take());
+                    group_index = Some(index);
+                    segment_index = Some(index);
+                }
+                // The first session-owned item after a placed steer opens the
+                // continuation, the promoted reply included so late work still
+                // joins before it. Reasoning paints no row and opens nothing.
+                let session_owned = session_mode
+                    && (detail_ids.contains(item.id.as_str())
+                        || promoted_id.as_ref().is_some_and(|reply| &item.id == reply));
+                if segment_pending
+                    && session_owned
+                    && !matches!(&item.kind, SceneItemKind::ReasoningSummary { .. })
+                {
+                    continuation_count = continuation_count.saturating_add(1);
+                    let anchor = session_continuation_anchor_id(&turn.turn_id, continuation_count)?;
+                    segment_index = Some(emit_session_group(&mut blocks, Some(anchor), None));
+                    segment_pending = false;
                 }
                 if session_mode && detail_ids.contains(item.id.as_str()) {
                     let Some(TurnBlock::WorkGroup(group)) =
-                        group_index.and_then(|index| blocks.get_mut(index))
+                        segment_index.and_then(|index| blocks.get_mut(index))
                     else {
                         continue;
                     };
@@ -846,6 +953,11 @@ impl ConversationScene {
                 // Messages, cards, and facts are all work-group barriers.
                 flush_work(&mut work_buffer, &mut work_disclosure, &mut blocks)?;
 
+                // A placed steer is the session's only seam: the work after
+                // it continues the same section in a new segment.
+                if group_index.is_some() && steer_keys.contains_key(item.id.as_str()) {
+                    segment_pending = true;
+                }
                 match item.kind {
                     SceneItemKind::UserMessage { body } => {
                         let anchor_key = item.id.as_str().to_owned();
@@ -908,17 +1020,26 @@ impl ConversationScene {
                             disclosure: item.disclosure,
                         }));
                     }
-                    SceneItemKind::Approval { prompt } => {
+                    SceneItemKind::Approval {
+                        prompt,
+                        approval_id,
+                    } => {
                         blocks.push(TurnBlock::Approval(ApprovalBlock {
                             id: item.id,
+                            run_id: item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.run_id.clone()),
+                            approval_id,
                             prompt,
                             disclosure: item.disclosure,
                         }));
                     }
-                    SceneItemKind::Question { prompt } => {
+                    SceneItemKind::Question { prompt, answer } => {
                         blocks.push(TurnBlock::Question(QuestionBlock {
                             id: item.id,
                             prompt,
+                            answer,
                             disclosure: item.disclosure,
                         }));
                     }
@@ -973,22 +1094,52 @@ impl ConversationScene {
             let live_summary = newest_summary
                 .clone()
                 .filter(|_| narration.is_active_work());
+            // A continuation opened only for the promoted reply or reasoning
+            // holds no rows: it would paint an empty slot, so it is dropped.
+            // Continuations always follow the first segment, so its index
+            // stays valid.
+            if continuation_count > 0 {
+                blocks.retain(|block| {
+                    !matches!(
+                        block,
+                        TurnBlock::WorkGroup(group)
+                            if group.continuation.is_some() && group.session_details.is_empty()
+                    )
+                });
+            }
             if let Some(group_index) = group_index {
-                let is_last_content = group_index == blocks.len().saturating_sub(1);
+                // Steers, their labels, and the session's own continuations
+                // are part of the section, not content that supersedes it.
+                // Without a placed steer this is exactly "any later block".
+                let superseded = blocks[group_index + 1..].iter().any(|block| match block {
+                    TurnBlock::UserMessage(message) => {
+                        !steer_keys.contains_key(message.id.as_str())
+                    }
+                    TurnBlock::SteeringLabel(label) => {
+                        !steer_keys.contains_key(label.anchor.as_str())
+                    }
+                    TurnBlock::WorkGroup(group) => group.continuation.is_none(),
+                    _ => true,
+                });
                 let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
                     unreachable!("session index always addresses its group");
                 };
-                group.superseded = !is_last_content;
+                group.superseded = superseded;
                 group.reasoning_summary.clone_from(&newest_summary);
             }
 
             // A duration narration is a terminal label, not a label on every
-            // historical work fragment. Prefer the session group when the
-            // turn has one; otherwise keep the latest positional group.
+            // historical work fragment. Prefer the session group's first
+            // segment when the turn has one; otherwise keep the latest
+            // positional group. Continuations never carry the label.
             if let Some(label) = narration.terminal_label() {
-                let session_at = blocks.iter().position(
-                    |block| matches!(block, TurnBlock::WorkGroup(group) if group.session.is_some()),
-                );
+                let session_at = blocks.iter().position(|block| {
+                    matches!(
+                        block,
+                        TurnBlock::WorkGroup(group)
+                            if group.session.is_some() && group.continuation.is_none()
+                    )
+                });
                 let positional_at = blocks
                     .iter()
                     .rposition(|block| matches!(block, TurnBlock::WorkGroup(_)));
@@ -1025,16 +1176,22 @@ impl ConversationScene {
                 return Err(SceneBuildError::CompactionNarrationConflict { narration });
             }
 
-            // A genuine live reply is its own status; commentary never
-            // suppresses as if it were a reply. Waiting tool progress
-            // suppresses the same way. Legacy inputs never suppress.
-            let suppress_status = (live_reply || waiting_for_activity)
+            // A genuine live reply is its own status: the block goes, and
+            // the streaming prose owns the visible progress. Commentary
+            // never suppresses as if it were a reply. Waiting tool progress
+            // keeps the block but drops the summary: the live tool row
+            // carries its own progress, so the status row stands down as
+            // the exact duplicate of the group header, while that header
+            // still counts `Working for …` from the block's basis. Legacy
+            // inputs never suppress.
+            let suppress_status = live_reply
                 && (narration == TurnNarration::StreamingSuppression || narration.is_active_work());
             if !suppress_status {
                 blocks.push(TurnBlock::TurnStatus(TurnStatusBlock {
                     narration,
                     active_started_at_ms,
-                    reasoning_summary: live_summary.filter(|_| session_mode),
+                    reasoning_summary: live_summary
+                        .filter(|_| session_mode && !waiting_for_activity),
                     engine_label: explicit_engine_label
                         .clone()
                         .or(engine_label.filter(|_| session_mode)),

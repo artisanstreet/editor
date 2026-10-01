@@ -15,7 +15,7 @@ use artisan_database::{
     ClaimMessageDispatch, ClaimedMessageDispatch, LaunchedRunReceipt, Repository,
     RunLaunchCredentials, RunStartKey,
 };
-use artisan_domain::{EngineId, ItemId, PatchId, RootPath, RunId, TurnId, UnixMillis};
+use artisan_domain::{EngineId, ErrorChain, ItemId, PatchId, RootPath, RunId, TurnId, UnixMillis};
 use artisan_native_engine::{
     NativeOpenCode2Authority, VerifiedClaudeLaunch, VerifiedCodexLaunch,
     VerifiedOpenCode2ProfileLaunch,
@@ -48,6 +48,8 @@ mod claim_lease;
 mod commit_retry;
 #[path = "native_run_dispatch/delta_coalescer.rs"]
 mod delta_coalescer;
+#[path = "native_run_dispatch/diagnostics.rs"]
+mod diagnostics;
 #[path = "native_run_dispatch/dispatch_policy.rs"]
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]
@@ -70,11 +72,14 @@ mod text_projection;
 mod turn;
 
 #[cfg(test)]
+pub(crate) use turn::resolution_checkpoint;
+
+#[cfg(test)]
 use assistant_commit::flush_pending_deltas;
 #[cfg(test)]
 use claim::launch_claim;
 use claim::{execute_claim, fail_claim, requeue_claim};
-use claim_lease::ClaimLease;
+use claim_lease::{ClaimLease, LiveClaims};
 pub(crate) use commit_retry::{CommitBatchRequest, commit_batch_with_retry};
 #[cfg(test)]
 pub(crate) use dispatch_policy::notify_after_commit;
@@ -182,6 +187,12 @@ impl std::fmt::Debug for NativeRunDispatcherConfigInput {
 pub struct NativeRunDispatcherConfig {
     authority: NativeOpenCode2Authority,
     notifier: ConversationCommitNotifier,
+    /// What each live run is thinking right now. The dispatcher writes it
+    /// and publishes through `notifier`; request delivery reads it.
+    live_thinking: crate::live_thinking::LiveThinkingBoard,
+    /// Claims this Forge's dispatch workers are executing right now; the
+    /// live recovery sweep never reaps them.
+    live_claims: LiveClaims,
     claim_lease: Duration,
     launch_deadline: Duration,
     poll_interval: Duration,
@@ -208,6 +219,7 @@ impl std::fmt::Debug for NativeRunDispatcherConfig {
             .field("stream_after", &self.stream_after)
             .field("authority", &"caller-selected certified authority")
             .field("notifier", &"caller-selected notifier")
+            .field("live_claims", &"process-owned live claim set")
             .finish()
     }
 }
@@ -216,6 +228,17 @@ impl NativeRunDispatcherConfig {
     /// Clones the exact process-owned notifier for Forge request delivery.
     pub(crate) fn conversation_commit_notifier(&self) -> ConversationCommitNotifier {
         self.notifier.clone()
+    }
+
+    /// Clones the process-owned set of claims the workers are executing.
+    pub(super) fn live_claims(&self) -> LiveClaims {
+        self.live_claims.clone()
+    }
+
+    /// Clones the process-owned board of live thinking blocks for Forge
+    /// request delivery.
+    pub(crate) fn live_thinking_board(&self) -> crate::live_thinking::LiveThinkingBoard {
+        self.live_thinking.clone()
     }
 
     /// Creates a complete injected scheduler policy.
@@ -269,6 +292,8 @@ impl NativeRunDispatcherConfig {
         Ok(Self {
             authority,
             notifier,
+            live_thinking: crate::live_thinking::LiveThinkingBoard::new(),
+            live_claims: LiveClaims::default(),
             claim_lease,
             launch_deadline,
             poll_interval,
@@ -566,8 +591,20 @@ impl NativeRunDispatcher {
                 EngineOwnerShutdown::Quarantined => NativeRunDispatcherShutdown::Quarantined,
                 EngineOwnerShutdown::TaskLost => NativeRunDispatcherShutdown::TaskLost,
             },
-            Ok(Err(_)) => NativeRunDispatcherShutdown::TaskLost,
-            Err(_) => NativeRunDispatcherShutdown::BudgetExceeded,
+            Ok(Err(error)) => {
+                eprintln!(
+                    "native run dispatcher task was lost during shutdown: {}",
+                    ErrorChain(&error)
+                );
+                NativeRunDispatcherShutdown::TaskLost
+            }
+            Err(_) => {
+                eprintln!(
+                    "native run dispatcher did not stop within its {} ms shutdown budget",
+                    self.shutdown_budget.as_millis()
+                );
+                NativeRunDispatcherShutdown::BudgetExceeded
+            }
         };
         self.observed = Some(outcome);
         outcome
@@ -601,10 +638,16 @@ struct DispatchLoopContext {
 // dispatch claims and prevents two workers from claiming the same thread.
 async fn dispatch_workers(mut context: DispatchLoopContext) -> DispatchLoopExit {
     if let Some(now) = wall_clock(&SystemCommandOrigin) {
-        let _ = context
+        if let Err(error) = context
             .repository
             .fail_orphaned_steered_dispatches(now)
-            .await;
+            .await
+        {
+            eprintln!(
+                "steers orphaned by the previous Forge could not be failed (they stay open until the next start): {}",
+                ErrorChain(&error)
+            );
+        }
         context.config.notifier.wake_any();
     }
     #[cfg(test)]
@@ -639,7 +682,11 @@ async fn dispatch_workers(mut context: DispatchLoopContext) -> DispatchLoopExit 
                 }
                 context.stop.cancel();
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!(
+                    "native run dispatch worker was lost; stopping the dispatcher: {}",
+                    ErrorChain(&error)
+                );
                 outcome = EngineOwnerShutdown::TaskLost;
                 context.stop.cancel();
             }
@@ -761,13 +808,20 @@ async fn dispatch_loop(context: DispatchLoopContext) -> DispatchLoopExit {
                 let backoff =
                     claim_failure_backoff(disposition, claim_failures, config.retry_backoff);
                 claim_failures = claim_failures.saturating_add(1);
-                eprintln!("native run dispatch claim attempt failed ({disposition:?}): {error}");
+                eprintln!(
+                    "native run dispatch claim attempt failed ({disposition:?}, {claim_failures} consecutive failure(s), retrying in {} ms): {}",
+                    backoff.as_millis(),
+                    ErrorChain(&error)
+                );
                 if !wait_for_next_claim(&stop, &process_cancel, backoff).await {
                     break;
                 }
                 continue;
             }
         };
+        // Held until the claim settles, so a lease that lapsed during a
+        // stall is never reaped while this worker still drives the turn.
+        let _live_claim = config.live_claims.hold(claimed.message_id.clone());
         let claim_lease = ClaimLease::new(&claimed, config.claim_lease);
         if let Some(lease) = Box::pin(execute_claim(
             ClaimExecution {

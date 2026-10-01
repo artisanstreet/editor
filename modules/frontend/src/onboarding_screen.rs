@@ -319,14 +319,16 @@ impl OnboardingScreen {
                     .child(SharedString::from(entry.card.description.clone())),
             );
         if let Some(failure) = presentation.failure.clone() {
-            upper = upper.child(
+            upper = upper.child(crate::dismissible_notice::DismissibleNotice::new(
+                format!("{card_selector}-failure-{failure}"),
                 div()
                     .max_w(px(ONBOARDING_DESCRIPTION_MAX_WIDTH_PX))
                     .text_xs()
                     .line_height(px(16.0))
                     .text_color(theme.colors.destructive.to_paint())
                     .child(SharedString::from(failure)),
-            );
+                theme,
+            ));
         }
 
         let button_face = div()
@@ -449,13 +451,15 @@ impl OnboardingScreen {
             .items_end()
             .gap(theme.spacing.steps(2.0));
         if let Some(error) = self.completion_error.clone() {
-            column = column.child(
+            column = column.child(crate::dismissible_notice::DismissibleNotice::new(
+                format!("onboarding-completion-error-{error}"),
                 div()
                     .text_xs()
                     .text_color(theme.colors.destructive.to_paint())
                     .debug_selector(|| format!("{ONBOARDING_SCREEN_SELECTOR}-completion-error"))
                     .child(SharedString::from(error)),
-            );
+                theme,
+            ));
         }
         let mut continue_button = div()
             .id(SharedString::from(format!(

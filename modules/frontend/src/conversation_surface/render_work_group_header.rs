@@ -13,9 +13,11 @@ impl ConversationSurface {
     /// the label (or disclosure chevron) at the near end, an engine handoff
     /// at the far end, and the 1 px settled divider pinned to the bottom
     /// edge. Controlled groups carry the label tone on the chevron;
-    /// uncontrolled text stays static; a headerless controlled group keeps
-    /// the chevron-only affordance with an honest accessible name —
-    /// disclosure chrome, never invented content.
+    /// uncontrolled text stays static. `controlled` means the settled,
+    /// toggleable header: a live section passes `false` and its label paints
+    /// without a chevron. The caller titles every disclosable section with
+    /// its turn's own state, so a chevron never paints without words: a
+    /// header without a label paints no near end at all.
     #[expect(
         clippy::too_many_arguments,
         reason = "the header row takes the label, transition, disclosure state, motion, and theme it paints as one unit"
@@ -47,34 +49,21 @@ impl ConversationSurface {
                 .gap(theme.spacing.steps(1.0))
                 .min_w_0()
                 .text_color(theme.colors.muted_foreground.to_paint())
-                .child(label)
-                .child(Self::work_group_chevron(
-                    fraction,
-                    16.0,
-                    theme.colors.muted_foreground.to_paint(),
-                ))
+                // A long thinking chip ellipsizes on its one line; the
+                // chevron never shrinks away.
+                .child(div().min_w_0().truncate().child(label))
+                .child(Self::work_group_header_chevron(fraction, selector, theme))
                 .into_any_element(),
-            (true, None) => div()
-                .id(format!("{selector}-work-trigger"))
-                .flex()
-                .flex_row()
-                .items_center()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .aria_label("Toggle work details")
-                .gap(theme.spacing.steps(1.0))
-                .child("Work history")
-                .child(Self::work_group_chevron(
-                    fraction,
-                    16.0,
-                    theme.colors.muted_foreground.to_paint(),
-                ))
-                .into_any_element(),
+            // A live section's words and any uncontrolled label: no chevron
+            // beside them.
             (false, Some(label)) => div()
                 .min_w_0()
+                .truncate()
                 .text_color(theme.colors.muted_foreground.to_paint())
+                .debug_selector(|| format!("{selector}-header-label"))
                 .child(label)
                 .into_any_element(),
-            (false, None) => div().into_any_element(),
+            (_, None) => div().into_any_element(),
         };
         let mut header = div()
             .relative()
@@ -93,10 +82,7 @@ impl ConversationSurface {
             )))
             .text_color(theme.colors.muted_foreground.to_paint())
             .pb(theme.spacing.steps(2.0))
-            .debug_selector({
-                let selector = format!("{selector}-header");
-                move || selector.clone()
-            })
+            .debug_selector(|| format!("{selector}-header"))
             .child(near);
         if let Some(handoff) = transition {
             header = header.child(
@@ -166,14 +152,21 @@ impl ConversationSurface {
         fraction: f32,
         size: f32,
         color: gpui::Hsla,
-    ) -> AnyElement {
+    ) -> gpui::Svg {
         gpui::svg()
             .path(AssetId::TABLER_CHEVRON_RIGHT.as_str())
             .size(px(size))
+            .flex_shrink_0()
             .text_color(color)
             .with_transformation(gpui::Transformation::rotate(gpui::radians(
                 fraction * std::f32::consts::FRAC_PI_2,
             )))
-            .into_any_element()
+    }
+
+    /// The section header's own chevron, selectable so its presence (settled)
+    /// and absence (live) stay observable without changing the layout.
+    fn work_group_header_chevron(fraction: f32, selector: &str, theme: &ArtisanTheme) -> gpui::Svg {
+        Self::work_group_chevron(fraction, 16.0, theme.colors.muted_foreground.to_paint())
+            .debug_selector(|| format!("{selector}-header-chevron"))
     }
 }

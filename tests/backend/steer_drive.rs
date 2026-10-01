@@ -507,6 +507,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             respond_tx,
         )
         .await;
@@ -621,6 +622,7 @@ async fn codex_steer_burst_drains_sixty_four_through_production_handle_steer() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             replay_tx,
         )
         .await;
@@ -954,6 +956,7 @@ async fn codex_steer_reject_fails_typed_with_payload_preserved() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             respond_tx,
         )
         .await;
@@ -1138,6 +1141,7 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             respond_tx,
         )
         .await;
@@ -1186,6 +1190,7 @@ async fn codex_steer_cancel_before_ack_records_nothing_and_retry_steers_once() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             retry_tx,
         )
         .await;
@@ -1355,6 +1360,7 @@ async fn codex_steer_known_acked_retry_replays_projection_without_provider() {
             command_id.clone(),
             message_id.clone(),
             "follow up".to_owned(),
+            Vec::new(),
             respond_tx,
         )
         .await;
@@ -1584,4 +1590,71 @@ async fn codex_message_history_preserves_parts_phases_and_late_corrections() {
     })
     .await
     .expect("history settles");
+}
+
+#[tokio::test]
+async fn steer_retires_only_an_assistant_item_that_carries_no_text() {
+    // Observation commits open the assistant item ahead of its first text. A
+    // steer projected meanwhile would otherwise sort after the item the
+    // acknowledging prose then fills, putting the reply above the message it
+    // answers; an item that already has text or a provider part keeps its
+    // identity.
+    let temp = SteerTempRoot::new("retire-unwritten");
+    let database = connect(SqliteConfig::file(&temp.db_path).sqlx_logging(false))
+        .await
+        .expect("file database should open");
+    migrate_to_current(&database)
+        .await
+        .expect("migrations should apply");
+    let repository = Repository::new(database.clone());
+    let thread_id = ThreadId::parse("thread-fixture-1").expect("thread id");
+    let seed = seed_steer_run(
+        &repository,
+        &thread_id,
+        "retire-unwritten",
+        "run-retire-unwritten",
+        "turn-retire-unwritten",
+    )
+    .await;
+    let scope = RunBatchScope {
+        claimed: &seed.claimed,
+        launched: &seed.launched,
+        bound: &seed.bound,
+        run_start_key: &seed.run_start_key,
+        credentials: &seed.credentials,
+        expected_launch_at: UnixMillis::from_millis(seed.launch_op_ms),
+        expected_updated_at: UnixMillis::from_millis(seed.bound_op_ms),
+    };
+    let mut state = TurnConsumptionState::new(scope, EngineId::Claude);
+    let first = MessageId::parse("message-steer-1").expect("message id");
+    let second = MessageId::parse("message-steer-2").expect("message id");
+    let item = |value: &str| ItemId::parse(value).expect("item id");
+
+    super::message_parts::retire_unwritten_item(&mut state, &first);
+    assert!(
+        state.parked_parts.is_empty(),
+        "nothing open, nothing retired"
+    );
+
+    state.assistant_item = Some(item("item-unwritten"));
+    state.assistant_revision = artisan_domain::Revision::new(3);
+    super::message_parts::retire_unwritten_item(&mut state, &first);
+    assert_eq!(state.assistant_item, None, "the next text opens a new item");
+    assert_eq!(state.assistant_revision, artisan_domain::Revision::new(0));
+    assert_eq!(
+        state.parked_parts.len(),
+        1,
+        "the empty item is sealed later"
+    );
+
+    state.assistant_item = Some(item("item-written"));
+    state.assistant_body = "Noted".to_owned();
+    super::message_parts::retire_unwritten_item(&mut state, &second);
+    assert_eq!(state.assistant_item, Some(item("item-written")));
+
+    state.assistant_body.clear();
+    state.active_part = Some("msg_1".to_owned());
+    super::message_parts::retire_unwritten_item(&mut state, &second);
+    assert_eq!(state.assistant_item, Some(item("item-written")));
+    assert_eq!(state.parked_parts.len(), 1);
 }

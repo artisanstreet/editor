@@ -12,9 +12,9 @@
 //! run is rejected instead of misapplied. This module never prompts, streams,
 //! or delivers: the returned snapshots are durable facts only.
 //!
-//! Observation sequences for the later resolution commit are allocated here,
-//! inside the same transaction family, as `MAX(requested, resolved) + 1`
-//! starting at 1. Allocation assumes the single-owner discipline the live
+//! Request-ledger sequences are allocated here as `MAX(requested, resolved) + 1`
+//! starting at 1. They are independent of transcript observation sequences;
+//! the dispatcher assigns a fresh transcript sequence when publishing a resolution. Allocation assumes the single-owner discipline the live
 //! run registry enforces: only the owning dispatch loop records and resolves
 //! for its run, so no two writers can race the counter.
 
@@ -182,7 +182,7 @@ pub struct AppliedInteraction {
     pub receipt: StoredInteractionReceipt,
     /// The reconstructed requested state, for the resolution commit.
     pub requested: RequestedInteractionSnapshot,
-    /// Allocated durable observation sequence of the resolution.
+    /// Allocated request-ledger sequence, independent of the transcript sequence.
     pub resolved_sequence: u64,
 }
 

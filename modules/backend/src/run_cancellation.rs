@@ -297,6 +297,21 @@ impl RunCancellationRegistry {
         }
         Ok(Some(run_id))
     }
+    /// Whether this exact run has received Stop, even while its process is draining.
+    ///
+    /// # Errors
+    /// Returns an error if the registry lock is poisoned.
+    pub fn cancellation_requested(
+        &self,
+        thread_id: &ThreadId,
+        run_id: &RunId,
+    ) -> Result<bool, RunCancellationError> {
+        let state = self.inner.lock()?;
+        Ok(state
+            .active
+            .get(&(thread_id.clone(), run_id.clone()))
+            .is_some_and(|run| run.signalled))
+    }
 }
 
 /// RAII ownership of one live cancellation registration.
@@ -486,6 +501,23 @@ mod tests {
             .register_exclusive(thread_id("a"), run_id("3"))
             .unwrap();
         drop((next, other));
+    }
+
+    #[test]
+    fn cancelled_run_stays_registered_but_no_longer_accepts_input() {
+        let registry = registry(1);
+        let thread = thread_id("cancel-input-thread");
+        let run = run_id("cancel-input-run");
+        let _lease = registry.register(thread.clone(), run.clone()).unwrap();
+        assert!(!registry.cancellation_requested(&thread, &run).unwrap());
+        registry.request_cancel(&thread, &run).unwrap();
+        assert!(registry.cancellation_requested(&thread, &run).unwrap());
+        assert_eq!(registry.active_run(&thread).unwrap(), Some(run));
+        assert!(
+            !registry
+                .cancellation_requested(&thread, &run_id("next-run"))
+                .unwrap()
+        );
     }
 
     #[test]

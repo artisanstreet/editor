@@ -13,10 +13,15 @@ pub(super) struct RunControlsState {
     generation: u64,
     pending: Option<u64>,
     stop: Option<StopRun>,
+    optimistic_stopped: Option<RunId>,
     poll: Option<Task<()>>,
 }
 
 impl RunControlsState {
+    pub(super) fn optimistically_stopped(&self) -> Option<&RunId> {
+        self.optimistic_stopped.as_ref()
+    }
+
     /// Clears transient run observation for a terminal transport failure.
     ///
     /// An observed active run, pending read, poll task, stop request, and
@@ -30,6 +35,7 @@ impl RunControlsState {
         self.available = false;
         self.pending = None;
         self.stop = None;
+        self.optimistic_stopped = None;
         self.poll = None;
     }
 }
@@ -42,11 +48,12 @@ impl NativeApplication {
                 self.run_controls
                     .active
                     .as_ref()
+                    .filter(|id| self.run_controls.optimistic_stopped.as_ref() != Some(*id))
                     .map(|id| id.as_str().to_owned())
             })
             .flatten();
         snapshot.run_active = snapshot.run_id.is_some();
-        snapshot.cancelling = current && self.run_controls.stop.is_some();
+        snapshot.cancelling = false;
         snapshot.abort_available = current && self.run_controls.available && self.service.is_some();
     }
 
@@ -59,6 +66,7 @@ impl NativeApplication {
             self.run_controls.available = false;
             self.run_controls.pending = None;
             self.run_controls.stop = None;
+            self.run_controls.optimistic_stopped = None;
             self.run_controls.poll = None;
             self.sync_composer_controls(cx);
         }
@@ -188,6 +196,41 @@ impl NativeApplication {
         cx.notify();
     }
 
+    fn project_optimistic_stop(&mut self, run_id: Option<&str>, cx: &mut Context<Self>) {
+        let Some(host) = self.conversation_host.clone() else {
+            return;
+        };
+        let turn_id = run_id.and_then(|run_id| {
+            let snapshot = host.read(cx).canonical_snapshot()?;
+            snapshot
+                .items()
+                .iter()
+                .find_map(|item| match item {
+                    ConversationItem::AssistantMessage(message)
+                        if message.run_id.as_str() == run_id =>
+                    {
+                        Some(message.turn_id.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    snapshot
+                        .turns()
+                        .iter()
+                        .rev()
+                        .find(|turn| !turn.lifecycle.is_terminal())
+                        .map(|turn| turn.turn_id.clone())
+                })
+        });
+        let _ = host.update(cx, |host, cx| {
+            host.dispatch(
+                ConversationStateEvent::SetOptimisticCancellation { turn_id },
+                cx,
+            )
+        });
+        self.pump_host_boundary(&host, cx);
+    }
+
     pub(super) fn stop_composer_run(&mut self, run_id: &str, cx: &mut Context<Self>) {
         if self.run_controls.stop.is_some()
             || !self.run_controls.available
@@ -212,7 +255,12 @@ impl NativeApplication {
         };
         let command = StopRun::new(request_id, thread, active);
         match self.submit_command(NativeTransportCommand::StopRun(command.clone())) {
-            Ok(()) => self.run_controls.stop = Some(command),
+            Ok(()) => {
+                self.run_controls.optimistic_stopped = Some(command.run_id.clone());
+                self.run_controls.stop = Some(command);
+                self.project_optimistic_stop(Some(run_id), cx);
+                self.sync_composer_questionnaires(cx);
+            }
             Err(error) => {
                 self.message_failure = Some(NativeMessageFailure::new(command_failure(error)));
             }
@@ -241,7 +289,7 @@ impl NativeApplication {
         // A requested receipt is not terminal completion. The live registry and
         // durable conversation projection remain authoritative until settlement.
         if receipt.disposition == StopRunDisposition::NotActive {
-            self.run_controls.stop = None;
+            // Keep the optimistic view until a fresh run read reconciles it.
             self.run_controls.available = false;
         }
         self.sync_composer_controls(cx);
@@ -258,7 +306,12 @@ impl NativeApplication {
             return;
         }
         self.run_controls.stop = None;
+        self.run_controls.optimistic_stopped = None;
+        self.project_optimistic_stop(None, cx);
+        self.sync_composer_questionnaires(cx);
         self.message_failure = Some(NativeMessageFailure::new(failure));
+        self.message_failure_note =
+            Some("Could not stop the run. It may still be running; try Stop again.".to_owned());
         self.sync_composer_controls(cx);
         self.schedule_run_observation(cx);
         cx.notify();
@@ -309,6 +362,7 @@ mod tests {
                 application.run_controls.available = true;
                 application.run_controls.pending = Some(2);
                 application.run_controls.stop = Some(stop.clone());
+                application.run_controls.optimistic_stopped = Some(run.clone());
                 application.receive_active_run(
                     &thread,
                     1,
@@ -337,11 +391,24 @@ mod tests {
                     }),
                     cx,
                 );
-                assert!(application.composer_controls.read(cx).snapshot().cancelling);
+                assert!(!application.composer_controls.read(cx).snapshot().run_active);
                 assert_eq!(application.run_controls.active.as_ref(), Some(&run));
                 application.receive_active_run(
                     &thread,
                     2,
+                    Ok(ActiveRunResult::Active {
+                        thread_id: thread.clone(),
+                        run_id: run.clone(),
+                        status: RunLiveStatus::Running,
+                        engine_id: artisan_domain::EngineId::Claude,
+                    }),
+                    cx,
+                );
+                assert!(!application.composer_controls.read(cx).snapshot().run_active);
+                application.run_controls.pending = Some(3);
+                application.receive_active_run(
+                    &thread,
+                    3,
                     Ok(ActiveRunResult::NoActive {
                         thread_id: thread.clone(),
                     }),

@@ -11,7 +11,7 @@
 //!   (host + composer) inside the production
 //!   [`desktop_shell`](crate::desktop_shell::desktop_shell) wrapper, so the
 //!   captured pixels exercise the real shell background, the real 48 px
-//!   titlebar reservation, the real 218 px sidebar reservation, and the real
+//!   titlebar reservation, the real 327 px sidebar reservation, and the real
 //!   composer dock — no hand-drawn approximation of any of them;
 //! - mounts each case through the shell lane's proof factory
 //!   (`ThreadScreen::mount_proof`: gate, content width, and title in one
@@ -69,7 +69,7 @@ use crate::conversation_surface::{ConversationSurfaceTarget, ordered_block_kinds
 use crate::desktop_shell::{
     DESKTOP_SIDEBAR_WIDTH_PX, DESKTOP_TITLEBAR_HEIGHT_PX, DesktopShellStyle, desktop_shell,
 };
-use crate::thread_screen::{ThreadScreen, thread_inspector_visible};
+use crate::thread_screen::{ThreadScreen, thread_inspector_width};
 
 /// Narrow baseline viewport, logical pixels.
 const NARROW_LOGICAL_WIDTH: f32 = 1024.0;
@@ -758,7 +758,7 @@ fn print_capture_geometry(
     let style = DesktopShellStyle::resolve(false, scale);
     let sidebar_matches = style.sidebar_width == px(DESKTOP_SIDEBAR_WIDTH_PX);
     let titlebar_matches = style.titlebar_height == px(DESKTOP_TITLEBAR_HEIGHT_PX);
-    let state = if thread_inspector_visible(content_width) {
+    let state = if thread_inspector_width(content_width).is_some() {
         "shown"
     } else {
         "hidden"
@@ -836,17 +836,18 @@ impl ParityProofShell {
     }
 
     /// Renders the shell around the mounted screen.
-    fn render_shell(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
+    fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let body = self.screen.clone().into_any_element();
+        let inspector_width = self.screen.read(cx).visible_inspector_width();
         desktop_shell(
             DesktopTheme::neutral_dark(),
-            false,
+            DesktopShellStyle::resolve(false, window.scale_factor()),
             div().into_any_element(),
             div().into_any_element(),
             div().into_any_element(),
             div().into_any_element(),
             body,
-            window.scale_factor(),
+            inspector_width,
             window.is_maximized(),
         )
         .into_any_element()

@@ -24,6 +24,12 @@ use super::failures::{
 };
 use super::{RUN_CANCELLATION_UNAVAILABLE_DETAIL, RequestHandler};
 
+/// Most observation rows one page of older turns carries. Settled turns send
+/// only the rows that show while their sections are closed, so a page stays
+/// far below this; the bound keeps a page of turns that never settled from
+/// growing without limit.
+const EARLIER_TURNS_MAX_OBSERVATIONS: usize = 2048;
+
 impl RequestHandler {
     pub(super) async fn pick_directory_outcome(
         &self,
@@ -190,16 +196,18 @@ impl RequestHandler {
                         let run = registry
                             .active_run(&thread.thread_id)
                             .map_err(|error| run_cancellation_failure(error, request_id))?;
-                        if let Some(run) = run {
-                            thread.has_active_work = self
+                        let live = match run {
+                            Some(run) => self
                                 .repository
                                 .read_assistant_run_status(&thread.thread_id, &run)
                                 .await
                                 .map_err(|error| repository_failure(&error, request_id))?
                                 .is_some_and(|(lifecycle, _)| {
                                     run_live_status(&lifecycle).is_some()
-                                });
-                        }
+                                }),
+                            None => false,
+                        };
+                        thread.set_active_work(live);
                     }
                 }
                 let threads = artisan_domain::ThreadListing::new(rows)
@@ -403,6 +411,95 @@ impl RequestHandler {
         }
     }
 
+    /// Reads one on-demand part of a thread's history.
+    ///
+    /// Older turns come with the activity that shows while their sections
+    /// are closed and a count of the work rows that stayed behind; one
+    /// turn's work comes as a page of its rows with where to continue.
+    async fn conversation_history_page(
+        &self,
+        history: &artisan_domain::ConversationHistoryRequest,
+    ) -> Result<artisan_domain::ConversationHistoryPage, artisan_database::RepositoryError> {
+        use artisan_domain::{ConversationHistoryPage, ConversationHistoryPart};
+        let thread_id = &history.thread_id;
+        match &history.part {
+            ConversationHistoryPart::EarlierTurns {
+                before_turn_ordinal,
+                minimum_turn_ordinal,
+                maximum_turn_count,
+            } => {
+                let query = artisan_domain::ConversationQuery {
+                    thread_id: thread_id.clone(),
+                    bounds: artisan_domain::ConversationQueryBounds::Range {
+                        before_turn_ordinal: *before_turn_ordinal,
+                        minimum_turn_ordinal: *minimum_turn_ordinal,
+                        maximum_turn_count: *maximum_turn_count,
+                    },
+                };
+                let snapshot = self.repository.read_conversation_snapshot(&query).await?;
+                let snapshot =
+                    crate::citation_projection::resolve_snapshot(&self.repository, snapshot).await;
+                let mut observations = Vec::new();
+                let mut held_back = Vec::new();
+                if let Some(oldest) = snapshot.turns().first() {
+                    let scope = artisan_database::ObservationHistoryScope {
+                        floor: oldest.ordinal.get(),
+                        before: Some(before_turn_ordinal.get()),
+                        tail: self.repository.observation_history_tail(thread_id).await?,
+                    };
+                    let mut after = 0;
+                    while observations.len() < EARLIER_TURNS_MAX_OBSERVATIONS {
+                        let page = self
+                            .repository
+                            .read_scoped_observation_history(
+                                thread_id,
+                                after,
+                                &scope,
+                                crate::activated_conversation_replay::OBSERVATION_HISTORY_PAGE_LIMIT,
+                            )
+                            .await?;
+                        let Some(last) = page
+                            .last()
+                            .and_then(|event| event.attribution.as_ref())
+                            .map(|attribution| attribution.delivery_sequence)
+                        else {
+                            break;
+                        };
+                        after = last;
+                        observations.extend(page);
+                    }
+                    held_back = self
+                        .repository
+                        .read_held_back_turn_work(thread_id, &scope)
+                        .await?;
+                }
+                Ok(ConversationHistoryPage {
+                    thread_id: thread_id.clone(),
+                    snapshot: Some(snapshot),
+                    observations,
+                    held_back,
+                    next_after_sequence: None,
+                })
+            }
+            ConversationHistoryPart::TurnWork {
+                turn_id,
+                after_sequence,
+            } => {
+                let (observations, next_after_sequence) = self
+                    .repository
+                    .read_turn_work(thread_id, turn_id, *after_sequence)
+                    .await?;
+                Ok(ConversationHistoryPage {
+                    thread_id: thread_id.clone(),
+                    snapshot: None,
+                    observations,
+                    held_back: Vec::new(),
+                    next_after_sequence,
+                })
+            }
+        }
+    }
+
     /// Answers conversation reads and subscription control.
     ///
     /// `ConversationRequest::Query` calls `Repository::read_conversation_snapshot`
@@ -432,6 +529,16 @@ impl RequestHandler {
                         crate::citation_projection::resolve_snapshot(&self.repository, snapshot)
                             .await,
                     ),
+                ))
+            }
+            ConversationRequest::History(history) => {
+                let page = self
+                    .conversation_history_page(history)
+                    .await
+                    .map_err(|error| repository_failure(&error, request_id))?;
+                Ok(outcome(
+                    request_id,
+                    ResponsePayload::ConversationHistory(page),
                 ))
             }
             ConversationRequest::Subscribe(_) => {

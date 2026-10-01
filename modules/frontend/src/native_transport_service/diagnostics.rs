@@ -253,6 +253,8 @@ pub enum PrivateDelivery {
     Observation(ServerEvent),
     /// A thread's complete message outbox.
     Outbox(artisan_domain::MessageOutbox),
+    /// A newly subscribed thread's observation history is fully delivered.
+    ObservationHistoryCurrent(artisan_domain::ThreadId),
     /// Connection-scoped state the Forge pushed.
     HostState(super::HostStateEvent),
     /// Bounded delivery loss.
@@ -615,6 +617,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::StopRun(_) => "StopRun",
             Self::RespondApproval(_) => "RespondApproval",
             Self::RespondQuestion(_) => "RespondQuestion",
+            Self::AnswerQuestions(_) => "AnswerQuestions",
             Self::BeginProjectIntake => "BeginProjectIntake",
             Self::BeginProjectIntakeAt(_) => "BeginProjectIntakeAt",
             Self::RetryProjectIntake => "RetryProjectIntake",
@@ -625,6 +628,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::CreateTask(_) => "CreateTask",
             Self::RecoverFailedMessage { .. } => "RecoverFailedMessage",
             Self::RequestSnapshot(_) => "RequestSnapshot",
+            Self::ReadConversationHistory { .. } => "ReadConversationHistory",
             Self::ReadMessageImage(_) => "ReadMessageImage",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
             Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",

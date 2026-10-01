@@ -5,11 +5,12 @@
 //! to start (or misses the dispatcher's launch deadline) the dispatcher has
 //! already torn the child down, so it knows the outcome: the run failed
 //! before any provider session existed. This transaction records exactly
-//! that, while the dispatcher still holds the live dispatch lease, instead of
-//! leaving the pair for lease-expiry recovery to report an unknown outcome.
+//! that, while the dispatcher still owns the dispatch, instead of leaving the
+//! pair for lease-expiry recovery to report an unknown outcome.
 //!
-//! One transaction fences the live dispatch (owner, `running`, unexpired
-//! lease) and the unbound `launching` run (identity, start key, all three
+//! One transaction fences the owned dispatch (owner token and `running`; the
+//! owner settles its own claim even after its lease lapsed during a stall)
+//! and the unbound `launching` run (identity, start key, all three
 //! launch capabilities, no binding), then fails the dispatch with the given
 //! reason, fails the run with the given error, fails the origin turn, and
 //! appends its `turn_lifecycle` patch with the per-thread counter. Any fence
@@ -38,7 +39,6 @@ SET state = 'failed',
 WHERE message_id = ?
   AND state = 'running'
   AND lease_owner = ?
-  AND lease_expires_at_ms > ?
   AND updated_at_ms <= ?
 RETURNING message_id
 ";
@@ -151,7 +151,6 @@ async fn execute(
             operated_at_ms.into(),
             command.claimed.message_id.as_str().into(),
             command.claimed.owner.to_storage().into(),
-            operated_at_ms.into(),
             operated_at_ms.into(),
         ],
     );

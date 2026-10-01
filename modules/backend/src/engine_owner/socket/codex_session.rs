@@ -29,7 +29,7 @@ use tokio::process::ChildStdout;
 use tokio::time::Instant;
 
 use super::super::codex as codex_runtime;
-use super::super::codex::CodexSettings;
+use super::super::codex::{CodexLineError, CodexSettings};
 use super::super::process::{
     ChildParts, CleanupObservation, LifelineWriter, RetainedEngine, START_DIAGNOSTIC_DRAIN,
     StartDiagnostic, StderrCounter, cleanup_after_abort, spawn_codex_engine,
@@ -328,11 +328,15 @@ async fn await_preflight_result(
 ) -> CodexPreflightWait {
     let deadline = phase_deadline(context.limits.prompt, context.attempt_deadline);
     loop {
-        if codex_runtime::read_codex_line(reader, line, deadline, context.shutdown, context.control)
-            .await
-            .is_err()
+        if let Err(read) =
+            codex_runtime::read_codex_line(reader, line, deadline, context.shutdown, context.control)
+                .await
         {
-            let error = if context.shutdown.is_cancelled() {
+            // An oversized reply is the adapter's bound, not the engine's
+            // failure: its stderr holds no reason for it.
+            let error = if read == CodexLineError::FrameTooLarge {
+                EngineOpenError::FrameTooLarge
+            } else if context.shutdown.is_cancelled() {
                 EngineOpenError::Shutdown
             } else if context.control.is_cancelled() {
                 EngineOpenError::Cancelled

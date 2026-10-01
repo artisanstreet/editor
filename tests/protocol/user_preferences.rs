@@ -198,6 +198,21 @@ fn pushed_host_state_events_round_trip() -> Result<(), Box<dyn Error>> {
             )?
             .with_compaction_at(Some(180_000)),
         ),
+        Event::LiveThinking(artisan_domain::LiveThinking {
+            thread_id: ThreadId::parse("thread-a")?,
+            current: Some(artisan_domain::LiveThinkingBlock {
+                run_id: artisan_domain::RunId::parse("run-a")?,
+                turn_id: artisan_domain::TurnId::parse("turn-a")?,
+                item_id: "thinking:block-1".to_owned(),
+                text: "Weighing the options".to_owned(),
+                started_at: artisan_domain::UnixMillis::from_millis(1_000),
+                updated_at: artisan_domain::UnixMillis::from_millis(1_250),
+            }),
+        }),
+        Event::LiveThinking(artisan_domain::LiveThinking {
+            thread_id: ThreadId::parse("thread-a")?,
+            current: None,
+        }),
     ];
     for (index, event) in events.into_iter().enumerate() {
         round_trip(

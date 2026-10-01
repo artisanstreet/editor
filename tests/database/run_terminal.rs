@@ -18,8 +18,8 @@ use artisan_domain::{
     EngineConfigUpdatePrecondition, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ItemId, MessageId, NetworkAccess,
-    OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId, Revision, RunId, ThreadId,
-    ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
+    OpenCode2Selection, PatchId, PermissionId, ProjectId, RequestId, Revision, RunId,
+    ThreadAttention, ThreadId, ThreadTitle, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -344,6 +344,17 @@ async fn seeded_with_item() -> (SeededPair, ItemId, PatchId, PatchId) {
     (pair, assistant_item, patch_item, patch_turn)
 }
 
+/// What the seeded thread wants from its reader, as the project listing
+/// reports it.
+async fn thread_attention(repository: &Repository) -> ThreadAttention {
+    repository
+        .list_threads(&ProjectId::parse("project-1").expect("pid"))
+        .await
+        .expect("thread listing")
+        .threads()[0]
+        .attention
+}
+
 fn terminal_scope(pair: &SeededPair) -> RunBatchScope<'_> {
     RunBatchScope {
         claimed: &pair.claimed,
@@ -419,6 +430,38 @@ async fn complete_pair_updates_all_rows() {
     assert_eq!(turn.lifecycle, EntityLifecycle::Completed);
     assert_eq!(turn.revision, 2);
     assert_eq!(turn.updated_at_ms, TERMINAL_AT_MS);
+
+    // The reader has not had the thread open since it finished: it is
+    // marked until a navigation at or after the settle time reads it, and
+    // the listing fingerprint moves with the read.
+    assert_eq!(
+        thread_attention(&pair.repository).await,
+        ThreadAttention::Finished
+    );
+    let unread = pair
+        .repository
+        .recent_threads_fingerprint()
+        .await
+        .expect("fingerprint");
+    pair.repository
+        .record_navigation(
+            &ProjectId::parse("project-1").expect("pid"),
+            Some(&ThreadId::parse(THREAD_ID).expect("tid")),
+            UnixMillis::from_millis(TERMINAL_AT_MS),
+        )
+        .await
+        .expect("navigation");
+    assert_eq!(
+        thread_attention(&pair.repository).await,
+        ThreadAttention::None
+    );
+    assert_ne!(
+        pair.repository
+            .recent_threads_fingerprint()
+            .await
+            .expect("fingerprint"),
+        unread
+    );
     let patches: Vec<_> = after
         .patches
         .iter()
@@ -551,6 +594,11 @@ async fn cancel_pair_is_distinct_and_idempotent() {
         .expect("dispatch");
     assert_eq!(dispatch.state, DispatchState::Failed);
     assert_eq!(dispatch.last_error.as_deref(), Some("run cancelled"));
+    // The reader stopped it: a cancelled run wants nothing.
+    assert_eq!(
+        thread_attention(&pair.repository).await,
+        ThreadAttention::None
+    );
     let item = after
         .items
         .iter()
@@ -619,6 +667,10 @@ async fn interrupt_pair_is_distinct_and_idempotent() {
     let run = after.runs.iter().find(|r| r.run_id == RUN_ID).expect("run");
     assert_eq!(run.lifecycle, AssistantRunLifecycle::Interrupted);
     assert_eq!(run.terminal_at_ms, None);
+    assert_eq!(
+        thread_attention(&pair.repository).await,
+        ThreadAttention::Failed
+    );
     assert_eq!(run.error_code.as_deref(), Some("provider_interrupted"));
     assert_eq!(
         run.error_message.as_deref(),
@@ -766,8 +818,8 @@ async fn fence_failures_write_nothing() {
         .expect_err("stale snapshot should fail");
     let _ = err2;
     assert_eq!(before, persisted_rows(&pair.database).await);
-    // generation mismatch via wrong bound version (simulate credential mismatch)
-    // expiry equality
+    // The owner token, not the clock, fences completion: an owner whose
+    // lease lapsed while it stalled still completes its run.
     let expiry_eq_scope = RunBatchScope {
         claimed: &pair.claimed,
         launched: &pair.launched,
@@ -777,8 +829,7 @@ async fn fence_failures_write_nothing() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
     };
-    let err3 = pair
-        .repository
+    pair.repository
         .complete_run(CompleteRun {
             scope: expiry_eq_scope,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), // equality
@@ -790,9 +841,8 @@ async fn fence_failures_write_nothing() {
             turn_patch_id: &PatchId::parse("p-exp-2").expect("p"),
         })
         .await
-        .expect_err("expiry equality should fail");
-    let _ = err3;
-    assert_eq!(before, persisted_rows(&pair.database).await);
+        .expect("the owner completes after its lease lapsed");
+    assert_ne!(before, persisted_rows(&pair.database).await);
 }
 
 #[tokio::test]

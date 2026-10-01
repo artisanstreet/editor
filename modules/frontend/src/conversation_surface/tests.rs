@@ -96,6 +96,13 @@ fn scroll_target_scene(disclosure: SceneDisclosure) -> ConversationScene {
 fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
     cx.run_until_parked();
+    // A turn row that replays its previous frame replays its paint, but the
+    // test harness records debug bounds only while painting. One refreshed
+    // frame repaints every row from its own synced inputs (at its cached
+    // height when it has one), so selectors resolve without hiding a row
+    // whose inputs went stale.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
 }
 
 fn offset(
@@ -132,13 +139,16 @@ fn activity_chain_scene(
     .expect("activity chain scene is valid")
 }
 
-/// Builds one live work-group scene whose disclosure is `disclosure`.
+/// Builds one settled work-group scene whose disclosure is `disclosure`.
+///
+/// Settled, because a live section cannot collapse: its panel is forced open
+/// whatever value is stored, so flights only exist once the turn settles.
 fn disclosure_flight_scene(disclosure: SceneDisclosure) -> ConversationScene {
     ConversationScene::build(
         vec![SceneTurn::new(
             turn_id("turn_a"),
             0,
-            ConversationLifecycle::Active,
+            ConversationLifecycle::Completed,
         )],
         vec![item(
             "work-a",
@@ -152,7 +162,7 @@ fn disclosure_flight_scene(disclosure: SceneDisclosure) -> ConversationScene {
         )],
         vec![TurnNarrationEntry::new(
             turn_id("turn_a"),
-            TurnNarration::Working,
+            TurnNarration::WorkedFor { millis: 5_000 },
         )],
         Vec::new(),
     )
@@ -249,6 +259,9 @@ mod transcript;
 
 #[path = "tests/windowing.rs"]
 mod windowing;
+
+#[path = "tests/work_group_header.rs"]
+mod work_group_header;
 
 #[path = "tests/work_groups.rs"]
 mod work_groups;

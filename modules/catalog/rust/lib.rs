@@ -35,6 +35,38 @@ mod tests {
     }
 
     #[test]
+    fn context_window_labels_read_in_thousands_and_millions() {
+        assert_eq!(context_window_label(200_000), "200K");
+        assert_eq!(context_window_label(272_000), "272K");
+        assert_eq!(context_window_label(272_400), "272K");
+        assert_eq!(context_window_label(999_500), "1M");
+        assert_eq!(context_window_label(1_000_000), "1M");
+        assert_eq!(context_window_label(1_048_576), "1M");
+        assert_eq!(context_window_label(1_050_000), "1M");
+        assert_eq!(context_window_label(1_500_000), "2M");
+        assert_eq!(context_window_label(2_000_000), "2M");
+        assert_eq!(context_window_label(512), "512");
+    }
+
+    #[test]
+    fn million_token_option_displays_in_millions_regardless_of_catalog_label() {
+        let option = |tokens, label: &str| NativeContextWindowOption {
+            advisory: None,
+            description: None,
+            id: "standard".to_owned(),
+            label: label.to_owned(),
+            native_config: None,
+            native_suffix: String::new(),
+            tokens,
+        };
+        assert_eq!(option(1_000_000, "1000K").display_label(), "1M");
+        assert_eq!(option(1_000_000, "").display_label(), "1M");
+        assert_eq!(option(200_000, "200K").display_label(), "200K");
+        assert_eq!(option(200_000, "  ").display_label(), "200K");
+        assert_eq!(option(872_000, "Extended").display_label(), "Extended");
+    }
+
+    #[test]
     fn shipped_catalog_has_no_models() {
         let catalog = NativeModelCatalog::harnesses_only().unwrap();
         assert!(catalog.manifest.models.is_empty());

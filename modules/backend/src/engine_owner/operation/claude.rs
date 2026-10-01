@@ -24,9 +24,11 @@ use super::core::EngineOperationError;
 use super::core::EngineTurnResult;
 use super::core::Execution;
 use super::core::PreparedSession;
+use super::core::ProviderResponse;
 use super::core::SteerDelivery;
 use super::core::SteerError;
 use super::core::settle_steers_closed;
+use super::owner::ClaudeDisplayRefusals;
 use super::turn_common::ConfiguredRuntime;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::finish_configured_start;
@@ -57,6 +59,7 @@ pub(super) async fn execute_claude_turn(
     request: ConfiguredTurnRequest,
     runtime: ConfiguredRuntime,
     shutdown: &Arc<CancelHandle>,
+    claude_displays: &mut ClaudeDisplayRefusals,
 ) -> Execution {
     use super::super::claude as claude_runtime;
     use super::super::process::spawn_claude_engine;
@@ -76,10 +79,19 @@ pub(super) async fn execute_claude_turn(
         return request.fail(EngineOperationError::Configuration);
     };
     // The effective thinking display resolves once from the verified launch
-    // capability and applies identically to fresh starts and resumes; older
-    // CLIs keep their existing arguments.
+    // capability plus the owner's observed refusals, and applies identically
+    // to fresh starts and resumes; older CLIs keep their existing arguments.
+    // Internal `highlights` is the default; a context whose server refused it
+    // on an observed prior turn downgrades to public `summarized` (see
+    // `ClaudeThinkingDisplay`).
+    let refusal_context = (
+        settings.profile_id().to_owned(),
+        selection.model_id().map(|model| model.as_str().to_owned()),
+        launch.version().to_owned(),
+    );
     let settings = settings.with_thinking_display(
-        claude_runtime::ClaudeThinkingDisplay::for_support(launch.thinking_display()),
+        claude_runtime::ClaudeThinkingDisplay::for_support(launch.thinking_display())
+            .with_refusal(claude_displays.refused(&refusal_context)),
     );
     // L3 continuation gate: same-engine is fenced by the dispatcher (claude
     // bindings only); the owner additionally requires an explicit target
@@ -314,11 +326,27 @@ pub(super) async fn execute_claude_turn(
             // the turn result: only lifecycle and transcript rows ever
             // accumulate in the pump buffer.
             forward_subagent_rows(&observations, subagent_rows).await;
+            // A completed turn that observed empty thinking stretches under a
+            // highlights request records the server refusal for this
+            // context; cancelled, failed, and no-thinking turns never infer
+            // capability loss.
+            if state == TerminalState::Completed && tracker.highlights_refused() {
+                claude_displays.mark_refused(refusal_context);
+            }
             // Terminal fence: capture the generated title best-effort and
             // carry it on the terminal observation beside settlement, exactly
             // like text deltas flow. A closed sink ends the send without
             // disturbing the turn result.
             settle_claude_terminal_title(&input, &session_id, &mut tracker);
+            // Print mode never writes a transcript title, so a completed turn
+            // on a still-placeholder thread asks Claude to name it, exactly
+            // like the Codex executor does.
+            if state == TerminalState::Completed
+                && input.awaits_title
+                && tracker.summary_title().is_none()
+            {
+                generate_claude_title(&input, shutdown, &control, &mut tracker).await;
+            }
             let terminal_observation = super::super::observation::TerminalObservation::new(
                 input.run_id.clone(),
                 frame_sequence,
@@ -374,11 +402,128 @@ fn settle_claude_terminal_title(
     session_id: &str,
     tracker: &mut super::super::claude::ClaudePendingTracker,
 ) {
-    if let Some(title) =
-        super::super::claude::claude_transcript_title_for_session(&input.project_root, session_id)
-    {
+    let super::super::InternalLaunch::Claude(launch) = &input.launch else {
+        return;
+    };
+    if let Some(title) = super::super::claude::claude_transcript_title_for_session(
+        launch.environment(),
+        &input.project_root,
+        session_id,
+    ) {
         tracker.note_summary_title(title);
     }
+}
+
+/// Upper bound for one naming run; a slow title never holds the turn longer.
+const CLAUDE_TITLE_BUDGET: Duration = Duration::from_secs(15);
+/// Upper bound for the naming run's JSON result on stdout.
+const CLAUDE_TITLE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Names the conversation with one bounded, tool-less, unpersisted
+/// `claude -p` run beside the turn. Best-effort: any failure is reported and
+/// the turn settles without a title, to be retried after the next completed
+/// turn while the placeholder stands.
+async fn generate_claude_title(
+    input: &super::super::InternalTurnInput,
+    shutdown: &Arc<CancelHandle>,
+    control: &Arc<CancelHandle>,
+    tracker: &mut super::super::claude::ClaudePendingTracker,
+) {
+    let super::super::InternalLaunch::Claude(launch) = &input.launch else {
+        return;
+    };
+    let prompt = input
+        .prompt
+        .text()
+        .map(|text| text.as_str().chars().take(4000).collect::<String>())
+        .unwrap_or_default();
+    if prompt.trim().is_empty() {
+        return;
+    }
+    let outcome = tokio::select! {
+        () = shutdown.wait() => return,
+        () = control.wait() => return,
+        outcome = tokio::time::timeout(
+            CLAUDE_TITLE_BUDGET,
+            run_claude_title(launch, &input.project_root, &prompt),
+        ) => outcome,
+    };
+    match outcome {
+        Ok(Ok(title)) => tracker.note_summary_title(title.as_str().to_owned()),
+        Ok(Err(reason)) => eprintln!(
+            "Claude title could not be generated (run {}): {reason}; retrying after the next successful turn",
+            input.run_id
+        ),
+        Err(_) => eprintln!(
+            "Claude title could not be generated (run {}): the naming run did not finish within {} s; retrying after the next successful turn",
+            input.run_id,
+            CLAUDE_TITLE_BUDGET.as_secs()
+        ),
+    }
+}
+
+async fn run_claude_title(
+    launch: &artisan_native_engine::VerifiedClaudeLaunch,
+    project_root: &artisan_domain::RootPath,
+    prompt: &str,
+) -> Result<artisan_domain::ThreadTitle, String> {
+    use tokio::io::AsyncReadExt;
+    let args = [
+        "-p".to_owned(),
+        "--output-format".to_owned(),
+        "json".to_owned(),
+        "--no-session-persistence".to_owned(),
+        "--model".to_owned(),
+        "haiku".to_owned(),
+        "--tools".to_owned(),
+        String::new(),
+        "--setting-sources".to_owned(),
+        String::new(),
+        "--system-prompt".to_owned(),
+        super::codex::TITLE_INSTRUCTIONS.to_owned(),
+        "--json-schema".to_owned(),
+        super::codex::title_schema().to_string(),
+        super::codex::title_request(prompt),
+    ];
+    let mut child = super::super::process::spawn_claude_engine(launch, project_root, &args)
+        .map_err(|error| format!("spawning the naming run: {error}"))?;
+    // The request travels as an argument; closing stdin tells the CLI no
+    // further input follows.
+    drop(child.stdin.take());
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "the naming run had no stdout".to_owned())?
+        .take(CLAUDE_TITLE_MAX_BYTES);
+    let stderr = child.stderr.take();
+    let mut output = Vec::new();
+    let (read, ()) = tokio::join!(
+        stdout.read_to_end(&mut output),
+        async {
+            if let Some(stderr) = stderr {
+                let _ = tokio::io::copy(
+                    &mut stderr.take(CLAUDE_TITLE_MAX_BYTES),
+                    &mut tokio::io::sink(),
+                )
+                .await;
+            }
+        }
+    );
+    read.map_err(|error| format!("reading the naming run's output: {error}"))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("waiting for the naming run: {error}"))?;
+    if !status.success() {
+        return Err(format!("the naming run exited with {status}"));
+    }
+    let result: serde_json::Value = serde_json::from_slice(&output)
+        .map_err(|error| format!("parsing the naming run's result: {error}"))?;
+    let structured = result
+        .get("structured_output")
+        .ok_or_else(|| "the naming run returned no structured output".to_owned())?;
+    super::codex::parse_generated_title(&structured.to_string())
+        .ok_or_else(|| "the naming run returned an unusable title".to_owned())
 }
 
 enum ClaudePumpOutcome {
@@ -418,31 +563,80 @@ async fn forward_subagent_rows(
     }
 }
 
-/// Services one claude steer delivery from the pump's owned lifeline.
+/// Services one claude delivery from the pump's owned lifeline: a steer
+/// text, or a durable approval or question decision written back onto its
+/// pending `control_request`.
 ///
-/// Writes the stream-input fold line and resolves the delivery from the
-/// transport-write outcome: `Ok(())` means the exact bytes reached the
+/// A steer writes the stream-input fold line and resolves the delivery from
+/// the transport-write outcome: `Ok(())` means the exact bytes reached the
 /// provider stdin, never mere channel enqueue. The fold has no correlated
 /// provider result — fold timing stays CLI-owned — so the write is the
-/// ack. No observation emission precedes it. A closed lifeline rejects
-/// typed. Exactly one write attempt is made per delivery, never a retry
-/// of an ambiguous write.
-pub(crate) async fn service_claude_steer_delivery<W: tokio::io::AsyncWrite + Unpin>(
+/// ack. A question answer is recorded on its open `AskUserQuestion` request
+/// and the control response is written once the last question of that
+/// request is answered, so the tool sees every answer at once. No
+/// observation emission precedes any write. A closed lifeline rejects
+/// typed. Exactly one write attempt is made per delivery, never a retry of
+/// an ambiguous write.
+pub(crate) async fn service_claude_delivery<W: tokio::io::AsyncWrite + Unpin>(
+    tracker: &mut super::super::claude::ClaudePendingTracker,
     stdin: &mut W,
     session_id: &str,
     delivery: SteerDelivery,
 ) {
     use super::super::claude as claude_runtime;
 
-    let wrote = claude_runtime::steer_live_turn(stdin, session_id, &delivery.text)
-        .await
-        .is_ok();
-    let _ = delivery.ack.send(if wrote {
-        Ok(())
-    } else {
-        Err(SteerError::DeliveryFailed)
-    });
+    let result = match &delivery.response {
+        Some(ProviderResponse::Approval {
+            approval_id,
+            approved,
+        }) => claude_runtime::answer_approval(stdin, tracker, approval_id, approval_id, *approved)
+            .await
+            .map_err(|_| SteerError::DeliveryFailed),
+        Some(ProviderResponse::Question {
+            question_id,
+            answers,
+        }) => match tracker.record_question_answer(question_id, answers) {
+            Ok(None) => Ok(()),
+            Ok(Some(reply)) => claude_runtime::write_line(stdin, &reply)
+                .await
+                .map_err(|_| SteerError::DeliveryFailed),
+            Err(_) => Err(SteerError::DeliveryFailed),
+        },
+        None => {
+            let written = claude_runtime::steer_live_turn(
+                stdin,
+                session_id,
+                &delivery.text,
+                &delivery.images,
+            )
+            .await;
+            match written {
+                Ok(()) => {
+                    // The folded message opens (or joins) a root turn.
+                    tracker.note_turn_opened();
+                    Ok(())
+                }
+                Err(error) => {
+                    eprintln!(
+                        "claude steer write failed (session {session_id}, request {}): {}",
+                        delivery.request_id,
+                        artisan_domain::ErrorChain(&error)
+                    );
+                    Err(SteerError::DeliveryFailed)
+                }
+            }
+        }
+    };
+    let _ = delivery.ack.send(result);
 }
+
+/// How long a session with nothing left to say keeps stdin open after its
+/// last background task ends.
+///
+/// The ending task queues a follow-up turn whose first frame re-opens the
+/// session well inside this window; the grace only bounds the case where no
+/// follow-up comes, so the CLI is still told to exit.
+const CLAUDE_SETTLED_INPUT_GRACE: Duration = Duration::from_secs(30);
 
 #[allow(clippy::too_many_arguments)]
 async fn claude_pump_loop(
@@ -484,7 +678,7 @@ async fn claude_pump_loop(
     .await;
     // Every exit settles queued steers typed: stop/cancel interrupts
     // pending steer requests deterministically instead of leaving
-    // `steer_text` on an indefinite ack await.
+    // `steer_message` on an indefinite ack await.
     let mut buffered: Vec<SteerDelivery> = Vec::new();
     let mut pending: HashMap<u64, oneshot::Sender<Result<(), SteerError>>> = HashMap::new();
     settle_steers_closed(steer_rx, &mut buffered, &mut pending);
@@ -522,6 +716,9 @@ async fn claude_pump_loop_inner(
     // the tracker. Delivery beyond the loop awaits the owner-channel
     // follow-up; see the handoff marker where the pump settles.
     let mut subagent_rows: Vec<artisan_domain::Observation> = Vec::new();
+    // Armed while the session is settled with stdin still open; see
+    // `CLAUDE_SETTLED_INPUT_GRACE`.
+    let mut settled_close_at: Option<Instant> = None;
     loop {
         if shutdown.is_cancelled() {
             return ClaudePumpOutcome::Failed {
@@ -545,8 +742,10 @@ async fn claude_pump_loop_inner(
                 subagent_rows: std::mem::take(&mut subagent_rows),
             };
         }
+        // A provider waiting on the user (an open approval or question) is
+        // not stalled, however long the user takes.
         if claude_runtime::has_stalled(
-            active_turn.is_some(),
+            active_turn.is_some() && !tracker.waiting_on_user(),
             *last_activity,
             inactivity,
             Instant::now(),
@@ -556,10 +755,14 @@ async fn claude_pump_loop_inner(
                 subagent_rows: std::mem::take(&mut subagent_rows),
             };
         }
-        let stall_at = last_activity
-            .checked_add(inactivity)
-            .unwrap_or(deadline)
-            .min(deadline);
+        let stall_at = if tracker.waiting_on_user() {
+            deadline
+        } else {
+            last_activity
+                .checked_add(inactivity)
+                .unwrap_or(deadline)
+                .min(deadline)
+        };
         line.clear();
         tokio::select! {
             biased;
@@ -584,7 +787,7 @@ async fn claude_pump_loop_inner(
             }
             () = tokio::time::sleep_until(stall_at) => {
                 if claude_runtime::has_stalled(
-                    active_turn.is_some(),
+                    active_turn.is_some() && !tracker.waiting_on_user(),
                     *last_activity,
                     inactivity,
                     Instant::now(),
@@ -595,6 +798,19 @@ async fn claude_pump_loop_inner(
                     };
                 }
                 let _ = parts.stderr_counter.pump().await;
+            }
+            () = async {
+                match settled_close_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                // Nothing followed the last background task: end input so
+                // the CLI exits and EOF classifies the turn.
+                settled_close_at = None;
+                if tracker.input_settled() {
+                    parts.lifeline.close();
+                }
             }
             steer_msg = async {
                 match steer_rx.as_mut() {
@@ -609,8 +825,11 @@ async fn claude_pump_loop_inner(
                 // Servicing resolves from the transport write alone and
                 // touches neither the observation channel nor the provider
                 // read side, so a suspended dispatch drain cannot wedge it.
-                service_claude_steer_delivery(&mut parts.lifeline, expected_session, delivery)
+                service_claude_delivery(tracker, &mut parts.lifeline, expected_session, delivery)
                     .await;
+                if !tracker.input_settled() {
+                    settled_close_at = None;
+                }
             }
             status = parts.child.wait(), if exited.is_none() => {
                 match status {
@@ -674,11 +893,20 @@ async fn claude_pump_loop_inner(
                             match outcome {
                                 claude_runtime::ClaudeApplyOutcome::Continue { end_input } => {
                                     if end_input {
-                                        // `result` seen: EndInput
+                                        // `result` seen with nothing
+                                        // running behind it: EndInput
                                         // equivalent, then the CLI exits
                                         // and EOF classifies the turn.
                                         parts.lifeline.close();
                                     }
+                                    settled_close_at = if tracker.input_settled()
+                                        && parts.lifeline.is_open()
+                                    {
+                                        settled_close_at
+                                            .or(Some(Instant::now() + CLAUDE_SETTLED_INPUT_GRACE))
+                                    } else {
+                                        None
+                                    };
                                 }
                                 claude_runtime::ClaudeApplyOutcome::Terminal(state) => {
                                     return ClaudePumpOutcome::Terminal {

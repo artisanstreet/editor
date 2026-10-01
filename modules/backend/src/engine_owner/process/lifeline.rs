@@ -39,7 +39,6 @@ impl LifelineWriter {
     }
 
     /// Returns whether the lifeline still holds the live writer.
-    #[allow(dead_code)]
     pub(crate) fn is_open(&self) -> bool {
         self.0.is_some()
     }

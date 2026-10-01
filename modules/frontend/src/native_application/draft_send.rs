@@ -49,7 +49,7 @@ impl NativeApplication {
             request_id: flight.request_id.clone(),
             scope: scope.clone(),
             draft_revision,
-            selection: self.displayed_selection(cx),
+            selection: flight.selection.clone(),
         };
         let sent = self.submit_command(NativeTransportCommand::SubmitComposerDraft(Box::new(
             command,

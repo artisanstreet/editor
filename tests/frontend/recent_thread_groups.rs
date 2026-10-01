@@ -19,6 +19,7 @@ fn row(id: &str, activity: i64) -> RecentThread {
         thread: ThreadSummary {
             has_started_response: true,
             has_active_work: false,
+            attention: artisan_domain::ThreadAttention::None,
             last_message_at: Some(UnixMillis::from_millis(activity)),
             thread_id: ThreadId::parse(id).expect("thread id"),
             project_id: ProjectId::parse("project").expect("project id"),

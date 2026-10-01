@@ -27,7 +27,7 @@ fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let result = match parse(&argv) {
         Err(error) => {
-            eprintln!("dev: error: {error}");
+            eprintln!("dev: error: {}", native_dev::error_chain(&error));
             println!("{}", usage());
             return ExitCode::from(2);
         }
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("dev: error: {error}");
+            eprintln!("dev: error: {}", native_dev::error_chain(&error));
             if matches!(error, DevError::Install(_)) {
                 eprintln!("dev: hint: the previously active version is untouched");
             }

@@ -29,13 +29,19 @@
 //! their ordered content (text and thinking) plus at most one usage sample;
 //! their text is authoritative and settles the streamed deltas of the same
 //! message through the [`ClaudeTextLedger`], so each block lands exactly once.
-//! When the launch requested `--thinking-display summarized`, thinking
-//! blocks carry public summary prose that the [`ClaudeThinkingTracker`]
-//! projects onto the shared reasoning-summary observations, one item per
-//! provider message and content-block index; signatures never become text
-//! and unknown display semantics project nothing. Encrypted-thinking
-//! estimates (`system/thinking_tokens`) stay tracker plumbing, never root
-//! text. Subagent lifecycle frames emit validated [`Observation::Subagent`]
+//! Supported launches request `--thinking-display highlights` by default.
+//! Anthropic's server accepts that internal value only for execution contexts
+//! it hosts (identified by the `x-claude-remote-session-id` request header,
+//! which the CLI sends only when `CLAUDE_CODE_REMOTE_SESSION_ID` is set), so a
+//! local subscription launch can draw a silent HTTP 400 and the CLI latches an
+//! `omitted` retry that loses that turn's thinking trace. A
+//! [`ClaudeDisplayRefusals`](super::operation::ClaudeDisplayRefusals) record
+//! downgrades a refused context on its next launch. Thinking blocks project
+//! through the [`ClaudeThinkingTracker`] onto the shared
+//! reasoning-summary observations, one item per provider message and
+//! content-block index; signatures never become text and unknown display
+//! semantics project nothing. Encrypted-thinking estimates
+//! (`system/thinking_tokens`) stay tracker plumbing, never root text. Subagent lifecycle frames emit validated [`Observation::Subagent`]
 //! rows (state `Discovered`, root plus agent thread identities) and child
 //! transcript frames (`parent_tool_use_id`) project into validated
 //! [`Observation::SubagentTranscript`] rows carrying renderer-safe message

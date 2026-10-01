@@ -470,7 +470,8 @@ fn record_steer_request(
 
 /// Validates `turn/steer` params against the production verb shape
 /// (`engine_owner/codex.rs`): exact thread id, actual provider turn id as
-/// `expectedTurnId`, and non-empty text input.
+/// `expectedTurnId`, and a non-empty `UserInput` array whose every item is
+/// non-empty text or a native image (image-only steers are valid).
 fn valid_steer_params(params: &serde_json::Value) -> bool {
     let thread_ok = params
         .get("threadId")
@@ -483,14 +484,23 @@ fn valid_steer_params(params: &serde_json::Value) -> bool {
     let input_ok = params
         .get("input")
         .and_then(|value| value.as_array())
-        .is_some_and(|items| {
-            items.first().is_some_and(|item| {
-                item.get("text")
-                    .and_then(|text| text.as_str())
-                    .is_some_and(|text| !text.is_empty())
-            })
-        });
+        .is_some_and(|items| !items.is_empty() && items.iter().all(valid_steer_input_item));
     thread_ok && turn_ok && input_ok
+}
+
+/// Accepts one `turn/steer` input item: non-empty `text`, or an `image`
+/// carrying a non-empty `url`.
+fn valid_steer_input_item(item: &serde_json::Value) -> bool {
+    let non_empty = |field: &str| {
+        item.get(field)
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.is_empty())
+    };
+    match item.get("type").and_then(|kind| kind.as_str()) {
+        Some("text") => non_empty("text"),
+        Some("image") => non_empty("url"),
+        _ => false,
+    }
 }
 
 /// Selects the scenario from the copied executable basename.

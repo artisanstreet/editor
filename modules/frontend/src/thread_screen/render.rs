@@ -6,25 +6,34 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Builds one inspector glass card: the native `ShaderGlassSurface` default
-/// (quiet) treatment at the `radius-xl` (14 px) card radius, with the material
-/// and highlight paint layers from the shared composer/picker helper. Content
-/// carries its own padding (card `p-1`, loading `p-3`) like the reference.
-fn inspector_glass_card(theme: &ArtisanTheme, content: impl IntoElement) -> Div {
-    let radius = RadiusTokens::value(RadiusStep::Xl);
+/// The muted label heading one inspector section, with its debug selector.
+#[derive(Clone, Copy)]
+struct InspectorSectionLabel {
+    selector: &'static str,
+    text: &'static str,
+}
+
+/// Builds one flat inspector section: its rows directly on the black column
+/// — no card frame, fill, blur, or shadow — under the shared desktop section
+/// label (the left sidebar's thread-age group treatment) when it has one.
+/// The Context rows name themselves, so that section carries no label.
+fn inspector_section(
+    theme: &ArtisanTheme,
+    selector: &'static str,
+    label: Option<InspectorSectionLabel>,
+    rows: impl IntoElement,
+) -> Div {
     div()
-        .relative()
-        .overflow_hidden()
+        .flex()
         .w_full()
         .min_w_0()
-        .min_h_0()
-        .rounded(radius)
-        .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-        .bg(glass_foreground_base(theme))
-        .shadow(glass_card_shadows())
-        .child(glass_material_layer(GlassStrength::Quiet, radius))
-        .child(glass_highlight_layer(GlassStrength::Quiet, radius))
-        .child(content)
+        .flex_col()
+        .debug_selector(move || selector.to_owned())
+        .children(label.map(|label| {
+            desktop_section_label(theme, label.text)
+                .debug_selector(move || label.selector.to_owned())
+        }))
+        .child(rows)
 }
 
 /// Builds one 16 px muted inspector row glyph (`size-4 text-muted-foreground`).
@@ -58,7 +67,7 @@ impl ThreadScreen {
     /// gutters, so standalone surface fixtures keep the identical column
     /// without this frame. The 40 px top spacing lives inside the scroll
     /// content (owned by the surface).
-    fn render_transcript_column(&self) -> impl IntoElement {
+    fn render_transcript_column(&self, cx: &App) -> impl IntoElement {
         div()
             .relative()
             .min_h_0()
@@ -66,19 +75,27 @@ impl ThreadScreen {
             .overflow_hidden()
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned())
-            .child(div().w_full().h_full().child(self.host.clone()))
+            // Cached: the transcript renders when it changes, not when the
+            // inspector, the composer, or the sidebar beside it does.
+            .child(div().w_full().h_full().child(crate::view_boundary::cached_view(
+                self.host.clone(),
+                gpui::StyleRefinement::default().size_full(),
+                cx,
+            )))
     }
 
-    /// Renders one environment-card row: glyph, flexible label, truncating value.
+    /// Renders one Context row: glyph, flexible label, truncating value.
     ///
     /// Legacy frame: `div.flex.min-w-0.items-center.gap-2.rounded-lg.px-2.py-2`
     /// with the `size-4 text-muted-foreground` row glyph, a `flex-1` label,
     /// and a `max-w-36 truncate` value
-    /// (`thread-environment-card.svelte:372-376`).
+    /// (`thread-environment-card.svelte:372-376`). Rows are read-only facts:
+    /// no id, hover, or chevron implies a click.
     fn render_environment_row(
         label: &str,
         value: String,
         icon: InspectorRowIcon,
+        selector: &'static str,
         theme: &ArtisanTheme,
     ) -> impl IntoElement {
         div()
@@ -89,7 +106,7 @@ impl ThreadScreen {
             .rounded(RadiusTokens::value(RadiusStep::Lg))
             .px(px(ROW_PAD_PX))
             .py(px(ROW_PAD_PX))
-            .debug_selector(|| THREAD_SCREEN_ENV_ROW_SELECTOR.to_owned())
+            .debug_selector(move || selector.to_owned())
             .child(inspector_row_glyph(theme, icon))
             .child(
                 div()
@@ -114,26 +131,39 @@ impl ThreadScreen {
             )
     }
 
-    /// Renders the environment card (`thread-environment-card.svelte`).
+    /// Renders the Context section: the environment card's rows
+    /// (`thread-environment-card.svelte`), unlabelled because each row names
+    /// its own fact.
     ///
-    /// Legacy frame: `ShaderGlassSurface` at `radius-xl` around the `p-1`
-    /// child holding Machine, Changes, Branch, and Worktree rows. The project
-    /// selector row belongs to packet 2's project picker and is a gap; the
-    /// remote chip is icon-only in legacy with a host-mark brand glyph that
-    /// has no exact catalog entry, so it stays a gap rather than a fake chip.
-    fn render_environment_card(&self, theme: &ArtisanTheme) -> impl IntoElement {
+    /// Rows, in order: Project (the published project display name, only
+    /// when one is set), Machine (always), then Changes, Branch, and Worktree
+    /// only when the environment projection has them. The project row is a
+    /// read-only label, not the legacy project picker; the remote chip is
+    /// icon-only in legacy with a host-mark brand glyph that has no exact
+    /// catalog entry, so it stays a gap rather than a fake chip.
+    fn render_context_section(&self, theme: &ArtisanTheme) -> impl IntoElement {
         let projection = present_thread_environment(&self.environment);
         let mut rows = div()
             .flex()
             .min_w_0()
             .flex_col()
-            .text_size(theme.typography.control_text)
-            .child(Self::render_environment_row(
-                "Machine",
-                projection.machine_label,
-                InspectorRowIcon::Machine,
+            .text_size(theme.typography.control_text);
+        if let Some(project_label) = self.project_label.clone() {
+            rows = rows.child(Self::render_environment_row(
+                "Project",
+                project_label,
+                InspectorRowIcon::Project,
+                THREAD_SCREEN_PROJECT_ROW_SELECTOR,
                 theme,
             ));
+        }
+        rows = rows.child(Self::render_environment_row(
+            "Machine",
+            projection.machine_label,
+            InspectorRowIcon::Machine,
+            THREAD_SCREEN_ENV_ROW_SELECTOR,
+            theme,
+        ));
         if let Some(summary) = projection.change_summary {
             rows = rows.child(
                 div()
@@ -181,6 +211,7 @@ impl ThreadScreen {
                 "Branch",
                 branch_label,
                 InspectorRowIcon::Branch,
+                THREAD_SCREEN_ENV_ROW_SELECTOR,
                 theme,
             ));
         }
@@ -189,31 +220,26 @@ impl ThreadScreen {
                 "Worktree",
                 worktree_label,
                 InspectorRowIcon::Worktree,
+                THREAD_SCREEN_ENV_ROW_SELECTOR,
                 theme,
             ));
         }
-        div()
-            .w_full()
-            .min_w_0()
-            .debug_selector(|| THREAD_SCREEN_ENV_CARD_SELECTOR.to_owned())
-            .child(inspector_glass_card(
-                theme,
-                div().min_w_0().p(px(CARD_INSET_PX)).child(rows),
-            ))
+        inspector_section(theme, THREAD_SCREEN_CONTEXT_SELECTOR, None, rows)
     }
 
-    /// Renders the terminals card (`thread-terminals-card.svelte`).
+    /// Renders the Terminals section (`thread-terminals-card.svelte`).
     ///
     /// Legacy branches: a skeleton shimmer while loading (`flex flex-col
-    /// gap-2 p-3` with `h-4` bars at 3/5 and 2/5 widths), the glass card only
-    /// when at least one live terminal exists, and nothing otherwise. Liveness
-    /// is `opening | active` (`lib/terminal/presentation.ts`
-    /// `is_live_terminal`); exited terminals disappear like finished agents.
-    /// Rows follow `thread-terminals.svelte`: the `terminal-2` glyph plus
-    /// display name plus muted command line. Click-to-inspect and the
-    /// tail-viewer dialog need transport wiring and are gaps, so rows render
-    /// without a fake affordance.
-    fn render_terminals_card(&self, theme: &ArtisanTheme) -> Option<impl IntoElement> {
+    /// gap-2` with `h-4` bars at 3/5 and 2/5 widths, here inset like the rows
+    /// so the bars start on the row text edge), the rows only when at least
+    /// one live terminal exists, and nothing otherwise — the section and its
+    /// label then take no space. Liveness is `opening | active`
+    /// (`lib/terminal/presentation.ts` `is_live_terminal`); exited terminals
+    /// disappear like finished agents. Rows follow `thread-terminals.svelte`:
+    /// the `terminal-2` glyph plus display name plus muted command line.
+    /// Click-to-inspect and the tail-viewer dialog need transport wiring and
+    /// are gaps, so rows render without a fake affordance.
+    fn render_terminals_section(&self, theme: &ArtisanTheme) -> Option<Div> {
         if self.terminals_loading {
             let bar = |fraction: f32| {
                 div()
@@ -222,19 +248,23 @@ impl ThreadScreen {
                     .rounded(px(4.0))
                     .bg(theme.colors.muted.to_paint())
             };
-            return Some(
-                div().w_full().min_w_0().child(inspector_glass_card(
-                    theme,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(ROW_GAP_PX))
-                        .p(px(LOADING_PAD_PX))
-                        .debug_selector(|| String::from("artisan-thread-screen-terminals-loading"))
-                        .child(bar(0.6))
-                        .child(bar(0.4)),
-                )),
-            );
+            return Some(inspector_section(
+                theme,
+                THREAD_SCREEN_TERMINALS_SELECTOR,
+                Some(InspectorSectionLabel {
+                    selector: THREAD_SCREEN_TERMINALS_LABEL_SELECTOR,
+                    text: "Terminals",
+                }),
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP_PX))
+                    .px(px(ROW_PAD_PX))
+                    .py(px(ROW_PAD_PX))
+                    .debug_selector(|| String::from("artisan-thread-screen-terminals-loading"))
+                    .child(bar(0.6))
+                    .child(bar(0.4)),
+            ));
         }
         let live: Vec<&TerminalSession> = self
             .terminals
@@ -253,7 +283,7 @@ impl ThreadScreen {
                     .min_w_0()
                     .items_center()
                     .justify_between()
-                    .gap(px(INSPECTOR_GAP_PX))
+                    .gap(px(TERMINAL_ROW_GAP_PX))
                     .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .px(px(ROW_PAD_PX))
                     .py(px(ROW_PAD_PX))
@@ -291,44 +321,112 @@ impl ThreadScreen {
                     ),
             );
         }
-        Some(
-            div().w_full().min_w_0().child(inspector_glass_card(
-                theme,
-                div()
-                    .min_w_0()
-                    .p(px(CARD_INSET_PX))
-                    .child(
-                        div().flex().min_w_0().flex_col().child(
-                            div()
-                                .px(px(ROW_PAD_PX))
-                                .pt(px(ROW_PAD_PX))
-                                .pb(px(4.0))
-                                .text_size(theme.typography.control_text)
-                                .font_weight(ProseTypography::BODY_WEIGHT)
-                                .letter_spacing(px(workspace_body_tracking(theme)))
-                                .text_color(theme.colors.foreground.to_paint())
-                                .child("Terminals"),
-                        ),
-                    )
-                    .child(list),
-            )),
-        )
+        Some(inspector_section(
+            theme,
+            THREAD_SCREEN_TERMINALS_SELECTOR,
+            Some(InspectorSectionLabel {
+                selector: THREAD_SCREEN_TERMINALS_LABEL_SELECTOR,
+                text: "Terminals",
+            }),
+            list,
+        ))
     }
 
-    /// Renders the checklist card (`thread-panel.svelte` plan section).
+    /// Renders the Agents section (`thread-agents.svelte`): the subagents
+    /// the thread's current run has started, in the order they started.
     ///
-    /// Legacy frame: `ShaderGlassSurface` at `radius-xl` around the `p-1`
-    /// child holding the `h2.px-2.pt-2.pb-1.text-sm.font-medium` "Checklist"
-    /// heading and the `rounded-lg.px-2.py-2.text-sm` rows. `font-medium`
-    /// resolves through the redefined token to the workspace 410, so every
-    /// row and the heading take it with surface tracking; tone maps the exact
-    /// legacy classes to theme colors otherwise: active keeps foreground;
-    /// completed/pending/skipped (`text-muted-foreground`, with
+    /// Each row is the `bot-id` glyph, the subagent's task truncated to one
+    /// line, and its state at the right edge: a spinning arc while it works,
+    /// then the reference state dot — sky (`--unread`) once it completed,
+    /// destructive when it failed. Click-to-inspect needs the agent
+    /// transcript viewer and is a gap, so rows render without a fake
+    /// affordance. The section is omitted while there are no agents.
+    fn render_agents_section(&self, theme: &ArtisanTheme) -> Option<Div> {
+        if self.agents.is_empty() {
+            return None;
+        }
+        let mut list = div().flex().min_w_0().flex_col();
+        for agent in &self.agents {
+            let row_selector = format!("{THREAD_SCREEN_AGENT_ROW_PREFIX}-{}", agent.id);
+            let state_selector = format!("{row_selector}-state");
+            let state = div()
+                .flex_shrink_0()
+                .size(px(AGENT_STATE_SLOT_PX))
+                .flex()
+                .items_center()
+                .justify_center()
+                .debug_selector({
+                    let selector = state_selector.clone();
+                    move || selector.clone()
+                });
+            let state = match agent.state {
+                ThreadAgentState::Working => state.child(
+                    FadeArc::new(SharedString::from(state_selector), *theme)
+                        .size(px(AGENT_STATE_SLOT_PX)),
+                ),
+                ThreadAgentState::Completed => state.child(
+                    div()
+                        .size(px(AGENT_STATE_DOT_PX))
+                        .rounded_full()
+                        .bg(theme.colors.unread.to_paint()),
+                ),
+                ThreadAgentState::Failed => state.child(
+                    div()
+                        .size(px(AGENT_STATE_DOT_PX))
+                        .rounded_full()
+                        .bg(theme.colors.destructive.to_paint()),
+                ),
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap(px(ROW_GAP_PX))
+                    .rounded(RadiusTokens::value(RadiusStep::Lg))
+                    .px(px(ROW_PAD_PX))
+                    .py(px(ROW_PAD_PX))
+                    .debug_selector(move || row_selector.clone())
+                    .child(inspector_row_glyph(theme, InspectorRowIcon::Agent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.typography.control_text)
+                            .font_weight(ProseTypography::BODY_WEIGHT)
+                            .letter_spacing(px(workspace_body_tracking(theme)))
+                            .text_color(theme.colors.foreground.to_paint())
+                            .child(agent.name.clone()),
+                    )
+                    .child(state),
+            );
+        }
+        Some(inspector_section(
+            theme,
+            THREAD_SCREEN_AGENTS_SELECTOR,
+            Some(InspectorSectionLabel {
+                selector: THREAD_SCREEN_AGENTS_LABEL_SELECTOR,
+                text: "Agents",
+            }),
+            list,
+        ))
+    }
+
+    /// Renders the Checklist section (`thread-panel.svelte` plan section).
+    ///
+    /// The `rounded-lg.px-2.py-2.text-sm` rows sit under the muted
+    /// "Checklist" label and the section is omitted while the checklist is
+    /// empty. `font-medium` resolves through the redefined token to the
+    /// workspace 410, so every row takes it with surface tracking; tone maps
+    /// the exact legacy classes to theme colors otherwise: active keeps
+    /// foreground; completed/pending/skipped (`text-muted-foreground`, with
     /// `line-through` on completed/skipped) use the muted token with
     /// strikethrough where legacy crosses out. The `list-disc` markers and
     /// the screen-reader `"{state}: "` prefix have no GPUI equivalent on
     /// plain text and stay gaps rather than faked bullets.
-    fn render_checklist_card(&self, theme: &ArtisanTheme) -> Option<impl IntoElement> {
+    fn render_checklist_section(&self, theme: &ArtisanTheme) -> Option<Div> {
         if self.checklist.is_empty() {
             return None;
         }
@@ -366,62 +464,69 @@ impl ThreadScreen {
             };
             list = list.child(row.child(presented.text.to_owned()));
         }
-        Some(
-            div().w_full().min_w_0().child(inspector_glass_card(
-                theme,
-                div().min_w_0().p(px(CARD_INSET_PX)).child(
-                    div()
-                        .flex()
-                        .min_w_0()
-                        .flex_col()
-                        .child(
-                            div()
-                                .px(px(ROW_PAD_PX))
-                                .pt(px(ROW_PAD_PX))
-                                .pb(px(4.0))
-                                .text_size(theme.typography.control_text)
-                                .font_weight(ProseTypography::BODY_WEIGHT)
-                                .letter_spacing(px(workspace_body_tracking(theme)))
-                                .text_color(theme.colors.foreground.to_paint())
-                                .child("Checklist"),
-                        )
-                        .child(list),
-                ),
-            )),
-        )
+        Some(inspector_section(
+            theme,
+            THREAD_SCREEN_CHECKLIST_SELECTOR,
+            Some(InspectorSectionLabel {
+                selector: THREAD_SCREEN_CHECKLIST_LABEL_SELECTOR,
+                text: "Checklist",
+            }),
+            list,
+        ))
     }
 
-    /// Renders the inspector column (`thread-panel.svelte` root).
+    /// Renders the inspector column (`thread-panel.svelte` root) as the
+    /// ruled right sidebar of the desktop shell.
     ///
-    /// Legacy frame: `div.relative.flex.h-full.min-h-0.flex-col.p-1` around
-    /// the `flex.min-h-0.flex-1.flex-col.gap-4` card group. The width is the
-    /// live viewport clamp; cards keep their themed fills against the black
-    /// column gutters.
-    fn render_inspector(&self, theme: &ArtisanTheme, width_px: f32) -> impl IntoElement {
-        let mut cards = div()
+    /// A flat true-black column `width` wide — the expanded left sidebar's
+    /// [`THREAD_INSPECTOR_WIDTH_PX`] once the window has room, narrower down to
+    /// the shared column minimum before it hides — padded by the sidebar's
+    /// [`DESKTOP_COLUMN_INSET_PX`] so labels and row text sit 18 px in, like
+    /// the left column. Sections stack Context, Agents, Checklist, Terminals,
+    /// spaced by the sidebar's 12 px group gap. The left edge carries a
+    /// one-device-pixel rule in the shell's line paint (`rule`) spanning the
+    /// column's full height, i.e. the whole body below the titlebar; it is a
+    /// plain absolute element with no pointer listener, so it cannot
+    /// intercept input. The titlebar end of that rule is the shell's
+    /// junction crosshair, fed by [`ThreadScreen::visible_inspector_width`].
+    fn render_inspector(&self, theme: &ArtisanTheme, width: f32, rule: Pixels) -> impl IntoElement {
+        let mut sections = div()
             .flex()
             .min_h_0()
             .flex_1()
             .flex_col()
-            .gap(px(INSPECTOR_GAP_PX))
-            .child(self.render_environment_card(theme));
-        if let Some(terminals) = self.render_terminals_card(theme) {
-            cards = cards.child(terminals);
+            .gap(theme.spacing.steps(3.0))
+            .child(self.render_context_section(theme));
+        if let Some(agents) = self.render_agents_section(theme) {
+            sections = sections.child(agents);
         }
-        if let Some(checklist) = self.render_checklist_card(theme) {
-            cards = cards.child(checklist);
+        if let Some(checklist) = self.render_checklist_section(theme) {
+            sections = sections.child(checklist);
+        }
+        if let Some(terminals) = self.render_terminals_section(theme) {
+            sections = sections.child(terminals);
         }
         div()
             .relative()
             .flex_shrink_0()
-            .w(px(width_px))
+            .w(px(width))
             .min_h_0()
             .flex()
             .flex_col()
-            .p(px(INSPECTOR_PAD_PX))
+            .p(px(DESKTOP_COLUMN_INSET_PX))
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_INSPECTOR_SELECTOR.to_owned())
-            .child(cards)
+            .child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .bottom(px(0.0))
+                    .w(rule)
+                    .bg(DesktopTheme::neutral_dark().line)
+                    .debug_selector(|| THREAD_SCREEN_INSPECTOR_RULE_SELECTOR.to_owned()),
+            )
+            .child(sections)
     }
 
     /// Renders the composer overlay frame around the packet-2 composer surface.
@@ -476,9 +581,11 @@ impl ThreadScreen {
     /// Renders the gate loading branch (`thread-route-gate.svelte`).
     ///
     /// Legacy frame: `div.flex.h-full.min-h-0.items-center.justify-center`
-    /// with `role="status"` and `aria-label="Loading thread"` holding the
-    /// `size-6 text-muted-foreground` `FadeArc`. GPUI divs carry no DOM roles;
-    /// the stable selector keeps the branch addressable instead.
+    /// with `role="status"` and `aria-label="Loading thread"`. The mark is
+    /// the shimmering stacked wordmark the application loads behind (the
+    /// legacy connection overlay's loader), not a spinning arc. GPUI divs
+    /// carry no DOM roles; the stable selector keeps the branch addressable
+    /// instead.
     fn render_loading(theme: &ArtisanTheme) -> impl IntoElement {
         div()
             .flex()
@@ -489,9 +596,11 @@ impl ThreadScreen {
             .bg(shell_black())
             .debug_selector(|| THREAD_SCREEN_LOADING_SELECTOR.to_owned())
             .child(
-                FadeArc::new(SharedString::from(THREAD_SCREEN_LOADING_SELECTOR), *theme)
-                    .size(px(24.0))
-                    .debug_selector(THREAD_SCREEN_LOADING_SELECTOR),
+                // Most threads present well inside a second; the mark only
+                // appears for a wait that is actually noticeable.
+                WordmarkLoader::new(THREAD_SCREEN_LOADING_SELECTOR, *theme)
+                    .appear_after(THREAD_SCREEN_LOADING_MARK_DELAY)
+                    .debug_selector(THREAD_SCREEN_LOADING_MARK_SELECTOR),
             )
     }
 
@@ -569,15 +678,17 @@ impl ThreadScreen {
     /// ownership — transcript at full column height with the overlay above its
     /// tail — so the composer can never extend across or cover the inspector,
     /// and composer growth never steals transcript height; when the inspector
-    /// hides, the conversation reclaims its space.
+    /// hides, the conversation reclaims its space. The column's width and
+    /// visibility both follow the published content width
+    /// ([`thread_inspector_width`]).
     fn render_open(
         &self,
         theme: &ArtisanTheme,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // No native minimum window width is enforced, so the frame inset
-        // follows the live viewport instead of assuming desktop.
+        // The frame inset follows the live viewport instead of assuming
+        // desktop geometry.
         let pad_bottom = composer_pad_bottom(f32::from(window.bounds().size.width));
         let conversation = div()
             .relative()
@@ -587,7 +698,7 @@ impl ThreadScreen {
             .min_w(px(0.0))
             .min_h(px(0.0))
             .bg(shell_black())
-            .child(self.render_transcript_column())
+            .child(self.render_transcript_column(cx))
             .child(self.render_composer_overlay(pad_bottom, cx));
         let mut row = div()
             .flex()
@@ -596,8 +707,11 @@ impl ThreadScreen {
             .flex_1()
             .bg(shell_black())
             .child(conversation);
-        if self.inspector_visible() {
-            row = row.child(self.render_inspector(theme, self.inspector_width()));
+        if let Some(width) = self.inspector_width() {
+            // The same display-aware stroke the shell draws its rules and
+            // junction marks with, so the rule stays one physical pixel.
+            let rule = DesktopShellStyle::resolve(false, window.scale_factor()).one_device_pixel;
+            row = row.child(self.render_inspector(theme, width, rule));
         }
         div()
             .relative()
@@ -611,7 +725,7 @@ impl ThreadScreen {
     }
 }
 
-/// Returns whether a terminal session stays visible on the terminals card.
+/// Returns whether a terminal session stays visible in the Terminals section.
 ///
 /// This is the legacy `is_live_terminal` boundary
 /// (`lib/terminal/presentation.ts`): `opening | active` sessions show;

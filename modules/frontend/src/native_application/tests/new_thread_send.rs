@@ -242,3 +242,59 @@ fn send_without_a_project_says_why_and_keeps_the_draft(cx: &mut TestAppContext) 
     });
     assert!(submissions(&commands.borrow()).is_empty());
 }
+
+#[gpui::test]
+fn a_model_chosen_in_the_new_task_draft_stays_with_it_and_is_what_send_carries(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = cx.add_window_view(signed_in_test_application);
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            new_thread_screen(application, cx, "use the model I chose", sink);
+            let catalog = application.served_catalog(cx);
+            let chosen = catalog.selection_policy_for_model("codex-luna").unwrap();
+            let later = catalog.selection_policy_for_model("codex-sol").unwrap();
+            application.handle_composer_policy_selection(&chosen, cx);
+            assert!(
+                !commands.borrow().iter().any(|command| matches!(
+                    command,
+                    NativeTransportCommand::ForgeDecision(
+                        crate::native_transport_service::ForgeDecisionCommand::ResolveModelSelection(_)
+                    )
+                )),
+                "a new task's choice is saved onto no thread"
+            );
+
+            // Another draft shows its own model; returning shows the choice.
+            application
+                .composer
+                .update(cx, |composer, cx| composer.switch_thread("elsewhere", false, cx));
+            application.sync_composer_model_policy(cx);
+            assert!(application.composer_model_choice(cx).is_none());
+            let key = format!("project:{}", new_task_project().as_str());
+            application
+                .composer
+                .update(cx, |composer, cx| composer.switch_thread(&key, false, cx));
+            assert_eq!(application.composer.read(cx).draft(), "use the model I chose");
+            application.sync_composer_model_policy(cx);
+            assert_eq!(application.composer_model_choice(cx), Some(&chosen));
+
+            application.begin_message_submission(cx);
+            assert!(application.message_flight.is_some());
+            // A pick made while the draft is being stored is not this send's.
+            application.handle_composer_policy_selection(&later, cx);
+            ack_project_save(application, cx, 7);
+        });
+    });
+    let sent = submissions(&commands.borrow());
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]
+            .selection
+            .as_ref()
+            .map(|selection| selection.model_id.as_str()),
+        Some("codex-luna"),
+        "the send carries the model shown when Send was pressed"
+    );
+}

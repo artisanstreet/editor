@@ -240,6 +240,8 @@ struct ThreadSummary {
   lastMessageAtMillis @7 :Int64;
   # A draft becomes a saved thread after assistant text arrives.
   hasStartedResponse @8 :Bool;
+  # What the thread wants from its reader, beyond live work.
+  attention @9 :ThreadAttention;
 }
 
 # Answer to a project thread listing request.
@@ -911,6 +913,15 @@ struct Request {
     # answer is the snapshot after queuing; progress arrives as
     # engineInstalls events. Fresh ordinal.
     changeEngineVersion @49 :EngineVersionChange;
+
+    # Answers one open questionnaire on a thread through the run that asked
+    # it. Fresh ordinal.
+    answerQuestions @50 :AnswerQuestionsRequest;
+
+    # One on-demand part of a thread's history: older turns as the reader
+    # scrolls toward them, or a settled turn's held-back work rows when its
+    # section opens. Fresh ordinal; existing ordinals frozen.
+    conversationHistory @51 :ConversationHistoryRequest;
   }
 }
 
@@ -1024,6 +1035,12 @@ struct Response {
 
     # Answer to listEngineVersions. Fresh ordinal.
     engineVersions @46 :EngineVersionList;
+
+    # Answer to answerQuestions. Fresh ordinal.
+    questionsAnswered @47 :AnswerQuestionsReceipt;
+
+    # Answers conversationHistory. Fresh ordinal; existing ordinals frozen.
+    conversationHistory @48 :ConversationHistoryPage;
   }
 }
 
@@ -1146,6 +1163,26 @@ struct Event {
     # Every Forge-managed engine's install status, pushed whenever one
     # changes to a connection that read them. Fresh member @12.
     engineInstalls @12 :EngineInstallSnapshot;
+
+    # End of a new subscription's observation-history replay: every durable
+    # observation page for the thread was published before this, and live
+    # observations follow it. Fresh member @13.
+    observationHistoryCurrent @13 :ObservationHistoryCurrent;
+
+    # What a subscribed thread's live run is thinking right now. Thinking
+    # summaries are never stored; this is pushed whenever the current one
+    # changes and cleared when the run moves on. Fresh member @14.
+    liveThinking @14 :LiveThinking;
+
+    # The work of a subscribed thread's settled turns that stayed on the
+    # Forge, pushed once the thread's activity replay is complete and before
+    # observationHistoryCurrent. Fresh member @15.
+    heldBackWork @15 :HeldBackWork;
+
+    # The user messages of a subscribed thread's turns before the loaded
+    # ones, so the turn navigator lists them. Pushed with heldBackWork.
+    # Fresh member @16.
+    earlierTurnMarkers @16 :EarlierTurnMarkers;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -1482,6 +1519,10 @@ struct ObservationQuestion {
     noAnswers @8 :Void;
     answers @9 :List(Text);
   }
+  # The questionnaire (the questions one provider request asked together).
+  # Empty decodes as absent: the question forms its own questionnaire.
+  # Identifier rule when present. Fresh ordinal.
+  groupId @10 :Text;
 }
 
 # One provider-neutral plan entry.
@@ -2225,6 +2266,21 @@ struct ConversationSubscribeRequest {
     # valid and replays from the first patch.
     resumeAfter @2 :UInt64;
   }
+
+  # Fresh subscription: how many of the newest turns the snapshot holds.
+  # Zero, which is what an older client sends, asks for the most the
+  # protocol allows (512). Older turns are read with conversationHistory.
+  newestTurns @3 :UInt16;
+
+  # Resumed subscription: the oldest turn the subscriber still holds.
+  # Activity of turns before it is not replayed.
+  historyFloor :union {
+    # No floor, which is what an older client sends: replay every turn's.
+    everything @4 :Void;
+
+    # Inclusive zero-based turn ordinal.
+    ordinal @5 :UInt64;
+  }
 }
 
 # Request to end authoritative conversation delivery for one thread.
@@ -2797,4 +2853,172 @@ struct EngineVersionChange {
     version @2 :Text;
     rollback @3 :Void;
   }
+}
+
+# ---------------------------------------------------------------------------
+# Appended declarations (2026-09-27), kept at the end of the file so every
+# pre-existing node identity stays stable.
+# ---------------------------------------------------------------------------
+
+# The thread's observation history has been delivered through its durable
+# tail for this subscription.
+struct ObservationHistoryCurrent {
+  # Identifier rule.
+  threadId @0 :Text;
+}
+
+# The answers to one question inside a questionnaire. An empty list skips
+# that question.
+struct QuestionAnswer {
+  questionId @0 :Text;
+  answers @1 :List(Text);
+}
+
+# Answers one open questionnaire on a thread. Names the questionnaire, not a
+# run: the Forge routes each named question to the run that asked it, which
+# resolves it durably and replies to the provider request still waiting on
+# it. Empty answers skip; skipping every question dismisses.
+struct AnswerQuestionsRequest {
+  threadId @0 :Text;
+  groupId @1 :Text;
+  # At least one and at most 16 questions, each named once.
+  answers @2 :List(QuestionAnswer);
+}
+
+# How one questionnaire answer settled.
+enum AnswerQuestionsOutcome {
+  # At least one named question was open and its answer reached its run.
+  applied @0;
+  # No named question was still open: each was answered before, or its run
+  # ended and closed it.
+  alreadyResolved @1;
+  # No question of the named questionnaire exists on the thread.
+  unknownTarget @2;
+}
+
+# Correlated result of one questionnaire answer. The nested request id
+# equals the enclosing Response.requestId exactly.
+struct AnswerQuestionsReceipt {
+  requestId @0 :Text;
+  threadId @1 :Text;
+  groupId @2 :Text;
+  outcome @3 :AnswerQuestionsOutcome;
+}
+
+# What a listed thread wants from its reader. Appended so existing node
+# identities stay stable.
+enum ThreadAttention {
+  # Nothing new since the reader last had the thread open.
+  none @0;
+  # The live run waits on an approval or a question.
+  awaitingAnswer @1;
+  # The latest run completed after the reader last had the thread open.
+  finished @2;
+  # The latest run failed or was interrupted after the reader last had the
+  # thread open.
+  failed @3;
+}
+
+# What a subscribed thread's live run is thinking right now. Appended so
+# existing node identities stay stable.
+struct LiveThinking {
+  threadId @0 :Text;
+  current :union {
+    # The run is not thinking: it moved on to a tool or prose, or ended.
+    none @1 :Void;
+    block @2 :LiveThinkingBlock;
+  }
+}
+
+# One thinking block of a live run. `text` is the summary so far, bounded to
+# its newest part.
+struct LiveThinkingBlock {
+  runId @0 :Text;
+  turnId @1 :Text;
+  itemId @2 :Text;
+  text @3 :Text;
+  startedAtMillis @4 :Int64;
+  updatedAtMillis @5 :Int64;
+}
+
+# Request for one on-demand part of a thread's history. Appended so existing
+# node identities stay stable.
+struct ConversationHistoryRequest {
+  threadId @0 :Text;
+
+  part :union {
+    # Older turns before the loaded ones, with the activity that shows while
+    # their sections are closed.
+    earlierTurns @1 :QueryRange;
+
+    # The held-back work rows of one settled turn.
+    turnWork @2 :TurnWorkRange;
+  }
+}
+
+# Where a reader continues one turn's held-back work rows.
+struct TurnWorkRange {
+  turnId @0 :Text;
+
+  # Delivery sequence to continue after; zero starts at the first row.
+  afterSequence @1 :UInt64;
+}
+
+# Work rows of one settled turn that the Forge has not sent. The first row's
+# run, instant and delivery sequence place the turn's work section.
+struct HeldBackTurnWork {
+  turnId @0 :Text;
+  runId @1 :Text;
+  rowCount @2 :UInt32;
+  firstCommittedAtMillis @3 :Int64;
+  firstDeliverySequence @4 :UInt64;
+}
+
+# The held-back work of a subscribed thread's loaded turns.
+struct HeldBackWork {
+  threadId @0 :Text;
+  turns @1 :List(HeldBackTurnWork);
+}
+
+# One answered part of a thread's history.
+struct ConversationHistoryPage {
+  threadId @0 :Text;
+
+  turns :union {
+    # A turnWork answer carries no turns.
+    none @1 :Void;
+
+    # The older turns and their items. No turns means the thread has none
+    # before the requested ordinal.
+    snapshot @2 :ConversationSnapshot;
+  }
+
+  # Observation rows of the page, in delivery order.
+  observations @3 :List(EngineObservationEvent);
+
+  # Work of the page's settled turns that stayed on the Forge.
+  heldBack @4 :List(HeldBackTurnWork);
+
+  next :union {
+    # Every row of the requested part was sent.
+    done @5 :Void;
+
+    # More turnWork rows remain: ask again after this delivery sequence.
+    afterSequence @6 :UInt64;
+  }
+}
+
+# The user messages of a thread's turns that lie before the loaded ones,
+# oldest first. Appended so existing node identities stay stable.
+struct EarlierTurnMarkers {
+  threadId @0 :Text;
+  markers @1 :List(EarlierTurnMarker);
+}
+
+# One user message in a turn that is not loaded. `label` is the start of its
+# text, at most 480 UTF-8 bytes.
+struct EarlierTurnMarker {
+  itemId @0 :Text;
+  turnOrdinal @1 :UInt64;
+  label @2 :Text;
 }

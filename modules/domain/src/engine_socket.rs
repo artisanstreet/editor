@@ -326,6 +326,9 @@ pub enum EngineOpenError {
     /// The provider rejected the stored native thread on resume.
     #[error("engine provider rejected the stored native thread")]
     ResumeRejected,
+    /// A handshake reply exceeded the adapter's frame bound.
+    #[error("engine provider handshake reply exceeded the frame bound")]
+    FrameTooLarge,
     /// The owning runtime shut down while the run was opening.
     #[error("engine runtime shut down while opening")]
     Shutdown,

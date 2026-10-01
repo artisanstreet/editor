@@ -55,6 +55,7 @@ fn tick_busy_keeps_row_pending_with_retry_state(cx: &mut TestAppContext) {
                 !surface.update(cx, |surface, surface_cx| {
                     surface.submit_approval_gesture(
                         "approval-1",
+                        &answer_run(),
                         &answer_approval(),
                         true,
                         surface_cx,
@@ -147,13 +148,7 @@ fn a_choice_the_forge_refuses_keeps_the_draft_and_shows_its_reason(cx: &mut Test
             application.sync_composer_model_policy(cx);
             // The durable choice survives the sync, and the Editor asks the
             // Forge to resolve it instead of judging it.
-            assert_eq!(
-                application
-                    .composer_model_choice
-                    .as_ref()
-                    .map(|(_, choice)| choice),
-                Some(&policy)
-            );
+            assert_eq!(application.composer_model_choice(cx), Some(&policy));
             assert!(commands.borrow().iter().any(|command| matches!(
                 command,
                 NativeTransportCommand::ForgeDecision(
@@ -180,9 +175,11 @@ fn a_choice_the_forge_refuses_keeps_the_draft_and_shows_its_reason(cx: &mut Test
                 snapshot.failure.expect("refusal banner").failure.description,
                 reason
             );
+            // The choice stays with the thread's draft whatever the
+            // selection does meanwhile.
             application.selected_thread = None;
             application.sync_composer_model_policy(cx);
-            assert!(application.composer_model_choice.is_none());
+            assert_eq!(application.composer_model_choice(cx), Some(&policy));
         });
     });
     let commands = commands.borrow();
@@ -224,7 +221,7 @@ fn an_unconfigured_first_send_carries_the_displayed_model(cx: &mut TestAppContex
             // The picker displays its default policy with no persisted
             // configuration and no explicit choice: the production first
             // send. The Forge resolves, saves, and admits what it carries.
-            assert!(application.composer_model_choice.is_none());
+            assert!(application.composer_model_choice(cx).is_none());
             let displayed = application
                 .model_selector
                 .read(cx)
@@ -662,6 +659,7 @@ fn delivered_message_turn_is_labelled_from_its_outbox_row(cx: &mut TestAppContex
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
+            application.handle_service_event(history_current_event(&thread_id), cx);
             application.handle_service_event(
                 NativeTransportEvent::PatchBatch(echo_batch(
                     &thread_id,
@@ -725,6 +723,7 @@ fn legacy_echo_without_source_id_takes_no_label(cx: &mut TestAppContext) {
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
+            application.handle_service_event(history_current_event(&thread_id), cx);
             // The item id equals the message id here, but without a source
             // id that proves nothing: the turn takes no label.
             application.handle_service_event(
@@ -802,6 +801,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
+            application.handle_service_event(history_current_event(&thread_id), cx);
             application.handle_service_event(
                 NativeTransportEvent::PatchBatch(echo_batch(
                     &thread_id,
@@ -876,31 +876,23 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
     // status row renders the summary, the user body stays exact-once.
     let header_selector: String = cx.update(|_, app| {
         view.update(app, |application, cx| {
-            let delta = artisan_domain::ReasoningSummaryDeltaObservation::new(
-                artisan_domain::ObservationId::parse("obs-1").expect("observation"),
-                artisan_domain::ObservationSequence::new(0).expect("sequence"),
-                artisan_domain::ObservationId::parse("obs-item-1").expect("observation item"),
-                0,
-                "Considering options.".to_owned(),
-                None,
-                artisan_domain::ObservationId::parse("obs-turn-1").expect("observation turn"),
-            )
-            .expect("reasoning delta");
-            let observation = artisan_domain::EngineObservationEvent {
-                thread_id: thread_id.clone(),
-                observation: artisan_domain::Observation::ReasoningSummaryDelta(delta),
-                attribution: Some(artisan_domain::EngineObservationAttribution {
-                    run_id: RunId::parse("run-staged").expect("run"),
-                    turn_id: TurnId::parse("turn-staged").expect("turn"),
-                    committed_at: UnixMillis::from_millis(11),
-                    delivery_sequence: 1,
-                }),
-            };
+            // Thinking is pushed live state, never a stored observation.
             application.handle_service_event(
-                NativeTransportEvent::EngineObservation(artisan_protocol::ServerEvent {
-                    cursor: artisan_protocol::EventCursor::new(1).expect("cursor"),
-                    event: artisan_domain::Event::EngineObservation(observation),
-                }),
+                NativeTransportEvent::HostState(
+                    crate::native_transport_service::HostStateEvent::LiveThinking(
+                        artisan_domain::LiveThinking {
+                            thread_id: thread_id.clone(),
+                            current: Some(artisan_domain::LiveThinkingBlock {
+                                run_id: RunId::parse("run-staged").expect("run"),
+                                turn_id: TurnId::parse("turn-staged").expect("turn"),
+                                item_id: "obs-item-1".to_owned(),
+                                text: "Considering options.".to_owned(),
+                                started_at: UnixMillis::from_millis(11),
+                                updated_at: UnixMillis::from_millis(11),
+                            }),
+                        },
+                    ),
+                ),
                 cx,
             );
             let scene = staged_turn_scene(application, cx, "turn-staged");
@@ -1209,6 +1201,7 @@ fn two_sends_leave_the_outbox_independently(cx: &mut TestAppContext) {
                 NativeTransportEvent::Snapshot(snapshot_for(&thread_id, 1)),
                 cx,
             );
+            application.handle_service_event(history_current_event(&thread_id), cx);
             let batch = PatchBatch::new(
                 thread_id.clone(),
                 ConversationCursor::new(1),
@@ -1464,7 +1457,10 @@ fn first_send_carries_the_displayed_one_million_window_for_the_forge(cx: &mut Te
                     model_context_window: 1_050_000,
                 }),
             });
-            application.composer_model_choice = Some((Some(thread), policy));
+            application.composer_model_choices.insert(
+                Some(artisan_domain::ComposerDraftScope::Thread(thread)),
+                policy,
+            );
             application.begin_message_submission(cx);
             assert!(application.message_flight.is_some(), "send should be eager");
             assert!(application.engine_settings.authoritative_config().is_none());
@@ -1585,14 +1581,15 @@ fn host_catalog_refresh_updates_the_send_choice_revision(cx: &mut TestAppContext
         view.update(app, |application, cx| {
             let catalog = application.served_catalog(cx);
             let policy = catalog.selection_policy_for_model("codex-luna").unwrap();
-            application.composer_model_choice = Some((None, policy));
+            let scope = application.composer.read(cx).draft_scope();
+            application.composer_model_choices.insert(scope, policy);
             let mut refreshed = catalog;
             refreshed.catalog_revision = "host-new-revision".to_owned();
             application
                 .model_selector
                 .update(cx, |selector, cx| selector.set_snapshot(refreshed, cx));
             application.sync_composer_model_policy(cx);
-            let (_, choice) = application.composer_model_choice.as_ref().unwrap();
+            let choice = application.composer_model_choice(cx).unwrap();
             assert_eq!(choice.catalog_revision, "host-new-revision");
             assert_eq!(choice.model_id, "codex-luna");
             application
@@ -1670,4 +1667,43 @@ fn sent_context_window(commands: &Rc<RefCell<Vec<NativeTransportCommand>>>) -> O
             .map(|option| option.as_str().to_owned()),
         _ => None,
     })
+}
+
+#[gpui::test]
+fn stop_is_immediate_and_failure_restores_the_live_run(cx: &mut TestAppContext) {
+    let thread = ThreadId::parse("stop-task").unwrap();
+    let (view, cx) = cx.add_window_view(|window, cx| signed_in_test_application(window, cx));
+    let (sink, commands) = command_sink([Ok(())]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(application, cx, thread.clone(), "next prompt", sink);
+            install_configured_engine_settings(application, cx);
+            application.seed_active_run_for_tests(
+                thread,
+                RunId::parse("stopping-run").unwrap(),
+                artisan_protocol::RunLiveStatus::Running,
+                artisan_domain::EngineId::Claude,
+            );
+            application.stop_composer_run("stopping-run", cx);
+            assert!(!application.composer_controls.read(cx).snapshot().run_active);
+            assert!(!application.composer_controls.read(cx).snapshot().cancelling);
+            application.stop_composer_run("stopping-run", cx);
+            let stops: Vec<_> = commands
+                .borrow()
+                .iter()
+                .filter_map(|command| match command {
+                    NativeTransportCommand::StopRun(stop) => Some(stop.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(stops.len(), 1, "double-click must not send Stop twice");
+            application.receive_run_stop_failure(
+                &stops[0],
+                super::super::invalid_service_failure(),
+                cx,
+            );
+            assert!(application.composer_controls.read(cx).snapshot().run_active);
+            assert!(application.message_failure.is_some());
+        })
+    });
 }

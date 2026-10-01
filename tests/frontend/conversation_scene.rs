@@ -3,7 +3,8 @@
 //! Structural enum assertions only: no string snapshots of debug output.
 
 use artisan_domain::{
-    ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, RunId, TurnId,
+    ConversationLifecycle, ItemId, MESSAGE_BODY_MAX_BYTES, MessageBody, ObservationId, RunId,
+    TurnId,
 };
 use artisan_frontend::conversation_scene;
 use artisan_frontend::conversation_scene::{
@@ -12,8 +13,8 @@ use artisan_frontend::conversation_scene::{
     SCENE_MAX_MESSAGE_BODY_BYTES, SCENE_MAX_NARRATIONS, SCENE_MAX_NATIVE_FACT_BYTES,
     SCENE_MAX_PLAN_ENTRIES, SCENE_MAX_STEERING_PLACEMENTS, SCENE_MAX_TURNS,
     SCENE_MAX_WORK_GROUP_ITEMS, SceneBuildError, SceneDisclosure, SceneFileChange, SceneId,
-    SceneItem, SceneItemKind, SceneTurn, SteeringPlacement, TurnBlock, TurnNarration,
-    TurnNarrationEntry, WorkGroupBlock, WorkGroupLabel, WorkItem,
+    SceneItem, SceneItemKind, SceneTurn, SessionDetail, SteeringPlacement, TurnBlock,
+    TurnNarration, TurnNarrationEntry, WorkGroupBlock, WorkGroupLabel, WorkItem,
 };
 
 fn scene_id(value: &str) -> SceneId {
@@ -180,6 +181,7 @@ fn approval_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         ordinal,
         SceneItemKind::Approval {
             prompt: "approve?".to_owned(),
+            approval_id: ObservationId::parse(id).expect("approval id"),
         },
         None,
     )
@@ -193,6 +195,7 @@ fn question_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         ordinal,
         SceneItemKind::Question {
             prompt: "question?".to_owned(),
+            answer: None,
         },
         None,
     )
@@ -1634,52 +1637,96 @@ fn multi_run_dissolves_session_grouping_without_losing_prose() {
     assert_eq!(bodies, vec!["first", "second"]);
 }
 
+/// Names each block for layout assertions; a session continuation (the
+/// segment after a mid-run user message) is named apart from the first
+/// segment.
+fn steer_layout(blocks: &[TurnBlock]) -> Vec<&'static str> {
+    blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::UserMessage(_) => "user",
+            TurnBlock::WorkGroup(group) if group.continuation.is_some() => "continuation",
+            TurnBlock::WorkGroup(group) if group.session.is_some() => "session",
+            TurnBlock::WorkGroup(_) => "work",
+            TurnBlock::SteeringLabel(_) => "steer-label",
+            TurnBlock::AssistantMessage(_) => "assistant",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect()
+}
+
+/// Returns the detail identities of one session segment in stored order.
+fn detail_ids(group: &WorkGroupBlock) -> Vec<&str> {
+    group
+        .session_details
+        .iter()
+        .map(|detail| match detail {
+            SessionDetail::Assistant { id, .. }
+            | SessionDetail::Activity { id, .. }
+            | SessionDetail::Compaction { id, .. }
+            | SessionDetail::NativeFact { id, .. } => id.as_str(),
+        })
+        .collect()
+}
+
+/// Returns every work group block of one turn in block order.
+fn work_groups(blocks: &[TurnBlock]) -> Vec<&WorkGroupBlock> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::WorkGroup(group) => Some(group),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_activity(id: &str, ordinal: u64, lifecycle: ConversationLifecycle) -> SceneItem {
+    provenanced(
+        activity_item(id, "turn_a", ordinal, "ran"),
+        "run_a",
+        lifecycle,
+    )
+}
+
+fn run_commentary(id: &str, ordinal: u64, body: &str) -> SceneItem {
+    provenanced(
+        assistant_item(id, "turn_a", ordinal, body, AssistantPhase::Commentary),
+        "run_a",
+        ConversationLifecycle::Completed,
+    )
+}
+
 #[test]
-fn post_steer_work_stays_top_level_and_supersedes_session() {
+fn unacknowledged_post_steer_work_joins_the_session_above_the_bubble() {
     use conversation_scene::ConversationScene;
 
+    // Departs from the old post-steering rule: a steer never starts a new
+    // section. Until the model acknowledges it in prose, work after the steer
+    // joins the one session above the bubble, and the bubble (with its
+    // label) sits after all of it without superseding the session.
     let scene = ConversationScene::build(
         vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
         vec![
             user_item("prompt", "turn_a", 1, "go"),
-            provenanced(
-                activity_item("tool", "turn_a", 2, "ran"),
-                "run_a",
-                ConversationLifecycle::Completed,
-            ),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
             user_item("steer", "turn_a", 5, "actually, stop"),
-            provenanced(
-                activity_item("tool2", "turn_a", 8, "stopping"),
-                "run_a",
-                ConversationLifecycle::Active,
-            ),
+            run_activity("tool2", 8, ConversationLifecycle::Active),
         ],
         vec![narration("turn_a", TurnNarration::Working)],
         vec![steering("steer_1", "steer", "steering")],
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    let kinds: Vec<&str> = blocks
-        .iter()
-        .map(|block| match block {
-            TurnBlock::UserMessage(_) => "user",
-            TurnBlock::WorkGroup(group) if group.session.is_some() => "session",
-            TurnBlock::WorkGroup(_) => "work",
-            TurnBlock::SteeringLabel(_) => "steer-label",
-            TurnBlock::TurnStatus(_) => "status",
-            TurnBlock::TurnFooter(_) => "footer",
-            _ => "other",
-        })
-        .collect();
-    // No status row: the live tool chain newer than any model prose carries
-    // progress itself (waiting-for-activity suppression).
     assert_eq!(
-        kinds,
-        vec!["user", "session", "user", "steer-label", "work", "footer"]
+        steer_layout(blocks),
+        vec!["user", "session", "user", "steer-label", "status", "footer"]
     );
     let group = session_group(blocks);
-    assert!(group.superseded);
-    assert_eq!(group.session_details.len(), 1);
+    assert!(!group.superseded, "a steer never supersedes its session");
+    assert!(group.continuation.is_none());
+    assert_eq!(detail_ids(group), vec!["tool", "tool2"]);
 }
 
 #[test]
@@ -1738,17 +1785,20 @@ fn legacy_positional_layout_without_provenance_is_unchanged() {
 }
 
 #[test]
-fn waiting_activity_suppresses_status_row() {
+fn waiting_activity_keeps_the_status_block_for_the_header_without_a_summary() {
     use conversation_scene::ConversationScene;
 
     // A live tool chain newer than model prose carries progress itself, so
-    // the row stays absent even while working.
+    // the row paints nothing of its own even while working: the block stays
+    // with its narration and basis, which the group header counts as
+    // `Working for …`, but the older thinking summary is dropped so the row
+    // is the header's exact duplicate and stands down.
     let scene = ConversationScene::build(
         vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
         vec![
             user_item("user_a", "turn_a", 1, "hi"),
             provenanced(
-                assistant_item("m1", "turn_a", 2, "reply", AssistantPhase::Final),
+                reasoning_item("r1", "turn_a", 2, "Weighing the options."),
                 "run_a",
                 ConversationLifecycle::Completed,
             ),
@@ -1763,7 +1813,21 @@ fn waiting_activity_suppresses_status_row() {
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    assert!(!blocks.iter().any(|b| matches!(b, TurnBlock::TurnStatus(_))));
+    let status = blocks
+        .iter()
+        .find_map(|b| match b {
+            TurnBlock::TurnStatus(status) => Some(status),
+            _ => None,
+        })
+        .expect("the status block stays for the group header's live line");
+    assert_eq!(status.narration, TurnNarration::Working);
+    assert_eq!(status.reasoning_summary, None);
+    assert!(
+        blocks
+            .iter()
+            .any(|b| matches!(b, TurnBlock::WorkGroup(group) if group.session.is_some())),
+        "the session group owns the live header"
+    );
 }
 
 #[test]
@@ -2203,18 +2267,18 @@ fn overlong_engine_label_is_rejected() {
 }
 
 #[test]
-fn durable_mid_run_reply_is_a_boundary_without_a_steering_label() {
+fn acknowledging_prose_continues_the_session_after_the_bubble() {
     use conversation_scene::ConversationScene;
 
+    // Departs from the old reference, where a durable mid-run reply was a
+    // boundary: the acknowledging commentary and the tools after it stay in
+    // the same session, painted as a headerless continuation after the
+    // bubble. Commentary is a row, never top-level prose.
     let scene = ConversationScene::build(
         vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
         vec![
             user_item("prompt", "turn_a", 1, "go"),
-            provenanced(
-                activity_item("tool", "turn_a", 2, "ran"),
-                "run_a",
-                ConversationLifecycle::Completed,
-            ),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
             user_item("steer", "turn_a", 5, "actually, stop"),
             provenanced(
                 assistant_item(
@@ -2227,37 +2291,365 @@ fn durable_mid_run_reply_is_a_boundary_without_a_steering_label() {
                 "run_a",
                 ConversationLifecycle::Streaming,
             ),
-            provenanced(
-                activity_item("tool2", "turn_a", 8, "stopping"),
-                "run_a",
-                ConversationLifecycle::Active,
-            ),
+            run_activity("tool2", 8, ConversationLifecycle::Active),
         ],
         vec![narration("turn_a", TurnNarration::Working)],
         Vec::new(),
     )
     .expect("builds");
     let blocks = &scene.turn_scenes()[0].blocks;
-    let kinds: Vec<&str> = blocks
+    assert_eq!(
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "continuation",
+            "status",
+            "footer"
+        ]
+    );
+    let groups = work_groups(blocks);
+    let (first, continuation) = (groups[0], groups[1]);
+    assert!(!first.superseded);
+    assert_eq!(detail_ids(first), vec!["tool"]);
+    assert_eq!(detail_ids(continuation), vec!["reply-after-steer", "tool2"]);
+    // One section: shared session identity and disclosure, a distinct
+    // segment anchor, and nothing the first segment's header owns.
+    assert_eq!(continuation.session, first.session);
+    assert_eq!(continuation.disclosure, first.disclosure);
+    assert_eq!(
+        continuation.continuation.as_ref().map(SceneId::as_str),
+        Some("session-turn_a.1")
+    );
+    assert!(continuation.label.is_none());
+    assert!(continuation.transition.is_none());
+    assert!(continuation.reasoning_summary.is_none());
+    assert!(!continuation.superseded);
+}
+
+#[test]
+fn tools_before_the_acknowledgement_extend_the_chain_above_the_bubble() {
+    use conversation_scene::ConversationScene;
+
+    // Seven commands, the steer, four more commands, then the acknowledging
+    // prose and two commands: the eleven commands are one uninterrupted run
+    // of activity rows above the bubble, and the prose plus the last two sit
+    // below it.
+    let mut items = vec![
+        user_item("prompt", "turn_a", 1, "why is the footer wrong"),
+        run_commentary("likely", 2, "Likely cause found"),
+    ];
+    for index in 0..7 {
+        items.push(run_activity(
+            &format!("pre_{index}"),
+            3 + index,
+            ConversationLifecycle::Completed,
+        ));
+    }
+    items.push(user_item("steer", "turn_a", 10, "also check the tray"));
+    for index in 0..4 {
+        items.push(run_activity(
+            &format!("post_{index}"),
+            11 + index,
+            ConversationLifecycle::Completed,
+        ));
+    }
+    items.push(run_commentary(
+        "confirmed",
+        15,
+        "Claude footer cause confirmed",
+    ));
+    items.push(run_activity("late_0", 16, ConversationLifecycle::Completed));
+    items.push(run_activity("late_1", 17, ConversationLifecycle::Active));
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        items,
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "continuation",
+            "status",
+            "footer"
+        ]
+    );
+    let groups = work_groups(blocks);
+    let first = detail_ids(groups[0]);
+    assert_eq!(first[0], "likely");
+    assert_eq!(first.len(), 12);
+    assert!(
+        groups[0].session_details[1..]
+            .iter()
+            .all(|detail| matches!(detail, SessionDetail::Activity { .. })),
+        "the eleven commands are one contiguous activity run"
+    );
+    assert_eq!(detail_ids(groups[1]), vec!["confirmed", "late_0", "late_1"]);
+}
+
+#[test]
+fn steers_acknowledged_by_the_same_prose_sit_together_before_it() {
+    use conversation_scene::ConversationScene;
+
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
+            user_item("steer_a", "turn_a", 3, "first"),
+            user_item("steer_b", "turn_a", 4, "second"),
+            run_activity("tool2", 5, ConversationLifecycle::Completed),
+            run_commentary("ack", 6, "Handling both"),
+            run_activity("tool3", 7, ConversationLifecycle::Active),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        vec![steering("label_b", "steer_b", "steering")],
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "user",
+            "steer-label",
+            "continuation",
+            "status",
+            "footer"
+        ]
+    );
+    let users: Vec<&str> = blocks
         .iter()
-        .map(|block| match block {
-            TurnBlock::UserMessage(_) => "user",
-            TurnBlock::WorkGroup(group) if group.session.is_some() => "session",
-            TurnBlock::WorkGroup(_) => "work",
-            TurnBlock::SteeringLabel(_) => "steer-label",
-            TurnBlock::AssistantMessage(_) => "assistant",
-            TurnBlock::TurnStatus(_) => "status",
-            TurnBlock::TurnFooter(_) => "footer",
-            _ => "other",
+        .filter_map(|block| match block {
+            TurnBlock::UserMessage(message) => Some(message.id.as_str()),
+            _ => None,
         })
         .collect();
-    // No status row: the live tool chain newer than any model prose carries
-    // progress itself (waiting-for-activity suppression).
+    assert_eq!(users, vec!["prompt", "steer_a", "steer_b"]);
+    let groups = work_groups(blocks);
+    assert_eq!(detail_ids(groups[0]), vec!["tool", "tool2"]);
+    assert_eq!(detail_ids(groups[1]), vec!["ack", "tool3"]);
+    assert!(!groups[0].superseded);
+}
+
+#[test]
+fn two_steers_each_find_their_own_seam() {
+    use conversation_scene::ConversationScene;
+
+    // The first steer is acknowledged, the next two are not yet: they stack
+    // in ordinal order after all work the session holds, and each segment
+    // gets its own anchor.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
+            user_item("steer_a", "turn_a", 3, "first"),
+            run_activity("tool2", 4, ConversationLifecycle::Completed),
+            run_commentary("ack_a", 5, "On it"),
+            run_activity("tool3", 6, ConversationLifecycle::Completed),
+            user_item("steer_b", "turn_a", 7, "second"),
+            user_item("steer_c", "turn_a", 8, "third"),
+            run_activity("tool4", 9, ConversationLifecycle::Active),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
     assert_eq!(
-        kinds,
-        vec!["user", "session", "user", "assistant", "work", "footer"]
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "continuation",
+            "user",
+            "user",
+            "status",
+            "footer"
+        ]
+    );
+    let groups = work_groups(blocks);
+    assert_eq!(detail_ids(groups[0]), vec!["tool", "tool2"]);
+    assert_eq!(detail_ids(groups[1]), vec!["ack_a", "tool3", "tool4"]);
+    assert!(!groups[0].superseded);
+
+    // Once the later steers are acknowledged too, the work after that seam
+    // opens a second continuation with its own anchor.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
+            user_item("steer_a", "turn_a", 3, "first"),
+            run_commentary("ack_a", 4, "On it"),
+            user_item("steer_b", "turn_a", 5, "second"),
+            run_commentary("ack_b", 6, "Also on that"),
+            run_activity("tool2", 7, ConversationLifecycle::Active),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "continuation",
+            "user",
+            "continuation",
+            "status",
+            "footer"
+        ]
+    );
+    let anchors: Vec<Option<&str>> = work_groups(blocks)
+        .iter()
+        .map(|group| group.continuation.as_ref().map(SceneId::as_str))
+        .collect();
+    assert_eq!(
+        anchors,
+        vec![None, Some("session-turn_a.1"), Some("session-turn_a.2")]
+    );
+}
+
+#[test]
+fn the_promoted_final_reply_can_acknowledge_a_steer() {
+    use conversation_scene::ConversationScene;
+
+    // The final reply is the first prose after the steer: the bubble sits
+    // directly before it, every tool stays above, and the settled outcome
+    // titles the one section.
+    let reply = || {
+        provenanced(
+            assistant_item("reply", "turn_a", 5, "Done", AssistantPhase::Final),
+            "run_a",
+            ConversationLifecycle::Completed,
+        )
+    };
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
+            user_item("steer", "turn_a", 3, "and the tray"),
+            run_activity("tool2", 4, ConversationLifecycle::Completed),
+            reply(),
+        ],
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")),
+        Some(scene_id("reply"))
+    );
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec!["user", "session", "user", "assistant", "status", "footer"]
     );
     let group = session_group(blocks);
-    assert!(group.superseded);
-    assert_eq!(group.session_details.len(), 1);
+    assert_eq!(detail_ids(group), vec!["tool", "tool2"]);
+    assert_eq!(group.label, Some(WorkGroupLabel::WorkedFor { millis: 9 }));
+
+    // Late work after the acknowledging reply continues the section before
+    // the reply, exactly like late work joins before it without a steer.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_activity("tool", 2, ConversationLifecycle::Completed),
+            user_item("steer", "turn_a", 3, "and the tray"),
+            reply(),
+            run_activity("late", 6, ConversationLifecycle::Completed),
+        ],
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec![
+            "user",
+            "session",
+            "user",
+            "continuation",
+            "assistant",
+            "status",
+            "footer"
+        ]
+    );
+    let groups = work_groups(blocks);
+    assert_eq!(detail_ids(groups[1]), vec!["late"]);
+    assert_eq!(
+        groups[0].label,
+        Some(WorkGroupLabel::WorkedFor { millis: 9 })
+    );
+    assert!(
+        groups[1].label.is_none(),
+        "only the first segment is titled"
+    );
+}
+
+#[test]
+fn a_session_turn_without_a_steer_keeps_its_exact_blocks() {
+    use conversation_scene::ConversationScene;
+
+    // No mid-run user message: one session segment, no continuation, and
+    // the pre-existing superseded rule (any later block) is unchanged.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)],
+        vec![
+            user_item("prompt", "turn_a", 1, "go"),
+            run_commentary("note", 2, "Looking"),
+            run_activity("tool", 3, ConversationLifecycle::Completed),
+            provenanced(
+                assistant_item("reply", "turn_a", 4, "Done", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::WorkedFor { millis: 9 })],
+        Vec::new(),
+    )
+    .expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert_eq!(
+        steer_layout(blocks),
+        vec!["user", "session", "assistant", "status", "footer"]
+    );
+    let TurnBlock::WorkGroup(group) = &blocks[1] else {
+        panic!("session group follows the prompt");
+    };
+    assert_eq!(
+        group,
+        &WorkGroupBlock {
+            items: Vec::new(),
+            label: Some(WorkGroupLabel::WorkedFor { millis: 9 }),
+            disclosure: None,
+            session: Some(scene_id("session-turn_a")),
+            session_run: Some(run_id("run_a")),
+            superseded: true,
+            continuation: None,
+            reasoning_summary: None,
+            progress: ProgressPhase::Reply,
+            transition: None,
+            session_details: group.session_details.clone(),
+        }
+    );
+    assert_eq!(detail_ids(group), vec!["note", "tool"]);
 }

@@ -50,6 +50,19 @@ fn default_transport_can_carry_maximum_image_payload() {
 }
 
 #[test]
+fn a_run_may_last_a_whole_day_while_its_provider_stays_live() {
+    // The attempt budget is the run's deadline: an hour killed long agent
+    // turns mid-build and left every later steer writing to a dead pump.
+    let runtime = default_runtime().unwrap();
+    assert_eq!(
+        runtime.attempt_budget().get(),
+        artisan_domain::ENGINE_RUNTIME_MAX_MILLIS
+    );
+    assert_eq!(runtime.attempt_budget().get(), 86_400_000);
+    assert!(runtime.stream_budget().get() < runtime.attempt_budget().get());
+}
+
+#[test]
 fn a_selection_resolves_to_the_policy_the_picker_showed() {
     let catalog = fixture();
     for model_id in [

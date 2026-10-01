@@ -42,7 +42,7 @@ use artisan_build_info::BuildInfo;
 
 pub use args::{Action, Command, DEFAULT_KEEP, DevArgs, EditorArgs, EditorPlatform, parse, usage};
 pub use binaries::{BinarySet, locate_binaries, locate_in_dir};
-pub use error::DevError;
+pub use error::{DevError, error_chain};
 pub use launch::{
     DEV_LAUNCH_REPORT_TIMEOUT_MS, DEV_STARTUP_POLL_MS, DEV_STARTUP_TIMEOUT_MS, EditorOutput,
     EditorProcess, MAX_RECEIPT_TEXT, STARTUP_RECEIPT_ENV, STARTUP_RECEIPT_SCHEMA, StartupWait,
@@ -126,6 +126,10 @@ pub fn prune(paths: &DevPaths, keep: usize) {
                 println!("dev: kept {version} (in use)");
             }
         }
-        Err(error) => eprintln!("dev: warning: prune skipped: {error}"),
+        Err(error) => eprintln!(
+            "dev: warning: prune of {} skipped: {}",
+            paths.home.display(),
+            error_chain(&error)
+        ),
     }
 }

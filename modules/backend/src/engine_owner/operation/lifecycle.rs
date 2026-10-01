@@ -33,6 +33,7 @@ use super::cursor::execute_cursor_turn;
 use super::failures::map_readiness_error;
 use super::grok::execute_grok_turn;
 use super::opencode::execute_configured_turn;
+use super::owner::ClaudeDisplayRefusals;
 use super::turn_common::ConfiguredTurnRequest;
 use super::turn_common::configured_runtime;
 
@@ -137,8 +138,14 @@ pub(super) async fn execute_legacy_job(
 
 /// Executes one configured `OpenCode2` turn.  The profile capability and the
 /// settings snapshot are moved into this owner call and are never reread from
-/// durable state or ambient process configuration.
-pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle>) -> Execution {
+/// durable state or ambient process configuration. The owner's observed
+/// Claude display refusals travel alongside so a refused context downgrades
+/// its next launch without any durable state.
+pub(super) async fn execute_configured_job(
+    job: Job,
+    shutdown: &Arc<CancelHandle>,
+    claude_displays: &mut ClaudeDisplayRefusals,
+) -> Execution {
     let Job::Turn {
         input,
         deadline,
@@ -208,7 +215,13 @@ pub(super) async fn execute_configured_job(job: Job, shutdown: &Arc<CancelHandle
             Box::pin(execute_codex_turn(request, runtime, shutdown)).await
         }
         super::super::consts::CLAUDE_ENGINE_ID => {
-            Box::pin(execute_claude_turn(request, runtime, shutdown)).await
+            Box::pin(execute_claude_turn(
+                request,
+                runtime,
+                shutdown,
+                claude_displays,
+            ))
+            .await
         }
         super::super::consts::GROK_ENGINE_ID => {
             Box::pin(execute_grok_turn(request, runtime, shutdown)).await

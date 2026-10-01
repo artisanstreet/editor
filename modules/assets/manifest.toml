@@ -85,6 +85,20 @@ sha256 = "d06c33503d746e5d62c9a30f09f70e6cbfb6ff593cd61019eb5b6833c499b2db"
 notes = "Legacy CSS stroke-draw animation is reimplemented natively."
 
 [[asset]]
+id = "artisan.wordmark-stacked"
+family = "artisan"
+name = "wordmark-stacked"
+origin_kind = "local"
+origin_path = "modules/frontend/src/lib/components/artisan-logo.svelte"
+license_spdx = "LicenseRef-First-Party"
+license_file = "licenses/artisan-first-party-NOTES.md"
+view_box = "0 0 136.675 225.15"
+monochrome = true
+source_path = "svg/artisan/wordmark-stacked.svg"
+sha256 = "66e08d667b7466caea8dcb305d51d2bd650a33ab312e06357b17c754404d5971"
+notes = "Stacked AR/TIS/AN wordmark as outlines: the legacy component's rows (one size, -0.05em tracking, line heights 0.71/0.8/0.7) set in Sigurd at weight 400. Tinted by text color; the loading shimmer is drawn natively."
+
+[[asset]]
 id = "brands.kimi"
 family = "brands"
 name = "kimi"
@@ -2221,6 +2235,14 @@ reachability = "shipped"
 classification = "static-vendored"
 sites = ["modules/frontend/src/routes/components/onboarding/view.svelte"]
 assets = ["artisan.success-check"]
+
+[[use]]
+id = "loading.wordmark-stacked"
+channel = "inline-component"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/lib/components/artisan-logo.svelte", "modules/frontend/src/routes/components/forge-connection-overlay.svelte"]
+assets = ["artisan.wordmark-stacked"]
 
 [[use]]
 id = "identity.gradient-avatar"

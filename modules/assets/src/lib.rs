@@ -267,6 +267,7 @@ catalog! {
     (ARTISAN_LOGO_GRADIENT, "artisan.logo-gradient", Family::Artisan, Some("0 0 720 720"), false, "svg/artisan/logo-gradient.svg"),
     (ARTISAN_STAR, "artisan.star", Family::Artisan, Some("0 0 100 100"), true, "svg/artisan/star.svg"),
     (ARTISAN_SUCCESS_CHECK, "artisan.success-check", Family::Artisan, Some("0 0 16 16"), true, "svg/artisan/success-check.svg"),
+    (ARTISAN_WORDMARK_STACKED, "artisan.wordmark-stacked", Family::Artisan, Some("0 0 136.675 225.15"), true, "svg/artisan/wordmark-stacked.svg"),
     (BRANDS_KIMI, "brands.kimi", Family::Brand, Some("0 0 24 25"), false, "svg/brands/kimi.svg"),
     (BRANDS_OPENCODE, "brands.opencode", Family::Brand, Some("0 0 240 300"), false, "svg/brands/opencode.svg"),
     (BRANDS_ZAI, "brands.zai", Family::Brand, Some("0 0 30 30"), false, "svg/brands/zai.svg"),

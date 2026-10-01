@@ -11,8 +11,9 @@ use artisan_database::{
     ResolveInteractionOutcome, RunBatchScope, RunErrorCode, RunErrorMessage,
 };
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, ItemId, Observation, ObservationId,
-    ObservationSequence, PatchId, RespondApproval, RespondQuestion, Revision, RunId, UnixMillis,
+    AssistantBody, AssistantMessagePhase, EngineId, ErrorChain, InteractionKind, ItemId,
+    Observation, ObservationId, ObservationSequence, PatchId, RequestId, RespondApproval,
+    RespondQuestion, Revision, RunId, UnixMillis,
 };
 
 use artisan_transport::CancelHandle;
@@ -33,6 +34,7 @@ use super::assistant_commit::{
 };
 use super::claim::drain_interactions;
 use super::delta_coalescer::DeltaCoalescer;
+use super::diagnostics::{RunLabel, StepError, report_interrupted, report_step_failure};
 use super::dispatch_support::{at_or_after, mint_item_id, mint_patch_id};
 use super::interaction_intent::command_request_intent;
 use super::observation_commit::{
@@ -149,18 +151,15 @@ pub(super) async fn consume_turn(
                 biased;
                 () = context.stop.wait() => {
                     cancel_signalled = true;
-                    state.forced_interrupted = true;
-                    turn.cancel();
+                    mark_interrupted(&mut state, &turn, false, &DISPATCHER_STOPPED);
                 }
                 () = context.process_cancel.wait() => {
                     cancel_signalled = true;
-                    state.forced_interrupted = true;
-                    turn.cancel();
+                    mark_interrupted(&mut state, &turn, false, &FORGE_SHUTTING_DOWN);
                 }
                 () = context.run_cancel.wait() => {
                     cancel_signalled = true;
-                    state.forced_cancelled = true;
-                    turn.cancel();
+                    mark_cancelled(&mut state, &turn);
                 }
                 () = async {
                     match flush_deadline {
@@ -203,16 +202,10 @@ pub(super) async fn consume_turn(
             turn.cancel();
         }
     }
-    // Persist the coalesced tail before ownership resolution and terminal
-    // settlement: an abort, an owner failure, or a held stream must not drop
-    // bytes that a per-delta commit would already have written.
-    if !state.progress_uncertain {
-        let _ = flush_pending_deltas(&context, &mut state, &mut turn).await;
-    }
-    if !state.progress_uncertain {
-        let _ = super::message_parts::finish_history(&context, &mut state, &mut turn).await;
-    }
+    forget_live_thinking(&context, &state);
+    persist_tail(&context, &mut state, &mut turn).await;
     let owner_result = turn.finish().await;
+    report_engine_turn_failure(&state, &owner_result);
     if is_unresolved_reap(&owner_result) {
         return true;
     }
@@ -236,7 +229,8 @@ pub(super) async fn consume_turn(
     ) else {
         return false;
     };
-    if !ensure_assistant_item(&context, &mut state).await {
+    if let Err(error) = ensure_assistant_item(&context, &mut state).await {
+        report_unsettled(&state, terminal, &error);
         return false;
     }
     if let Some(report) = &state.last_usage {
@@ -251,11 +245,94 @@ pub(super) async fn consume_turn(
     false
 }
 
+/// Persists the coalesced tail before ownership resolution and terminal
+/// settlement: an abort, an owner failure, or a held stream must not drop
+/// bytes that a per-delta commit would already have written.
+async fn persist_tail(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    turn: &mut AcceptedTurn,
+) {
+    if !state.progress_uncertain {
+        let _ = flush_pending_deltas(context, state, turn).await;
+    }
+    if !state.progress_uncertain {
+        let _ = super::message_parts::finish_history(context, state, turn).await;
+    }
+    close_open_questions(context, state).await;
+}
+
+/// The dispatcher's own stop reached a live turn.
+const DISPATCHER_STOPPED: StepError =
+    StepError::refused("the run dispatcher was stopped while the turn was live");
+
+/// The Forge process began shutting down under a live turn.
+const FORGE_SHUTTING_DOWN: StepError =
+    StepError::refused("the Forge process is shutting down while the turn was live");
+
+/// Ends the live turn as cancelled on the user's request.
+fn mark_cancelled(state: &mut TurnConsumptionState<'_>, turn: &AcceptedTurn) {
+    eprintln!(
+        "native run cancelled on request ({}, engine {:?}, batch {})",
+        RunLabel(&state.scope),
+        state.engine,
+        state.batch_sequence
+    );
+    state.forced_cancelled = true;
+    turn.cancel();
+}
+
+/// Reports an engine turn that ended with a typed error other than the
+/// caller's own cancellation.
+///
+/// Engine errors are payload-free by design: the typed cause chain is the
+/// whole diagnosis the owner exposes.
+fn report_engine_turn_failure(state: &TurnConsumptionState<'_>, result: &TurnResult) {
+    let Err(error) = result else {
+        return;
+    };
+    if matches!(error, EngineOperationError::Cancelled) {
+        return;
+    }
+    eprintln!(
+        "native run engine turn failed ({}, engine {:?}, batch {}, observed terminal {:?}): {}",
+        RunLabel(&state.scope),
+        state.engine,
+        state.batch_sequence,
+        state.terminal,
+        ErrorChain(error)
+    );
+}
+
+/// Reports a run whose terminal state could not be prepared for storage.
+/// The run stays unsettled; lease recovery owns it from then on.
+fn report_unsettled(state: &TurnConsumptionState<'_>, terminal: TerminalState, error: &StepError) {
+    eprintln!(
+        "native run could not be settled as {terminal:?} ({}, engine {:?}): {}",
+        RunLabel(&state.scope),
+        state.engine,
+        ErrorChain(error)
+    );
+}
+
+/// Ends the live turn as interrupted because `error`'s step failed.
+///
+/// Every call is reported with the run, the failed step, and the whole cause
+/// chain: the run's stored outcome is the fixed `provider_interrupted`, so
+/// this line is the only place the actual reason is written down.
 pub(super) fn mark_interrupted(
     state: &mut TurnConsumptionState<'_>,
     turn: &AcceptedTurn,
     progress_uncertain: bool,
+    error: &StepError,
 ) {
+    report_interrupted(
+        &state.scope,
+        state.engine,
+        state.batch_sequence,
+        progress_uncertain,
+        error,
+    );
     state.forced_interrupted = true;
     state.progress_uncertain |= progress_uncertain;
     turn.cancel();
@@ -294,10 +371,12 @@ pub(super) async fn handle_observation(
             if delta.run_id() == &state.scope.launched.run_id {
                 state.streaming_speed.push(&delta);
             }
+            forget_live_thinking(context, state);
             handle_text_delta(context, state, turn, delta).await;
         }
         EngineObservation::TextSnapshot(snapshot) => {
             state.streaming_speed.end_interval();
+            forget_live_thinking(context, state);
             handle_text_snapshot(context, state, turn, snapshot).await;
         }
         EngineObservation::Usage(usage) => {
@@ -328,8 +407,69 @@ pub(super) async fn handle_observation(
         }
         EngineObservation::Activity(observation) => {
             state.streaming_speed.end_interval();
+            if note_live_thinking(context, state, &observation) {
+                return;
+            }
             handle_activity_observation(context, state, turn, observation).await;
         }
+    }
+}
+
+/// Keeps a thinking summary in memory instead of committing it, and returns
+/// whether `observation` was one.
+///
+/// A summary is shown only while it is the newest thing the run produced, so
+/// it is never written to the observation ledger: the current block lives on
+/// the dispatcher's board and subscribers are woken to read it. Any other
+/// visible activity means the run moved on, which drops the block.
+fn note_live_thinking(
+    context: &TurnConsumptionContext<'_>,
+    state: &TurnConsumptionState<'_>,
+    observation: &Observation,
+) -> bool {
+    let launched = state.scope.launched;
+    let board = &context.config.live_thinking;
+    let source = |item_id| crate::live_thinking::ThinkingSource {
+        thread_id: &launched.thread_id,
+        run_id: &launched.run_id,
+        turn_id: &launched.turn_id,
+        item_id,
+        at: at_or_after(context.origin, state.scope.expected_updated_at)
+            .unwrap_or(state.scope.expected_updated_at),
+    };
+    match observation {
+        Observation::ReasoningSummaryDelta(row) => {
+            board.append(&source(row.item_id().as_str()), row.delta());
+        }
+        Observation::ReasoningSummaryCompleted(row) => {
+            board.complete(&source(row.item_id().as_str()), row.text());
+        }
+        // Bookkeeping rows are not work a reader sees, so a block that is
+        // still streaming survives them whole.
+        Observation::ProcessDiagnostic(_)
+        | Observation::ProtocolDiagnostic(_)
+        | Observation::RunState(_)
+        | Observation::TurnState(_)
+        | Observation::Usage(_) => return false,
+        _ => {
+            forget_live_thinking(context, state);
+            return false;
+        }
+    }
+    let _ = context.config.notifier.publish(&launched.thread_id);
+    true
+}
+
+/// Drops the run's thinking block once it is no longer the newest thing the
+/// run produced, and wakes subscribers when one was showing.
+fn forget_live_thinking(context: &TurnConsumptionContext<'_>, state: &TurnConsumptionState<'_>) {
+    let launched = state.scope.launched;
+    if context
+        .config
+        .live_thinking
+        .clear(&launched.thread_id, &launched.run_id)
+    {
+        let _ = context.config.notifier.publish(&launched.thread_id);
     }
 }
 
@@ -352,7 +492,7 @@ async fn handle_interaction(
     let RunInteractionEnvelope {
         thread_id,
         run_id,
-        command,
+        mut command,
         respond,
     } = envelope;
     // The registry routed the exact pair, but the scope owns the fence:
@@ -361,7 +501,7 @@ async fn handle_interaction(
         let _ = respond.send(RunInteractionAck::WrongRun);
         return;
     }
-    sync_turn_ledger(context, turn, &run_id).await;
+    sync_turn_ledger(context, state, turn, &run_id).await;
     let scope = artisan_database::ResolveScope {
         binding_version: state.scope.bound.binding_version,
         responded_at: if let Ok(instant) = context.origin.acceptance_instant() {
@@ -373,14 +513,14 @@ async fn handle_interaction(
             return;
         },
     };
-    let outcome = match &command {
+    let outcome = match &mut command {
         OwnedInteractionCommand::RespondApproval {
+            request_id,
             approval_id,
             approved,
-            ..
         } => {
             let approval = RespondApproval::new(
-                command.request_id().clone(),
+                request_id.clone(),
                 thread_id.clone(),
                 run_id.clone(),
                 approval_id.clone(),
@@ -392,12 +532,12 @@ async fn handle_interaction(
                 .await
         }
         OwnedInteractionCommand::RespondQuestion {
+            request_id,
             question_id,
             answers,
-            ..
         } => {
             let Ok(question) = RespondQuestion::new(
-                command.request_id().clone(),
+                request_id.clone(),
                 thread_id.clone(),
                 run_id.clone(),
                 question_id.clone(),
@@ -415,10 +555,13 @@ async fn handle_interaction(
             request_id,
             message_id,
             text,
+            images,
         } => {
             // Steers complete through `handle_steer` (provider write +
             // projection + row completion under the original request id),
-            // never through the approval/question resolve path.
+            // never through the approval/question resolve path. The steer
+            // returns here, so its payload moves out instead of cloning
+            // image bytes.
             handle_steer(
                 context,
                 state,
@@ -427,19 +570,28 @@ async fn handle_interaction(
                 run_id,
                 request_id.clone(),
                 message_id.clone(),
-                text.clone(),
+                std::mem::take(text),
+                std::mem::take(images),
                 respond,
             )
             .await;
             return;
         }
     };
-    let Ok(outcome) = outcome else {
-        // A resolve failure leaves durability unknown, so the run fails
-        // safe instead of presenting a stream as durably completed.
-        mark_interrupted(state, turn, true);
-        let _ = respond.send(RunInteractionAck::Unavailable);
-        return;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A resolve failure leaves durability unknown, so the run fails
+            // safe instead of presenting a stream as durably completed.
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::failed("storing the answer to an approval or question", error),
+            );
+            let _ = respond.send(RunInteractionAck::Unavailable);
+            return;
+        }
     };
     match outcome {
         ResolveInteractionOutcome::WrongRun => {
@@ -459,6 +611,98 @@ async fn handle_interaction(
     }
 }
 
+/// Closes every question the run still holds open as it ends.
+///
+/// A question lives exactly as long as the provider request that asked it:
+/// once the run is over nothing can answer it, so each open question
+/// resolves as skipped through the same durable path an answer takes and
+/// its resolution row reaches the thread. Best-effort beside terminal
+/// settlement: a question this fails to close stays open on the thread and
+/// answers as "no longer open" later.
+async fn close_open_questions(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+) {
+    // A turn whose durable commit path already failed commits nothing more.
+    if state.progress_uncertain {
+        return;
+    }
+    let run_id = state.scope.launched.run_id.clone();
+    let pending = match context.repository.pending_interactions(&run_id).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            report_step_failure(
+                &state.scope,
+                &StepError::failed(
+                    "reading the run's open questions to close them at turn end",
+                    error,
+                ),
+            );
+            return;
+        }
+    };
+    let open: Vec<ObservationId> = pending
+        .into_iter()
+        .filter(|view| view.requested && view.kind == InteractionKind::Question)
+        .map(|view| view.interaction_id)
+        .collect();
+    for question_id in open {
+        if let Err(error) = close_open_question(context, state, &run_id, question_id).await {
+            // The question stays open on the run; settlement wipes the
+            // run's pending rows either way.
+            report_step_failure(&state.scope, &error);
+            return;
+        }
+    }
+}
+
+/// Answers one still-open question as skipped and commits that resolution.
+async fn close_open_question(
+    context: &TurnConsumptionContext<'_>,
+    state: &mut TurnConsumptionState<'_>,
+    run_id: &RunId,
+    question_id: ObservationId,
+) -> Result<(), StepError> {
+    let minted = context.origin.mint_identity().map_err(|error| {
+        StepError::failed("minting the request id that skips an open question", error)
+    })?;
+    let request_id = RequestId::parse(minted).map_err(|error| {
+        StepError::failed(
+            "validating the request id that skips an open question",
+            error,
+        )
+    })?;
+    let skipped = RespondQuestion::new(
+        request_id,
+        state.scope.launched.thread_id.clone(),
+        run_id.clone(),
+        question_id,
+        Vec::new(),
+    )
+    .map_err(|error| {
+        StepError::failed("building the skipped answer for an open question", error)
+    })?;
+    let responded_at = context
+        .origin
+        .acceptance_instant()
+        .map_err(|error| StepError::failed("reading the clock to skip an open question", error))?;
+    let scope = artisan_database::ResolveScope {
+        binding_version: state.scope.bound.binding_version,
+        responded_at,
+    };
+    let outcome = context
+        .repository
+        .resolve_question_response(&skipped, &scope)
+        .await
+        .map_err(|error| {
+            StepError::failed("storing the skipped answer for an open question", error)
+        })?;
+    if let ResolveInteractionOutcome::Applied(applied) = outcome {
+        commit_resolution_observation(context, state, &applied).await?;
+    }
+    Ok(())
+}
+
 /// Seeds the accepted turn ledger from durable pending state.
 ///
 /// Runs before the resolve transaction so the later delivery agrees with
@@ -467,11 +711,22 @@ async fn handle_interaction(
 /// disagrees fails the run safe in the caller.
 async fn sync_turn_ledger(
     context: &TurnConsumptionContext<'_>,
+    state: &TurnConsumptionState<'_>,
     turn: &mut AcceptedTurn,
     run_id: &RunId,
 ) {
-    let Ok(pending) = context.repository.pending_interactions(run_id).await else {
-        return;
+    let pending = match context.repository.pending_interactions(run_id).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            report_step_failure(
+                &state.scope,
+                &StepError::failed(
+                    "reading the run's pending approvals and questions before an answer",
+                    error,
+                ),
+            );
+            return;
+        }
     };
     for view in pending.iter().filter(|view| view.requested) {
         turn.note_interaction_requested(
@@ -519,46 +774,80 @@ async fn deliver_applied_response(
         }
     };
     let Some(intent) = intent else {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::refused(
+                "deriving the stored answer's intent key: the answer is already durable but cannot be handed to the engine",
+            ),
+        );
         let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
         return;
     };
-    if turn
-        .deliver_interaction_response(
-            applied.receipt.request_id.as_str(),
-            target_id,
-            target,
-            &intent,
-        )
-        .is_err()
-    {
-        mark_interrupted(state, turn, true);
+    if let Err(error) = turn.deliver_interaction_response(
+        applied.receipt.request_id.as_str(),
+        target_id,
+        target,
+        &intent,
+    ) {
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::failed("delivering the stored answer to the engine turn", error),
+        );
         let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
         return;
     }
-    if state.engine == EngineId::Codex
-        && let OwnedInteractionCommand::RespondApproval {
-            approval_id,
-            approved,
-            ..
-        } = command
-    {
-        let pending = turn.answer_provider_approval(
-            applied.receipt.request_id.as_str(),
-            approval_id.as_str(),
-            *approved,
-        );
-        if !matches!(
-            super::steer::drive_steer_ack(context, state, turn, pending).await,
-            super::steer::SteerDriveOutcome::Acked(Ok(()))
-        ) {
-            mark_interrupted(state, turn, true);
+    // Engines whose pump holds the provider request open hand the decision
+    // back to it: the approval reply, or the question answer the pump
+    // accumulates until its request is whole. A failed handoff fails the
+    // run safe rather than leaving the provider waiting forever.
+    if matches!(state.engine, EngineId::Codex | EngineId::Claude) {
+        let request_id = applied.receipt.request_id.as_str();
+        let handed = match command {
+            OwnedInteractionCommand::RespondApproval {
+                approval_id,
+                approved,
+                ..
+            } => {
+                let pending =
+                    turn.answer_provider_approval(request_id, approval_id.as_str(), *approved);
+                super::steer::drive_steer_ack(context, state, turn, pending).await
+            }
+            OwnedInteractionCommand::RespondQuestion {
+                question_id,
+                answers,
+                ..
+            } => {
+                let pending =
+                    turn.answer_provider_question(request_id, question_id.as_str(), answers);
+                super::steer::drive_steer_ack(context, state, turn, pending).await
+            }
+            OwnedInteractionCommand::Steer { .. } => super::steer::SteerDriveOutcome::Acked(Ok(())),
+        };
+        let refusal = match handed {
+            super::steer::SteerDriveOutcome::Acked(Ok(())) => None,
+            super::steer::SteerDriveOutcome::Acked(Err(error)) => Some(StepError::failed(
+                "handing the answer back to the provider request",
+                error,
+            )),
+            super::steer::SteerDriveOutcome::Cancelled => Some(StepError::refused(
+                "handing the answer back to the provider request: the run was cancelled while waiting for the provider's acknowledgement",
+            )),
+            super::steer::SteerDriveOutcome::TurnEnded => Some(StepError::refused(
+                "handing the answer back to the provider request: the turn ended before the provider acknowledged it",
+            )),
+        };
+        if let Some(refusal) = refusal {
+            mark_interrupted(state, turn, true, &refusal);
             let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
             return;
         }
     }
-    if !commit_resolution_observation(context, state, turn, &applied).await {
-        mark_interrupted(state, turn, true);
+    if let Err(error) = commit_resolution_observation(context, state, &applied).await {
+        mark_interrupted(state, turn, true, &error);
     }
     let _ = respond.send(RunInteractionAck::Settled(applied.receipt));
 }
@@ -574,62 +863,47 @@ async fn deliver_applied_response(
 async fn commit_resolution_observation(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
     applied: &artisan_database::AppliedInteraction,
-) -> bool {
-    let Ok(base) = context
+) -> Result<(), StepError> {
+    let base = context
         .repository
         .last_committed_observation_sequence(&state.scope.launched.run_id)
         .await
-    else {
-        return false;
-    };
-    let Ok(observation_id) = context.origin.mint_identity() else {
-        return false;
-    };
-    let Ok(observation_id) = ObservationId::parse(observation_id) else {
-        return false;
-    };
-    let Ok(resolved_sequence) = ObservationSequence::new(applied.resolved_sequence) else {
-        return false;
-    };
-    let Some(resolved) = build_resolved_observation(applied, &observation_id, resolved_sequence)
-    else {
-        return false;
-    };
-    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+        .map_err(|error| {
+            StepError::failed("reading the last committed observation sequence", error)
+        })?;
+    let observation_id = context.origin.mint_identity().map_err(|error| {
+        StepError::failed("minting the resolution's observation identity", error)
+    })?;
+    let observation_id = ObservationId::parse(observation_id)
+        .map_err(|error| StepError::failed("validating the minted observation identity", error))?;
+    let checkpoint = resolution_checkpoint(
         state.engine,
         state.scope.bound.binding_version,
         base,
-        &[resolved],
-    ) else {
-        return false;
-    };
-    if artisan_database::validate_observation_bind(
+        applied,
+        &observation_id,
+    )
+    .ok_or(StepError::refused(
+        "encoding the resolved answer as an observation checkpoint: the stored request carries neither an approval nor a question, or its fields no longer validate",
+    ))?;
+    artisan_database::validate_observation_bind(
         state.scope.bound.binding_version,
         state.scope.bound,
     )
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(body) = AssistantBody::parse(state.assistant_body.clone()) else {
-        mark_interrupted(state, turn, false);
-        return false;
-    };
-    let Some(patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return false;
-    };
-    let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-        mark_interrupted(state, turn, false);
-        return false;
-    };
+    .map_err(|error| StepError::failed("validating the run's observation binding", error))?;
+    let body = AssistantBody::parse(state.assistant_body.clone())
+        .map_err(|error| StepError::failed("validating the assembled assistant body", error))?;
+    let patch_id = mint_patch_id(context.origin).ok_or(StepError::refused(
+        "minting the item patch id: entropy or identifier validation failed",
+    ))?;
+    let operated_at = at_or_after(context.origin, state.scope.expected_updated_at).ok_or(
+        StepError::refused("reading the clock for the resolution batch"),
+    )?;
     let committed = if let Some(item_id) = state.assistant_item.clone() {
         commit_resolution_replace(
             context,
             state,
-            turn,
             checkpoint,
             operated_at,
             &item_id,
@@ -638,18 +912,9 @@ async fn commit_resolution_observation(
         )
         .await
     } else {
-        commit_resolution_start(
-            context,
-            state,
-            turn,
-            checkpoint,
-            operated_at,
-            &body,
-            &patch_id,
-        )
-        .await
+        commit_resolution_start(context, state, checkpoint, operated_at, &body, &patch_id).await
     };
-    if committed {
+    if committed.is_ok() {
         // The replace/start persisted the whole assembled body, including
         // any buffered append fragments, so the buffer is now redundant.
         state.coalescer.clear();
@@ -661,20 +926,15 @@ async fn commit_resolution_observation(
 ///
 /// The body is rewritten verbatim at the next revision so subscribers
 /// receive the wake hint without any transcript mutation.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "arguments mirror the CommitBatchRequest fields one-for-one; a wrapper struct would only rename them"
-)]
 async fn commit_resolution_replace(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
     checkpoint: artisan_database::EngineCheckpoint,
     operated_at: UnixMillis,
     item_id: &ItemId,
     body: &AssistantBody,
     patch_id: &PatchId,
-) -> bool {
+) -> Result<(), StepError> {
     let changes = [AssistantChange::Replace {
         item_id,
         expected_revision: state.assistant_revision,
@@ -682,7 +942,7 @@ async fn commit_resolution_replace(
         phase: AssistantMessagePhase::Unspecified,
         patch_id,
     }];
-    if commit_batch_with_retry(CommitBatchRequest {
+    commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -694,22 +954,25 @@ async fn commit_resolution_replace(
         retries: context.config.max_command_retries,
     })
     .await
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(next_revision) = state.assistant_revision.checked_next() else {
-        mark_interrupted(state, turn, true);
-        return false;
-    };
+    .map_err(|error| {
+        StepError::failed(
+            "committing the resolution beside the existing assistant item",
+            error,
+        )
+    })?;
+    let next_revision = state.assistant_revision.checked_next().map_err(|error| {
+        StepError::failed("advancing the assistant revision after the commit", error)
+    })?;
     state.assistant_revision = next_revision;
     state.scope.expected_updated_at = operated_at;
-    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
-        mark_interrupted(state, turn, true);
-        return false;
-    };
+    let next_sequence = state
+        .batch_sequence
+        .checked_add(1)
+        .ok_or(StepError::refused(
+            "advancing the batch sequence after the commit: the counter overflowed",
+        ))?;
     state.batch_sequence = next_sequence;
-    true
+    Ok(())
 }
 
 /// Commits a resolution checkpoint while opening the assistant item.
@@ -720,27 +983,24 @@ async fn commit_resolution_replace(
 async fn commit_resolution_start(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
-    turn: &mut AcceptedTurn,
     checkpoint: artisan_database::EngineCheckpoint,
     operated_at: UnixMillis,
     body: &AssistantBody,
     patch_id: &PatchId,
-) -> bool {
-    let Some(item_id) = mint_item_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return false;
-    };
-    let Some(activation_patch_id) = mint_patch_id(context.origin) else {
-        mark_interrupted(state, turn, false);
-        return false;
-    };
+) -> Result<(), StepError> {
+    let item_id = mint_item_id(context.origin).ok_or(StepError::refused(
+        "minting the assistant item id: entropy or identifier validation failed",
+    ))?;
+    let activation_patch_id = mint_patch_id(context.origin).ok_or(StepError::refused(
+        "minting the turn activation patch id: entropy or identifier validation failed",
+    ))?;
     let changes = [AssistantChange::Start {
         item_id: &item_id,
         phase: AssistantMessagePhase::Unspecified,
         body,
         patch_id,
     }];
-    if commit_batch_with_retry(CommitBatchRequest {
+    commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
         scope: &state.scope,
@@ -752,19 +1012,37 @@ async fn commit_resolution_start(
         retries: context.config.max_command_retries,
     })
     .await
-    .is_err()
-    {
-        return false;
-    }
+    .map_err(|error| {
+        StepError::failed(
+            "committing the resolution while opening the assistant item",
+            error,
+        )
+    })?;
     state.assistant_item = Some(item_id);
     state.assistant_revision = Revision::new(0);
     state.scope.expected_updated_at = operated_at;
-    let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
-        mark_interrupted(state, turn, true);
-        return false;
-    };
+    let next_sequence = state
+        .batch_sequence
+        .checked_add(1)
+        .ok_or(StepError::refused(
+            "advancing the batch sequence after the commit: the counter overflowed",
+        ))?;
     state.batch_sequence = next_sequence;
-    true
+    Ok(())
+}
+
+/// Assigns the resolution a transcript sequence, independently of the request ledger.
+pub(crate) fn resolution_checkpoint(
+    engine: EngineId,
+    binding_version: i64,
+    base: Option<u64>,
+    applied: &artisan_database::AppliedInteraction,
+    observation_id: &ObservationId,
+) -> Option<artisan_database::EngineCheckpoint> {
+    // Provider activity can advance the transcript while an answer is delivered.
+    let sequence = ObservationSequence::new(base.unwrap_or(0).checked_add(1)?).ok()?;
+    let resolved = build_resolved_observation(applied, observation_id, sequence)?;
+    artisan_database::encode_observation_checkpoint(engine, binding_version, base, &[resolved]).ok()
 }
 
 /// Builds the resolved domain observation for one applied decision.
@@ -859,7 +1137,7 @@ async fn handle_subagent_row(
         assistant_body: state.assistant_body.clone(),
         assistant_phase: state.assistant_phase,
     };
-    if !commit_subagent_observation(
+    if let Err(error) = commit_subagent_observation(
         context.repository,
         context.config,
         context.origin,
@@ -868,7 +1146,7 @@ async fn handle_subagent_row(
     )
     .await
     {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(state, turn, true, &error);
         return;
     }
     let updated_at = cursor.scope.expected_updated_at;
@@ -914,7 +1192,7 @@ async fn handle_activity_observation(
         assistant_body: state.assistant_body.clone(),
         assistant_phase: state.assistant_phase,
     };
-    if !commit_activity_observation(
+    if let Err(error) = commit_activity_observation(
         context.repository,
         context.config,
         context.origin,
@@ -923,7 +1201,7 @@ async fn handle_activity_observation(
     )
     .await
     {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(state, turn, true, &error);
         return;
     }
     let updated_at = cursor.scope.expected_updated_at;
@@ -949,21 +1227,36 @@ async fn handle_usage(
 ) {
     let report = usage.report();
     state.last_usage = Some(report.clone());
+    // A valid text stream must not be presented as durably completed when
+    // its authenticated usage observation could not be fenced/persisted.
     if report.run_id() != &state.scope.launched.run_id
         || report.thread_id() != &state.scope.launched.thread_id
-        || context
-            .repository
-            .record_run_usage(RecordRunUsage {
-                run_id: &state.scope.launched.run_id,
-                thread_id: &state.scope.launched.thread_id,
-                report,
-            })
-            .await
-            .is_err()
     {
-        // A valid text stream must not be presented as durably completed when
-        // its authenticated usage observation could not be fenced/persisted.
-        mark_interrupted(state, turn, true);
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::refused(
+                "recording run usage: the engine reported usage for a different run or thread",
+            ),
+        );
+        return;
+    }
+    if let Err(error) = context
+        .repository
+        .record_run_usage(RecordRunUsage {
+            run_id: &state.scope.launched.run_id,
+            thread_id: &state.scope.launched.thread_id,
+            report,
+        })
+        .await
+    {
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::failed("recording run usage", error),
+        );
     }
 }
 
@@ -974,7 +1267,14 @@ async fn handle_text_snapshot(
     snapshot: TextSnapshot,
 ) {
     if snapshot.run_id() != &state.scope.launched.run_id {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::refused(
+                "accepting a text snapshot: the engine addressed it to a different run",
+            ),
+        );
         return;
     }
     // A snapshot rewrites the assembled body, so the buffered append run must
@@ -984,7 +1284,14 @@ async fn handle_text_snapshot(
         return;
     }
     if state.assistant_parts.replace_snapshot(&snapshot).is_none() {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::refused(
+                "applying a text snapshot to the assembled body: the part order or the body bound refused it",
+            ),
+        );
         return;
     }
     if !super::message_parts::select_part(context, state, turn, snapshot.part_id()).await {
@@ -1022,12 +1329,26 @@ async fn handle_text_delta(
 ) {
     if delta.run_id() != &state.scope.launched.run_id || delta.delta().is_empty() {
         if delta.run_id() != &state.scope.launched.run_id {
-            mark_interrupted(state, turn, true);
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::refused(
+                    "accepting a text delta: the engine addressed it to a different run",
+                ),
+            );
         }
         return;
     }
     if state.assistant_parts.append_delta(&delta).is_none() {
-        mark_interrupted(state, turn, true);
+        mark_interrupted(
+            state,
+            turn,
+            true,
+            &StepError::refused(
+                "appending a text delta to the assembled body: the part order or the body bound refused it",
+            ),
+        );
         return;
     }
     let part = delta.part_id().unwrap_or("fixture-text-part");
@@ -1127,10 +1448,19 @@ async fn settle_terminal(
 ) {
     // Pending rows are per-run: wipe them at settle so decisions never leak
     // across runs. Best-effort beside terminal settlement; idempotent.
-    let _ = context
+    if let Err(error) = context
         .repository
         .settle_run_interactions(&state.scope.launched.run_id)
-        .await;
+        .await
+    {
+        report_step_failure(
+            &state.scope,
+            &StepError::failed("clearing the run's pending approvals and questions", error),
+        );
+    }
+    let engine = state.engine;
+    let assistant_phase = state.assistant_phase;
+    let label = RunLabel(&state.scope).to_string();
     let TurnConsumptionState {
         scope,
         assistant_item: Some(item_id),
@@ -1139,21 +1469,25 @@ async fn settle_terminal(
         ..
     } = state
     else {
+        // Nothing opened an assistant item, so there is no item to settle
+        // the run on; lease recovery owns the run from here.
+        eprintln!(
+            "native run left to recovery instead of settling as {terminal:?} ({label}, engine {engine:?}): the turn never opened an assistant item"
+        );
         return;
     };
-    let Ok(body) = AssistantBody::parse(assistant_body) else {
-        return;
+    let prepared = prepare_settlement(context, &scope, assistant_body);
+    let (body, item_patch_id, turn_patch_id, operated_at) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!(
+                "native run could not be settled as {terminal:?} ({label}, engine {engine:?}): {}",
+                ErrorChain(&error)
+            );
+            return;
+        }
     };
-    let Some(item_patch_id) = mint_patch_id(context.origin) else {
-        return;
-    };
-    let Some(turn_patch_id) = mint_patch_id(context.origin) else {
-        return;
-    };
-    let Some(operated_at) = at_or_after(context.origin, scope.expected_updated_at) else {
-        return;
-    };
-    let phase = if state.assistant_phase == AssistantMessagePhase::Commentary {
+    let phase = if assistant_phase == AssistantMessagePhase::Commentary {
         AssistantMessagePhase::Commentary
     } else if matches!(terminal, TerminalState::Completed) {
         AssistantMessagePhase::Final
@@ -1172,15 +1506,51 @@ async fn settle_terminal(
         item_patch_id: &item_patch_id,
         turn_patch_id: &turn_patch_id,
     };
-    if persist_terminal_settlement(&settlement, terminal).await {
-        let _ = context.config.notifier.publish(&scope.launched.thread_id);
+    match persist_terminal_settlement(&settlement, terminal).await {
+        Ok(()) => {
+            let _ = context.config.notifier.publish(&scope.launched.thread_id);
+        }
+        Err(error) => {
+            // The run keeps its live row; lease recovery settles it later.
+            eprintln!(
+                "native run could not be settled as {terminal:?} ({label}, engine {engine:?}, {} attempt(s)): {}",
+                context.config.max_command_retries,
+                ErrorChain(&error)
+            );
+        }
     }
 }
 
+/// Validates the body and mints the identities and instant one terminal
+/// settlement needs.
+fn prepare_settlement(
+    context: &TurnConsumptionContext<'_>,
+    scope: &RunBatchScope<'_>,
+    assistant_body: String,
+) -> Result<(AssistantBody, PatchId, PatchId, UnixMillis), StepError> {
+    let body = AssistantBody::parse(assistant_body)
+        .map_err(|error| StepError::failed("validating the final assistant body", error))?;
+    let item_patch_id = mint_patch_id(context.origin).ok_or(StepError::refused(
+        "minting the item patch id: entropy or identifier validation failed",
+    ))?;
+    let turn_patch_id = mint_patch_id(context.origin).ok_or(StepError::refused(
+        "minting the turn patch id: entropy or identifier validation failed",
+    ))?;
+    let operated_at = at_or_after(context.origin, scope.expected_updated_at).ok_or(
+        StepError::refused("reading the clock for the terminal settlement"),
+    )?;
+    Ok((body, item_patch_id, turn_patch_id, operated_at))
+}
+
+/// Persists the terminal state, retrying up to the configured attempts.
+///
+/// # Errors
+///
+/// Returns the last attempt's failure.
 async fn persist_terminal_settlement(
     settlement: &TerminalSettlement<'_>,
     terminal: TerminalState,
-) -> bool {
+) -> Result<(), StepError> {
     match terminal {
         TerminalState::Completed => persist_completed(settlement).await,
         TerminalState::Failed => persist_failed(settlement).await,
@@ -1189,9 +1559,10 @@ async fn persist_terminal_settlement(
     }
 }
 
-async fn persist_completed(settlement: &TerminalSettlement<'_>) -> bool {
+async fn persist_completed(settlement: &TerminalSettlement<'_>) -> Result<(), StepError> {
+    let mut last = StepError::refused("storing the completed run: no attempt ran");
     for _ in 0..settlement.retries.get() {
-        if settlement
+        match settlement
             .repository
             .complete_run(CompleteRun {
                 scope: copy_scope(settlement.scope),
@@ -1204,23 +1575,22 @@ async fn persist_completed(settlement: &TerminalSettlement<'_>) -> bool {
                 turn_patch_id: settlement.turn_patch_id,
             })
             .await
-            .is_ok()
         {
-            return true;
+            Ok(_) => return Ok(()),
+            Err(error) => last = StepError::failed("storing the completed run", error),
         }
     }
-    false
+    Err(last)
 }
 
-async fn persist_failed(settlement: &TerminalSettlement<'_>) -> bool {
-    let Ok(error_code) = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned()) else {
-        return false;
-    };
-    let Ok(error_message) = RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned()) else {
-        return false;
-    };
+async fn persist_failed(settlement: &TerminalSettlement<'_>) -> Result<(), StepError> {
+    let error_code = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned())
+        .map_err(|error| StepError::failed("validating the provider failure code", error))?;
+    let error_message = RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned())
+        .map_err(|error| StepError::failed("validating the provider failure message", error))?;
+    let mut last = StepError::refused("storing the failed run: no attempt ran");
     for _ in 0..settlement.retries.get() {
-        if settlement
+        match settlement
             .repository
             .fail_run(artisan_database::FailRun {
                 scope: copy_scope(settlement.scope),
@@ -1235,17 +1605,18 @@ async fn persist_failed(settlement: &TerminalSettlement<'_>) -> bool {
                 error_message: &error_message,
             })
             .await
-            .is_ok()
         {
-            return true;
+            Ok(_) => return Ok(()),
+            Err(error) => last = StepError::failed("storing the failed run", error),
         }
     }
-    false
+    Err(last)
 }
 
-async fn persist_cancelled(settlement: &TerminalSettlement<'_>) -> bool {
+async fn persist_cancelled(settlement: &TerminalSettlement<'_>) -> Result<(), StepError> {
+    let mut last = StepError::refused("storing the cancelled run: no attempt ran");
     for _ in 0..settlement.retries.get() {
-        if settlement
+        match settlement
             .repository
             .cancel_run(artisan_database::CancelRun {
                 scope: copy_scope(settlement.scope),
@@ -1258,23 +1629,22 @@ async fn persist_cancelled(settlement: &TerminalSettlement<'_>) -> bool {
                 turn_patch_id: settlement.turn_patch_id,
             })
             .await
-            .is_ok()
         {
-            return true;
+            Ok(_) => return Ok(()),
+            Err(error) => last = StepError::failed("storing the cancelled run", error),
         }
     }
-    false
+    Err(last)
 }
 
-async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> bool {
-    let Ok(error_code) = RunErrorCode::parse(INTERRUPTED_CODE.to_owned()) else {
-        return false;
-    };
-    let Ok(error_message) = RunErrorMessage::parse(INTERRUPTED_MESSAGE.to_owned()) else {
-        return false;
-    };
+async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> Result<(), StepError> {
+    let error_code = RunErrorCode::parse(INTERRUPTED_CODE.to_owned())
+        .map_err(|error| StepError::failed("validating the interrupted run code", error))?;
+    let error_message = RunErrorMessage::parse(INTERRUPTED_MESSAGE.to_owned())
+        .map_err(|error| StepError::failed("validating the interrupted run message", error))?;
+    let mut last = StepError::refused("storing the interrupted run: no attempt ran");
     for _ in 0..settlement.retries.get() {
-        if settlement
+        match settlement
             .repository
             .interrupt_run(InterruptRun {
                 scope: copy_scope(settlement.scope),
@@ -1289,10 +1659,10 @@ async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> bool {
                 error_message: &error_message,
             })
             .await
-            .is_ok()
         {
-            return true;
+            Ok(_) => return Ok(()),
+            Err(error) => last = StepError::failed("storing the interrupted run", error),
         }
     }
-    false
+    Err(last)
 }

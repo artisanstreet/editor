@@ -52,7 +52,9 @@ pub struct FirstMessageQueued {
 ///
 /// `Eq` is absent by necessity: the engine arm carries [`Observation`],
 /// whose usage rows hold a finite `f64` cost. See the module docs.
-#[expect(
+// `allow`, not `expect`: whether the lint fires depends on how the largest
+// variant compares with the next, which moves whenever a variant is added.
+#[allow(
     clippy::large_enum_variant,
     reason = "boxing would change the public payload type consumed across crates; events are built one at a time, not stored in bulk"
 )]
@@ -72,6 +74,9 @@ pub enum Event {
     /// the provider `approval_id`/`question_id` that the later A-approve
     /// packet answers; this packet never responds to them.
     EngineObservation(EngineObservationEvent),
+    /// A newly subscribed thread's observation history has been delivered
+    /// through its durable tail (see [`ObservationHistoryCurrent`]).
+    ObservationHistoryCurrent(ObservationHistoryCurrent),
     /// The thread's undelivered messages changed; the complete outbox is
     /// pushed to the thread's subscribers (see [`MessageOutbox`]).
     MessageOutbox(MessageOutbox),
@@ -94,6 +99,15 @@ pub enum Event {
     /// A Forge-managed engine's install status changed; pushed to a
     /// connection that read the engine installs.
     EngineInstalls(crate::EngineInstallSnapshot),
+    /// What a subscribed thread's live run is thinking right now; never
+    /// stored, so it exists only while the run is thinking.
+    LiveThinking(LiveThinking),
+    /// The work of a subscribed thread's settled turns that stayed on the
+    /// Forge, pushed once the thread's activity replay is complete.
+    HeldBackWork(crate::HeldBackWork),
+    /// The user messages of a subscribed thread's turns before the loaded
+    /// ones, pushed with the held-back work.
+    EarlierTurnMarkers(crate::EarlierTurnMarkers),
 }
 
 /// A subscribed thread's display title changed: the generated title was
@@ -104,6 +118,51 @@ pub struct ThreadRetitled {
     pub thread_id: ThreadId,
     /// Its display title.
     pub title: ThreadTitle,
+}
+
+/// What a subscribed thread's live run is thinking right now.
+///
+/// Thinking summaries are shown only while they are the newest thing the run
+/// produced, so the Forge keeps the current one in memory and never writes it
+/// to the observation ledger. `current` is `None` once the run moved on to a
+/// tool, to prose, or ended.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveThinking {
+    /// The thread.
+    pub thread_id: ThreadId,
+    /// The thinking block in progress, if the run is thinking.
+    pub current: Option<LiveThinkingBlock>,
+}
+
+/// One thinking block of a live run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveThinkingBlock {
+    /// Run that is thinking.
+    pub run_id: RunId,
+    /// Forge turn the run launched from.
+    pub turn_id: TurnId,
+    /// Provider identity of the thinking block.
+    pub item_id: String,
+    /// The summary so far, bounded to its newest part.
+    pub text: String,
+    /// When the block started.
+    pub started_at: UnixMillis,
+    /// When the block last grew.
+    pub updated_at: UnixMillis,
+}
+
+/// The end-of-replay marker for one thread subscription.
+///
+/// Sent once per activation, after every page of the thread's durable
+/// observation history has been published and before any live observation.
+/// The subscription snapshot carries only the transcript; this marker tells
+/// the subscriber the tool and reasoning history that belongs to it is now
+/// complete, so the thread can be presented whole instead of filling in page
+/// by page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationHistoryCurrent {
+    /// The thread whose history is current.
+    pub thread_id: ThreadId,
 }
 
 /// One committed engine observation routed to its thread subscribers.

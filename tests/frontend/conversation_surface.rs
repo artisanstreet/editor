@@ -6,7 +6,7 @@
 
 use artisan_frontend::{conversation_scene, conversation_surface};
 
-use artisan_domain::{ConversationLifecycle, ItemId, TurnId};
+use artisan_domain::{ConversationLifecycle, ItemId, ObservationId, TurnId};
 use artisan_ui::theme::ThemeMode;
 use conversation_scene::{
     AssistantPhase, ConversationScene, FileChangeStatus, SceneDisclosure, SceneFileChange, SceneId,
@@ -121,6 +121,16 @@ fn drain_surface_actions(
     cx: &mut gpui::VisualTestContext,
 ) -> Vec<ConversationSurfaceAction> {
     cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()))
+}
+
+/// Draws one refreshed frame so every turn row paints.
+///
+/// Turn rows are cached child views: a row that replays its previous frame
+/// replays its paint, but the test harness records debug bounds only while
+/// painting. A refresh repaints every row from its own synced inputs.
+fn repaint_rows(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
 }
 
 fn complete_key_press(cx: &mut VisualTestContext, key: &'static str) {
@@ -255,6 +265,7 @@ fn ordered_scene_items() -> Vec<SceneItem> {
             5,
             SceneItemKind::Approval {
                 prompt: "approve".to_owned(),
+                approval_id: ObservationId::parse("approval").expect("approval id"),
             },
             None,
         ),
@@ -264,6 +275,7 @@ fn ordered_scene_items() -> Vec<SceneItem> {
             6,
             SceneItemKind::Question {
                 prompt: "question".to_owned(),
+                answer: None,
             },
             None,
         ),
@@ -454,6 +466,7 @@ fn error_approval_question_and_transition_are_distinct_kinds() {
                 1,
                 SceneItemKind::Approval {
                     prompt: "approval".to_owned(),
+                    approval_id: ObservationId::parse("approval").expect("approval id"),
                 },
                 None,
             ),
@@ -463,6 +476,7 @@ fn error_approval_question_and_transition_are_distinct_kinds() {
                 2,
                 SceneItemKind::Question {
                     prompt: "question".to_owned(),
+                    answer: None,
                 },
                 None,
             ),
@@ -579,6 +593,7 @@ fn disclosure_click_emits_request_without_mutating_scene(cx: &mut TestAppContext
     });
     cx.simulate_resize(size(px(720.0), px(480.0)));
     cx.run_until_parked();
+    repaint_rows(cx);
     let _ = drain_surface_actions(&surface, cx);
 
     let trigger = cx
@@ -875,6 +890,7 @@ fn markdown_message_body_mounts_heading_paragraph_inline_code_and_fence(cx: &mut
     });
     cx.simulate_resize(size(px(720.0), px(640.0)));
     cx.run_until_parked();
+    repaint_rows(cx);
 
     // Plain user paragraph mounts visibly; no markdown subtree exists there.
     for selector in [USER_ITEM, USER_BODY] {
@@ -978,9 +994,11 @@ fn markdown_open_unknown_fence_and_html_are_inert(cx: &mut TestAppContext) {
         cx.debug_bounds(UNKNOWN_MARKDOWN).is_some(),
         "assistant markdown must remain mounted"
     );
+    // A fence in a language without a bundled grammar reads as plain code
+    // in the fence chrome; it never demotes the message to raw source.
     assert!(
-        cx.debug_bounds(UNKNOWN_CODE).is_none(),
-        "inert source must not expose a highlighted code selector"
+        cx.debug_bounds(UNKNOWN_CODE).is_some(),
+        "an unknown-language fence must still render as a code block"
     );
     let _ = drain_surface_actions(&surface, cx);
     cx.update(|_, app| assert!(surface.read(app).pending_actions().is_empty()));

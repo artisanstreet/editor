@@ -388,6 +388,57 @@ async fn a_failure_after_launch_is_offered_but_not_retryable() {
 }
 
 #[tokio::test]
+async fn a_stopped_run_is_not_offered_as_a_failed_send() {
+    let (database, repository) = repository().await;
+    queue(&repository, "first", 300).await;
+    let claimed = claim(&repository, 0x11).await;
+    launch(&repository, &claimed).await;
+    // Cancelling settles the run's own dispatch as failed with this reason.
+    let mut row = entities::message_dispatch::Entity::find_by_id("first")
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    row.state = Set(DispatchState::Failed);
+    row.lease_owner = Set(None);
+    row.lease_expires_at_ms = Set(None);
+    row.last_error = Set(Some("run cancelled".to_owned()));
+    row.update(&database).await.unwrap();
+
+    let failure = failed(&repository).await;
+    assert_eq!(failure.total_count(), 0);
+    assert!(
+        failure.messages().is_empty(),
+        "the message reached the transcript and was stopped on request"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_before_the_transcript_keeps_the_prompt_recoverable() {
+    let (database, repository) = repository().await;
+    queue(&repository, "first", 300).await;
+    claim(&repository, 0x11).await;
+    let mut row = entities::message_dispatch::Entity::find_by_id("first")
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    row.state = Set(DispatchState::Failed);
+    row.lease_owner = Set(None);
+    row.lease_expires_at_ms = Set(None);
+    row.last_error = Set(Some("run cancelled".to_owned()));
+    row.update(&database).await.unwrap();
+
+    let failure = failed(&repository).await;
+    let [row] = failure.messages() else {
+        panic!("the undelivered prompt stays recoverable");
+    };
+    assert!(row.retryable);
+}
+
+#[tokio::test]
 async fn a_recovered_failure_leaves_the_failed_listing() {
     let (_database, repository) = repository().await;
     queue(&repository, "first", 300).await;

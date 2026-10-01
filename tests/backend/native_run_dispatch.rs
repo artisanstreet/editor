@@ -1585,8 +1585,9 @@ async fn accept_fixture_delivery(connection: &Connection) -> quinn::RecvStream {
         .unwrap_or_else(|_| panic!("Forge delivery stream could not be accepted"))
 }
 
-/// Receives the next patch batch, skipping the message-outbox state pushes
-/// the Forge interleaves on the same delivery stream.
+/// Receives the next patch batch, skipping the history-current marker and
+/// message-outbox state pushes the Forge interleaves on the same delivery
+/// stream.
 async fn receive_fixture_patch_batch(stream: &mut quinn::RecvStream) -> PatchBatch {
     loop {
         let envelope = tokio::time::timeout(FORGE_REPLAY_PROOF_DEADLINE, receive_envelope(stream))
@@ -1596,7 +1597,9 @@ async fn receive_fixture_patch_batch(stream: &mut quinn::RecvStream) -> PatchBat
         match envelope.body {
             WireEnvelopeBody::PatchBatch(batch) => return batch,
             WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
-                event: artisan_domain::Event::MessageOutbox(_),
+                event:
+                    artisan_domain::Event::MessageOutbox(_)
+                    | artisan_domain::Event::ObservationHistoryCurrent(_),
                 ..
             }) => {}
             _ => panic!("Forge delivery stream should carry a patch batch"),
@@ -4037,10 +4040,9 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         )
         .expect("source row"),
     );
-    assert!(
-        commit_activity_observation(&repository, &config, &origin, &mut cursor1, source1).await,
-        "first activity batch must commit"
-    );
+    commit_activity_observation(&repository, &config, &origin, &mut cursor1, source1)
+        .await
+        .expect("first activity batch must commit");
     assert_eq!(cursor1.batch_sequence, 3);
 
     // Settle the first run through the real terminal path before the
@@ -4217,10 +4219,9 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         )
         .expect("source row"),
     );
-    assert!(
-        commit_activity_observation(&repository, &config, &origin, &mut cursor2, source2).await,
-        "second activity batch must commit"
-    );
+    commit_activity_observation(&repository, &config, &origin, &mut cursor2, source2)
+        .await
+        .expect("second activity batch must commit");
 
     // The authoritative read returns both rows in thread-scoped order with
     // Forge-persisted attribution; run-local sequences both read 1 while the
@@ -4504,7 +4505,8 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
     // The claim lease is wall-clock wide: activity commits stamp wall-clock
     // `operated_at` through `SystemCommandOrigin`, so the shared helper's
     // 600 ms lease would expire immediately.
-    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
+    let notifier = ConversationCommitNotifier::new();
+    let config = config_for_fixture_dispatch(notifier.clone()).expect("config");
     let origin = SystemCommandOrigin;
     repository
         .queue_first_message(QueueFirstMessageInput {
@@ -4595,6 +4597,23 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
         assistant_revision: Revision::new(0),
         assistant_body: String::from("hello assistant"),
     };
+    // Provider activity advances the transcript without advancing the interaction ledger.
+    for index in 0..2 {
+        let activity = Observation::Tool(
+            artisan_domain::ToolObservation::new(
+                ObservationId::parse(format!("activity-{index}")).unwrap(),
+                ObservationSequence::new(1).unwrap(),
+                ObservationId::parse(format!("tool-{index}")).unwrap(),
+                "read".to_owned(),
+                artisan_domain::ToolAction::Completed,
+                None,
+            )
+            .unwrap(),
+        );
+        commit_activity_observation(&repository, &config, &origin, &mut cursor1, activity)
+            .await
+            .expect("activity batch must commit");
+    }
     let approval_id = ObservationId::parse("provider-approval-42").unwrap();
     let source = Observation::Approval(
         artisan_domain::ApprovalObservation::requested(
@@ -4611,7 +4630,9 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
         )
         .unwrap(),
     );
-    assert!(commit_activity_observation(&repository, &config, &origin, &mut cursor1, source).await);
+    commit_activity_observation(&repository, &config, &origin, &mut cursor1, source)
+        .await
+        .expect("question batch must commit");
     let pending = repository
         .pending_interactions(&launched1.run_id)
         .await
@@ -4634,10 +4655,82 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
         )
         .await
         .unwrap();
-    assert!(matches!(
-        result,
-        artisan_database::ResolveInteractionOutcome::Applied(_)
-    ));
+    let artisan_database::ResolveInteractionOutcome::Applied(applied) = result else {
+        panic!("answer should be applied");
+    };
+    assert_eq!(applied.resolved_sequence, 2);
+    // Thinking, tool-start, and question have already occupied transcript 1..=3.
+    // The request ledger's answer sequence 2 must not be reused in that chain.
+    let checkpoint = crate::native_run_dispatch::resolution_checkpoint(
+        EngineId::OpenCode2,
+        bound1.binding_version,
+        Some(3),
+        &applied,
+        &ObservationId::parse("resolved-after-activity").unwrap(),
+    )
+    .expect("answer after provider activity must encode successfully");
+    let body = artisan_domain::AssistantBody::parse(cursor1.assistant_body.clone()).unwrap();
+    let patch = PatchId::parse("answer-resolution-patch").unwrap();
+    let changes = [artisan_database::AssistantChange::Replace {
+        item_id: cursor1.assistant_item.as_ref().unwrap(),
+        expected_revision: cursor1.assistant_revision,
+        body: &body,
+        phase: cursor1.assistant_phase,
+        patch_id: &patch,
+    }];
+    // Commit against the real run as the dispatcher does.
+    crate::native_run_dispatch::commit_batch_with_retry(
+        crate::native_run_dispatch::CommitBatchRequest {
+            repository: &repository,
+            notifier: &notifier,
+            scope: &cursor1.scope,
+            batch_sequence: cursor1.batch_sequence,
+            operated_at: origin.acceptance_instant().unwrap(),
+            activate_turn_patch_id: None,
+            changes: &changes,
+            checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
+            retries: std::num::NonZeroUsize::new(3).unwrap(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repository
+            .last_committed_observation_sequence(&launched1.run_id)
+            .await
+            .unwrap(),
+        Some(4)
+    );
+    let mut question = applied;
+    question.requested.approval = None;
+    let question_id = ObservationId::parse("custom-question").unwrap();
+    question.requested.question = Some(artisan_database::QuestionSnapshot {
+        question_id: question_id.clone(),
+        requested_sequence: 1,
+        input: artisan_domain::QuestionInput {
+            question_id,
+            text: "Which answer?".to_owned(),
+            header: None,
+            multi_select: false,
+            options: None,
+        },
+    });
+    question.receipt.approved = None;
+    question.receipt.answers = vec!["Write the watermelon emoji if you see this.".to_owned()];
+    question.receipt.kind = artisan_domain::InteractionKind::Question;
+    for base in [None, Some(3), Some(20)] {
+        assert!(
+            crate::native_run_dispatch::resolution_checkpoint(
+                EngineId::Claude,
+                bound1.binding_version,
+                base,
+                &question,
+                &ObservationId::parse("custom-answer-resolution").unwrap(),
+            )
+            .is_some(),
+            "custom answers must follow the current transcript, including activity during delivery"
+        );
+    }
 }
 
 #[path = "native_run_dispatch_start.rs"]

@@ -9,10 +9,10 @@
 //! fixture turn (burst mode: reasoning frame plus 64 deltas, no terminal
 //! until interrupt) through production `consume_turn` with a shared
 //! interaction registry. It proves wire order: send receipt, user
-//! admission patch, distinct `burst-01`/`burst-02` appends, one
-//! `ReasoningSummaryDelta` observation event, all before any terminal
-//! lifecycle, then the cancelled terminal after interrupt. Order
-//! assertions pin admission/observation/terminal relative positions;
+//! admission patch and distinct `burst-01`/`burst-02` appends, all before
+//! any terminal lifecycle, then the cancelled terminal after interrupt. The
+//! fixture's thinking frame is never stored, so no thinking observation
+//! streams. Order assertions pin admission/terminal relative positions;
 //! batch coalescing means no exact per-delta frame count is asserted.
 
 use std::net::SocketAddr;
@@ -455,9 +455,12 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                 .expect("admission frame decodes");
                 match admission.body {
                     WireEnvelopeBody::PatchBatch(batch) => break batch,
-                    // The activation's message-outbox push precedes launch.
+                    // The activation's history-current marker and
+                    // message-outbox push precede launch.
                     WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
-                        event: artisan_domain::Event::MessageOutbox(_),
+                        event:
+                            artisan_domain::Event::MessageOutbox(_)
+                            | artisan_domain::Event::ObservationHistoryCurrent(_),
                         ..
                     }) => {}
                     _ => panic!("launch must deliver a patch batch"),
@@ -853,7 +856,6 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
             let mut frames = Vec::new();
             let mut saw_burst_01 = false;
             let mut saw_burst_02 = false;
-            let mut saw_observation = false;
             // A terminal lifecycle here preserves its full identity for
             // the post-loop diagnosis instead of failing blind: the run
             // row, dispatch row, and patch position are read below.
@@ -906,26 +908,22 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                     WireEnvelopeBody::Event(event) => {
                         let observation = match event.event {
                             artisan_domain::Event::EngineObservation(observation) => observation,
-                            // Message-outbox state pushes share the stream.
-                            artisan_domain::Event::MessageOutbox(_) => continue,
+                            // Message-outbox and history-current state
+                            // pushes share the stream.
+                            // The thinking trace is pushed live state,
+                            // and only while it is the newest thing the
+                            // run produced, so the burst may outrun it.
+                            artisan_domain::Event::MessageOutbox(_)
+                            | artisan_domain::Event::ObservationHistoryCurrent(_)
+                            | artisan_domain::Event::LiveThinking(_) => continue,
                             _ => panic!("expected an engine observation event"),
                         };
                         assert_eq!(observation.thread_id, thread_id);
-                        // Only the provider thinking trace counts here, not
-                        // just any engine observation.
-                        if matches!(
-                            observation.observation,
-                            artisan_domain::Observation::ReasoningSummaryDelta(_)
-                        ) {
-                            saw_observation = true;
-                        }
                         frames.push(StreamFrame::ObservationEvent(observation));
                     }
                     _ => panic!("unexpected delivery frame"),
                 }
-                if terminal_seen.is_some()
-                    || (saw_burst_01 && saw_burst_02 && saw_observation)
-                {
+                if terminal_seen.is_some() || (saw_burst_01 && saw_burst_02) {
                     break;
                 }
             }
@@ -943,7 +941,7 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                     .await
                     .expect("dispatch rows should read");
                 panic!(
-                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames (burst-01 {saw_burst_01}, burst-02 {saw_burst_02}, reasoning {saw_observation}); run lifecycle {:?}; dispatches {:?}",
+                    "terminal lifecycle while held: {lifecycle:?} turn {turn_id} patch sequence {sequence} after {} frames (burst-01 {saw_burst_01}, burst-02 {saw_burst_02}); run lifecycle {:?}; dispatches {:?}",
                     frames.len(),
                     run.map(|row| (row.run_id, format!("{:?}", row.lifecycle))),
                     dispatch
@@ -982,7 +980,9 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                     WireEnvelopeBody::Event(event) => {
                         let observation = match event.event {
                             artisan_domain::Event::EngineObservation(observation) => observation,
-                            artisan_domain::Event::MessageOutbox(_) => continue,
+                            artisan_domain::Event::MessageOutbox(_)
+                            | artisan_domain::Event::ObservationHistoryCurrent(_)
+                            | artisan_domain::Event::LiveThinking(_) => continue,
                             _ => panic!("expected an engine observation event"),
                         };
                         frames.push(StreamFrame::ObservationEvent(observation));
@@ -1237,7 +1237,6 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
         let mut user_index = None;
         let mut saw_burst_01 = false;
         let mut saw_burst_02 = false;
-        let mut observation_index = None;
         let mut terminal_index = None;
         for (index, frame) in frames.iter().enumerate() {
             match frame {
@@ -1276,13 +1275,16 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                     }
                 }
                 StreamFrame::ObservationEvent(observation) => {
-                    if matches!(
-                        observation.observation,
-                        artisan_domain::Observation::ReasoningSummaryDelta(_)
-                    ) && observation_index.is_none()
-                    {
-                        observation_index = Some(index);
-                    }
+                    // A thinking summary is never stored, so none streams
+                    // as an observation.
+                    assert!(
+                        !matches!(
+                            observation.observation,
+                            artisan_domain::Observation::ReasoningSummaryDelta(_)
+                                | artisan_domain::Observation::ReasoningSummaryCompleted(_)
+                        ),
+                        "thinking summaries must not reach the observation ledger"
+                    );
                 }
             }
         }
@@ -1291,14 +1293,8 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
             saw_burst_01 && saw_burst_02,
             "two distinct incremental chunks must stream"
         );
-        let observation_index =
-            observation_index.expect("observation event must stream before terminal");
         let terminal_index = terminal_index.expect("cancelled terminal must stream last");
         assert!(user_index < terminal_index, "admission must precede terminal");
-        assert!(
-            observation_index < terminal_index,
-            "observation must precede terminal"
-        );
     })
     .await
     .expect("visible stream settles inside budget");

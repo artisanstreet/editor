@@ -1,10 +1,13 @@
 # The AST License
 
-Version 1.0, August 2026
+Version 1.1, September 2026
 
 Copyright (c) 2026 The Artisan Street copyright holders.
 
-Redistribution and use of this software in source and binary forms, with or
+This license applies to Artisan Editor, Artisan Forge, and all other software
+distributed with it (the "Software").
+
+Redistribution and use of the Software in source and binary forms, with or
 without modification, are permitted provided that the following conditions
 are met:
 
@@ -12,24 +15,25 @@ are met:
    this license, and the following disclaimer.
 
 2. Redistributions in binary form must reproduce the above copyright notice,
-   this license, and the following disclaimer in the documentation and/or
-   other materials provided with the distribution.
+   this license, and the following disclaimer in the documentation or other
+   materials provided with the distribution.
 
-3. Neither the names "Artisan Street", "Artisan", or "Artisan Editor", nor
-   the Artisan logos, nor the names of contributors may be used to name,
-   brand, endorse, or promote products derived from this software. Products
-   derived from this software must carry a different name and must not state
-   or imply affiliation with, or endorsement by, Artisan Street.
+3. The names "Artisan Street", "Artisan", "Artisan Editor", and "Artisan
+   Forge", any other name, logo, or mark of Artisan Street, and the names of
+   contributors may not be used to name, brand, endorse, or promote products
+   derived from the Software. Derived products must carry a different name
+   and must not state or imply affiliation with, or endorsement by, Artisan
+   Street.
 
-4. Neither this software nor products derived from it may be sold, licensed
-   for a fee, or otherwise monetized — directly or indirectly, including
+4. Neither the Software nor products derived from it may be sold, licensed
+   for a fee, or otherwise monetized, directly or indirectly, including
    through paid access, paid hosting, subscriptions, advertising, or bundling
-   with paid products or services — without a separate written commercial
+   with paid products or services, without a separate written commercial
    license from Artisan Street.
 
-5. This license may not be modified, replaced, or removed. This software and
+5. This license may not be modified, replaced, or removed. The Software and
    products derived from it may be redistributed only under this license,
-   reproduced in its entirety and without change.
+   reproduced in full and without change.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE

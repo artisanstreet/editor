@@ -46,6 +46,9 @@ pub use repository::{
     ModelFavoritesRepositoryError, SetModelFavoriteInput, SetModelFavoriteResult,
 };
 
+pub use repository::LedgerQuestion;
+pub use repository::ObservationHistoryScope;
+
 pub use repository::{
     AppliedInteraction, ApprovalSnapshot, PendingInteractionView, QuestionSnapshot,
     RecordApprovalRequest, RecordInteractionOutcome, RecordQuestionRequest,

@@ -36,7 +36,9 @@
 //!   [`TRANSCRIPT_MAX_ROW_HEIGHT_PX`] — the height model for rows that have
 //!   never been measured. Windowing runs before layout, so it plans from
 //!   remembered heights with a bounded fallback; min/max keep one pathological
-//!   measurement from poisoning the running average used for the rest.
+//!   measurement from poisoning the running average used for the rest. They
+//!   bound the estimate only: a measured row always keeps its exact height,
+//!   because its placeholder must occupy exactly the space the row painted.
 //! - [`TRANSCRIPT_TURN_GAP_PX`] — the inter-turn gap the offsets model adds
 //!   between rows (`gap-8` on the 4 px spacing base).
 //!
@@ -165,3 +167,8 @@ pub(super) fn plan_transcript_window(
         capped,
     }
 }
+
+/// How far above the viewport, in viewport heights, the loaded turns must
+/// reach before older ones are read. Two viewports is one long wheel glide:
+/// the page is there before the reader arrives at it.
+pub(super) const EARLIER_TURNS_LEAD_VIEWPORTS: f64 = 2.0;

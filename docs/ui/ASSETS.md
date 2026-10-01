@@ -35,7 +35,7 @@ runtime, or browser.
 | Runtime-rendered SVG pipeline (Mermaid) | 1 (renderer-deferred, §5) |
 | CSS/data-URL SVG payloads | nested base64 `<image>` inside the two app icons only; favicon is empty `data:,` (§8) |
 | Packaging resources reaching into `src/lib/assets/**` | PNG/ICO only — no SVG packaging resource exists (§9) |
-| **Vendored assets** | **103 files / 103 manifest entries** |
+| **Vendored assets** | **104 files / 104 manifest entries** |
 
 Reachability axis: production builds stub five development-only surfaces
 (`modules/frontend/vite.config.ts` `development_only_surfaces()`):

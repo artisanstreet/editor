@@ -151,6 +151,7 @@ fn thread(id: &str, project_id: &str, title: &str) -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse(id).expect("thread"),
         project_id: ProjectId::parse(project_id).expect("project"),
@@ -173,6 +174,12 @@ fn snapshot_for(thread_id: &ThreadId, cursor: u64) -> ConversationSnapshot {
         UnixMillis::EPOCH,
     )
     .expect("snapshot")
+}
+
+/// The Forge's end-of-history marker that follows a subscription's
+/// observation replay; a mounted thread presents only once it arrives.
+fn history_current_event(thread_id: &ThreadId) -> NativeTransportEvent {
+    NativeTransportEvent::ObservationHistoryCurrent(thread_id.clone())
 }
 
 fn fresh_start_event(thread_id: &ThreadId, request_id: &str, cursor: u64) -> NativeTransportEvent {
@@ -484,9 +491,9 @@ fn queue_approval_answer(
     let surface = host.read(cx).surface().clone();
 
     surface.update(cx, |surface, surface_cx| {
-        surface.set_answer_context(answer_thread(), answer_run(), surface_cx);
         assert!(surface.submit_approval_gesture(
             "approval-1",
+            &answer_run(),
             &answer_approval(),
             true,
             surface_cx,
@@ -749,6 +756,7 @@ fn prepare_thread_switch_fixture(
         scope: artisan_domain::ComposerDraftScope::Thread(source.clone()),
         request_id: request("message-switch"),
         token,
+        selection: None,
     });
 
     let (sink, commands) = command_sink([Ok(()), Ok(()), Ok(()), Ok(())]);
@@ -1063,6 +1071,8 @@ use forge_catalog::{
 };
 #[path = "tests/forge_drafts.rs"]
 mod forge_drafts;
+#[path = "tests/history_paging.rs"]
+mod history_paging;
 #[path = "tests/lifecycle.rs"]
 mod lifecycle;
 #[path = "tests/navigation.rs"]
@@ -1071,12 +1081,17 @@ mod navigation;
 mod project_draft_transition;
 #[path = "tests/projects.rs"]
 mod projects;
+#[path = "tests/render_boundaries.rs"]
+mod render_boundaries;
 
 #[path = "tests/retry.rs"]
 mod retry;
 
 #[path = "tests/sends.rs"]
 mod sends;
+
+#[path = "tests/thread_inspector.rs"]
+mod thread_inspector;
 
 #[path = "tests/settings_profile.rs"]
 mod settings_profile;

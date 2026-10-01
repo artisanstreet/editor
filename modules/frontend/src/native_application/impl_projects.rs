@@ -24,6 +24,10 @@ pub(super) struct ProjectNavigation {
     /// route that shows no conversation, such as Settings; other mounts
     /// leave such a route alone.
     pub(super) chosen_thread: Option<ThreadId>,
+    /// The user opened the new-task screen: thread listings keep it and
+    /// open no remembered thread until a thread is opened or a project
+    /// chosen.
+    pub(super) new_task_open: bool,
 }
 
 impl NativeApplication {

@@ -139,7 +139,6 @@ async fn fence_dispatch(
             claimed.owner.to_storage().into(),
             millis(claimed.lease_expires_at).into(),
             millis(command.scope.expected_updated_at).into(),
-            millis(command.operated_at).into(),
         ],
     );
     let fenced = transaction
@@ -232,7 +231,6 @@ async fn classify_unfenced_dispatch(
     command: &CommitRunBatch<'_>,
 ) -> RunObservationError {
     let claimed = command.scope.claimed;
-    let operated_at_ms = millis(command.operated_at);
     let dispatch = match entities::message_dispatch::Entity::find_by_id(claimed.message_id.as_str())
         .one(transaction)
         .await
@@ -254,15 +252,6 @@ async fn classify_unfenced_dispatch(
         return RunObservationError::Repository(RepositoryError::InvalidDispatchState {
             message_id: claimed.message_id.clone(),
             state: dispatch_state_label(&dispatch.state),
-        });
-    }
-    if let Some(expiry) = dispatch.lease_expires_at_ms
-        && expiry <= operated_at_ms
-    {
-        return RunObservationError::Repository(RepositoryError::DispatchLeaseExpired {
-            message_id: claimed.message_id.clone(),
-            lease_expires_at_ms: expiry,
-            operated_at_ms,
         });
     }
     let owner_matches = dispatch.lease_owner.as_deref().is_some_and(|owner| {
@@ -668,6 +657,7 @@ async fn build_ledger_inserts(
             binding_version: batch.binding_version(),
             observation_version: OBSERVATION_CHECKPOINT_VERSION,
             observation_bytes: payload,
+            observation_tag: observation.tag(),
         });
     }
     Ok(rows)

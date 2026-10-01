@@ -121,13 +121,14 @@ pub fn run() -> ExitCode {
             })
             .detach();
 
-            let bounds = Bounds::centered(None, size(px(SURFACE_WIDTH), px(SURFACE_HEIGHT)), cx);
+            let (bounds, min_size) = launch_window_geometry(cx);
             let service_for_view = service.clone();
             let home_for_view = home.clone();
             let view_for_registration = Rc::clone(&application_view);
             let opened = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(min_size),
                     titlebar: Some(TitlebarOptions {
                         title: Some(window_title(home.as_deref()).into()),
                         // CE keeps native resizing; desktop_shell supplies caption hit areas.
@@ -173,4 +174,37 @@ pub fn run() -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Launch bounds and minimum size for the desktop window.
+///
+/// The window opens wide enough to seat the chat beside both full-width ruled
+/// columns (left sidebar and thread inspector), clamped to the primary
+/// display. Narrowing hides the inspector, then the sidebar, down to the chat
+/// alone at its floor width.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "layout policy widths are small f64 pixel counts narrowed to GPUI's f32 pixels"
+)]
+fn launch_window_geometry(cx: &App) -> (Bounds<gpui::Pixels>, gpui::Size<gpui::Pixels>) {
+    use crate::desktop_shell::DESKTOP_SIDEBAR_WIDTH_PX;
+    use crate::shell_layout::{ProseWidth, desktop_full_window_pixels, desktop_min_window_pixels};
+
+    let min_size = size(
+        px(desktop_min_window_pixels() as f32),
+        px(MIN_WINDOW_HEIGHT),
+    );
+    let mut launch = size(
+        px(
+            desktop_full_window_pixels(ProseWidth::Balanced, f64::from(DESKTOP_SIDEBAR_WIDTH_PX))
+                as f32,
+        ),
+        px(LAUNCH_WINDOW_HEIGHT),
+    );
+    if let Some(display) = cx.primary_display() {
+        let visible = display.visible_bounds().size;
+        launch.width = launch.width.min(visible.width).max(min_size.width);
+        launch.height = launch.height.min(visible.height).max(min_size.height);
+    }
+    (Bounds::centered(None, launch, cx), min_size)
 }

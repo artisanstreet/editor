@@ -8,6 +8,20 @@
 use super::*;
 
 impl ConversationStateController {
+    fn presented_turn_view(
+        &self,
+        turn_id: &TurnId,
+        controller: &ConversationTurnController,
+    ) -> ChildTurnView {
+        let mut view = controller.view();
+        if self.optimistic_cancelled_turn.as_ref() == Some(turn_id) && !view.narration.is_terminal()
+        {
+            view.state = StateKind::Cancelled;
+            view.narration = TurnNarration::Cancelled { elapsed_ms: 0 };
+        }
+        view
+    }
+
     /// Derives a renderer-facing immutable aggregate view.
     #[must_use]
     pub fn view(&self) -> ConversationStateView {
@@ -16,7 +30,7 @@ impl ConversationStateController {
         for (turn_id, controller) in &self.turns {
             turn_views.push(ConversationTurnView {
                 turn_id: turn_id.clone(),
-                view: controller.view(),
+                view: self.presented_turn_view(turn_id, controller),
             });
         }
 
@@ -68,7 +82,13 @@ impl ConversationStateController {
                 turns.push(SceneTurn::new(
                     turn.turn_id.clone(),
                     turn.ordinal.get(),
-                    turn.lifecycle,
+                    if self.optimistic_cancelled_turn.as_ref() == Some(&turn.turn_id)
+                        && !turn.lifecycle.is_terminal()
+                    {
+                        ConversationLifecycle::Cancelled
+                    } else {
+                        turn.lifecycle
+                    },
                 ));
             }
 
@@ -95,7 +115,7 @@ impl ConversationStateController {
         let mut narrations = Vec::new();
         for (turn_id, controller) in &self.turns {
             if durable_turn_ids.iter().any(|durable| durable == turn_id) {
-                let view = controller.view();
+                let view = self.presented_turn_view(turn_id, controller);
                 let mut entry =
                     TurnNarrationEntry::new(turn_id.clone(), scene_narration(&view.narration));
                 // The basis is the turn's own first active-entry event time,
@@ -255,6 +275,56 @@ impl ConversationStateController {
                 });
             }
             if snapshot_uses_ordinal(snapshot, fact.ordinal) {
+                return Err(ConversationStateError::SceneConflict {
+                    id: fact.id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that a page of older turns fits the scene beside what is
+    /// already loaded: the turn and item bounds, and no fact colliding with
+    /// an identity or ordinal the page brings.
+    pub(super) fn validate_earlier_turns_for_scene(
+        &self,
+        page: &ConversationSnapshot,
+    ) -> Result<(), ConversationStateError> {
+        if page.thread_id() != self.thread_id() {
+            return Ok(());
+        }
+        let Some(snapshot) = self.delivery.snapshot() else {
+            return Ok(());
+        };
+        let turn_count = snapshot.turns().len().saturating_add(page.turns().len());
+        if turn_count > crate::conversation_scene::SCENE_MAX_TURNS {
+            return Err(ConversationStateError::Scene(
+                SceneBuildError::TooManyTurns {
+                    count: turn_count,
+                    maximum: crate::conversation_scene::SCENE_MAX_TURNS,
+                },
+            ));
+        }
+        let item_count = snapshot
+            .items()
+            .len()
+            .saturating_add(page.items().len())
+            .saturating_add(self.facts.len());
+        if item_count > crate::conversation_scene::SCENE_MAX_ITEMS {
+            return Err(ConversationStateError::Scene(
+                SceneBuildError::TooManyItems {
+                    count: item_count,
+                    maximum: crate::conversation_scene::SCENE_MAX_ITEMS,
+                },
+            ));
+        }
+        for fact in self.facts.values() {
+            if page
+                .items()
+                .iter()
+                .any(|item| item.item_id().as_str() == fact.id.as_str())
+                || snapshot_uses_ordinal(page, fact.ordinal)
+            {
                 return Err(ConversationStateError::SceneConflict {
                     id: fact.id.clone(),
                 });
@@ -476,6 +546,13 @@ impl ConversationStateController {
             scene.set_turn_footer_settlement(&turn.turn_id, settlement);
         }
         Ok(())
+    }
+
+    /// Whether `turn_id`'s work section is open, or `None` when the turn has
+    /// no section of its own (its work then shows ungrouped).
+    #[must_use]
+    pub fn session_disclosure(&self, turn_id: &TurnId) -> Option<SceneDisclosure> {
+        self.scene_disclosure(&session_anchor_id(turn_id).ok()?)
     }
 
     fn scene_disclosure(&self, id: &SceneId) -> Option<SceneDisclosure> {

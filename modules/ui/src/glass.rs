@@ -1,13 +1,14 @@
-//! Shared translucent surfaces for the native composer and model picker.
+//! Shared translucent glass surfaces.
 //!
 //! The source surfaces use a separate backdrop filter, a translucent diagonal
 //! material, and a non-interactive highlight layer. Keeping those pieces in
-//! one small native helper prevents the picker and composer from drifting into
-//! two different opaque approximations of the Electron glass treatment.
+//! one small native helper prevents the composer, the pickers, the menus, and
+//! the transcript's code blocks from drifting into different opaque
+//! approximations of the Electron glass treatment.
 
 #![forbid(unsafe_code)]
 
-use artisan_ui::theme::{ArtisanTheme, Oklch, SurfaceStep};
+use crate::theme::{ArtisanTheme, Oklch, ShadowLayer, SurfaceStep};
 use gpui::{
     Background, BoxShadow, Div, Hsla, Pixels, Styled as _, div, linear_color_stop, linear_gradient,
     point, px,
@@ -19,7 +20,7 @@ use gpui::{
 /// its option menus, and the composer to silently drift into three different
 /// material implementations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GlassStrength {
+pub enum GlassStrength {
     /// The quiet treatment used by the composer surface.
     Quiet,
     /// The stronger treatment used by picker and tooltip surfaces.
@@ -27,13 +28,13 @@ pub(crate) enum GlassStrength {
 }
 
 /// The quiet blur radius from `shader-glass-backdrop`.
-pub(crate) const GLASS_QUIET_BLUR_RADIUS_PX: f32 = 12.0;
+pub const GLASS_QUIET_BLUR_RADIUS_PX: f32 = 12.0;
 /// The strong blur radius from `shader-glass-backdrop`.
-pub(crate) const GLASS_STRONG_BLUR_RADIUS_PX: f32 = 20.0;
+pub const GLASS_STRONG_BLUR_RADIUS_PX: f32 = 20.0;
 
 /// Resolves a source surface's backdrop blur radius.
 #[must_use]
-pub(crate) fn glass_blur_radius(strength: GlassStrength) -> Pixels {
+pub fn glass_blur_radius(strength: GlassStrength) -> Pixels {
     px(match strength {
         GlassStrength::Quiet => GLASS_QUIET_BLUR_RADIUS_PX,
         GlassStrength::Strong => GLASS_STRONG_BLUR_RADIUS_PX,
@@ -46,7 +47,7 @@ pub(crate) fn glass_blur_radius(strength: GlassStrength) -> Pixels {
 /// `rgb(82 82 91)` and `rgb(39 39 42)`. Their alpha is intentionally applied
 /// before the GPUI paint conversion so the backdrop remains visible.
 #[must_use]
-pub(crate) fn glass_material(strength: GlassStrength) -> Background {
+pub fn glass_material(strength: GlassStrength) -> Background {
     let (from_alpha, to_alpha) = match strength {
         GlassStrength::Quiet => (0.20, 0.14),
         GlassStrength::Strong => (0.28, 0.20),
@@ -71,7 +72,7 @@ pub(crate) fn glass_material(strength: GlassStrength) -> Background {
 /// that transparent color through the rest of the surface rather than painting
 /// an opaque lower band over the backdrop.
 #[must_use]
-pub(crate) fn glass_highlight(strength: GlassStrength) -> Background {
+pub fn glass_highlight(strength: GlassStrength) -> Background {
     let (alpha, transparent_at) = match strength {
         GlassStrength::Quiet => (0.05, 0.42),
         GlassStrength::Strong => (0.08, 0.44),
@@ -86,7 +87,7 @@ pub(crate) fn glass_highlight(strength: GlassStrength) -> Background {
 
 /// Adds the visual-only material without installing any pointer handlers.
 #[must_use]
-pub(crate) fn glass_material_layer(strength: GlassStrength, radius: Pixels) -> Div {
+pub fn glass_material_layer(strength: GlassStrength, radius: Pixels) -> Div {
     div()
         .absolute()
         .top_0()
@@ -102,7 +103,7 @@ pub(crate) fn glass_material_layer(strength: GlassStrength, radius: Pixels) -> D
 /// therefore remains a paint layer while the interactive descendants retain
 /// their existing hit testing and outside-dismiss behavior.
 #[must_use]
-pub(crate) fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> Div {
+pub fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> Div {
     div()
         .absolute()
         .top_0()
@@ -118,7 +119,7 @@ pub(crate) fn glass_highlight_layer(strength: GlassStrength, radius: Pixels) -> 
 /// the material gradient. Keeping the value here gives the picker and composer
 /// one tuneable 5% adjustment while preserving the backdrop and source stops.
 #[must_use]
-pub(crate) fn glass_foreground_base(theme: &ArtisanTheme) -> Hsla {
+pub fn glass_foreground_base(theme: &ArtisanTheme) -> Hsla {
     theme.colors.foreground.with_alpha(0.05).to_paint()
 }
 
@@ -128,13 +129,13 @@ pub(crate) fn glass_foreground_base(theme: &ArtisanTheme) -> Hsla {
 /// engine strip is a regular card, not a card-glass surface; using the latter
 /// there creates the doubled bright/dark rims visible in the native picker.
 #[must_use]
-pub(crate) fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
+pub fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
     theme
         .elevation
         .card_shadow
         .iter()
         .copied()
-        .map(artisan_ui::theme::ShadowLayer::to_box_shadow)
+        .map(ShadowLayer::to_box_shadow)
         .collect()
 }
 
@@ -144,7 +145,7 @@ pub(crate) fn card_shadows(theme: &ArtisanTheme) -> Vec<BoxShadow> {
 /// is added here: the material remains translucent when the backdrop is
 /// unavailable, and this stack only supplies the edge and elevation treatment.
 #[must_use]
-pub(crate) fn glass_card_shadows() -> Vec<BoxShadow> {
+pub fn glass_card_shadows() -> Vec<BoxShadow> {
     let white = Oklch::new(1.0, 0.0, 0.0);
     let black = Oklch::new(0.0, 0.0, 0.0);
     vec![

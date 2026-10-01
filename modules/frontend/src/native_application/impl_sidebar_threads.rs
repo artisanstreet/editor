@@ -7,10 +7,13 @@
 //! age boundary. Choosing a row opens the thread in its own project.
 
 use super::*;
+use crate::desktop_shell::desktop_section_label;
 use crate::recent_thread_groups::{RecentThreadGroup, group_recent_threads, next_regrouping};
-use artisan_domain::{RecentThread, RecentThreadListing, UnixMillis};
-use gpui::ColorExt as _;
+use artisan_domain::{
+    RecentThread, RecentThreadListing, ThreadAttention, ThreadSummary, UnixMillis,
+};
 use gpui::prelude::FluentBuilder as _;
+use gpui::{Animation, AnimationExt as _};
 use std::time::Instant;
 
 /// Height of one two-line thread row.
@@ -18,6 +21,63 @@ pub(super) const SIDEBAR_THREAD_ROW_HEIGHT_PX: f32 = 48.0;
 
 /// Spoken after a working row's subtitle.
 pub(super) const SIDEBAR_WORKING_LABEL: &str = "working";
+
+/// One full fade of the working dot, out and back.
+const SIDEBAR_WORKING_PULSE: Duration = Duration::from_millis(1_600);
+
+/// The dimmest the working dot gets mid-pulse.
+const SIDEBAR_WORKING_PULSE_FLOOR: f32 = 0.4;
+
+/// What a row's trailing dot says about its thread: whether it needs the
+/// reader, never decoration. At most one state shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SidebarThreadIndicator {
+    /// An approval or question is open: the run waits on the reader.
+    Awaiting,
+    /// The Forge owns a live run.
+    Working,
+    /// The latest run failed or was interrupted and has not been read.
+    Failed,
+    /// The latest run finished and has not been read.
+    Finished,
+}
+
+impl SidebarThreadIndicator {
+    /// The state a thread's row shows, if any.
+    ///
+    /// Waiting on the reader outranks the work it blocks. An unread outcome
+    /// never shows on the thread the reader has open: they are looking at
+    /// it, and leaving it marks it read.
+    pub(super) fn of(thread: &ThreadSummary, open: bool) -> Option<Self> {
+        match thread.attention {
+            ThreadAttention::AwaitingAnswer => Some(Self::Awaiting),
+            _ if thread.has_active_work => Some(Self::Working),
+            ThreadAttention::Failed if !open => Some(Self::Failed),
+            ThreadAttention::Finished if !open => Some(Self::Finished),
+            ThreadAttention::None | ThreadAttention::Failed | ThreadAttention::Finished => None,
+        }
+    }
+
+    /// Spoken after the row's subtitle.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Awaiting => "waiting for your answer",
+            Self::Working => SIDEBAR_WORKING_LABEL,
+            Self::Failed => "failed",
+            Self::Finished => "finished",
+        }
+    }
+
+    /// Suffix of the dot's selector.
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Awaiting => "awaiting",
+            Self::Working => "working",
+            Self::Failed => "failed",
+            Self::Finished => "finished",
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
@@ -106,6 +166,22 @@ fn selection_duration() -> Duration {
 )]
 fn fade_curve(progress: f32) -> f32 {
     artisan_ui::motion::MotionCurve::EaseInOut.sample(f64::from(progress)) as f32
+}
+
+/// Mixes `from` toward `to` by `weight` in `[0, 1]`, channel by channel.
+///
+/// GPUI's `ColorExt::blend` is not this: it scales the base by the other
+/// colour's alpha, so a zero weight returns a transparent colour instead of
+/// `from`, which made every unselected title vanish.
+fn mix_colors(from: gpui::Hsla, to: gpui::Hsla, weight: f32) -> gpui::Hsla {
+    let weight = weight.clamp(0.0, 1.0);
+    let mut mixed = gpui::hsla_to_rgba(from);
+    let to = gpui::hsla_to_rgba(to);
+    mixed.red += (to.red - mixed.red) * weight;
+    mixed.green += (to.green - mixed.green) * weight;
+    mixed.blue += (to.blue - mixed.blue) * weight;
+    mixed.alpha += (to.alpha - mixed.alpha) * weight;
+    gpui::rgb_to_hsla(mixed)
 }
 
 /// The wall clock the age groups are measured against.
@@ -257,15 +333,8 @@ impl NativeApplication {
             .gap(px(2.0))
             .debug_selector(move || selector.clone())
             .child(
-                div()
-                    .w_full()
-                    .px(px(8.0))
-                    .pb(self.theme.spacing.steps(1.0))
-                    .text_size(self.theme.typography.label_text)
-                    .text_color(self.theme.colors.muted_foreground.to_paint())
-                    .truncate()
-                    .debug_selector(move || header_selector.clone())
-                    .child(group.age.label()),
+                desktop_section_label(&self.theme, group.age.label())
+                    .debug_selector(move || header_selector.clone()),
             );
         for thread in &group.threads {
             rows = rows.child(self.desktop_sidebar_thread(thread, cx));
@@ -289,22 +358,26 @@ impl NativeApplication {
             .sidebar_threads
             .selection
             .weight(&thread.thread_id, Instant::now());
-        let glyph_color = self
-            .desktop_theme
-            .foreground
-            .blend(&self.desktop_theme.secondary.opacity(weight));
+        // The open thread's title reads in the link colour, fading with the
+        // selection. The hover fill stays the pointer's alone.
+        let title_color = mix_colors(
+            self.desktop_theme.foreground,
+            self.theme.colors.banner_info.to_paint(),
+            weight,
+        );
         let title = SharedString::from(thread.title.as_str().to_owned());
         let subtitle = SharedString::from(row.subtitle.as_str().to_owned());
-        let description = if thread.has_active_work {
-            SharedString::from(format!("{subtitle}, {SIDEBAR_WORKING_LABEL}"))
-        } else {
-            subtitle.clone()
+        let open = self.sidebar_threads.selection.target.as_ref() == Some(&thread.thread_id);
+        let indicator = SidebarThreadIndicator::of(thread, open);
+        let description = match indicator {
+            Some(indicator) => SharedString::from(format!("{subtitle}, {}", indicator.label())),
+            None => subtitle.clone(),
         };
         let selector = format!("artisan-sidebar-thread-{}", thread.thread_id.as_str());
         let title_selector = format!("{selector}-title");
         let subtitle_selector = format!("{selector}-subtitle");
-        let working_selector = format!("{selector}-working");
-        let working_tone = self.theme.colors.primary.to_paint();
+        let dot_selector = indicator.map(|indicator| format!("{selector}-{}", indicator.id()));
+        let pulse = !cx.reduce_motion();
         let click_target = (thread.project_id.clone(), thread.thread_id.clone());
         let key_target = click_target.clone();
         let color = self.theme.colors.muted.to_paint();
@@ -344,10 +417,6 @@ impl NativeApplication {
             .focus_visible(move |style| style.bg(color))
             .debug_selector(move || selector.clone())
             .child(
-                desktop_nav_glyph(AssetId::TABLER_MESSAGE_CIRCLE, self.desktop_theme)
-                    .text_color(glyph_color),
-            )
-            .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
@@ -359,7 +428,7 @@ impl NativeApplication {
                             .w_full()
                             .truncate()
                             .text_size(self.theme.typography.control_text)
-                            .text_color(self.desktop_theme.foreground)
+                            .text_color(title_color)
                             .debug_selector(move || title_selector.clone())
                             .child(title),
                     )
@@ -373,17 +442,43 @@ impl NativeApplication {
                             .child(subtitle),
                     ),
             )
-            // Live work keeps its prominence without reordering the
-            // chronological groups: the rail's trailing state dot.
-            .when(thread.has_active_work, |row| {
-                row.child(
-                    div()
-                        .size(px(crate::shell::LEGACY_RAIL_STATE_DOT_PX))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(working_tone)
-                        .debug_selector(move || working_selector.clone()),
-                )
+            // A thread that needs the reader keeps its prominence without
+            // reordering the chronological groups: the trailing state dot.
+            // Purple is the reader's turn; live work breathes; an unread
+            // outcome holds still until the thread is opened.
+            .when_some(indicator, |row, indicator| {
+                let colors = &self.theme.colors;
+                let tone = match indicator {
+                    SidebarThreadIndicator::Awaiting => colors.question_from,
+                    SidebarThreadIndicator::Working => colors.primary,
+                    SidebarThreadIndicator::Failed => colors.destructive,
+                    SidebarThreadIndicator::Finished => colors.unread,
+                };
+                let dot_selector = dot_selector.unwrap_or_default();
+                let dot = div()
+                    .size(px(crate::shell::LEGACY_RAIL_STATE_DOT_PX))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(tone.to_paint())
+                    .debug_selector({
+                        let dot_selector = dot_selector.clone();
+                        move || dot_selector.clone()
+                    });
+                if indicator == SidebarThreadIndicator::Working && pulse {
+                    row.child(dot.with_animation(
+                        SharedString::from(dot_selector),
+                        Animation::new(SIDEBAR_WORKING_PULSE).repeat(),
+                        |dot, progress| {
+                            let swing = (progress * std::f32::consts::TAU).cos().mul_add(0.5, 0.5);
+                            dot.opacity(
+                                SIDEBAR_WORKING_PULSE_FLOOR
+                                    + (1.0 - SIDEBAR_WORKING_PULSE_FLOOR) * swing,
+                            )
+                        },
+                    ))
+                } else {
+                    row.child(dot)
+                }
             })
             .on_click(cx.listener(move |app, _, window, cx| {
                 window.focus(&focus, cx);
@@ -403,6 +498,75 @@ impl NativeApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indicator_names_what_the_thread_needs_from_the_reader() {
+        let thread = |working: bool, attention| ThreadSummary {
+            has_started_response: true,
+            has_active_work: working,
+            attention,
+            last_message_at: None,
+            thread_id: ThreadId::parse("thread").unwrap(),
+            project_id: ProjectId::parse("project").unwrap(),
+            title: artisan_domain::ThreadTitle::parse("Thread").unwrap(),
+            created_at: UnixMillis::from_millis(1),
+            updated_at: UnixMillis::from_millis(1),
+        };
+        let of = SidebarThreadIndicator::of;
+        assert_eq!(of(&thread(false, ThreadAttention::None), false), None);
+        assert_eq!(
+            of(&thread(true, ThreadAttention::None), false),
+            Some(SidebarThreadIndicator::Working)
+        );
+        // The reader's turn outranks the work it blocks, open or not.
+        for open in [false, true] {
+            assert_eq!(
+                of(&thread(true, ThreadAttention::AwaitingAnswer), open),
+                Some(SidebarThreadIndicator::Awaiting)
+            );
+        }
+        assert_eq!(
+            of(&thread(false, ThreadAttention::Finished), false),
+            Some(SidebarThreadIndicator::Finished)
+        );
+        assert_eq!(
+            of(&thread(false, ThreadAttention::Failed), false),
+            Some(SidebarThreadIndicator::Failed)
+        );
+        // The thread on screen is being read: no unread outcome on it.
+        assert_eq!(of(&thread(false, ThreadAttention::Finished), true), None);
+        assert_eq!(of(&thread(false, ThreadAttention::Failed), true), None);
+        // A new run after an unread outcome reads as working.
+        assert_eq!(
+            of(&thread(true, ThreadAttention::Finished), false),
+            Some(SidebarThreadIndicator::Working)
+        );
+    }
+
+    #[test]
+    fn title_colour_rests_on_the_foreground_and_reaches_the_link_colour() {
+        let foreground = gpui::rgb_to_hsla(gpui::rgb(0x00ff_ffff));
+        let link = gpui::rgb_to_hsla(gpui::rgb(0x0060_a5fa));
+        let close = |left: gpui::Hsla, right: gpui::Hsla| {
+            let (left, right) = (gpui::hsla_to_rgba(left), gpui::hsla_to_rgba(right));
+            [
+                left.red - right.red,
+                left.green - right.green,
+                left.blue - right.blue,
+                left.alpha - right.alpha,
+            ]
+            .iter()
+            .all(|delta| delta.abs() < 0.01)
+        };
+        // An unselected title is the plain, fully opaque foreground.
+        assert!(close(mix_colors(foreground, link, 0.0), foreground));
+        assert!(close(mix_colors(foreground, link, 1.0), link));
+        let half = gpui::hsla_to_rgba(mix_colors(foreground, link, 0.5));
+        assert!(
+            (half.alpha - 1.0).abs() < 0.01,
+            "the title never goes translucent"
+        );
+    }
 
     #[test]
     fn selected_foreground_fades_out_before_next_fades_in() {

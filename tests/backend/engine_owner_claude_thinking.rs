@@ -23,6 +23,7 @@ use super::claude::{
     parse_frame,
 };
 use super::observation::EngineObservation;
+use super::operation::ClaudeDisplayRefusals;
 
 const TOOLS: &str = include_str!("../fixtures/claude/summarized-tools.jsonl");
 const MIXED: &str = include_str!("../fixtures/claude/summarized-mixed.jsonl");
@@ -33,6 +34,9 @@ const INTERRUPTED: &str = include_str!("../fixtures/claude/interrupted.jsonl");
 const TWO_STRETCHES: &str = include_str!("../fixtures/claude/constructed-two-stretches.jsonl");
 const INTERRUPTED_THINKING: &str =
     include_str!("../fixtures/claude/constructed-interrupted-thinking.jsonl");
+const HIGHLIGHT_TITLES: &str =
+    include_str!("../fixtures/claude/constructed-highlight-titles.jsonl");
+const HIGHLIGHTS_REFUSED: &str = include_str!("../fixtures/claude/highlights-refused.jsonl");
 
 fn selection() -> ClaudeSelection {
     ClaudeSelection::new(
@@ -60,16 +64,20 @@ fn display_pair(args: &[String]) -> Option<&str> {
 }
 
 #[test]
-fn supported_cli_requests_summarized_on_start_and_resume() {
+fn supported_cli_requests_highlights_on_start_and_resume() {
     let display = ClaudeThinkingDisplay::for_support(claude_thinking_display_support("2.1.282"));
-    assert_eq!(display, ClaudeThinkingDisplay::Summarized);
+    assert_eq!(
+        display,
+        ClaudeThinkingDisplay::Highlights,
+        "the shipped default is hosted highlights; refusal falls back to prose"
+    );
     let settings = ClaudeSettings::from_selection(&selection())
         .expect("settings")
         .with_thinking_display(display);
     let start = settings.spawn_args(&ClaudeSession::Start("session-a".to_owned()));
     let resume = settings.spawn_args(&ClaudeSession::Resume("session-a".to_owned()));
-    assert_eq!(display_pair(&start), Some("summarized"));
-    assert_eq!(display_pair(&resume), Some("summarized"));
+    assert_eq!(display_pair(&start), Some("highlights"));
+    assert_eq!(display_pair(&resume), Some("highlights"));
     assert!(resume.contains(&"--resume".to_owned()));
     assert_eq!(
         start
@@ -77,6 +85,38 @@ fn supported_cli_requests_summarized_on_start_and_resume() {
             .filter(|arg| *arg == "--thinking-display")
             .count(),
         1
+    );
+}
+
+#[test]
+fn highlights_downgrades_for_a_refused_context() {
+    // The default highlights request downgrades to public prose once a
+    // context's server refusal has been observed.
+    let requested = ClaudeThinkingDisplay::Highlights;
+    let settings = ClaudeSettings::from_selection(&selection())
+        .expect("settings")
+        .with_thinking_display(requested.with_refusal(false));
+    for session in [
+        ClaudeSession::Start("session-highlights".to_owned()),
+        ClaudeSession::Resume("session-highlights".to_owned()),
+    ] {
+        assert_eq!(
+            display_pair(&settings.spawn_args(&session)),
+            Some("highlights")
+        );
+    }
+    assert_eq!(
+        requested.with_refusal(true),
+        ClaudeThinkingDisplay::Summarized
+    );
+    // A refusal never rewrites an already-public or unrequested policy.
+    assert_eq!(
+        ClaudeThinkingDisplay::Summarized.with_refusal(true),
+        ClaudeThinkingDisplay::Summarized
+    );
+    assert_eq!(
+        ClaudeThinkingDisplay::Unrequested.with_refusal(true),
+        ClaudeThinkingDisplay::Unrequested
     );
 }
 
@@ -113,7 +153,8 @@ fn mixed_assistant_frame_projects_thinking_text_and_usage_once() {
         frame.content,
         vec![
             ClaudeAssistantContent::Thinking {
-                text: "**Planning** the read".to_owned()
+                text: "**Planning** the read".to_owned(),
+                title: None
             },
             ClaudeAssistantContent::Text {
                 text: "Reading now".to_owned(),
@@ -125,7 +166,8 @@ fn mixed_assistant_frame_projects_thinking_text_and_usage_once() {
                 input: serde_json::json!({}),
             }),
             ClaudeAssistantContent::Thinking {
-                text: "Second stretch".to_owned()
+                text: "Second stretch".to_owned(),
+                title: None
             },
         ]
     );
@@ -141,7 +183,13 @@ fn stream_blocks_keep_their_index_and_opaque_deltas_stay_bookkeeping() {
         1,
     )
     .expect("start decodes");
-    assert_eq!(start, ClaudeEvent::ThinkingStarted { index: 2 });
+    assert_eq!(
+        start,
+        ClaudeEvent::ThinkingStarted {
+            index: 2,
+            title: None
+        }
+    );
     let text_start = parse_frame(
         r#"{"type":"stream_event","event":{"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}}"#,
         2,
@@ -195,6 +243,8 @@ struct Replay {
     tools: Vec<(String, String, String, Option<String>)>,
     /// Terminal rows as `(activity id, state, command, output)`.
     terminals: Vec<(String, String, Option<String>, Option<String>)>,
+    /// Whether the tracker observed a silently omitted highlights request.
+    highlights_refused: bool,
 }
 
 impl Replay {
@@ -291,6 +341,7 @@ async fn replay_lines(lines: &[&str], run: &str, display: ClaudeThinkingDisplay)
             .await,
         );
     }
+    replay.highlights_refused = tracker.highlights_refused();
     drop(sender);
     while let Some(observation) = receiver.recv().await {
         match observation {
@@ -796,7 +847,7 @@ fn tool_use_start(index: u64, id: &str, name: &str) -> String {
     .to_string()
 }
 
-fn buffered_tool_use(message: &str, id: &str, name: &str, input: serde_json::Value) -> String {
+fn buffered_tool_use(message: &str, id: &str, name: &str, input: &serde_json::Value) -> String {
     serde_json::json!({"type":"assistant","message":{"id":message,
         "content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
     .to_string()
@@ -822,7 +873,7 @@ async fn narration_before_a_tool_call_is_commentary_and_commands_are_terminal_wo
             "msg-plan",
             "toolu-ls",
             "Bash",
-            serde_json::json!({"command":"ls -a","description":"List files"}),
+            &serde_json::json!({"command":"ls -a","description":"List files"}),
         ),
         tool_result("toolu-ls", "a\nb", false),
         message_start("msg-retry"),
@@ -830,7 +881,7 @@ async fn narration_before_a_tool_call_is_commentary_and_commands_are_terminal_wo
             "msg-retry",
             "toolu-bad",
             "Bash",
-            serde_json::json!({"command":"false"}),
+            &serde_json::json!({"command":"false"}),
         ),
         tool_result("toolu-bad", "exit 1", true),
         tool_result("toolu-unknown", "ignored", false),
@@ -877,4 +928,148 @@ async fn narration_before_a_tool_call_is_commentary_and_commands_are_terminal_wo
         ]
     );
     assert!(replay.tools.is_empty(), "commands are terminal work only");
+}
+
+#[test]
+fn summaries_select_the_newest_non_empty_title() {
+    let start = parse_frame(
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"SIG","summaries":[{"summary":"First"},{"summary":"  "},{"summary":"Newest"}]}}}"#,
+        1,
+    )
+    .expect("start decodes");
+    assert_eq!(
+        start,
+        ClaudeEvent::ThinkingStarted {
+            index: 0,
+            title: Some("Newest".to_owned())
+        }
+    );
+    let buffered = parse_frame(
+        r#"{"type":"assistant","message":{"id":"msg-hl","content":[{"type":"thinking","thinking":"","signature":"SIG","summaries":[{"summary":"  "},{"summary":"Buffered title"},{"without":"summary"},{"summary":42}]}]}}"#,
+        2,
+    )
+    .expect("buffered decodes");
+    let ClaudeEvent::Assistant(frame) = buffered else {
+        panic!("expected one assistant frame");
+    };
+    assert_eq!(
+        frame.content,
+        vec![ClaudeAssistantContent::Thinking {
+            text: String::new(),
+            title: Some("Buffered title".to_owned())
+        }]
+    );
+    assert!(!format!("{frame:?}").contains("SIG"));
+}
+
+#[tokio::test]
+async fn highlight_titles_project_live_and_settle_on_the_buffered_frame() {
+    let replay = replay(
+        HIGHLIGHT_TITLES,
+        "run-highlight",
+        ClaudeThinkingDisplay::Highlights,
+    )
+    .await;
+    assert_eq!(replay.completions.len(), 1);
+    let (item, text, _) = &replay.completions[0];
+    assert_eq!(item, "thinking:msg_fixture_hl:0");
+    assert_eq!(
+        text.as_deref(),
+        Some("Checking pairwise sums of the values")
+    );
+    assert_eq!(
+        replay.streamed(item),
+        "Checking pairwise sums of the values",
+        "the block-start title is the live label, settled once by the buffered title"
+    );
+    assert!(!replay.highlights_refused);
+    assert!(replay.text.contains("All six pair sums are distinct."));
+}
+
+#[tokio::test]
+async fn refused_highlights_settle_empty_and_mark_the_context() {
+    let refused = replay(
+        HIGHLIGHTS_REFUSED,
+        "run-hl-refused",
+        ClaudeThinkingDisplay::Highlights,
+    )
+    .await;
+    assert!(refused.deltas.is_empty(), "no titles or prose project");
+    assert!(!refused.text.is_empty(), "the answer text still lands");
+    assert!(
+        refused
+            .completions
+            .iter()
+            .all(|(_, text, _)| text.is_none())
+    );
+    assert!(
+        refused.highlights_refused,
+        "empty stretches under a highlights request are a silent server refusal"
+    );
+    // The same capture under summarized is merely an empty public display.
+    let public = replay(
+        HIGHLIGHTS_REFUSED,
+        "run-hl-public",
+        ClaudeThinkingDisplay::Summarized,
+    )
+    .await;
+    assert!(!public.highlights_refused);
+    // A no-thinking turn never infers capability loss.
+    let no_think = replay(START, "run-hl-nothink", ClaudeThinkingDisplay::Highlights).await;
+    assert!(no_think.completions.is_empty());
+    assert!(!no_think.highlights_refused);
+}
+
+#[tokio::test]
+async fn highlights_mode_never_projects_prose_but_its_presence_clears_refusal() {
+    let delta = thinking_delta("Unexpected prose");
+    let buffered = buffered_thinking("Unexpected prose");
+    let lines = [
+        MESSAGE_START,
+        STRETCH_START,
+        delta.as_str(),
+        buffered.as_str(),
+        STRETCH_STOP,
+    ];
+    let replay = replay_lines(&lines, "run-hl-prose", ClaudeThinkingDisplay::Highlights).await;
+    assert!(
+        replay.deltas.is_empty(),
+        "prose is not the highlighted label"
+    );
+    assert_eq!(
+        replay.completions,
+        vec![(
+            "thinking:msg-edge:0".to_owned(),
+            None,
+            "run-hl-prose".to_owned()
+        )]
+    );
+    assert!(!replay.highlights_refused);
+}
+
+#[test]
+fn display_refusal_memory_is_keyed_by_context() {
+    let mut refusals = ClaudeDisplayRefusals::default();
+    let refused = (
+        "claude-fixture".to_owned(),
+        Some("claude-sonnet-5".to_owned()),
+        "2.1.282".to_owned(),
+    );
+    assert!(!refusals.refused(&refused));
+    refusals.mark_refused(refused.clone());
+    assert!(refusals.refused(&refused));
+    for other in [
+        (
+            "claude-fixture".to_owned(),
+            Some("claude-opus-5".to_owned()),
+            "2.1.282".to_owned(),
+        ),
+        (
+            "claude-fixture".to_owned(),
+            Some("claude-sonnet-5".to_owned()),
+            "2.2.0".to_owned(),
+        ),
+    ] {
+        assert!(!refusals.refused(&other));
+    }
 }

@@ -3,7 +3,7 @@ name = "artisan-native-engine"
 description = "Certified native engine installation and profile authority"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

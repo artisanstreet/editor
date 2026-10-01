@@ -1779,7 +1779,7 @@ async fn unstarted_run_fails_live_with_its_launch_error() {
 }
 
 #[tokio::test]
-async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
+async fn owner_fails_its_unstarted_run_after_its_lease_lapsed() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
     let (claimed, receipt, start_key, creds) = queue_claim_launch(
@@ -1804,17 +1804,43 @@ async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
         error_message: &message,
         dispatch_reason: &reason,
     };
-    let before = fetch_all(&database).await;
-    // A lapsed lease belongs to recovery, not to this dispatcher.
+    // The owner token, not the clock, fences the dispatch: a stalled owner
+    // whose lease lapsed still settles the run it launched.
     assert_eq!(
         repository
             .fail_unstarted_run(command(LEASE_EXPIRES_AT_MS))
             .await
             .expect("expired attempt"),
-        FailUnstartedRunOutcome::Moved
+        FailUnstartedRunOutcome::Failed
     );
-    assert_eq!(fetch_all(&database).await, before);
+}
 
+#[tokio::test]
+async fn bound_runs_are_never_failed_as_unstarted() {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (claimed, receipt, start_key, creds) = queue_claim_launch(
+        &repository,
+        &database,
+        "thread-1",
+        "message-1",
+        "run-1",
+        "turn-1",
+    )
+    .await;
+    let (code, message, reason) = unstarted_texts();
+    let turn_patch = PatchId::parse("turn-patch-unstarted").expect("p");
+    let command = |operated_at_ms: i64| FailUnstartedRun {
+        claimed: &claimed,
+        receipt: &receipt,
+        run_start_key: &start_key,
+        credentials: &creds,
+        operated_at: UnixMillis::from_millis(operated_at_ms),
+        turn_patch_id: &turn_patch,
+        error_code: &code,
+        error_message: &message,
+        dispatch_reason: &reason,
+    };
     let _bound = bind_running(&repository, &claimed, &receipt, &start_key, &creds).await;
     let bound = fetch_all(&database).await;
     assert_eq!(

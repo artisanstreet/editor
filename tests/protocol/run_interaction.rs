@@ -250,3 +250,53 @@ fn mismatched_command_correlation_is_rejected_before_encoding() {
     value.frame_id = frame_id("different-request");
     assert!(encode_envelope(&value).is_err());
 }
+
+fn answer_questions_command(answers: Vec<(&str, Vec<String>)>) -> Command {
+    Command::AnswerQuestions(
+        artisan_domain::AnswerQuestions::new(
+            request_id("request-answer-questions"),
+            thread_id(),
+            ObservationId::parse("item-questions").expect("fixture group id is valid"),
+            answers
+                .into_iter()
+                .map(|(question, answers)| artisan_domain::QuestionAnswer {
+                    question_id: ObservationId::parse(question)
+                        .expect("fixture question id is valid"),
+                    answers,
+                })
+                .collect(),
+        )
+        .expect("fixture questionnaire answer is valid"),
+    )
+}
+
+#[test]
+fn questionnaire_answers_roundtrip_answers_skips_and_dismissals() {
+    assert_roundtrip(&request_frame(answer_questions_command(vec![
+        ("item-questions:scope", vec!["Only the API".to_owned()]),
+        ("item-questions:tests", Vec::new()),
+    ])));
+    assert_roundtrip(&request_frame(answer_questions_command(vec![(
+        "item-questions:scope",
+        Vec::new(),
+    )])));
+}
+
+#[test]
+fn questionnaire_receipts_roundtrip_every_outcome() {
+    for outcome in [
+        artisan_protocol::AnswerQuestionsOutcome::Applied,
+        artisan_protocol::AnswerQuestionsOutcome::AlreadyResolved,
+        artisan_protocol::AnswerQuestionsOutcome::UnknownTarget,
+    ] {
+        assert_roundtrip(&response_frame(
+            ResponsePayload::QuestionsAnswered(artisan_protocol::AnswerQuestionsReceipt {
+                request_id: request_id("request-answer-questions"),
+                thread_id: thread_id(),
+                group_id: ObservationId::parse("item-questions").expect("group id"),
+                outcome,
+            }),
+            "request-answer-questions",
+        ));
+    }
+}

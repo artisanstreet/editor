@@ -18,11 +18,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use artisan_database::{MessageOutboxFingerprint, QueuedMessageRepositoryError, Repository};
+use artisan_database::{
+    MessageOutboxFingerprint, ObservationHistoryScope, QueuedMessageRepositoryError, Repository,
+};
 use artisan_domain::{
-    EngineUsageSnapshot, Event, FAILED_MESSAGE_LIST_MAX, ListFailedMessages, ListQueuedMessages,
-    MessageOutbox, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder, RunUsageResult, ThreadId,
-    ThreadRetitled, ThreadTitle, UserPreferences,
+    EarlierTurnMarkers, EngineUsageSnapshot, ErrorChain, Event, FAILED_MESSAGE_LIST_MAX,
+    HeldBackWork, ListFailedMessages, ListQueuedMessages, LiveThinking, LiveThinkingBlock,
+    MessageOutbox, ObservationHistoryCurrent, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder,
+    RunUsageResult, ThreadId, ThreadRetitled, ThreadTitle, UserPreferences,
 };
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
@@ -63,6 +66,9 @@ pub(crate) struct ConversationDeliveryDriver {
     titles: BTreeMap<ThreadId, ThreadTitle>,
     /// The live run's usage last pushed for each active subscription.
     run_usage: BTreeMap<ThreadId, RunUsageResult>,
+    /// The thinking block last pushed per subscribed thread; absent when the
+    /// subscriber was last told the run is not thinking.
+    live_thinking: BTreeMap<ThreadId, LiveThinkingBlock>,
     /// The connection-scoped host state last pushed.
     host: DeliveredHostState,
     /// The recent threads last served or pushed, once the connection read
@@ -115,6 +121,7 @@ impl ConversationDeliveryDriver {
             outboxes: BTreeMap::new(),
             titles: BTreeMap::new(),
             run_usage: BTreeMap::new(),
+            live_thinking: BTreeMap::new(),
             host: DeliveredHostState::default(),
             recent: None,
             projects: None,
@@ -180,14 +187,34 @@ impl ConversationDeliveryDriver {
             let subscription = self
                 .deliver_until_current(subscription, stamp, limit, cancel)
                 .await?;
+            let floor = outcome
+                .follow_up
+                .history_floor
+                .filter(|(thread, _)| thread == &thread_id)
+                .map(|(_, floor)| floor);
+            let subscription = match floor {
+                Some(floor) => {
+                    self.deliver_windowed_history(subscription, floor, stamp, limit, cancel)
+                        .await?
+                }
+                None => subscription,
+            };
             let subscription = self
                 .deliver_observation_history(subscription, stamp, limit, cancel)
                 .await?;
+            // Same stream as the history pages, so the subscriber sees this
+            // only after the last page and before any live observation.
+            let current = Event::ObservationHistoryCurrent(ObservationHistoryCurrent {
+                thread_id: thread_id.clone(),
+            });
+            self.send_state_event(current, stamp, limit, cancel).await?;
             self.deliver_message_outbox(&thread_id, stamp, limit, cancel)
                 .await?;
             self.deliver_thread_title(&thread_id, false, stamp, limit, cancel)
                 .await?;
             self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
+            self.deliver_live_thinking(&thread_id, stamp, limit, cancel)
                 .await?;
             self.active.insert(thread_id, subscription);
         }
@@ -204,6 +231,7 @@ impl ConversationDeliveryDriver {
         self.outboxes.remove(thread_id);
         self.titles.remove(thread_id);
         self.run_usage.remove(thread_id);
+        self.live_thinking.remove(thread_id);
     }
 
     /// Re-reads every active subscription once after a coalesced process-wide
@@ -236,6 +264,8 @@ impl ConversationDeliveryDriver {
             self.deliver_thread_title(&thread_id, true, stamp, limit, cancel)
                 .await?;
             self.deliver_run_usage(&thread_id, stamp, limit, cancel)
+                .await?;
+            self.deliver_live_thinking(&thread_id, stamp, limit, cancel)
                 .await?;
             self.active.insert(thread_id, subscription);
         }
@@ -286,6 +316,36 @@ impl ConversationDeliveryDriver {
         self.send_state_event(Event::RunUsage(usage.clone()), stamp, limit, cancel)
             .await?;
         self.run_usage.insert(thread_id.clone(), usage);
+        Ok(())
+    }
+
+    /// Pushes what a subscribed thread's live run is thinking when it
+    /// changed, and that it stopped once the run moved on. The text is read
+    /// from memory: thinking summaries are never stored, so a thread whose
+    /// run is not thinking pushes nothing on activation.
+    async fn deliver_live_thinking<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let current = self.context.live_thinking(thread_id);
+        if self.live_thinking.get(thread_id) == current.as_ref() {
+            return Ok(());
+        }
+        let event = Event::LiveThinking(LiveThinking {
+            thread_id: thread_id.clone(),
+            current: current.clone(),
+        });
+        self.send_state_event(event, stamp, limit, cancel).await?;
+        match current {
+            Some(block) => self.live_thinking.insert(thread_id.clone(), block),
+            None => self.live_thinking.remove(thread_id),
+        };
         Ok(())
     }
 
@@ -559,6 +619,127 @@ impl ConversationDeliveryDriver {
         }
     }
 
+    /// Replays a windowed subscriber's share of the thread's stored activity.
+    ///
+    /// The subscriber holds the turns from `floor` on. It receives their rows
+    /// except the work rows of settled turns, which stay on the Forge until
+    /// a section is opened, and then one count of what stayed behind. The
+    /// subscription's cursor ends at the newest stored row, so the ordinary
+    /// delivery that follows carries only what is committed from now on.
+    async fn deliver_windowed_history<F>(
+        &mut self,
+        subscription: ActivatedConversationSubscription,
+        floor: u64,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<ActivatedConversationSubscription, DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let thread_id: ThreadId = subscription.lease().thread_id().clone();
+        let repository = self.context.repository().clone();
+        let tail = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.observation_history_tail(&thread_id),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let scope = ObservationHistoryScope {
+            floor,
+            before: None,
+            tail,
+        };
+        let lease = subscription.lease().clone();
+        let cursor = loop {
+            let after = self
+                .context
+                .registrar()
+                .subscription_view(&thread_id)
+                .await
+                .map_or(0, |view| view.observation_cursor());
+            let page = run_with_deadline(
+                OperationKind::Receive,
+                limit,
+                cancel,
+                repository.read_scoped_observation_history(
+                    &thread_id,
+                    after,
+                    &scope,
+                    OBSERVATION_HISTORY_PAGE_LIMIT,
+                ),
+            )
+            .await
+            .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+            if page.is_empty() {
+                break after;
+            }
+            let mut batch = Vec::with_capacity(page.len());
+            for event in page {
+                let frame = stamp().map_err(|error| DeadlineError::Peer {
+                    operation: OperationKind::Send,
+                    error,
+                })?;
+                batch.push((frame, event));
+            }
+            let writer = self
+                .writer
+                .take()
+                .ok_or_else(|| delivery_failure(OperationKind::Send, DeliveryStageError::Writer))?;
+            let (writer, delivered) = run_with_deadline(
+                OperationKind::Send,
+                limit,
+                cancel,
+                writer.deliver_observation_batch(&lease, thread_id.clone(), batch),
+            )
+            .await
+            .map_err(map_writer_deadline)?;
+            self.writer = Some(writer);
+            if let ObservationBatchDelivery::Current { observation_cursor } = delivered {
+                break observation_cursor;
+            }
+        };
+        // The rows left out sit between the cursor and the tail. Moving the
+        // cursor past them is what keeps them on the Forge.
+        if tail > cursor {
+            self.context
+                .registrar()
+                .record_published_observation_batch(&lease, &thread_id, cursor, tail)
+                .await
+                .map_err(|_| delivery_failure(OperationKind::Send, DeliveryStageError::Replay))?;
+        }
+        let held_back = run_with_deadline(
+            OperationKind::Receive,
+            limit,
+            cancel,
+            repository.read_held_back_turn_work(&thread_id, &scope),
+        )
+        .await
+        .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+        let event = Event::HeldBackWork(HeldBackWork {
+            thread_id: thread_id.clone(),
+            turns: held_back,
+        });
+        self.send_state_event(event, stamp, limit, cancel).await?;
+        // The turns before the window are not loaded, but their questions
+        // are still listed so the reader can jump to one.
+        if floor > 0 {
+            let markers = run_with_deadline(
+                OperationKind::Receive,
+                limit,
+                cancel,
+                repository.read_earlier_turn_markers(&thread_id, floor),
+            )
+            .await
+            .map_err(|error| map_deadline(&error, DeliveryStageError::Replay))?;
+            let event = Event::EarlierTurnMarkers(EarlierTurnMarkers { thread_id, markers });
+            self.send_state_event(event, stamp, limit, cancel).await?;
+        }
+        Ok(subscription)
+    }
+
     /// Finishes the one writer and then clears all connection-local registry
     /// state. For peer/error cleanup the unfinished writer is dropped so its
     /// existing guard resets any open output instead of attempting a finish.
@@ -696,10 +877,18 @@ fn delivery_failure(
     }
 }
 
+/// Classifies a delivery-stage failure. The stage error is payload-free by
+/// design, so the underlying cause is logged here before it is dropped.
 fn map_deadline<T>(
     error: &DeadlineError<T>,
     delivery_error: DeliveryStageError,
-) -> DeadlineError<RequestStageError> {
+) -> DeadlineError<RequestStageError>
+where
+    T: std::error::Error + 'static,
+{
+    if let DeadlineError::Peer { operation, error } = error {
+        eprintln!("{delivery_error} ({operation}): {}", ErrorChain(error));
+    }
     match error {
         DeadlineError::Timeout { operation, limit } => DeadlineError::Timeout {
             operation: *operation,

@@ -19,29 +19,29 @@
 use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
+    rc::Rc,
     sync::Arc,
 };
 
-use artisan_assets::AssetId;
 use artisan_domain::{ImageAttachment, ImageAttachmentRef, ImageMimeType, ThreadId};
-use artisan_ui::{
-    asset_seam::asset_glyph,
-    theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode},
-};
-use gpui::ColorExt;
+use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::prelude::FluentBuilder as _;
 use gpui::prelude::{
     InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, StyledImage as _,
 };
 use gpui::{
-    Bounds, Context, ElementId, FocusHandle, Image, ImageFormat, ImageSource, KeyDownEvent,
-    ObjectFit, Pixels, Render, RenderImage, SvgRenderer, Task, Window, div, img, px,
+    AnyElement, Bounds, Context, ElementId, FocusHandle, Image, ImageFormat, ImageSource,
+    KeyDownEvent, ObjectFit, Pixels, Render, RenderImage, SharedString, SvgRenderer, Task, Window,
+    deferred, div, img, px,
 };
 use image::{DynamicImage, ImageDecoder, ImageFormat as EncodedImageFormat, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::native_image_preview::{
+    IMAGE_PREVIEW_DEFERRED_PRIORITY, ImagePreview, ImagePreviewSelectors, image_preview_overlay,
+};
 use crate::native_transport_service::ServiceFailure;
 
 /// The largest encoded source that this renderer will custody.
@@ -71,6 +71,9 @@ pub const NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR: &str =
 /// Stable selector for the full preview content.
 pub const NATIVE_MESSAGE_IMAGE_PREVIEW_CONTENT_SELECTOR: &str =
     "artisan-native-message-image-preview-content";
+/// Stable selector for the full preview image.
+pub const NATIVE_MESSAGE_IMAGE_PREVIEW_IMAGE_SELECTOR: &str =
+    "artisan-native-message-image-preview-image";
 /// Stable selector for the full preview close action.
 pub const NATIVE_MESSAGE_IMAGE_PREVIEW_CLOSE_SELECTOR: &str =
     "artisan-native-message-image-preview-close";
@@ -1004,135 +1007,63 @@ impl NativeMessageImages {
     ///
     /// The returned element is empty when no viewer is open, so the root may
     /// mount this entity continuously without an invisible hitbox covering
-    /// the conversation.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one GPUI overlay builder composes the backdrop, viewer chrome, and dismissal wiring"
-    )]
+    /// the conversation. An open viewer paints the shared
+    /// [`image_preview_overlay`] in the deferred layer at
+    /// [`IMAGE_PREVIEW_DEFERRED_PRIORITY`], so no deferred conversation
+    /// surface (the turn navigator, a menu) paints over the modal.
     pub fn render_preview(
         &mut self,
         theme: ArtisanTheme,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut root = div()
+    ) -> AnyElement {
+        let root = div()
             .id(ElementId::Name(NATIVE_MESSAGE_IMAGES_ROOT_SELECTOR.into()))
             .debug_selector(|| NATIVE_MESSAGE_IMAGES_ROOT_SELECTOR.to_owned());
         let Some(viewer) = self.viewer.as_ref() else {
-            return root;
+            return root.into_any_element();
         };
 
-        let reference = viewer.fence.reference.clone();
-        let preview = viewer.preview.clone().or_else(|| viewer.thumbnail.clone());
-        let full_ready = viewer.preview.is_some();
-        let preview_error = viewer.error;
-        let name = reference.name.clone();
-        let dismiss_entity = cx.entity();
-        let close_entity = cx.entity();
-        let close_key_entity = cx.entity();
-
-        let dismiss = div()
-            .id(ElementId::Name(
-                NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR.into(),
-            ))
-            .absolute()
-            .left(Pixels::ZERO)
-            .top(Pixels::ZERO)
-            .right(Pixels::ZERO)
-            .bottom(Pixels::ZERO)
-            .debug_selector(|| NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR.to_owned())
-            .on_click(move |_, _, app| {
-                let () = dismiss_entity.update(app, |images, images_cx| {
-                    let _ = images.close_preview(images_cx);
-                });
-            });
-
-        let mut content = div()
-            .id(ElementId::Name(
-                NATIVE_MESSAGE_IMAGE_PREVIEW_CONTENT_SELECTOR.into(),
-            ))
-            .relative()
-            .max_w(px(960.0))
-            .max_h(px(720.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(8.0))
-            .on_click(|_, _, app| app.stop_propagation());
-
-        if let Some(preview) = preview {
-            content = content.child(
-                img(ImageSource::Render(preview))
-                    .max_w(px(960.0))
-                    .max_h(px(720.0))
-                    .object_fit(ObjectFit::Contain),
-            );
-        }
-        content = content.child(
-            div()
-                .text_size(theme.typography.label_text)
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(if preview_error {
-                    "Preview unavailable".to_owned()
-                } else if full_ready {
-                    name
-                } else {
-                    "Preparing full preview…".to_owned()
-                }),
-        );
-
-        let close = div()
-            .id(ElementId::Name(
-                NATIVE_MESSAGE_IMAGE_PREVIEW_CLOSE_SELECTOR.into(),
-            ))
-            .absolute()
-            .top(px(12.0))
-            .right(px(12.0))
-            .size(px(32.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(theme.colors.card.to_paint().opacity(0.94))
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .cursor_pointer()
-            .tab_index(0)
-            .role(gpui::Role::Button)
-            .aria_label("Close image preview")
-            .debug_selector(|| NATIVE_MESSAGE_IMAGE_PREVIEW_CLOSE_SELECTOR.to_owned())
-            .on_click(move |_, _, app| {
-                let () = close_entity.update(app, |images, images_cx| {
-                    let _ = images.close_preview(images_cx);
-                });
-            })
-            .on_key_down(move |event, _, app| {
-                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                    let () = close_key_entity.update(app, |images, images_cx| {
+        let status = if viewer.error {
+            Some(SharedString::from("Preview unavailable"))
+        } else if viewer.preview.is_some() {
+            None
+        } else {
+            Some(SharedString::from("Preparing full preview…"))
+        };
+        let images = cx.entity();
+        let overlay = image_preview_overlay(
+            ImagePreview {
+                selectors: ImagePreviewSelectors {
+                    backdrop: NATIVE_MESSAGE_IMAGE_PREVIEW_BACKDROP_SELECTOR,
+                    content: NATIVE_MESSAGE_IMAGE_PREVIEW_CONTENT_SELECTOR,
+                    image: NATIVE_MESSAGE_IMAGE_PREVIEW_IMAGE_SELECTOR,
+                    close: NATIVE_MESSAGE_IMAGE_PREVIEW_CLOSE_SELECTOR,
+                },
+                image: viewer.preview.clone().or_else(|| viewer.thumbnail.clone()),
+                status,
+                on_close: Rc::new(move |_, app| {
+                    let () = images.update(app, |images, images_cx| {
                         let _ = images.close_preview(images_cx);
                     });
-                }
-            })
-            .child(asset_glyph(AssetId::TABLER_X).size(px(16.0)));
-
-        root = root
-            .absolute()
-            .left(Pixels::ZERO)
-            .top(Pixels::ZERO)
-            .right(Pixels::ZERO)
-            .bottom(Pixels::ZERO)
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.colors.background.to_paint().opacity(0.97))
-            .occlude()
-            .track_focus(&self.focus_handle)
-            .tab_group()
-            .on_key_down(cx.listener(Self::handle_preview_key_down))
-            .child(dismiss)
-            .child(content)
-            .child(close);
-        root
+                }),
+            },
+            theme,
+            window.viewport_size(),
+        );
+        deferred(
+            root.absolute()
+                .left(Pixels::ZERO)
+                .top(Pixels::ZERO)
+                .right(Pixels::ZERO)
+                .bottom(Pixels::ZERO)
+                .track_focus(&self.focus_handle)
+                .tab_group()
+                .on_key_down(cx.listener(Self::handle_preview_key_down))
+                .child(overlay),
+        )
+        .with_priority(IMAGE_PREVIEW_DEFERRED_PRIORITY)
+        .into_any_element()
     }
 
     fn request_visible(&mut self, reference: ImageAttachmentRef, cx: &mut Context<Self>) {
@@ -1711,5 +1642,160 @@ mod tests {
             Err(ImageStateError::GenerationExhausted)
         );
         assert_eq!(state.generation, u64::MAX);
+    }
+
+    struct PreviewHost {
+        images: gpui::Entity<NativeMessageImages>,
+    }
+
+    impl Render for PreviewHost {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            // Mirrors the application root: a relative full-window block
+            // whose shell fills it, followed by the continuously mounted
+            // image overlay.
+            div()
+                .size_full()
+                .relative()
+                .child(div().size_full())
+                .child(self.images.clone())
+        }
+    }
+
+    /// A decoded full preview far larger than the viewer box.
+    fn large_preview() -> Arc<RenderImage> {
+        let image = DynamicImage::new_rgba8(1800, 1400);
+        let mut encoded = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
+            .expect("test image encodes");
+        render_full_preview(&encoded, ImageMimeType::Png).expect("test preview decodes")
+    }
+
+    #[gpui::test]
+    fn open_preview_covers_the_window_and_centers_its_content(cx: &mut gpui::TestAppContext) {
+        let bytes = [1, 2, 3];
+        let exact = reference("thread-a", "message-a", 0, &bytes);
+        let (host, cx) = cx.add_window_view(|_, cx| PreviewHost {
+            images: gpui::AppContext::new(cx, NativeMessageImages::new),
+        });
+        cx.update(|_, app| {
+            host.read(app)
+                .images
+                .clone()
+                .update(app, |images, images_cx| {
+                    images.viewer = Some(PreviewState {
+                        fence: PreviewFence {
+                            reference: exact.clone(),
+                            generation: 1,
+                            scope_generation: 1,
+                        },
+                        thumbnail: None,
+                        preview: Some(large_preview()),
+                        error: false,
+                        task: None,
+                    });
+                    images_cx.notify();
+                });
+        });
+        cx.run_until_parked();
+
+        for viewport in [size(px(1600.0), px(1000.0)), size(px(872.0), px(607.0))] {
+            cx.simulate_resize(viewport);
+            cx.run_until_parked();
+            assert_preview_centered_within_window(cx);
+        }
+    }
+
+    #[gpui::test]
+    fn a_press_anywhere_but_the_image_dismisses_the_preview(cx: &mut gpui::TestAppContext) {
+        let exact = reference("thread-a", "message-a", 0, &[1, 2, 3]);
+        let (host, cx) = cx.add_window_view(|_, cx| PreviewHost {
+            images: gpui::AppContext::new(cx, NativeMessageImages::new),
+        });
+        let open = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| {
+                host.read(app)
+                    .images
+                    .clone()
+                    .update(app, |images, images_cx| {
+                        images.viewer = Some(PreviewState {
+                            fence: PreviewFence {
+                                reference: exact.clone(),
+                                generation: 1,
+                                scope_generation: 1,
+                            },
+                            thumbnail: None,
+                            preview: Some(large_preview()),
+                            error: false,
+                            task: None,
+                        });
+                        images_cx.notify();
+                    });
+            });
+            cx.run_until_parked();
+        };
+        let is_open = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, app| host.read(app).images.read(app).viewer.is_some())
+        };
+        cx.simulate_resize(size(px(1600.0), px(1000.0)));
+        open(cx);
+        let image = cx
+            .debug_bounds(NATIVE_MESSAGE_IMAGE_PREVIEW_IMAGE_SELECTOR)
+            .expect("the preview image paints");
+
+        // The picture itself holds the preview open.
+        cx.simulate_click(image.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(is_open(cx), "a press on the image keeps the preview");
+
+        // Just outside the picture, and far from it: both dismiss.
+        for outside in [
+            point(image.left() - px(4.0), image.center().y),
+            point(image.center().x, image.bottom() + px(4.0)),
+            point(px(20.0), px(980.0)),
+        ] {
+            open(cx);
+            cx.simulate_click(outside, gpui::Modifiers::none());
+            cx.run_until_parked();
+            assert!(!is_open(cx), "a press at {outside:?} dismisses the preview");
+        }
+    }
+
+    fn assert_preview_centered_within_window(cx: &mut gpui::VisualTestContext) {
+        let window = cx.update(|window, _| window.viewport_size());
+        let root = cx
+            .debug_bounds(NATIVE_MESSAGE_IMAGES_ROOT_SELECTOR)
+            .expect("the overlay root paints");
+        assert_eq!(root.origin, point(px(0.0), px(0.0)));
+        assert_eq!(root.size, window);
+        let content = cx
+            .debug_bounds(NATIVE_MESSAGE_IMAGE_PREVIEW_CONTENT_SELECTOR)
+            .expect("the preview content paints");
+        let image = cx
+            .debug_bounds(NATIVE_MESSAGE_IMAGE_PREVIEW_IMAGE_SELECTOR)
+            .expect("the preview image paints");
+        for inner in [content, image] {
+            assert!(
+                inner.origin.x >= px(0.0) && inner.origin.y >= px(0.0),
+                "{inner:?}"
+            );
+            assert!(
+                inner.bottom_right().x <= window.width,
+                "{inner:?} in {window:?}"
+            );
+            assert!(
+                inner.bottom_right().y <= window.height,
+                "{inner:?} in {window:?}"
+            );
+        }
+        let center = content.center();
+        assert!(
+            (center.x - window.width / 2.0).abs() <= px(1.0),
+            "{content:?} in {window:?}"
+        );
+        assert!(
+            (center.y - window.height / 2.0).abs() <= px(1.0),
+            "{content:?} in {window:?}"
+        );
     }
 }

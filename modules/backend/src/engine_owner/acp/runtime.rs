@@ -400,6 +400,21 @@ impl<R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send> AcpTransport<R, 
         Ok(())
     }
 
+    /// Answers one agent-initiated request with a JSON-RPC result.
+    pub(crate) async fn respond(&mut self, id: &AcpId, result: Value) -> Result<(), AcpError> {
+        let id = match id {
+            AcpId::Number(number) => Value::from(*number),
+            AcpId::Text(text) => Value::from(text.as_str()),
+        };
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        })
+        .to_string();
+        self.write_line(&line).await
+    }
+
     pub(super) async fn send_request(
         &mut self,
         method: &str,

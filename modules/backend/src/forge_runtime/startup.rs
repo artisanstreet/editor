@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use artisan_database::{SqliteConfig, StartupReconciliationCandidate};
-use artisan_domain::PatchId;
+use artisan_domain::{ErrorChain, PatchId};
 use artisan_transport::{CancelHandle, PinnedIdentity, TransportError, server_config};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -440,7 +440,10 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     if let Err(error) = reconcile_startup(&app).await {
         // The dispatcher retries recovery and fences unresolved threads.
         // A damaged conversation must not prevent the host from serving others.
-        eprintln!("startup run recovery failed: {error:?}");
+        eprintln!(
+            "startup run recovery failed (runs left live by the previous Forge stay unsettled until the dispatcher's sweep succeeds): {}",
+            ErrorChain(&error)
+        );
     }
 
     let Ok(forge_executable) = std::env::current_exe() else {
@@ -483,7 +486,8 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     .with_registered_engine_profiles_reader(
         crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
     )
-    .with_conversation_commit_notifier(native_run.conversation_commit_notifier());
+    .with_conversation_commit_notifier(native_run.conversation_commit_notifier())
+    .with_live_thinking_board(native_run.live_thinking_board());
     Box::pin(run_with_handler(
         ForgeRunContext {
             app,

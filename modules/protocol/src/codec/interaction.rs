@@ -7,6 +7,8 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::{AnswerQuestionsOutcome, AnswerQuestionsReceipt};
+use artisan_domain::{AnswerQuestions, QUESTIONNAIRE_MAX_QUESTIONS, QuestionAnswer};
 
 pub(crate) fn decode_lifecycle_request(
     value: artisan_capnp::lifecycle_request::Reader<'_>,
@@ -669,4 +671,150 @@ pub(crate) fn decode_directory_picked(
         directory_pick_outcome::Which::Cancelled(()) => DirectoryPickOutcome::Cancelled,
     };
     Ok(ResponsePayload::DirectoryPicked(outcome))
+}
+
+pub(crate) fn encode_answer_questions(
+    mut builder: artisan_capnp::answer_questions_request::Builder<'_>,
+    command: &AnswerQuestions,
+) -> Result<(), ProtocolEncodeError> {
+    builder.set_thread_id(command.thread_id().as_str());
+    builder.set_group_id(command.group_id().as_str());
+    let mut answers = builder.reborrow().init_answers(list_length(
+        "request.answerQuestions.answers",
+        command.answers().len(),
+    )?);
+    for (index, answer) in command.answers().iter().enumerate() {
+        let mut encoded = answers
+            .reborrow()
+            .get(list_index("request.answerQuestions.answers", index)?);
+        encoded.set_question_id(answer.question_id.as_str());
+        let mut list = encoded.init_answers(list_length(
+            "request.answerQuestions.answers.answers",
+            answer.answers.len(),
+        )?);
+        for (position, text) in answer.answers.iter().enumerate() {
+            list.set(
+                list_index("request.answerQuestions.answers.answers", position)?,
+                text.as_str(),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_answer_questions(
+    command: artisan_capnp::answer_questions_request::Reader<'_>,
+    request_id: RequestId,
+) -> Result<ClientRequest, ProtocolDecodeError> {
+    let thread_id = parse_thread_id(
+        read_text(command.get_thread_id(), "request.answerQuestions.threadId")?,
+        "request.answerQuestions.threadId",
+    )?;
+    let group_id = parse_observation_id(
+        read_text(command.get_group_id(), "request.answerQuestions.groupId")?,
+        "request.answerQuestions.groupId",
+    )?;
+    let encoded = command.get_answers()?;
+    let count = encoded.len() as usize;
+    if count > QUESTIONNAIRE_MAX_QUESTIONS {
+        return Err(ProtocolDecodeError::RunInteraction {
+            source: RunInteractionError::TooManyQuestions {
+                count,
+                maximum: QUESTIONNAIRE_MAX_QUESTIONS,
+            },
+        });
+    }
+    let mut answers = Vec::with_capacity(count);
+    for answer in encoded {
+        answers.push(QuestionAnswer {
+            question_id: parse_observation_id(
+                read_text(
+                    answer.get_question_id(),
+                    "request.answerQuestions.answers.questionId",
+                )?,
+                "request.answerQuestions.answers.questionId",
+            )?,
+            answers: decode_answer_list(
+                answer.get_answers()?,
+                "request.answerQuestions.answers.answers",
+            )?,
+        });
+    }
+    AnswerQuestions::new(request_id, thread_id, group_id, answers)
+        .map(Command::AnswerQuestions)
+        .map(ClientRequest::Command)
+        .map_err(|source| ProtocolDecodeError::RunInteraction { source })
+}
+
+const fn encode_answer_questions_outcome(
+    value: AnswerQuestionsOutcome,
+) -> artisan_capnp::AnswerQuestionsOutcome {
+    match value {
+        AnswerQuestionsOutcome::Applied => artisan_capnp::AnswerQuestionsOutcome::Applied,
+        AnswerQuestionsOutcome::AlreadyResolved => {
+            artisan_capnp::AnswerQuestionsOutcome::AlreadyResolved
+        }
+        AnswerQuestionsOutcome::UnknownTarget => {
+            artisan_capnp::AnswerQuestionsOutcome::UnknownTarget
+        }
+    }
+}
+
+const fn decode_answer_questions_outcome(
+    value: artisan_capnp::AnswerQuestionsOutcome,
+) -> AnswerQuestionsOutcome {
+    match value {
+        artisan_capnp::AnswerQuestionsOutcome::Applied => AnswerQuestionsOutcome::Applied,
+        artisan_capnp::AnswerQuestionsOutcome::AlreadyResolved => {
+            AnswerQuestionsOutcome::AlreadyResolved
+        }
+        artisan_capnp::AnswerQuestionsOutcome::UnknownTarget => {
+            AnswerQuestionsOutcome::UnknownTarget
+        }
+    }
+}
+
+pub(crate) fn encode_answer_questions_receipt(
+    mut receipt: artisan_capnp::answer_questions_receipt::Builder<'_>,
+    value: &AnswerQuestionsReceipt,
+) {
+    receipt.set_request_id(value.request_id.as_str());
+    receipt.set_thread_id(value.thread_id.as_str());
+    receipt.set_group_id(value.group_id.as_str());
+    receipt.set_outcome(encode_answer_questions_outcome(value.outcome));
+}
+
+pub(crate) fn decode_answer_questions_receipt(
+    receipt: artisan_capnp::answer_questions_receipt::Reader<'_>,
+    request_id: &RequestId,
+) -> Result<ResponsePayload, ProtocolDecodeError> {
+    let nested_request_id = parse_request_id(
+        read_text(
+            receipt.get_request_id(),
+            "response.questionsAnswered.requestId",
+        )?,
+        "response.questionsAnswered.requestId",
+    )?;
+    if &nested_request_id != request_id {
+        return Err(ProtocolDecodeError::CorrelationMismatch {
+            field: "response.questionsAnswered.requestId",
+        });
+    }
+    let thread_id = parse_thread_id(
+        read_text(
+            receipt.get_thread_id(),
+            "response.questionsAnswered.threadId",
+        )?,
+        "response.questionsAnswered.threadId",
+    )?;
+    let group_id = parse_observation_id(
+        read_text(receipt.get_group_id(), "response.questionsAnswered.groupId")?,
+        "response.questionsAnswered.groupId",
+    )?;
+    Ok(ResponsePayload::QuestionsAnswered(AnswerQuestionsReceipt {
+        request_id: nested_request_id,
+        thread_id,
+        group_id,
+        outcome: decode_answer_questions_outcome(receipt.get_outcome()?),
+    }))
 }

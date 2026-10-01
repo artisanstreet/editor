@@ -15,7 +15,7 @@ use artisan_database::{
     AssistantChange, CheckpointUpdate, CommitRunBatch, CommitRunBatchOutcome, Repository,
     RepositoryError, RunBatchScope, RunObservationError,
 };
-use artisan_domain::{PatchId, UnixMillis};
+use artisan_domain::{ErrorChain, PatchId, UnixMillis};
 use sea_orm::DbErr;
 
 use crate::conversation_commit_notifier::ConversationCommitNotifier;
@@ -23,6 +23,7 @@ use crate::sqlite_write_retry_policy::{
     SqliteWriteErrorObservation, SqliteWriteRetryDecision, SqliteWriteRetryPolicy,
 };
 
+use super::diagnostics::RunLabel;
 use super::dispatch_policy::notify_after_commit;
 
 /// One batch commit request captured from the live turn state.
@@ -170,10 +171,14 @@ pub(crate) async fn commit_batch_with_retry(
                 source: error,
             }
         };
+        // The whole chain: the repository refusal names the fence or the
+        // SQLite failure that rejected the batch.
         eprintln!(
-            "native run dispatch batch commit failed after {} attempt(s) (retryable: {}): {failure}",
+            "native run batch commit failed ({}, batch {batch_sequence}, {} attempt(s), retryable: {}): {}",
+            RunLabel(scope),
             failure.attempts(),
-            failure.retryable()
+            failure.retryable(),
+            ErrorChain(&failure)
         );
         return Err(failure);
     }

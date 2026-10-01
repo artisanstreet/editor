@@ -41,30 +41,32 @@ use artisan_domain::{
     FiniteMillis, FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
     IdentifierError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
     ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
-    ListAttachedProjects, ListDirectories, ListProjectThreads, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody, MessageBodyError, MessageId, ModelFavoriteId,
-    ModelFavoriteIdError, ModelFavoritesRevision, ModelFavoritesRevisionError,
-    ModelFavoritesSnapshotError, MultimodalUserMessageItem, NetworkAccess, OpenCode2Selection,
-    PROJECT_LISTING_MAX_PROJECTS, PatchBatch, PatchBatchError, PatchId, PatchSequence,
-    PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing, ProjectListingError,
-    ProjectSummary, Query, QueryTurnCount, QueryTurnCountError, QueueFirstMessage, QueueMessage,
-    QueueMessagePayload, QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage,
-    ReadActiveRun, ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition,
-    RequestId, RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
+    ListAttachedProjects, ListDirectories, ListProjectThreads, LiveThinking, LiveThinkingBlock,
+    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody,
+    MessageBodyError, MessageId, ModelFavoriteId, ModelFavoriteIdError, ModelFavoritesRevision,
+    ModelFavoritesRevisionError, ModelFavoritesSnapshotError, MultimodalUserMessageItem,
+    NetworkAccess, ObservationHistoryCurrent, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS,
+    PatchBatch, PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached,
+    ProjectId, ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
+    QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
+    QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage, ReadActiveRun,
+    ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
+    RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
-    THREAD_LISTING_MAX_THREADS, ThreadCreated, ThreadId, ThreadListing, ThreadListingError,
-    ThreadRetitled, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId, TurnOrdinal, UnixMillis,
-    UserMessageItem, WebSearchAccess,
+    THREAD_LISTING_MAX_THREADS, ThreadAttention, ThreadCreated, ThreadId, ThreadListing,
+    ThreadListingError, ThreadRetitled, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId,
+    TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
 
 use crate::artisan_capnp::{
-    self, conversation_item, conversation_patch, conversation_query_request,
-    conversation_subscribe_request, conversation_subscription_started, directory_listing,
-    directory_pick_outcome, engine_config_precondition, engine_run_config, engine_selection_v2,
-    engine_usage_report, engine_usage_snapshot, engine_usage_window, envelope as capnp_envelope,
-    event, lifecycle_request, lifecycle_response, list_directories_request, protocol_error,
+    self, conversation_history_page, conversation_history_request, conversation_item,
+    conversation_patch, conversation_query_request, conversation_subscribe_request,
+    conversation_subscription_started, directory_listing, directory_pick_outcome,
+    engine_config_precondition, engine_run_config, engine_selection_v2, engine_usage_report,
+    engine_usage_snapshot, engine_usage_window, envelope as capnp_envelope, event,
+    lifecycle_request, lifecycle_response, list_directories_request, live_thinking, protocol_error,
     query_range, read_account_usage_request, request, response, set_thread_engine_config_request,
 };
 use crate::repository::{
@@ -95,6 +97,7 @@ mod engine_usage;
 mod envelope;
 mod error;
 mod forge_decisions;
+mod history;
 mod interaction;
 mod message_submission;
 mod observation;
@@ -112,6 +115,7 @@ pub(crate) use engine_installs::*;
 pub(crate) use engine_usage::*;
 pub(crate) use envelope::*;
 pub(crate) use forge_decisions::*;
+pub(crate) use history::*;
 pub(crate) use interaction::*;
 pub(crate) use message_submission::*;
 pub(crate) use observation::*;

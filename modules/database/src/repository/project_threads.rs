@@ -317,7 +317,7 @@ impl Repository {
 
     /// Fills the listed projections of stored thread rows: whether assistant
     /// text started, the first message standing in for a placeholder title,
-    /// and the latest message time.
+    /// the latest message time, and what the thread wants from its reader.
     pub(super) async fn project_listed_threads(
         &self,
         summaries: &mut [ThreadSummary],
@@ -398,7 +398,23 @@ impl Repository {
                     .map(UnixMillis::from_millis);
             }
         }
-        Ok(())
+        self.project_thread_attention(summaries).await
+    }
+
+    /// Reports whether a thread still carries its automatic placeholder title,
+    /// so a harness-generated title would replace it. `false` for an unknown
+    /// thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns a preserved database failure.
+    pub async fn thread_awaits_generated_title(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<bool, RepositoryError> {
+        Ok(thread_row_by_id(&self.database, thread_id)
+            .await?
+            .is_some_and(|row| matches!(row.title.as_str(), "New thread" | "New task")))
     }
 
     /// Reads one thread's display title exactly as [`Self::list_threads`]
@@ -469,6 +485,7 @@ impl CreateThreadInput {
         ThreadSummary {
             has_started_response: false,
             has_active_work: false,
+            attention: artisan_domain::ThreadAttention::None,
             last_message_at: None,
             thread_id: self.thread_id.clone(),
             project_id: self.project_id.clone(),
@@ -689,6 +706,7 @@ pub(super) fn thread_summary(row: entities::Thread) -> Result<ThreadSummary, Rep
     Ok(ThreadSummary {
         has_started_response: false,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse(row.thread_id)
             .map_err(|error| corrupt_data("threads", "thread_id", error))?,

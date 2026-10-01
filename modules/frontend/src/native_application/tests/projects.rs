@@ -297,6 +297,7 @@ fn switching_to_an_empty_project_keeps_an_inflight_payload_in_its_source_thread(
                 scope: artisan_domain::ComposerDraftScope::Thread(source.clone()),
                 request_id: request("project-switch-send"),
                 token,
+                selection: None,
             });
 
             application.choose_project(beta.clone(), cx);
