@@ -199,6 +199,19 @@ fn run_claude_child(mode: &str) -> ! {
             )
             .expect("happy should write");
         }
+        "claude-zone" => {
+            // Like the real CLI, print each reset in the process timezone.
+            let zone = env::var("TZ").unwrap_or_else(|_| "Europe/Oslo".to_owned());
+            writeln!(
+                stdout,
+                "{{\
+                    \"result\": \"Current session: 11% used · resets Sep 29, 10pm ({zone})\\n\
+                    Current week (all models): 77% used · resets Sep 30, 10pm ({zone})\\n\
+                    Current week (Fable): 43% used · resets Sep 30, 10pm ({zone})\"\
+                }}"
+            )
+            .expect("zone should write");
+        }
         "claude-garbage" => {
             writeln!(stdout, "not json at all").expect("garbage should write");
         }
@@ -464,6 +477,31 @@ fn claude_happy_path_reports_session_and_weekly_windows() {
     assert_eq!(usage.windows[0].percent_used(), 42.0);
     assert_eq!(usage.windows[1].id(), "seven_day");
     assert_eq!(usage.windows[1].percent_used(), 17.0);
+}
+
+/// The CLI prints resets in the process timezone and only UTC resolves to an
+/// instant, so the reader runs the child in UTC: every window then carries
+/// its reset, which is what the usage menu's "resets in" sentence needs.
+#[test]
+fn claude_resets_resolve_because_the_child_runs_in_utc() {
+    let usage = artisan_native_engine::read_claude_usage(&claude_config(
+        "claude-zone",
+        Duration::from_secs(10),
+    ))
+    .expect("fixture claude should answer");
+    let resets = usage
+        .windows
+        .iter()
+        .map(|window| (window.id(), window.resets_at().map(|at| &at[4..])))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resets,
+        vec![
+            ("five_hour", Some("-09-29T22:00:00Z")),
+            ("seven_day", Some("-09-30T22:00:00Z")),
+            ("seven_day:fable", Some("-09-30T22:00:00Z")),
+        ]
+    );
 }
 
 #[test]

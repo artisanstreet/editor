@@ -298,7 +298,11 @@ async fn await_settlement(database: &sea_orm::DatabaseConnection) {
                 .await
                 .expect("run should be readable")
                 .expect("run should exist");
-            if run.terminal_at_ms.is_some() {
+            // Process shutdown settles as interrupted, which intentionally has no
+            // terminal timestamp so its provider session can still be recovered.
+            if run.terminal_at_ms.is_some()
+                || run.lifecycle == artisan_database::entities::AssistantRunLifecycle::Interrupted
+            {
                 return;
             }
             tokio::task::yield_now().await;
@@ -475,6 +479,17 @@ async fn hold_turn_answers_deny_then_allow_and_settles_clean() {
             .await
             .expect("instants should read")
             .is_empty()
+    );
+
+    let live = artisan_database::entities::assistant_run::Entity::find_by_id(RUN_ID)
+        .one(&database)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        live.lifecycle,
+        artisan_database::entities::AssistantRunLifecycle::Running,
+        "both decisions must leave the run live until explicit shutdown"
     );
 
     // Settle wipes pending rows while receipts survive; the run settled.

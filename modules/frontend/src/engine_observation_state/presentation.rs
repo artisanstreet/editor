@@ -17,6 +17,7 @@ pub struct ReasoningRow {
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl ReasoningRow {
@@ -71,6 +72,13 @@ impl ReasoningRow {
         self.first_committed_at
     }
 
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
+    }
+
     /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
@@ -95,6 +103,7 @@ pub struct ToolRow {
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl ToolRow {
@@ -149,6 +158,13 @@ impl ToolRow {
         self.first_committed_at
     }
 
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
+    }
+
     /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
@@ -175,6 +191,7 @@ pub struct TerminalRow {
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl TerminalRow {
@@ -241,6 +258,13 @@ impl TerminalRow {
         self.first_committed_at
     }
 
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
+    }
+
     /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
@@ -268,6 +292,7 @@ pub struct ApprovalRow {
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl ApprovalRow {
@@ -326,6 +351,13 @@ impl ApprovalRow {
     #[must_use]
     pub fn first_committed_at(&self) -> Option<UnixMillis> {
         self.first_committed_at
+    }
+
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
     }
 
     /// Returns the latest durable commit time, when delivered.
@@ -399,6 +431,16 @@ impl QuestionOptionView {
     }
 }
 
+/// One open questionnaire: the unanswered questions one provider request
+/// asked together, in the order they were asked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpenQuestionnaire {
+    /// Questionnaire identity the answer names.
+    pub group_id: String,
+    /// Its open questions, in order.
+    pub questions: Vec<QuestionRow>,
+}
+
 /// One question request with its eventual answers, keyed by question id.
 ///
 /// Like approvals, the row renders with its provider `question_id` so the
@@ -406,6 +448,7 @@ impl QuestionOptionView {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuestionRow {
     pub(super) question_id: String,
+    pub(super) group_id: String,
     pub(super) text: String,
     pub(super) header: Option<String>,
     pub(super) multi_select: bool,
@@ -415,6 +458,7 @@ pub struct QuestionRow {
     pub(super) sequence: u64,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl QuestionRow {
@@ -422,6 +466,12 @@ impl QuestionRow {
     #[must_use]
     pub fn question_id(&self) -> &str {
         &self.question_id
+    }
+
+    /// Returns the questionnaire this question was asked in.
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
     }
 
     /// Returns the question itself.
@@ -487,6 +537,13 @@ impl QuestionRow {
         self.first_committed_at
     }
 
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
+    }
+
     /// Returns the latest durable commit time, when delivered.
     #[must_use]
     pub fn committed_at(&self) -> Option<UnixMillis> {
@@ -514,6 +571,7 @@ pub struct TimelineRow {
     pub(super) summary: String,
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
+    pub(super) first_delivery_sequence: Option<u64>,
 }
 
 impl TimelineRow {
@@ -566,6 +624,13 @@ impl TimelineRow {
     #[must_use]
     pub fn first_committed_at(&self) -> Option<UnixMillis> {
         self.first_committed_at
+    }
+
+    /// Delivery sequence of the first event for this item: a position in
+    /// the thread that never changes as later events or older rows arrive.
+    #[must_use]
+    pub fn first_delivery_sequence(&self) -> Option<u64> {
+        self.first_delivery_sequence
     }
 
     /// Returns the latest durable commit time, when delivered.

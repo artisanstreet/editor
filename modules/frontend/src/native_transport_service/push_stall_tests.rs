@@ -368,6 +368,92 @@ fn a_request_sent_during_a_long_push_is_answered_without_a_send_stall() {
 }
 
 #[test]
+fn a_request_is_answered_while_a_parked_delivery_holds_the_pushes_behind_it() {
+    let (certificate, key) = identity();
+    let (address, outcome, forge) = start_forge(certificate.clone(), key);
+    let (event_tx, event_rx) = sync_channel::<NativeTransportEvent>(PUSHED_BATCHES as usize);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("editor runtime");
+    runtime.block_on(async {
+        let mut service = connected_runtime(address, certificate, event_tx).await;
+        // A fresh subscribe whose response has not been read: the first
+        // pushed batch has no baseline and parks, and every push behind it
+        // must wait its turn.
+        service.custody.on_subscribe(thread(), None);
+        let mut frames = FrameFactory::new();
+        for request in ["first", "second"] {
+            let answered = tokio::time::timeout(
+                WATCHDOG,
+                service.request(
+                    &mut frames,
+                    super::registered_profiles_request(),
+                    super::ExpectedResponse::RegisteredProfiles,
+                ),
+            )
+            .await;
+            match answered {
+                Ok(Err(failure)) if failure.peer.is_some() => {}
+                Ok(Err(failure)) => panic!("the {request} request failed: {:?}", failure.failure),
+                Ok(Ok(_)) => panic!("the {request} request got an unscripted answer"),
+                Err(_) => panic!("the {request} request was not answered"),
+            }
+        }
+        // The second answer settles the exchange; pushes still in flight
+        // wait in the delivery channel behind the held ones.
+        let held = service.deliveries.parked.len();
+        assert!(
+            held > 1,
+            "pushes were read and held behind the parked batch"
+        );
+        assert!(
+            event_rx.try_recv().is_err(),
+            "nothing overtakes the parked batch"
+        );
+
+        // The subscription starts at the first batch's cursor: the held
+        // pushes continue it and forward in their pushed order.
+        service
+            .custody
+            .on_subscribe(thread(), Some(ConversationCursor::new(0)));
+        assert!(
+            service
+                .deliveries
+                .forward_parked_if_ready(&mut service.custody)
+        );
+        assert!(service.deliveries.parked.is_empty());
+        let receiver = service.deliveries.receiver.as_mut().expect("receiver");
+        for index in 0..PUSHED_BATCHES {
+            let batch = if index < u64::try_from(held).expect("count") {
+                match event_rx.try_recv() {
+                    Ok(NativeTransportEvent::PatchBatch(batch)) => batch,
+                    other => panic!("held batch {index} forwards: {other:?}"),
+                }
+            } else {
+                match tokio::time::timeout(WATCHDOG, receiver.recv()).await {
+                    Ok(Some(PrivateDelivery::Batch(batch))) => batch,
+                    _ => panic!("batch {index} follows in the delivery channel"),
+                }
+            };
+            assert_eq!(
+                batch.from_cursor(),
+                ConversationCursor::new(index * PATCHES_PER_BATCH),
+                "batch {index} keeps its pushed order"
+            );
+        }
+        assert!(service.cleanup().await.is_ok(), "clean teardown");
+    });
+    let forge_outcome = outcome.recv_timeout(WATCHDOG).expect("forge outcome");
+    forge.join().expect("forge thread");
+    assert_eq!(
+        forge_outcome,
+        ForgeOutcome::Served,
+        "the Forge's pushes settle although a delivery is parked"
+    );
+}
+
+#[test]
 fn cancelling_the_delivery_task_ends_it_even_when_its_channel_is_full() {
     let (certificate, key) = identity();
     let (address, outcome, forge) = start_forge(certificate.clone(), key);

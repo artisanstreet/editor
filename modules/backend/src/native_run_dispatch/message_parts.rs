@@ -1,6 +1,7 @@
 //! Durable message identities survive provider part switches and corrections.
 
 use super::assistant_commit::flush_pending_deltas;
+use super::diagnostics::StepError;
 use super::dispatch_support::{at_or_after, mint_patch_id};
 use super::turn::{TurnConsumptionContext, TurnConsumptionState, mark_interrupted};
 use super::{CommitBatchRequest, commit_batch_with_retry};
@@ -54,6 +55,38 @@ pub(super) async fn select_part(
     true
 }
 
+/// Retires the open assistant item when a steer lands before it carried text.
+///
+/// Observation commits open the item with an empty body ahead of the first
+/// text, so a steer projected meanwhile takes a later ordinal than the item
+/// the acknowledging prose would then fill: the reply would sort above the
+/// message it answers. Parking the still-empty item makes the next text (or
+/// observation) open a fresh one after the steer; the parked item is sealed
+/// with the other earlier messages. An item that already carries text, or
+/// belongs to a provider part, keeps its identity.
+pub(super) fn retire_unwritten_item(
+    state: &mut TurnConsumptionState<'_>,
+    steered: &artisan_domain::MessageId,
+) {
+    if state.active_part.is_some() || !state.assistant_body.is_empty() {
+        return;
+    }
+    let Some(item) = state.assistant_item.take() else {
+        return;
+    };
+    state.parked_parts.insert(
+        format!("unwritten-before-steer:{}", steered.as_str()),
+        MessageCursor {
+            item: Some(item),
+            revision: state.assistant_revision,
+            body: String::new(),
+            phase: state.assistant_phase,
+        },
+    );
+    state.assistant_revision = Revision::new(0);
+    state.assistant_phase = AssistantMessagePhase::Unspecified;
+}
+
 /// Seals earlier messages before the owning run's terminal transaction.
 /// The last-created message stays selected even if an older part was corrected.
 pub(super) async fn finish_history(
@@ -73,11 +106,23 @@ pub(super) async fn finish_history(
         .collect();
     for (item_id, revision) in targets {
         let Some(patch_id) = mint_patch_id(context.origin) else {
-            mark_interrupted(state, turn, true);
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::refused(
+                    "minting the patch id that seals an earlier message: entropy or identifier validation failed",
+                ),
+            );
             return false;
         };
         let Some(operated_at) = at_or_after(context.origin, state.scope.expected_updated_at) else {
-            mark_interrupted(state, turn, true);
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::refused("reading the clock to seal an earlier message"),
+            );
             return false;
         };
         let changes = [AssistantChange::Finish {
@@ -85,7 +130,7 @@ pub(super) async fn finish_history(
             expected_revision: revision,
             patch_id: &patch_id,
         }];
-        if commit_batch_with_retry(CommitBatchRequest {
+        if let Err(error) = commit_batch_with_retry(CommitBatchRequest {
             repository: context.repository,
             notifier: &context.config.notifier,
             scope: &state.scope,
@@ -97,14 +142,25 @@ pub(super) async fn finish_history(
             retries: context.config.max_command_retries,
         })
         .await
-        .is_err()
         {
-            mark_interrupted(state, turn, true);
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::failed("committing the seal of an earlier message", error),
+            );
             return false;
         }
         state.scope.expected_updated_at = operated_at;
         let Some(next) = state.batch_sequence.checked_add(1) else {
-            mark_interrupted(state, turn, true);
+            mark_interrupted(
+                state,
+                turn,
+                true,
+                &StepError::refused(
+                    "advancing the batch sequence after sealing an earlier message: the counter overflowed",
+                ),
+            );
             return false;
         };
         state.batch_sequence = next;

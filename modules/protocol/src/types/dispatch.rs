@@ -177,6 +177,31 @@ pub struct RespondQuestionReceipt {
     pub disposition: ReceiptDisposition,
 }
 
+/// How one questionnaire answer settled.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AnswerQuestionsOutcome {
+    /// At least one named question was open and its answer reached its run.
+    Applied,
+    /// No named question was still open: each was answered before, or its
+    /// run ended and closed it.
+    AlreadyResolved,
+    /// No question of the named questionnaire exists on the thread.
+    UnknownTarget,
+}
+
+/// Correlated result of one questionnaire answer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AnswerQuestionsReceipt {
+    /// Stable client request identity echoed by the enclosing response.
+    pub request_id: RequestId,
+    /// Thread the questionnaire was asked on.
+    pub thread_id: ThreadId,
+    /// The answered questionnaire.
+    pub group_id: ObservationId,
+    /// How the answer settled.
+    pub outcome: AnswerQuestionsOutcome,
+}
+
 /// Authoritative live-run query result for one thread.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ActiveRunResult {

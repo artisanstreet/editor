@@ -23,8 +23,13 @@ impl NativeApplication {
                 }
             }
         }
+        self.observation_replay_deferred = true;
         for event in events {
             self.handle_service_event(event, cx);
+        }
+        self.observation_replay_deferred = false;
+        if self.observation_replay_pending {
+            self.replay_observation_activity(cx);
         }
         // Drain the final Failed/Stopped events before treating sender closure
         // as a generic bridge error; otherwise the real failure is discarded.
@@ -44,6 +49,7 @@ impl NativeApplication {
         self.retry_thread_switch_if_admitted(cx);
         self.try_mount_pending_thread(cx);
         self.sync_composer_availability(cx);
+        self.sync_composer_questionnaires(cx);
         !self.service_stopped
     }
 
@@ -137,9 +143,6 @@ impl NativeApplication {
             NativeTransportEvent::Failed(failure) => {
                 self.retain_message_flight(cx);
                 self.clear_transient_service_state();
-                self.thread_switch_flight = None;
-                self.ordinary_unsubscribe_thread = None;
-                self.pending_thread = None;
                 self.set_picker_disabled(true, cx);
                 self.set_thread_picker_disabled(true, cx);
                 self.reset_profile_usage_for_connection();
@@ -255,6 +258,12 @@ impl NativeApplication {
             | NativeTransportEvent::ApprovalFailed { .. }
             | NativeTransportEvent::QuestionAnswered { .. }
             | NativeTransportEvent::QuestionFailed { .. } => self.handle_answer_event(event, cx),
+            NativeTransportEvent::QuestionsAnswered { command, receipt } => {
+                self.settle_questionnaire_answered(&command, &receipt, cx);
+            }
+            NativeTransportEvent::QuestionsAnswerFailed { command, failure } => {
+                self.settle_questionnaire_failed(&command, &failure, cx);
+            }
             NativeTransportEvent::MessageQueued(receipt) => {
                 self.handle_message_receipt(receipt, cx);
             }
@@ -287,10 +296,19 @@ impl NativeApplication {
             NativeTransportEvent::MessageOutbox(outbox) => {
                 self.apply_message_outbox(&outbox, cx);
             }
+            NativeTransportEvent::ObservationHistoryCurrent(thread_id) => {
+                self.handle_observation_history_current(thread_id, cx);
+            }
+            NativeTransportEvent::ConversationHistory { part, page } => {
+                self.handle_conversation_history(part, *page, cx);
+            }
+            NativeTransportEvent::ConversationHistoryFailed {
+                thread_id, part, ..
+            } => self.handle_conversation_history_failed(&thread_id, &part),
             NativeTransportEvent::HostState(state) => self.apply_host_state(state, cx),
             NativeTransportEvent::Preferences(event) => self.handle_preferences_event(event, cx),
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
-            NativeTransportEvent::Reconnected => self.resume_after_reconnect(),
+            NativeTransportEvent::Reconnected => self.resume_after_reconnect(cx),
             NativeTransportEvent::HostHome(home) => self.adopt_resolved_home(home, cx),
             NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
         }
@@ -354,9 +372,6 @@ impl NativeApplication {
         self.clear_transient_service_state();
         self.reset_composer_catalog(cx);
         self.reset_profile_usage_for_connection();
-        self.thread_switch_flight = None;
-        self.ordinary_unsubscribe_thread = None;
-        self.pending_thread = None;
         self.set_picker_disabled(true, cx);
         self.set_thread_picker_disabled(true, cx);
         if matches!(status, ServiceStopStatus::Failed)
@@ -792,7 +807,44 @@ impl NativeApplication {
                 cx.notify();
             }
         }
+        // Replay is a full projection of everything retained, so a burst of
+        // observations in one poll tick needs it once, after the burst.
+        if self.observation_replay_deferred {
+            self.observation_replay_pending = true;
+        } else {
+            self.replay_observation_activity(cx);
+        }
+    }
+
+    /// Marks the selected thread's observation history as delivered and
+    /// projects everything retained so far in one pass.
+    ///
+    /// Until now the rows were only retained, so the thread's tool groups and
+    /// their `Worked for` / `Thought for` labels appear together with its
+    /// prose in the first presented frame instead of filling in page by
+    /// page. A marker for any other thread is stale and ignored.
+    pub(super) fn handle_observation_history_current(
+        &mut self,
+        thread_id: ThreadId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_thread.as_ref() != Some(&thread_id) {
+            return;
+        }
+        self.observation_history_current = Some(thread_id);
         self.replay_observation_activity(cx);
+        // The thread is presentable: sections that start open read their
+        // turn's work rows, and a reader already near the start of a short
+        // window gets the turns above it.
+        self.request_open_turn_work(cx);
+        self.request_earlier_turns(cx);
+        cx.notify();
+    }
+
+    /// Whether the selected thread's observation history has been delivered
+    /// through its durable tail for the current mount.
+    pub(super) fn selected_history_current(&self) -> bool {
+        self.selected_thread.is_some() && self.observation_history_current == self.selected_thread
     }
 
     /// Replays retained attributed observations into the mounted host scene.
@@ -806,8 +858,14 @@ impl NativeApplication {
     /// no-op, changed facts update in place, and no remove-then-register
     /// sequence ever runs. Unknown turns and scene conflicts skip without
     /// failure so retained rows project once the canonical turn exists;
-    /// backpressure stops the replay so retained rows project later.
+    /// backpressure stops the replay so retained rows project later. Nothing
+    /// projects until the thread's history is current, so the replayed
+    /// history lands as one projection rather than one per page.
     pub(super) fn replay_observation_activity(&mut self, cx: &mut Context<Self>) {
+        self.observation_replay_pending = false;
+        if !self.selected_history_current() {
+            return;
+        }
         let Some(selected) = self.selected_thread.clone() else {
             return;
         };
@@ -820,58 +878,67 @@ impl NativeApplication {
         let Some(host) = self.conversation_host.clone() else {
             return;
         };
-        if host.read(cx).controller_view().delivery.thread_id != selected {
-            return;
-        }
-        let Some(snapshot) = host.read(cx).canonical_snapshot() else {
-            return;
+        // Borrowed reads: this runs on every observation, and cloning the
+        // snapshot or building the controller view would copy the thread.
+        let (projection, slid_out) = {
+            let mounted = host.read(cx);
+            if mounted.thread_id() != &selected {
+                return;
+            }
+            let Some(snapshot) = mounted.snapshot() else {
+                return;
+            };
+            let projection =
+                crate::conversation_observation_projection::project_activities(state, snapshot);
+            // Facts that slid out of the window leave first, so the scene
+            // room they held goes to the newest activity.
+            let window: std::collections::BTreeSet<&crate::conversation_scene::SceneId> =
+                projection.facts.iter().map(|fact| &fact.id).collect();
+            let slid_out: Vec<_> = mounted
+                .derived_fact_ids()
+                .into_iter()
+                .filter(|id| !window.contains(id))
+                .collect();
+            (projection, slid_out)
         };
-        let projection =
-            crate::conversation_observation_projection::project_activities(state, &snapshot);
-        // Facts that slid out of the window leave first, so the scene room
-        // they held goes to the newest activity.
-        let window: std::collections::BTreeSet<&crate::conversation_scene::SceneId> =
-            projection.facts.iter().map(|fact| &fact.id).collect();
-        let slid_out: Vec<_> = host
-            .read(cx)
-            .derived_fact_ids()
-            .into_iter()
-            .filter(|id| !window.contains(id))
-            .collect();
         if projection.facts.is_empty() && slid_out.is_empty() {
             return;
         }
-        let mut invalidated = false;
-        for id in slid_out {
-            let remove = crate::conversation_state_machine::SceneFactCommand::Remove { id };
-            match host.update(cx, |host, host_cx| {
-                host.dispatch(ConversationStateEvent::Fact(remove), host_cx)
-            }) {
-                Ok(()) => invalidated = true,
-                Err(_) => break,
+        // One host update for the whole pass: every fact dispatches on its
+        // own as before, and the scene is re-projected once at the end.
+        let invalidated = host.update(cx, |host, host_cx| {
+            let mut invalidated = false;
+            for id in slid_out {
+                let remove = crate::conversation_state_machine::SceneFactCommand::Remove { id };
+                match host.dispatch_batched(ConversationStateEvent::Fact(remove), host_cx) {
+                    Ok(()) => invalidated = true,
+                    Err(_) => break,
+                }
             }
-        }
-        for fact in projection.facts {
-            let upsert = crate::conversation_state_machine::SceneFactCommand::Upsert(fact);
-            match host.update(cx, |host, host_cx| {
-                host.dispatch(ConversationStateEvent::Fact(upsert), host_cx)
-            }) {
-                Ok(()) => invalidated = true,
-                Err(crate::conversation_host::ConversationHostError::Controller(
-                    crate::conversation_state_machine::ConversationStateError::UnknownTurn {
-                        ..
-                    }
-                    | crate::conversation_state_machine::ConversationStateError::SceneConflict {
-                        ..
-                    }
-                    | crate::conversation_state_machine::ConversationStateError::FactTurnMismatch {
-                        ..
-                    }
-                    | crate::conversation_state_machine::ConversationStateError::Scene { .. },
-                )) => {}
-                Err(_) => break,
+            for fact in projection.facts {
+                let upsert = crate::conversation_state_machine::SceneFactCommand::Upsert(fact);
+                match host.dispatch_batched(ConversationStateEvent::Fact(upsert), host_cx) {
+                    Ok(()) => invalidated = true,
+                    Err(crate::conversation_host::ConversationHostError::Controller(
+                        crate::conversation_state_machine::ConversationStateError::UnknownTurn {
+                            ..
+                        }
+                        | crate::conversation_state_machine::ConversationStateError::SceneConflict {
+                            ..
+                        }
+                        | crate::conversation_state_machine::ConversationStateError::FactTurnMismatch {
+                            ..
+                        }
+                        | crate::conversation_state_machine::ConversationStateError::Scene { .. },
+                    )) => {}
+                    Err(_) => break,
+                }
             }
-        }
+            // A scene that cannot project stays as it was, as when a single
+            // dispatch refused; the next accepted dispatch presents again.
+            let _ = host.present_batched_scene(host_cx);
+            invalidated
+        });
         if invalidated {
             self.pump_host_boundary(&host, cx);
             cx.notify();
@@ -1384,6 +1451,9 @@ impl NativeApplication {
     }
 
     pub(super) fn handle_delivery_lost(&mut self, failure: ServiceFailure, cx: &mut Context<Self>) {
+        self.retain_message_flight(cx);
+        self.clear_transient_service_state();
+        self.sync_composer_availability(cx);
         // Use mounted host's last-good cursor and existing recovery policy to resubscribe
         if let Some(thread_id) = self.selected_thread.clone()
             && let Some(host) = self.conversation_host.clone()

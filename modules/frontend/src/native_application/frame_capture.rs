@@ -214,16 +214,18 @@ impl Capture {
             }
             cx.background_executor()
                 .spawn(async move {
+                    let image = self.path.with_extension("png");
                     if let Some(screenshot) = screenshot
-                        && let Err(error) = screenshot.save(self.path.with_extension("png"))
+                        && let Err(error) = screenshot.save(&image)
                     {
-                        eprintln!("frame capture image failed: {error}");
+                        report_write_failure("image", &image, &format!("{error:#}"));
                     }
                     let result = serde_json::to_vec_pretty(&report)
                         .map_err(std::io::Error::other)
                         .and_then(|bytes| std::fs::write(&self.path, bytes));
                     if let Err(error) = result {
-                        eprintln!("frame capture failed: {error}");
+                        let cause = artisan_domain::ErrorChain(&error).to_string();
+                        report_write_failure("report", &self.path, &cause);
                     }
                 })
                 .detach();
@@ -247,4 +249,13 @@ impl Capture {
             window.on_next_frame(move |window, cx| self.tick(window, cx));
         }
     }
+}
+
+/// Reports a frame capture output that could not be written, with the file
+/// it was meant for and the failure behind it.
+fn report_write_failure(what: &str, path: &std::path::Path, cause: &str) {
+    eprintln!(
+        "frame capture {what} could not be written to {}: {cause}",
+        path.display()
+    );
 }

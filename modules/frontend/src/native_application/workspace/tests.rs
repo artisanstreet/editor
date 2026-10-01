@@ -821,3 +821,6 @@ fn a_window_opened_from_a_stale_hint_writes_the_resolved_incarnation_back(cx: &m
         );
     });
 }
+
+#[path = "tests/crash.rs"]
+mod crash;

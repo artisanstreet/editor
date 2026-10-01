@@ -464,6 +464,9 @@ fn disclosure_click_routes_user_open_and_close_through_controller(cx: &mut TestA
             .find(|view| view.scene_id.as_str() == "session-turn_a")
             .expect("auto-registered session disclosure view remains visible");
         assert_eq!(disclosure.state, DisclosureState::UserOpen);
+        // The toggle anchors the reader: tail following stops, so the growth
+        // pushes content down instead of re-pinning the bottom.
+        assert!(host.controller_view().viewport_state.is_detached());
         assert!(host.surface().read(app).pending_actions().is_empty());
         assert_host_work_group_disclosure(host, app, SceneDisclosure::Open);
     });
@@ -899,6 +902,51 @@ fn recovery_keeps_the_last_good_scene_and_close_is_typed(cx: &mut TestAppContext
                 ConversationDeliveryEffect::OwnerClosed { .. }
             ))
         )));
+    });
+}
+
+#[gpui::test]
+fn batched_fact_dispatch_presents_the_scene_once_at_the_end(cx: &mut TestAppContext) {
+    let (host, cx) = add_host(cx);
+    dispatch_snapshot(&host, cx);
+    cx.run_until_parked();
+    let activity = |id: &str, ordinal: u64| {
+        SceneFact::new(
+            scene_id(id),
+            turn_id(TURN_A),
+            ordinal,
+            SceneFactKind::Activity {
+                body: format!("batched {id}"),
+                kind: None,
+                detail: None,
+            },
+        )
+        .expect("test activity fact is valid")
+    };
+    let before = cx.update(|_, app| host.read(app).surface().read(app).scene().clone());
+
+    cx.update(|_, app| {
+        host.update(app, |host, host_cx| {
+            for (id, ordinal) in [("batched_a", 3), ("batched_b", 4)] {
+                host.dispatch_batched(
+                    ConversationStateEvent::Fact(SceneFactCommand::Upsert(activity(id, ordinal))),
+                    host_cx,
+                )
+                .expect("batched upsert is accepted");
+            }
+            // Accepted by the controller, not yet presented.
+            assert_eq!(host.controller_view().scene_fact_count, 2);
+            assert_eq!(host.surface().read(host_cx).scene(), &before);
+            host.present_batched_scene(host_cx)
+                .expect("the batch presents");
+        });
+    });
+
+    cx.update(|_, app| {
+        let host = host.read(app);
+        let controller_scene = host.controller_scene().expect("scene projects");
+        assert_ne!(controller_scene, before);
+        assert_eq!(host.surface().read(app).scene(), &controller_scene);
     });
 }
 

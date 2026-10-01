@@ -243,60 +243,51 @@ fn reasoning_deltas_accumulate_and_empty_completion_keeps_text() {
         .expect("fixture settled reasoning is valid"),
     );
     let outcome = presentation.apply(2, &event(completed));
+    // Thinking is pushed live state now: a stored row an older Forge still
+    // replays is accepted and shows nothing.
     assert!(matches!(
         outcome,
         ApplyOutcome::Applied {
             tag: "reasoning_summary_completed",
-            settled_in_place: true
+            settled_in_place: false
         }
     ));
-    let row = presentation
-        .reasoning("item-2")
-        .expect("reasoning row pairs");
-    assert_eq!(row.text(), "summary ");
-    assert!(row.settled());
+    assert!(presentation.reasoning("item-2").is_none());
+    assert!(presentation.reasoning_in_order().is_empty());
 }
 
-fn claude_stretch() -> Vec<Observation> {
-    let delta = |id: &str, text: &str| {
-        Observation::ReasoningSummaryDelta(
-            ReasoningSummaryDeltaObservation::new(
-                observation_id(id),
-                sequence(5),
-                observation_id("thinking:msg-1:0"),
-                0,
-                String::from(text),
-                None,
-                observation_id("run-claude"),
-            )
-            .expect("fixture reasoning delta is valid"),
-        )
-    };
+fn pushed_thinking(text: Option<&str>) -> artisan_domain::LiveThinking {
+    artisan_domain::LiveThinking {
+        thread_id: thread_id(),
+        current: text.map(|text| artisan_domain::LiveThinkingBlock {
+            run_id: artisan_domain::RunId::parse("run-claude").expect("fixture run id is valid"),
+            turn_id: artisan_domain::TurnId::parse("turn-claude")
+                .expect("fixture turn id is valid"),
+            item_id: String::from("thinking:msg-1:0"),
+            text: text.to_owned(),
+            started_at: artisan_domain::UnixMillis::from_millis(1_000),
+            updated_at: artisan_domain::UnixMillis::from_millis(1_000),
+        }),
+    }
+}
+
+/// What the Forge pushes over one Claude thinking block: the text as it
+/// grows, then the authoritative summary.
+fn claude_stretch() -> Vec<&'static str> {
     vec![
-        delta("obs-claude-1", "Checking the pair"),
-        delta("obs-claude-2", " sums\n\nIf interpreting"),
-        Observation::ReasoningSummaryCompleted(
-            ReasoningSummaryCompletedObservation::new(
-                observation_id("obs-claude-3"),
-                sequence(6),
-                observation_id("thinking:msg-1:0"),
-                Some(String::from(
-                    "Checking the pair sums\n\nIf interpreting the files",
-                )),
-                observation_id("run-claude"),
-            )
-            .expect("fixture settled reasoning is valid"),
-        ),
+        "Checking the pair",
+        "Checking the pair sums\n\nIf interpreting",
+        "Checking the pair sums\n\nIf interpreting the files",
     ]
 }
 
 #[test]
-fn claude_label_is_stable_while_streaming_and_after_replay() {
+fn claude_label_is_stable_while_streaming_and_gone_when_the_run_moves_on() {
     let policy = SummaryLinePolicy::for_engine(Some(artisan_domain::EngineId::Claude));
     let mut live = state();
     let mut labels = Vec::new();
-    for (cursor, observation) in claude_stretch().into_iter().enumerate() {
-        live.apply(cursor as u64 + 1, &event(observation));
+    for text in claude_stretch() {
+        assert!(live.set_live_thinking(&pushed_thinking(Some(text))));
         let row = live.reasoning("thinking:msg-1:0").expect("row pairs");
         labels.push(policy.reduce(row.text()));
     }
@@ -308,21 +299,16 @@ fn claude_label_is_stable_while_streaming_and_after_replay() {
             Some(String::from("Checking the pair sums")),
         ]
     );
-    // The authoritative completion replaces the streamed text instead of
-    // appending it a second time.
-    let row = live.reasoning("thinking:msg-1:0").expect("row pairs");
-    assert_eq!(
-        row.text(),
-        "Checking the pair sums\n\nIf interpreting the files"
-    );
-    // Replaying the durable observations reproduces the same line.
-    let mut replayed = state();
-    for (cursor, observation) in claude_stretch().into_iter().enumerate() {
-        replayed.apply(cursor as u64 + 1, &event(observation));
-    }
-    let replayed_row = replayed.reasoning("thinking:msg-1:0").expect("row pairs");
-    assert_eq!(replayed_row.text(), row.text());
-    assert_eq!(policy.reduce(replayed_row.text()), labels[2]);
+    assert_eq!(live.reasoning_in_order().len(), 1);
+    // An unchanged push changes nothing; a push for another thread is
+    // ignored.
+    assert!(!live.set_live_thinking(&pushed_thinking(Some(claude_stretch()[2]))));
+    let mut foreign = pushed_thinking(Some("elsewhere"));
+    foreign.thread_id = other_thread_id();
+    assert!(!live.set_live_thinking(&foreign));
+    // The run moved on: nothing of the block is kept.
+    assert!(live.set_live_thinking(&pushed_thinking(None)));
+    assert!(live.reasoning_in_order().is_empty());
 }
 
 #[test]
@@ -869,4 +855,104 @@ fn uni_delivery_accepts_engine_observation_events() {
         }),
     };
     assert!(validate_uni_envelope(&response_envelope, ProtocolVersion::V1).is_err());
+}
+
+fn attributed(observation: Observation, delivery_sequence: u64) -> EngineObservationEvent {
+    EngineObservationEvent {
+        thread_id: thread_id(),
+        observation,
+        attribution: Some(artisan_domain::EngineObservationAttribution {
+            run_id: artisan_domain::RunId::parse("run-order").expect("fixture run id is valid"),
+            turn_id: artisan_domain::TurnId::parse("turn-order").expect("fixture turn id is valid"),
+            committed_at: UnixMillis::from_millis(
+                1_000 + i64::try_from(delivery_sequence).expect("fixture sequence fits"),
+            ),
+            delivery_sequence,
+        }),
+    }
+}
+
+fn terminal(id: &str, output: Option<&str>, state: TerminalActivityState) -> Observation {
+    Observation::TerminalActivity(
+        TerminalActivityObservation::new(
+            observation_id(id),
+            sequence(1),
+            TerminalActivityInput {
+                activity_id: observation_id("activity-order"),
+                channel: None,
+                command: matches!(state, TerminalActivityState::Started)
+                    .then(|| String::from("cargo test")),
+                shell: None,
+                output: output.map(str::to_owned),
+                exit_code: matches!(state, TerminalActivityState::Completed).then_some(0),
+                state,
+            },
+        )
+        .expect("fixture terminal row is valid"),
+    )
+}
+
+/// A settled turn's work rows are read only when its section opens, which
+/// can be after a later event of the same activity arrived live. The earlier
+/// event then fills in what it knows and where the activity began; it never
+/// rewinds the activity.
+#[test]
+fn an_earlier_event_read_later_never_rewinds_its_activity() {
+    let run = artisan_domain::RunId::parse("run-order").expect("fixture run id is valid");
+    let mut presentation = state();
+    // The completion arrives first.
+    let _ = presentation.apply(
+        0,
+        &attributed(
+            terminal("obs-done", Some("passed"), TerminalActivityState::Completed),
+            12,
+        ),
+    );
+    // Its start and first output are read afterwards, in their own order.
+    let _ = presentation.apply(
+        0,
+        &attributed(
+            terminal("obs-start", None, TerminalActivityState::Started),
+            10,
+        ),
+    );
+    let row = presentation
+        .terminal_scoped(&run, "activity-order")
+        .expect("terminal row pairs");
+    assert_eq!(row.state(), TerminalActivityState::Completed);
+    assert_eq!(row.command(), Some("cargo test"));
+    assert_eq!(row.exit_code(), Some(0));
+    assert_eq!(row.delivery_sequence(), Some(12));
+    assert_eq!(row.first_delivery_sequence(), Some(10));
+    assert_eq!(
+        row.first_committed_at().map(UnixMillis::as_millis),
+        Some(1_010)
+    );
+
+    let tool = |id: &str, action: ToolAction| {
+        Observation::Tool(
+            ToolObservation::new(
+                observation_id(id),
+                sequence(1),
+                observation_id("tool-order"),
+                String::from("read"),
+                action,
+                None,
+            )
+            .expect("fixture tool row is valid"),
+        )
+    };
+    let _ = presentation.apply(
+        0,
+        &attributed(tool("obs-tool-done", ToolAction::Completed), 21),
+    );
+    let _ = presentation.apply(
+        0,
+        &attributed(tool("obs-tool-start", ToolAction::Started), 20),
+    );
+    let row = presentation
+        .tool_scoped(&run, "tool-order")
+        .expect("tool row pairs");
+    assert_eq!(row.action(), ToolAction::Completed);
+    assert_eq!(row.first_delivery_sequence(), Some(20));
 }

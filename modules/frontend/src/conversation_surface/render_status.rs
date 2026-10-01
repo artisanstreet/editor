@@ -1,4 +1,4 @@
-//! Turn status row rendering for [`ConversationSurface`]: the live thinking
+//! Turn status row rendering for a turn row ([`TurnRowView`]): the live thinking
 //! line, narration verbs, and settled durations.
 //!
 //! Extracted from `render_sections.rs`; copy, visibility, and the summary
@@ -7,27 +7,15 @@
 
 use super::*;
 
-impl ConversationSurface {
-    /// Terminal header copy for one work group: the duration label, chipped
-    /// with the group's reduced thinking label on a thinking stretch.
-    ///
-    /// The reduction runs through the turn's typed engine policy, the same
-    /// one the live line uses, so the chip and the status row never disagree.
+impl TurnRowView {
+    /// Terminal header copy for one work group: the turn's own outcome
+    /// (`Worked for …`, `Thought for …`, `Interrupted`, `Failed`,
+    /// `Cancelled`). Thinking text never titles the header; the reasoning
+    /// rows inside the group and the live status row carry it.
     pub(in crate::conversation_surface) fn group_header_terminal(
-        &self,
-        turn_id: &TurnId,
         block: &crate::conversation_scene::WorkGroupBlock,
     ) -> Option<String> {
-        let engine = self.scene.turn_scene(turn_id).and_then(|turn| {
-            turn.blocks().iter().find_map(|block| match block {
-                TurnBlock::TurnStatus(status) => status.engine,
-                _ => None,
-            })
-        });
-        thinking_header_copy(
-            block.label,
-            thinking_chip_label(block.reasoning_summary.as_deref(), engine).as_deref(),
-        )
+        work_group_header_copy(block.label)
     }
 
     pub(in crate::conversation_surface) fn render_status(
@@ -40,7 +28,7 @@ impl ConversationSurface {
     ) -> Option<AnyElement> {
         // The terminal duration prefers the work-group header when the turn
         // carries the group; the reference settles to the header alone.
-        let turn_scene = self.scene.turn_scene(turn_id);
+        let turn_scene = (&self.turn.turn_id == turn_id).then_some(&self.turn);
         let turn_has_work_group = turn_scene.is_some_and(|turn| {
             turn.blocks()
                 .iter()
@@ -61,8 +49,10 @@ impl ConversationSurface {
         if !turn_status_block_paints(turn_scene, block, turn_has_work_group, self.active_now_ms) {
             return None;
         }
-        // Base-size muted copy. The effective motion resolves the live
-        // window signal at render time (see `effective_status_motion`); the
+        // Base-size muted copy on one line: a summary wider than the column
+        // ellipsizes rather than wrapping or overflowing. The effective
+        // motion resolves the live window signal at render time (see
+        // `effective_status_motion`); the
         // shimmer animates only for live rows under `Full` and stays
         // immediate for settled history and reduced motion. A summary sweeps
         // with the summary cadence and parses inline marks through the
@@ -92,6 +82,8 @@ impl ConversationSurface {
                 .delay_seconds(0.0)
                 .duration_seconds(2.0)
                 .text_color(status_color(theme, block.narration))
+                .min_w_0()
+                .truncate()
                 .into_element()
         } else {
             ShimmerText::new(copy, *theme, status_motion)
@@ -99,6 +91,8 @@ impl ConversationSurface {
                 .delay_seconds(1.5)
                 .duration_seconds(3.0)
                 .text_color(status_color(theme, block.narration))
+                .min_w_0()
+                .truncate()
                 .into_element()
         };
         let mut status = div()

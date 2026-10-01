@@ -7,14 +7,14 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::HashSet, ops::Range, panic, sync::Arc};
+use std::{collections::HashSet, ops::Range, panic, rc::Rc, sync::Arc};
 
 use artisan_assets::AssetId;
 use artisan_ui::{
     asset_seam::asset_glyph,
     button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility},
     motion::MotionPolicy,
-    theme::{ArtisanTheme, DesktopTheme, ProseTypography, ThemeMode},
+    theme::{ArtisanTheme, DesktopTheme, ProseTypography, RadiusTokens, ThemeMode},
 };
 use gpui::ColorExt;
 use gpui::StyledImage;
@@ -24,7 +24,7 @@ use gpui::{
     Focusable, GlobalElementId, HighlightStyle, ImageFormat, ImageSource, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ObjectFit, Pixels, Point, Render, RenderImage, SharedString, Stateful, StyledText,
-    Subscription, Task, UTF16Selection, Window, actions, div, img, point,
+    Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, img, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -34,14 +34,17 @@ use std::time::Duration;
 
 use crate::composer::{ComposerState, DraftDisposition, SubmissionBlocked, SubmissionToken};
 use crate::native_composer_controls::NativeComposerControls;
-use crate::native_composer_material::{
-    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
 use crate::native_composer_visuals::{
     COMPOSER_TRAY_MOTION_MS, composer_placeholder_phrase, composer_smooth_out,
 };
+use crate::native_image_preview::{
+    IMAGE_PREVIEW_DEFERRED_PRIORITY, ImagePreview, ImagePreviewSelectors, image_preview_overlay,
+};
 use crate::native_model_selector::NativeModelSelector;
+use artisan_ui::glass::{
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 
 #[path = "native_composer_attachments.rs"]
 mod native_composer_attachments;
@@ -95,6 +98,12 @@ pub(crate) const NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR: &str =
     "artisan-native-composer-attachment-tray";
 pub(crate) const NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR: &str =
     "artisan-native-composer-attachment-viewer";
+const NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTORS: ImagePreviewSelectors = ImagePreviewSelectors {
+    backdrop: "artisan-native-composer-attachment-viewer-dismiss",
+    content: "artisan-native-composer-attachment-viewer-content",
+    image: "artisan-native-composer-attachment-viewer-image",
+    close: "artisan-native-composer-attachment-viewer-close",
+};
 pub(crate) const NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR: &str =
     "artisan-native-composer-attachment-send-blocked";
 const NATIVE_COMPOSER_ATTACHMENT_SIZE: f32 = 72.0;
@@ -105,6 +114,9 @@ pub(crate) enum NativeComposerEvent {
     /// The user invoked the send control; the application owns admission.
     SendRequested,
     ConfigureModel,
+    /// A questionnaire was answered or dismissed; the application takes it
+    /// with [`NativeComposer::take_questionnaire_answer`] and sends it.
+    QuestionnaireAnswered,
 }
 
 /// Exact identity of an empty composer that is eligible to receive one
@@ -149,6 +161,9 @@ pub(crate) struct NativeComposer {
     attachment_delivery_enabled: bool,
     attachments: Vec<ComposerAttachment>,
     viewed_attachment: Option<String>,
+    /// Focus of the open attachment preview, so Escape and the close action
+    /// reach the modal while it covers the window.
+    attachment_viewer_focus: FocusHandle,
     attachment_preview: Option<AttachmentPreviewState>,
     attachment_preview_error: Option<String>,
     attachment_preview_task: Option<Task<()>>,
@@ -162,6 +177,15 @@ pub(crate) struct NativeComposer {
     /// Set by a thread switch until the Forge draft is applied or the user
     /// edits first.
     awaiting_forge_draft: bool,
+    /// Whether the user authored a change since the current scope opened.
+    /// A draft the scope restored from the Forge is not new typing, so it
+    /// never follows the user into another scope.
+    authored_since_open: bool,
+    /// The draft each scope showed when the view last left it, so reopening
+    /// a scope shows its draft at once; a scope missing here is read from
+    /// the Forge.
+    scope_drafts:
+        std::collections::HashMap<artisan_domain::ComposerDraftScope, forge_draft::ScopeDraft>,
     /// The scope a carried draft moved away from; its Forge draft is cleared.
     released_scope: Option<String>,
     /// The draft of the scope an ordinary switch just left, as it was.
@@ -195,6 +219,8 @@ pub(crate) struct NativeComposer {
     /// immediately (see the tray motion note in `render`).
     tray_entrance_generation: u64,
     tray_was_open: bool,
+    /// Open agent questionnaires and the answer being given.
+    questionnaire: questionnaire::QuestionnairePanel,
 }
 
 impl EventEmitter<NativeComposerEvent> for NativeComposer {}
@@ -222,6 +248,7 @@ impl NativeComposer {
             attachment_delivery_enabled: false,
             attachments: Vec::new(),
             viewed_attachment: None,
+            attachment_viewer_focus: cx.focus_handle(),
             attachment_preview: None,
             attachment_preview_error: None,
             attachment_preview_task: None,
@@ -232,6 +259,8 @@ impl NativeComposer {
             selection_revision: 0,
             draft_change: 0,
             awaiting_forge_draft: false,
+            authored_since_open: false,
+            scope_drafts: std::collections::HashMap::new(),
             released_scope: None,
             outgoing_draft: None,
             active_attachment_submission: None,
@@ -255,6 +284,7 @@ impl NativeComposer {
             placeholder_was_visible: true,
             tray_entrance_generation: 0,
             tray_was_open: false,
+            questionnaire: questionnaire::QuestionnairePanel::default(),
         }
     }
 
@@ -290,6 +320,12 @@ impl NativeComposer {
             && (!self.state.draft().is_empty() || !self.attachments.is_empty())
     }
 
+    /// Whether the unsent draft holds content the user authored since the
+    /// current scope opened, as opposed to only the draft it restored.
+    pub(crate) fn has_authored_draft(&self) -> bool {
+        self.authored_since_open && self.has_unsent_draft()
+    }
+
     #[cfg(test)]
     pub(crate) fn draft(&self) -> &str {
         self.state.draft()
@@ -313,6 +349,8 @@ impl NativeComposer {
         }
         self.state.set_draft(draft);
         self.authored_text_present = true;
+        // Text set here stands for text the user typed.
+        self.authored_since_open = true;
         self.layout = None;
         self.painted_bounds = None;
         let end = self.state.draft().len();
@@ -502,8 +540,10 @@ impl NativeComposer {
 
     /// Moves the composer to another draft scope.
     ///
-    /// An ordinary switch clears the view and waits for the scope's Forge
-    /// draft (see [`Self::apply_forge_draft`]). A carried draft (the prompt of
+    /// An ordinary switch remembers the draft it leaves and shows the new
+    /// scope's draft: the one remembered from when the view last left it,
+    /// or, for a scope never shown, the Forge's once read (see
+    /// [`Self::apply_forge_draft`]). A carried draft (the prompt of
     /// a first message moving into its new thread) keeps its text and image
     /// work, becomes the new scope's draft, and releases the old scope's.
     pub(crate) fn switch_thread(
@@ -515,6 +555,9 @@ impl NativeComposer {
         if self.draft_thread.as_deref() == Some(thread) || self.state.is_submitting() {
             return;
         }
+        // An answer being written belongs to the thread being left; the
+        // draft put aside for it is that thread's draft.
+        self.return_draft_aside();
         let previous_thread = self.draft_thread.replace(thread.to_owned());
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.selection_dragging = false;
@@ -525,16 +568,22 @@ impl NativeComposer {
         self.viewed_attachment = None;
         self.clear_attachment_preview();
         if carry_draft {
+            self.forget_released_scope_draft(previous_thread.as_deref());
             self.released_scope = previous_thread;
             self.note_draft_change();
         } else {
-            self.outgoing_draft = previous_thread.and_then(|key| self.capture_draft(&key));
+            self.outgoing_draft = previous_thread.as_deref().and_then(|key| {
+                self.remember_scope_draft(key);
+                self.capture_draft(key)
+            });
             self.attachment_tasks.clear();
             self.attachment_work_generation = self.attachment_work_generation.saturating_add(1);
             self.attachments.clear();
             self.attachment_error = None;
-            self.replace_draft_text(String::new());
-            self.awaiting_forge_draft = true;
+            self.authored_since_open = false;
+            // A scope the view already showed opens on its draft at once;
+            // only a scope never shown waits for the Forge's.
+            self.awaiting_forge_draft = !self.restore_scope_draft(thread);
         }
         cx.notify();
     }
@@ -978,3 +1027,7 @@ mod render;
 
 #[path = "native_composer/forge_draft.rs"]
 mod forge_draft;
+
+#[path = "native_composer/questionnaire.rs"]
+mod questionnaire;
+pub(crate) use questionnaire::{ComposerQuestion, ComposerQuestionnaire};

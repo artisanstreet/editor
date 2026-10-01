@@ -35,6 +35,12 @@ WHERE message_id = (
       AND steer_run_id IS NULL
       AND NOT EXISTS (
           SELECT 1 FROM messages candidate
+          JOIN assistant_runs active ON active.thread_id = candidate.thread_id
+          WHERE candidate.message_id = message_dispatches.message_id
+            AND active.lifecycle IN ('launching', 'running', 'waiting', 'cancel_requested')
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM messages candidate
           JOIN messages sibling ON sibling.thread_id = candidate.thread_id
           JOIN message_dispatches busy ON busy.message_id = sibling.message_id
           WHERE candidate.message_id = message_dispatches.message_id
@@ -242,6 +248,9 @@ async fn classify_unclaimed(
 /// invariant below on a steered row it must not touch.
 fn eligible_dispatch_condition(claimed_at_ms: i64) -> Condition {
     Condition::all()
+        .add(sea_orm::sea_query::Expr::cust(
+            "NOT EXISTS (SELECT 1 FROM messages candidate JOIN assistant_runs active ON active.thread_id = candidate.thread_id WHERE candidate.message_id = message_dispatches.message_id AND active.lifecycle IN ('launching', 'running', 'waiting', 'cancel_requested'))",
+        ))
         .add(sea_orm::sea_query::Expr::cust_with_values(
             "NOT EXISTS (SELECT 1 FROM messages candidate JOIN messages sibling ON sibling.thread_id = candidate.thread_id JOIN message_dispatches busy ON busy.message_id = sibling.message_id WHERE candidate.message_id = message_dispatches.message_id AND busy.message_id != message_dispatches.message_id AND busy.state IN ('leased', 'running') AND busy.lease_expires_at_ms > ?)",
             [claimed_at_ms],

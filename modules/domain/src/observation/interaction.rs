@@ -390,11 +390,19 @@ pub struct QuestionInput {
 /// A requested observation never carries answers; a resolved observation
 /// always carries the answer list (possibly empty for an explicitly skipped
 /// question).
+///
+/// Every question belongs to a questionnaire: the questions one provider
+/// request asked together, answered together. Engines differ (a Codex async
+/// question list, a blocking `requestUserInput`, an ACP elicitation form),
+/// but each lands here as questions sharing one [`Self::group_id`], so every
+/// engine's questions present and answer the same way. A question with no
+/// explicit group forms its own one-question questionnaire.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct QuestionObservation {
     id: ObservationId,
     sequence: ObservationSequence,
     question_id: ObservationId,
+    group_id: Option<ObservationId>,
     state: QuestionState,
     text: String,
     header: Option<String>,
@@ -458,6 +466,7 @@ impl QuestionObservation {
             id,
             sequence,
             question_id: input.question_id,
+            group_id: None,
             state: QuestionState::Requested,
             text: input.text,
             header: input.header,
@@ -487,6 +496,7 @@ impl QuestionObservation {
             id,
             sequence,
             question_id: input.question_id,
+            group_id: None,
             state: QuestionState::Resolved,
             text: input.text,
             header: input.header,
@@ -512,6 +522,40 @@ impl QuestionObservation {
     #[must_use]
     pub const fn question_id(&self) -> &ObservationId {
         &self.question_id
+    }
+
+    /// Places this question in an explicit questionnaire.
+    #[must_use]
+    pub fn with_group(mut self, group_id: ObservationId) -> Self {
+        self.group_id = Some(group_id);
+        self
+    }
+
+    /// Returns the questionnaire this question belongs to: its explicit
+    /// group, or the question itself when it was asked alone.
+    #[must_use]
+    pub fn group_id(&self) -> &ObservationId {
+        self.group_id.as_ref().unwrap_or(&self.question_id)
+    }
+
+    /// Returns the explicit questionnaire identity, [`None`] for a question
+    /// asked alone (codecs persist only an explicit group).
+    #[must_use]
+    pub const fn explicit_group_id(&self) -> Option<&ObservationId> {
+        self.group_id.as_ref()
+    }
+
+    /// Returns the validated question values shared by the request and its
+    /// resolution, for rebuilding the row under a new identity.
+    #[must_use]
+    pub fn input(&self) -> QuestionInput {
+        QuestionInput {
+            question_id: self.question_id.clone(),
+            text: self.text.clone(),
+            header: self.header.clone(),
+            multi_select: self.multi_select,
+            options: self.options.clone(),
+        }
     }
 
     /// Returns the question lifecycle state.

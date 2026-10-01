@@ -25,7 +25,7 @@ pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
 pub mod engine_owner;
-pub mod error_chain;
+pub use artisan_domain::error_chain;
 pub mod file_identity_policy;
 pub mod forge_runtime;
 pub mod git_remote_url_policy;
@@ -36,6 +36,7 @@ pub mod host_machines_policy;
 pub mod host_suspend_detection_policy;
 pub mod lifecycle_control;
 pub mod listener;
+pub mod live_thinking;
 pub mod native_run_dispatch;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
@@ -123,10 +124,17 @@ pub fn run() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("Forge runtime construction failed: {error}");
+            eprintln!(
+                "Forge could not start: building the Tokio runtime failed: {}",
+                error_chain::ErrorChain(&error)
+            );
             return ExitCode::from(forge_runtime::EXIT_CODE_SHUTDOWN);
         }
     };
+
+    // Reports any stall of the single event-loop thread, which would also
+    // stall every lease heartbeat and request deadline.
+    let _watchdog = event_loop_watchdog::start(&runtime);
 
     let cancel = Arc::new(CancelHandle::new());
     let config = match forge_runtime::parse_args(std::env::args_os().skip(1), Arc::clone(&cancel)) {
@@ -278,6 +286,8 @@ mod context_compaction_policy;
 mod account_readiness;
 
 mod engine_selection;
+
+mod event_loop_watchdog;
 
 mod image_policy;
 

@@ -1,5 +1,6 @@
 {
   "captured": "2026-09-25",
+  "highlights_captured": "2026-09-27",
   "cli": {
     "version": "2.1.282 (Claude Code)",
     "executable": "npm global @anthropic-ai/claude-code shim on the Windows host, invoked from WSL (Ubuntu)",
@@ -38,7 +39,9 @@
     "without the flag the same blocks stream empty thinking text plus estimated_tokens",
     "each content block is followed by one buffered assistant frame (same message id as message_start) carrying only that block, emitted immediately before its content_block_stop",
     "the buffered thinking text equals the concatenated streamed fragments in every captured block",
-    "summary prose arrives in paragraph bursts: the first paragraph lands while the stretch is still running"
+    "summary prose arrives in paragraph bursts: the first paragraph lands while the stretch is still running",
+    "highlights-refused capture (2.1.282, first-party subscription login, --thinking-display highlights): the API rejects the value with HTTP 400 'thinking.adaptive.display: Input should be summarized, omitted', the CLI latches and silently retries with omitted, so thinking blocks stream empty text with no summaries and exit 0; the rejection is visible only in the CLI debug log, never on stdout, stderr, or the result frame",
+    "constructed-highlight-titles is not a capture: it encodes the claude.ai client contract (last non-empty summaries[].summary wins) on the block start and its buffered frame for decode/fallback tests"
   ],
   "research_provenance": {
     "desktop_app": "Claude desktop 1.40609.1 (MSIX Claude_2.9939.2.0_x64__pzs8sxrjxfjjc), embedded Claude Code 2.1.255",
@@ -113,6 +116,21 @@
       "session_id": "fixture-session-two",
       "frames": 23,
       "description": "Constructed from the real transport shape: two thinking stretches around a tool_use in one message (block indexes 0 and 2), markdown in the second summary."
+    },
+    {
+      "file": "highlights-refused.jsonl",
+      "kind": "real",
+      "raw_capture": "highlights-start.jsonl (2026-09-27, --thinking-display highlights, --debug variant recorded the rejection log)",
+      "session_id": "fixture-session-highlights-refused",
+      "frames": 135,
+      "description": "Real highlights request on an ineligible first-party subscription context: HTTP 400 rejection, silent omitted retry, empty thinking text, no summaries, exit 0."
+    },
+    {
+      "file": "constructed-highlight-titles.jsonl",
+      "kind": "constructed",
+      "session_id": "fixture-session-highlights",
+      "frames": 9,
+      "description": "Constructed from the claude.ai client summary contract: one thinking stretch whose block start and buffered frame carry summaries arrays (last non-empty title wins, whitespace entry ignored), plus answer text."
     },
     {
       "file": "constructed-interrupted-thinking.jsonl",

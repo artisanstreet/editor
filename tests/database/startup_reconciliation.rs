@@ -369,7 +369,7 @@ async fn expired_launching_candidate_with_no_assistant_item() {
     let c = &candidates[0];
     assert_eq!(c.run_id.as_str(), "run-1");
     assert_eq!(c.lifecycle, StartupRunLifecycle::Launching);
-    assert!(c.assistant_item_id.is_none());
+    assert!(c.assistant_item_ids.is_empty());
     assert_eq!(c.generation, 1);
     assert_eq!(c.lease_expires_at.as_millis(), LEASE_EXPIRES_AT_MS);
 }
@@ -448,7 +448,7 @@ async fn expired_running_candidate_with_assistant_item() {
     let c = &candidates[0];
     assert_eq!(c.lifecycle, StartupRunLifecycle::Running);
     assert_eq!(
-        c.assistant_item_id.as_ref().map(ItemId::as_str),
+        c.assistant_item_ids.first().map(ItemId::as_str),
         Some("assistant-1")
     );
 }
@@ -832,7 +832,7 @@ async fn corrupted_identity_fails_typed() {
 }
 
 #[tokio::test]
-async fn duplicate_assistant_item_fails_typed() {
+async fn multiple_assistant_items_are_recoverable() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
     let (claimed, receipt, sk, creds) = queue_claim_launch(
@@ -896,21 +896,12 @@ async fn duplicate_assistant_item_fails_typed() {
         .await
         .expect("batch");
     insert_second_assistant_item(&database, "thread-1", "turn-1", "run-1").await;
-    // Prove the SQL limit cannot mask the duplicate: even at limit 1 the per-run
-    // count before limiting must be detected.
     let query = StartupReconciliationQuery::new(UnixMillis::from_millis(LEASE_EXPIRES_AT_MS), 1)
         .expect("q");
-    let err = repository
+    let candidates = repository
         .list_startup_reconciliation_candidates(query)
         .await
-        .expect_err("duplicate should fail even at limit 1");
-    match err {
-        artisan_database::StartupReconciliationError::Repository(
-            RepositoryError::CorruptData { table, field, .. },
-        ) => {
-            assert_eq!(table, "conversation_items");
-            assert_eq!(field, "run_id");
-        }
-        other => panic!("expected duplicate CorruptData, got {other:?}"),
-    }
+        .expect("multiple items are valid");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].assistant_item_ids.len(), 2);
 }

@@ -13,18 +13,13 @@ use tokio::sync::mpsc;
 #[cfg(test)]
 use super::super::observation::TerminalObservation;
 use super::super::observation::{EngineObservation, TerminalState, UsageObservation, chunk_text};
-#[cfg(test)]
-use serde_json::Value;
-
 use super::continuation::{
     CodexUsageContext, CodexUsageScope, codex_usage_report, current_unix_millis,
 };
-#[cfg(test)]
-use super::protocol::CODEX_MAX_ANSWERS;
 use super::protocol::{
     CodexEvent, CodexFileChange, CodexFileKind, CodexPendingTracker, CodexPlanEntry,
-    CodexPlanStatus, CodexSearchLifecycle, CodexTerminalLifecycle, CodexToolAction, CodexTurnError,
-    CodexTurnState, request_line, write_line,
+    CodexPlanStatus, CodexQuestion, CodexSearchLifecycle, CodexTerminalLifecycle, CodexToolAction,
+    CodexTurnError, CodexTurnState, prompt_input, request_line, write_line,
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +85,30 @@ fn activity_observation_id(
     slug: &str,
 ) -> Option<ObservationId> {
     ObservationId::parse(format!("{}:codex:{frame_sequence}:{slug}", run_id.as_str())).ok()
+}
+
+/// Builds the requested question rows for newly asked questions, each in its
+/// questionnaire. A question that fails the domain bounds drops fail-closed.
+fn question_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    questions: &[CodexQuestion],
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    questions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let id = activity_observation_id(run_id, frame_sequence, &format!("question-{index}"))?;
+            let group = ObservationId::parse(question.group_id().to_owned()).ok()?;
+            let input = question.to_domain_input().ok()?;
+            artisan_domain::QuestionObservation::requested(id, sequence, input)
+                .ok()
+                .map(|row| DomainObservation::Question(row.with_group(group)))
+        })
+        .collect()
 }
 
 /// Reads one source frame's order as a domain sequence.
@@ -717,8 +736,10 @@ pub(crate) async fn apply_event(
             emit_activity(observations, vec![DomainObservation::Approval(row)]).await
         }
         CodexEvent::QuestionRequested(request) => {
-            tracker.note_questions(&request);
-            None
+            // The request stays open in the tracker until the user answers
+            // every question; the questions present as one questionnaire.
+            let asked = tracker.note_question_request(&request);
+            emit_activity(observations, question_rows(run_id, frame_sequence, &asked)).await
         }
         CodexEvent::SubagentDiscovered {
             agent_thread_id,
@@ -873,14 +894,16 @@ pub(crate) async fn apply_event(
     }
 }
 
-/// Steers a live turn with follow-up text (`turn/steer`).
+/// Steers a live turn with a follow-up message (`turn/steer`).
 ///
-/// Production verb behind [`AcceptedTurn::steer_text`](super::operation::AcceptedTurn::steer_text):
+/// Production verb behind [`AcceptedTurn::steer_message`](super::operation::AcceptedTurn::steer_message):
 /// the pump writes the follow-up with the actual provider turn id as
 /// `expectedTurnId` and the correlated `turn/steer` result resolves the
 /// delivery; a correlated error reply resolves it failed without settling
 /// the turn. Proves the follow-up verb against the fixture stdio script
-/// without disturbing the authorize-once production flow.
+/// without disturbing the authorize-once production flow. `input` is the
+/// same ordered `UserInput` array a fresh `turn/start` sends, so images
+/// ride as native image items after the text.
 ///
 /// # Errors
 ///
@@ -891,10 +914,11 @@ pub(crate) async fn steer_live_turn<W: AsyncWrite + Unpin>(
     thread_id: &str,
     turn_id: &str,
     text: &str,
+    images: &[artisan_domain::ImageAttachment],
 ) -> Result<(), CodexTurnError> {
     let params = serde_json::json!({
         "expectedTurnId": turn_id,
-        "input": [{ "text": text, "text_elements": [], "type": "text" }],
+        "input": prompt_input(text, images),
         "threadId": thread_id,
     });
     let line = request_line(*request_id, "turn/steer", &params);
@@ -942,38 +966,6 @@ pub(crate) async fn answer_approval<W: AsyncWrite + Unpin>(
     let decision = if approved { "approved" } else { "denied" };
     let line =
         serde_json::json!({ "id": native_id, "result": { "decision": decision } }).to_string();
-    write_line(stdin, &line).await
-}
-
-/// Answers one question request group through the durable answers.
-///
-/// Test-only until dispatcher delivery wiring lands.
-///
-/// # Errors
-///
-/// Returns [`CodexTurnError::Configuration`] for an unknown or resolved
-/// target and [`CodexTurnError::StreamFailed`] when the write fails.
-#[cfg(test)]
-pub(crate) async fn answer_questions<W: AsyncWrite + Unpin>(
-    stdin: &mut W,
-    tracker: &mut CodexPendingTracker,
-    native_id: &str,
-    answers: &[(String, Vec<String>)],
-) -> Result<(), CodexTurnError> {
-    for (question_id, _) in answers {
-        if !tracker.resolve_question(question_id) {
-            return Err(CodexTurnError::Configuration);
-        }
-    }
-    let mut map = serde_json::Map::new();
-    for (question_id, options) in answers.iter().take(CODEX_MAX_ANSWERS) {
-        map.insert(
-            question_id.clone(),
-            serde_json::json!({ "answers": options }),
-        );
-    }
-    let line = serde_json::json!({ "id": native_id, "result": { "answers": Value::Object(map) } })
-        .to_string();
     write_line(stdin, &line).await
 }
 

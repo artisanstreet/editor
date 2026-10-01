@@ -258,3 +258,120 @@ fn project_choice_moves_an_unsent_existing_thread_draft_and_image(cx: &mut TestA
 fn project_choice_moves_an_unsent_home_draft_and_image(cx: &mut TestAppContext) {
     project_choice_moves_draft_and_image(cx, DraftLocation::Home);
 }
+
+/// A started thread of a project (not a draft thread).
+fn started_thread(thread_id: &ThreadId, project: &ProjectId) -> ThreadListing {
+    let mut row = thread(thread_id.as_str(), project.as_str(), "Source");
+    row.has_started_response = true;
+    row.last_message_at = Some(UnixMillis::from_millis(100));
+    ThreadListing::new(vec![row]).unwrap()
+}
+
+/// A project with one open, started thread whose composer shows the draft
+/// the Forge restored for it: `(project, thread)`.
+fn thread_with_restored_draft(
+    application: &mut NativeApplication,
+    sink: NativeTestCommandSink,
+    cx: &mut Context<NativeApplication>,
+) -> (ProjectId, ThreadId) {
+    let project = ProjectId::parse("restored-workspace").unwrap();
+    let source = ThreadId::parse("restored-source").unwrap();
+    let projects = ProjectListing::new(vec![self::project(project.as_str(), "Workspace")]).unwrap();
+    application.test_command_sink = Some(sink);
+    application.project_options = project_options_from_listing(&projects);
+    application.selected_project = Some(project.clone());
+    application.thread_listing = Some(started_thread(&source, &project));
+    // The thread opens on its own Forge draft.
+    application.project_navigation.restore_draft = true;
+    application.pending_thread = Some(source.clone());
+    application.try_mount_pending_thread(cx);
+    let host = application.conversation_host.clone().unwrap();
+    application.dispatch_snapshot(&host, snapshot_for(&source, 1), cx);
+    application
+        .composer
+        .update(cx, |composer, cx| composer.set_disabled(false, cx));
+    application.sync_composer_draft(cx);
+    application.reply_forge_draft("the thread's own draft", cx);
+    application.composer_drafts.sent.borrow_mut().clear();
+    (project, source)
+}
+
+#[gpui::test]
+fn new_thread_shows_the_project_draft_not_the_open_threads_restored_one(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, _commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let (project, source) = thread_with_restored_draft(application, sink, cx);
+            assert_eq!(
+                application.composer.read(cx).draft(),
+                "the thread's own draft"
+            );
+            application.begin_new_task(cx);
+            stop_source(application, &source, cx);
+            application.sync_composer_draft(cx);
+            let project_scope = artisan_domain::ComposerDraftScope::Project(project.clone());
+            assert_eq!(
+                application.composer.read(cx).draft_scope(),
+                Some(project_scope.clone())
+            );
+            let sent = application.composer_drafts.sent.borrow().clone();
+            assert!(
+                sent.contains(
+                    &crate::native_transport_service::ComposerDraftCommand::Read(project_scope)
+                ),
+                "the project's own draft is read"
+            );
+            assert!(
+                !sent.iter().any(|command| matches!(
+                    command,
+                    crate::native_transport_service::ComposerDraftCommand::Save { .. }
+                )),
+                "neither the thread's draft is released nor the project's overwritten"
+            );
+            application.reply_forge_draft("the project's draft", cx);
+            assert_eq!(application.composer.read(cx).draft(), "the project's draft");
+        });
+    });
+}
+
+#[gpui::test]
+fn the_wordmark_opens_the_new_task_and_a_thread_listing_never_replaces_it(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let (project, source) = thread_with_restored_draft(application, sink, cx);
+            application.go_home(cx);
+            stop_source(application, &source, cx);
+            assert_eq!(
+                application.composer.read(cx).draft_scope(),
+                Some(artisan_domain::ComposerDraftScope::Project(project.clone()))
+            );
+            commands.borrow_mut().clear();
+            // The Forge pushes the project's listing again (a title or
+            // activity change): the new-task screen stays.
+            application.handle_threads(&project, &started_thread(&source, &project), cx);
+            assert!(matches!(
+                application.route(),
+                NativeRoute::NewThread { project: Some(shown) } if shown == &project
+            ));
+            assert_eq!(application.selected_thread, None);
+            assert!(application.conversation_host.is_none());
+            assert!(
+                !commands
+                    .borrow()
+                    .iter()
+                    .any(|command| matches!(command, NativeTransportCommand::Subscribe { .. }))
+            );
+            assert_eq!(
+                application.composer.read(cx).draft_scope(),
+                Some(artisan_domain::ComposerDraftScope::Project(project.clone()))
+            );
+
+            // Opening the thread from the sidebar still opens it.
+            application.open_listed_thread(source.clone(), cx);
+            assert_eq!(application.selected_thread.as_ref(), Some(&source));
+        });
+    });
+}

@@ -31,6 +31,14 @@
 //! flight the normalized anchor/head range is live, so the wash tracks the
 //! pointer before release.
 //!
+//! Layout does no per-frame work for an unchanged leaf. Validation skips
+//! the content hash when the text is the very allocation validated last
+//! time, and the compiled [`TextRun`]s are kept beside the selection state
+//! and reused while the text, inherited style, caller ranges, selection,
+//! and wash are unchanged. Callers that keep their ranges across frames
+//! (the Markdown renderer) hand them over as shared slices, so an unchanged
+//! leaf compares pointers instead of copying or re-merging highlights.
+//!
 //! Deliberate limits: read-only selection only — no caret, no editing, no
 //! IME/composition handling. Pointer capture is emulated the same way
 //! GPUI's own interactive text does it: a left press latches the anchor and
@@ -52,9 +60,10 @@ use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId,
     FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
     IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, SharedString, StyledText, Window,
+    MouseUpEvent, Pixels, SharedString, StyledText, TextRun, TextStyle, Window,
 };
 
+use crate::markdown_cache::same_allocation;
 use crate::theme::ArtisanTheme;
 
 pub use crate::text_runs::{TextRunOverride, compile_text_runs};
@@ -149,12 +158,23 @@ pub fn merge_selection_highlight(
     selection: Option<Range<usize>>,
     wash: &HighlightStyle,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
+    merge_selection_highlight_slice(text, &base, selection, wash)
+}
+
+/// [`merge_selection_highlight`] over borrowed caller ranges, so callers that
+/// keep their ranges across frames never copy them to merge.
+fn merge_selection_highlight_slice(
+    text: &str,
+    base: &[(Range<usize>, HighlightStyle)],
+    selection: Option<Range<usize>>,
+    wash: &HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
     let mut sanitized: Vec<(Range<usize>, HighlightStyle)> = base
-        .into_iter()
+        .iter()
         .filter_map(|(range, style)| {
             let start = clamp_to_char_boundary(text, range.start);
             let end = clamp_to_char_boundary(text, range.end);
-            (start < end).then_some((start..end, style))
+            (start < end).then_some((start..end, *style))
         })
         .collect();
     sanitized.sort_by(|left, right| {
@@ -240,6 +260,11 @@ fn text_fingerprint(text: &str) -> (usize, u64) {
 #[derive(Clone, Debug, Default)]
 pub struct SelectableTextState {
     inner: Rc<RefCell<SelectionInner>>,
+    /// Runs compiled for the last layout, reused while their inputs hold.
+    compiled: Rc<RefCell<Option<CompiledRuns>>>,
+    /// Compilations performed, so tests can prove reuse.
+    #[cfg(test)]
+    compilations: Rc<std::cell::Cell<u64>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -250,6 +275,77 @@ struct SelectionInner {
     dragging: bool,
     selection: Option<(usize, usize)>,
     fingerprint: (usize, u64),
+    /// The shared text `fingerprint` was last computed from. While a layout
+    /// hands over this same allocation the content cannot have changed, so
+    /// validation skips the hash; holding it keeps the address from being
+    /// reused by other text meanwhile.
+    validated: Option<SharedString>,
+}
+
+/// Caller ranges held either for one frame or shared across frames.
+#[derive(Clone, Debug)]
+enum RangeSlice<T> {
+    Owned(Vec<T>),
+    Shared(Rc<[T]>),
+}
+
+impl<T> Default for RangeSlice<T> {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl<T: PartialEq> RangeSlice<T> {
+    fn as_slice(&self) -> &[T] {
+        match self {
+            Self::Owned(values) => values,
+            Self::Shared(values) => values,
+        }
+    }
+
+    /// Whether both hold the same ranges, comparing shared pointers first.
+    fn same(&self, other: &Self) -> bool {
+        if let (Self::Shared(left), Self::Shared(right)) = (self, other)
+            && Rc::ptr_eq(left, right)
+        {
+            return true;
+        }
+        self.as_slice() == other.as_slice()
+    }
+}
+
+/// One compiled layout and every input it was compiled from.
+#[derive(Debug)]
+struct CompiledRuns {
+    text: SharedString,
+    default_style: TextStyle,
+    highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
+    overrides: RangeSlice<TextRunOverride>,
+    selection: Option<Range<usize>>,
+    wash: HighlightStyle,
+    runs: Vec<TextRun>,
+}
+
+/// The inputs of one layout's run compilation.
+struct RunInputs<'a> {
+    text: &'a SharedString,
+    default_style: &'a TextStyle,
+    highlights: &'a mut RangeSlice<(Range<usize>, HighlightStyle)>,
+    overrides: &'a mut RangeSlice<TextRunOverride>,
+    selection: Option<Range<usize>>,
+    wash: &'a HighlightStyle,
+}
+
+impl CompiledRuns {
+    fn matches(&self, inputs: &RunInputs<'_>) -> bool {
+        self.selection == inputs.selection
+            && self.wash == *inputs.wash
+            && self.text.len() == inputs.text.len()
+            && (same_allocation(&self.text, inputs.text) || self.text == *inputs.text)
+            && self.highlights.same(inputs.highlights)
+            && self.overrides.same(inputs.overrides)
+            && self.default_style == *inputs.default_style
+    }
 }
 
 impl SelectableTextState {
@@ -270,14 +366,56 @@ impl SelectableTextState {
         let Some(mut inner) = self.inner.try_borrow_mut().ok() else {
             return;
         };
-        if inner.fingerprint != next {
-            inner.fingerprint = next;
-            inner.selection = None;
-            inner.anchor = None;
-            inner.head = None;
-            inner.down_index = None;
-            inner.dragging = false;
+        // Borrowed text carries no identity to trust on the next layout.
+        inner.validated = None;
+        inner.apply_fingerprint(next);
+    }
+
+    /// Validates like [`Self::validate_for_text`], skipping the content hash
+    /// when `text` is the allocation validated last time.
+    fn validate_for_shared(&self, text: &SharedString) {
+        let Some(mut inner) = self.inner.try_borrow_mut().ok() else {
+            return;
+        };
+        if inner
+            .validated
+            .as_ref()
+            .is_some_and(|validated| same_allocation(validated, text))
+        {
+            return;
         }
+        inner.apply_fingerprint(text_fingerprint(text));
+        inner.validated = Some(text.clone());
+    }
+
+    /// Returns the runs for one layout, compiling only when an input changed
+    /// since the previous layout.
+    ///
+    /// A miss moves the caller ranges into the cache (the element is
+    /// consumed by this frame and never reads them again), so neither path
+    /// copies them.
+    fn compiled_runs(&self, inputs: RunInputs<'_>) -> Vec<TextRun> {
+        let Ok(mut compiled) = self.compiled.try_borrow_mut() else {
+            return compile_runs(&inputs);
+        };
+        if let Some(cached) = compiled.as_ref()
+            && cached.matches(&inputs)
+        {
+            return cached.runs.clone();
+        }
+        let runs = compile_runs(&inputs);
+        #[cfg(test)]
+        self.compilations.set(self.compilations.get() + 1);
+        *compiled = Some(CompiledRuns {
+            text: inputs.text.clone(),
+            default_style: inputs.default_style.clone(),
+            highlights: std::mem::take(inputs.highlights),
+            overrides: std::mem::take(inputs.overrides),
+            selection: inputs.selection,
+            wash: *inputs.wash,
+            runs: runs.clone(),
+        });
+        runs
     }
 
     /// Returns the normalized selected byte range, if any.
@@ -437,6 +575,38 @@ impl SelectableTextState {
     }
 }
 
+impl SelectionInner {
+    /// Drops the selection and drag latch when the content fingerprint
+    /// changed: new bytes must never keep a range that addressed older
+    /// content.
+    fn apply_fingerprint(&mut self, next: (usize, u64)) {
+        if self.fingerprint != next {
+            self.fingerprint = next;
+            self.selection = None;
+            self.anchor = None;
+            self.head = None;
+            self.down_index = None;
+            self.dragging = false;
+        }
+    }
+}
+
+/// Merges the selection wash and compiles runs for one layout.
+fn compile_runs(inputs: &RunInputs<'_>) -> Vec<TextRun> {
+    let merged = merge_selection_highlight_slice(
+        inputs.text,
+        inputs.highlights.as_slice(),
+        inputs.selection.clone(),
+        inputs.wash,
+    );
+    compile_text_runs(
+        inputs.text,
+        inputs.default_style,
+        &merged,
+        inputs.overrides.as_slice(),
+    )
+}
+
 /// Activation for one link range inside selectable text.
 pub type SelectableLinkHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
@@ -469,7 +639,7 @@ struct PaintFrame {
     state: SelectableTextState,
     focus: Option<FocusHandle>,
     text: SharedString,
-    links: Vec<Range<usize>>,
+    links: Rc<[Range<usize>]>,
     on_link: Option<SelectableLinkHandler>,
     /// Whether to attach the focus handle to the dispatch tree in
     /// `prepaint`. True for retained mode, which owns its handle, and for
@@ -477,13 +647,9 @@ struct PaintFrame {
     register_focus: bool,
 }
 
-/// Merged highlight runs, the retained selection range, and the prepared
-/// paint frame resolved from element state.
-type RetainedFramePaint = (
-    Vec<(Range<usize>, HighlightStyle)>,
-    Option<Range<usize>>,
-    PaintFrame,
-);
+/// The retained selection range and the prepared paint frame resolved from
+/// element state.
+type RetainedFramePaint = (Option<Range<usize>>, PaintFrame);
 
 /// Read-only selectable text element for transcript bodies.
 ///
@@ -495,12 +661,12 @@ type RetainedFramePaint = (
 pub struct SelectableText {
     id: ElementId,
     text: SharedString,
-    base_highlights: Vec<(Range<usize>, HighlightStyle)>,
-    text_run_overrides: Vec<TextRunOverride>,
+    base_highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
+    text_run_overrides: RangeSlice<TextRunOverride>,
     inline_images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
     selection_style: HighlightStyle,
     source: SelectionSource,
-    link_ranges: Vec<Range<usize>>,
+    link_ranges: Rc<[Range<usize>]>,
     on_link: Option<SelectableLinkHandler>,
     snapshot: Option<Range<usize>>,
     styled: Option<StyledText>,
@@ -562,12 +728,12 @@ impl SelectableText {
         Self {
             id: id.into(),
             text: text.into(),
-            base_highlights,
-            text_run_overrides: Vec::new(),
+            base_highlights: RangeSlice::Owned(base_highlights),
+            text_run_overrides: RangeSlice::default(),
             inline_images: Vec::new(),
             selection_style: selection_style_for_theme(*theme),
             source,
-            link_ranges: Vec::new(),
+            link_ranges: Rc::from([]),
             on_link: None,
             snapshot: None,
             styled: None,
@@ -597,12 +763,35 @@ impl SelectableText {
     /// [`SelectableTextState::suppresses_click`] in overlapping handlers.
     #[must_use]
     pub fn links(
-        mut self,
+        self,
         ranges: Vec<Range<usize>>,
+        on_link: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.shared_links(ranges.into(), on_link)
+    }
+
+    /// Supplies link ranges the caller keeps across frames; otherwise
+    /// identical to [`Self::links`].
+    #[must_use]
+    pub fn shared_links(
+        mut self,
+        ranges: Rc<[Range<usize>]>,
         on_link: impl Fn(usize, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.link_ranges = ranges;
         self.on_link = Some(Rc::new(on_link));
+        self
+    }
+
+    /// Replaces the caller highlight ranges with ranges the caller keeps
+    /// across frames, so an unchanged layout reuses its compiled runs by
+    /// pointer instead of comparing or copying ranges.
+    #[must_use]
+    pub fn with_shared_highlights(
+        mut self,
+        highlights: Rc<[(Range<usize>, HighlightStyle)]>,
+    ) -> Self {
+        self.base_highlights = RangeSlice::Shared(highlights);
         self
     }
 
@@ -615,7 +804,15 @@ impl SelectableText {
     /// time (see [`compile_text_runs`]).
     #[must_use]
     pub fn with_text_run_overrides(mut self, overrides: Vec<TextRunOverride>) -> Self {
-        self.text_run_overrides = overrides;
+        self.text_run_overrides = RangeSlice::Owned(overrides);
+        self
+    }
+
+    /// Supplies run overrides the caller keeps across frames; otherwise
+    /// identical to [`Self::with_text_run_overrides`].
+    #[must_use]
+    pub fn with_shared_text_run_overrides(mut self, overrides: Rc<[TextRunOverride]>) -> Self {
+        self.text_run_overrides = RangeSlice::Shared(overrides);
         self
     }
 
@@ -654,18 +851,13 @@ impl SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> RetainedFramePaint {
-        let (merged, snapshot, frame, needs_focus) = window.with_optional_element_state(
+        let (snapshot, frame, needs_focus) = window.with_optional_element_state(
             global_id,
             |stored: Option<Option<RetainedSelection>>, _: &mut Window| {
                 let Some(inner) = stored else {
                     let state = SelectableTextState::default();
-                    state.validate_for_text(self.text.as_ref());
-                    let merged = merge_selection_highlight(
-                        self.text.as_ref(),
-                        self.base_highlights.clone(),
-                        state.selection_range(),
-                        &self.selection_style,
-                    );
+                    state.validate_for_shared(&self.text);
+                    let snapshot = state.selection_range();
                     let frame = PaintFrame {
                         state,
                         focus: None,
@@ -674,18 +866,12 @@ impl SelectableText {
                         on_link: self.on_link.clone(),
                         register_focus: false,
                     };
-                    return ((merged, None, frame, false), None);
+                    return ((snapshot, frame, false), None);
                 };
                 let retained: RetainedSelection = inner.unwrap_or_default();
-                retained.state.validate_for_text(self.text.as_ref());
+                retained.state.validate_for_shared(&self.text);
                 let snapshot = retained.state.selection_range();
                 let needs_focus = retained.focus.is_none();
-                let merged = merge_selection_highlight(
-                    self.text.as_ref(),
-                    self.base_highlights.clone(),
-                    snapshot.clone(),
-                    &self.selection_style,
-                );
                 let frame = PaintFrame {
                     state: retained.state.clone(),
                     focus: retained.focus.clone(),
@@ -694,7 +880,7 @@ impl SelectableText {
                     on_link: self.on_link.clone(),
                     register_focus: true,
                 };
-                ((merged, snapshot, frame, needs_focus), Some(retained))
+                ((snapshot, frame, needs_focus), Some(retained))
             },
         );
         let frame = if needs_focus {
@@ -717,7 +903,7 @@ impl SelectableText {
         } else {
             frame
         };
-        (merged, snapshot, frame)
+        (snapshot, frame)
     }
 }
 
@@ -740,15 +926,9 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (merged, snapshot, frame) = match &self.source {
+        let (snapshot, frame) = match &self.source {
             SelectionSource::Controlled { state, focus } => {
-                state.validate_for_text(self.text.as_ref());
-                let merged = merge_selection_highlight(
-                    self.text.as_ref(),
-                    self.base_highlights.clone(),
-                    state.selection_range(),
-                    &self.selection_style,
-                );
+                state.validate_for_shared(&self.text);
                 let frame = PaintFrame {
                     state: state.clone(),
                     focus: focus.clone(),
@@ -757,19 +937,21 @@ impl Element for SelectableText {
                     on_link: self.on_link.clone(),
                     register_focus: focus.is_some(),
                 };
-                (merged, state.selection_range(), frame)
+                (state.selection_range(), frame)
             }
             SelectionSource::Retained => self.retained_frame(global_id, window, cx),
         };
+        let default_style = window.text_style();
+        let runs = frame.state.compiled_runs(RunInputs {
+            text: &self.text,
+            default_style: &default_style,
+            highlights: &mut self.base_highlights,
+            overrides: &mut self.text_run_overrides,
+            selection: snapshot.clone(),
+            wash: &self.selection_style,
+        });
         self.snapshot = snapshot;
         self.frame = Some(frame);
-        let default_style = window.text_style();
-        let runs = compile_text_runs(
-            self.text.as_ref(),
-            &default_style,
-            &merged,
-            &self.text_run_overrides,
-        );
         let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
         let (layout_id, ()) = styled.request_layout(None, inspector_id, window, cx);
         self.styled = Some(styled);
@@ -794,8 +976,8 @@ impl Element for SelectableText {
             let runs = compile_text_runs(
                 self.text.as_ref(),
                 &default_style,
-                &self.base_highlights,
-                &self.text_run_overrides,
+                self.base_highlights.as_slice(),
+                self.text_run_overrides.as_slice(),
             );
             let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
             let _ = styled.request_layout(None, inspector_id, window, cx);
@@ -1018,5 +1200,143 @@ impl IntoElement for SelectableText {
 
     fn into_element(self) -> Self::Element {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ops::Range;
+    use std::rc::Rc;
+
+    use gpui::{FontWeight, HighlightStyle, SharedString, TextStyle};
+
+    use super::{RangeSlice, RunInputs, SelectableTextState, compile_runs};
+
+    fn bold() -> HighlightStyle {
+        HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            ..Default::default()
+        }
+    }
+
+    fn wash() -> HighlightStyle {
+        HighlightStyle {
+            background_color: Some(gpui::black()),
+            ..Default::default()
+        }
+    }
+
+    const BODY: &str = "a shared body long enough to live on the heap";
+
+    #[test]
+    fn same_allocation_keeps_selection_and_changed_bytes_clear_it() {
+        let state = SelectableTextState::new();
+        let text = SharedString::from(BODY.to_owned());
+        state.validate_for_shared(&text);
+        state.begin_drag(2);
+        let _ = state.update_drag(8);
+        assert!(state.end_drag(&text));
+
+        state.validate_for_shared(&text);
+        assert_eq!(state.selection_range(), Some(2..8));
+        // Equal bytes in a new allocation still keep the selection.
+        let copy = SharedString::from(BODY.to_owned());
+        state.validate_for_shared(&copy);
+        assert_eq!(state.selection_range(), Some(2..8));
+        // New bytes clear it.
+        state.validate_for_shared(&SharedString::from(format!("{BODY}!")));
+        assert_eq!(state.selection_range(), None);
+    }
+
+    #[test]
+    fn borrowed_validation_forgets_the_trusted_allocation() {
+        let state = SelectableTextState::new();
+        let text = SharedString::from(BODY.to_owned());
+        state.validate_for_shared(&text);
+        // Borrowed validation of other bytes moves the fingerprint on; the
+        // old allocation must not then pass as unchanged.
+        state.validate_for_text("different content entirely");
+        state.select_all();
+        assert_eq!(
+            state.selection_range(),
+            Some(0.."different content entirely".len())
+        );
+        state.validate_for_shared(&text);
+        assert_eq!(state.selection_range(), None);
+    }
+
+    fn inputs<'a>(
+        text: &'a SharedString,
+        style: &'a TextStyle,
+        highlights: &'a mut RangeSlice<(Range<usize>, HighlightStyle)>,
+        overrides: &'a mut RangeSlice<super::TextRunOverride>,
+        selection: Option<Range<usize>>,
+        wash: &'a HighlightStyle,
+    ) -> RunInputs<'a> {
+        RunInputs {
+            text,
+            default_style: style,
+            highlights,
+            overrides,
+            selection,
+            wash,
+        }
+    }
+
+    #[test]
+    fn unchanged_layout_reuses_its_compiled_runs() {
+        let state = SelectableTextState::new();
+        let text = SharedString::from(BODY.to_owned());
+        let style = TextStyle::default();
+        let wash = wash();
+        let shared: Rc<[(Range<usize>, HighlightStyle)]> = Rc::from(vec![(2..8, bold())]);
+        let compile = |selection: Option<Range<usize>>| {
+            let mut highlights = RangeSlice::Shared(Rc::clone(&shared));
+            let mut overrides = RangeSlice::default();
+            state.compiled_runs(inputs(
+                &text,
+                &style,
+                &mut highlights,
+                &mut overrides,
+                selection,
+                &wash,
+            ))
+        };
+        let first = compile(None);
+        let second = compile(None);
+        assert_eq!(first, second);
+        assert_eq!(state.compilations.get(), 1);
+
+        // A selection change recompiles, and matches a direct compilation.
+        let selected = compile(Some(4..12));
+        assert_eq!(state.compilations.get(), 2);
+        let mut highlights = RangeSlice::Shared(Rc::clone(&shared));
+        let mut overrides = RangeSlice::default();
+        let direct = compile_runs(&inputs(
+            &text,
+            &style,
+            &mut highlights,
+            &mut overrides,
+            Some(4..12),
+            &wash,
+        ));
+        assert_eq!(selected, direct);
+        assert_ne!(selected, first);
+
+        // Equal per-frame ranges and equal text in a fresh allocation reuse
+        // the compiled runs too.
+        let fresh_text = SharedString::from(BODY.to_owned());
+        let mut owned = RangeSlice::Owned(vec![(2..8, bold())]);
+        let mut overrides = RangeSlice::default();
+        let reused = state.compiled_runs(inputs(
+            &fresh_text,
+            &style,
+            &mut owned,
+            &mut overrides,
+            Some(4..12),
+            &wash,
+        ));
+        assert_eq!(reused, selected);
+        assert_eq!(state.compilations.get(), 2);
     }
 }

@@ -318,6 +318,109 @@ impl ConversationProjection {
         Ok(SnapshotDisposition::Applied)
     }
 
+    /// Adds one page of older turns in front of the materialized window.
+    ///
+    /// A subscription opens on a thread's newest turns; the reader's older
+    /// turns arrive afterwards as pages read on demand. A page contributes
+    /// only turns that lie wholly before the window: a turn the window
+    /// already holds, or one at or after its oldest turn, is left out with
+    /// its items, so a repeated or late page changes nothing. The cursor and
+    /// delivery status stay exactly as they were, because a page is history
+    /// and not delivery: batches keep continuing from the same cursor.
+    ///
+    /// Budgets, semantic times, and identity rules are checked on borrowed
+    /// input before anything is cloned; a refusal leaves every prior row,
+    /// the cursor, and the status byte-identical.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProjectionError::ThreadMismatch`] for a foreign thread,
+    /// [`ProjectionError::BaselineRequired`] before any snapshot, or the
+    /// retention, time-ordering, identity, or structure refusal the merged
+    /// window would violate.
+    pub fn extend_earlier(
+        &mut self,
+        page: &ConversationSnapshot,
+    ) -> Result<SnapshotDisposition, ProjectionError> {
+        if page.thread_id() != &self.thread_id {
+            return Err(ProjectionError::ThreadMismatch);
+        }
+        let Some(previous) = self.state.as_ref() else {
+            return Err(ProjectionError::BaselineRequired);
+        };
+        let Some(oldest_loaded) = previous.turns().first().map(|turn| turn.ordinal) else {
+            return Ok(SnapshotDisposition::Unchanged);
+        };
+        validate_snapshot_semantics(page)?;
+        let earlier: HashSet<&TurnId> = page
+            .turns()
+            .iter()
+            .filter(|turn| turn.ordinal < oldest_loaded)
+            .filter(|turn| turn_index(previous.turns(), &turn.turn_id).is_none())
+            .map(|turn| &turn.turn_id)
+            .collect();
+        if earlier.is_empty() {
+            return Ok(SnapshotDisposition::Unchanged);
+        }
+        let page_items = || {
+            page.items()
+                .iter()
+                .filter(|item| earlier.contains(item.turn_id()))
+        };
+        // The same cross-kind rule a snapshot install applies: one raw
+        // identifier never names both a turn and an item.
+        for turn_id in &earlier {
+            if previous
+                .items()
+                .iter()
+                .any(|item| item.item_id().as_str() == turn_id.as_str())
+            {
+                return Err(ProjectionError::IdentityConflict);
+            }
+        }
+        for item in page_items() {
+            if previous
+                .turns()
+                .iter()
+                .any(|turn| turn.turn_id.as_str() == item.item_id().as_str())
+            {
+                return Err(ProjectionError::IdentityConflict);
+            }
+        }
+        let mut retention =
+            Retention::seed(previous.items()).map_err(|_| ProjectionError::RetentionExceeded)?;
+        for item in page_items() {
+            retention
+                .insert_item(item_body_len(item))
+                .map_err(|_| ProjectionError::RetentionExceeded)?;
+        }
+
+        let mut turns: Vec<ConversationTurn> = page
+            .turns()
+            .iter()
+            .filter(|turn| earlier.contains(&turn.turn_id))
+            .cloned()
+            .collect();
+        turns.extend(previous.turns().iter().cloned());
+        let mut items: Vec<ConversationItem> = page_items().cloned().collect();
+        items.extend(previous.items().iter().cloned());
+        let watermark = previous
+            .updated_at()
+            .as_millis()
+            .max(page.updated_at().as_millis());
+        let candidate = ConversationSnapshot::new(
+            self.thread_id.clone(),
+            previous.cursor(),
+            turns,
+            items,
+            UnixMillis::from_millis(watermark),
+        )
+        .map_err(ProjectionError::Structure)?;
+        // Not `publish`: a page never clears a required recovery.
+        self.state = Some(candidate);
+        Ok(SnapshotDisposition::Applied)
+    }
+
     /// Acknowledges an authoritative resumed subscription at the existing
     /// last-good cursor.
     ///

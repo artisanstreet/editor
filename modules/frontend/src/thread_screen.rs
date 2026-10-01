@@ -7,8 +7,8 @@
 //!   `routes/components/thread-route-gate.svelte`. Gate precedence
 //!   (opened route > loading > failure retry) is reused from
 //!   [`crate::thread_route_gate_policy::thread_route_gate_render`]; the
-//!   loading mark reuses the shared [`FadeArc`] element, which is the same
-//!   component the legacy gate renders (`size-6 text-muted-foreground`).
+//!   loading mark is the shared shimmering wordmark ([`WordmarkLoader`]),
+//!   the legacy application loader, in place of the legacy gate's arc.
 //! - `routes/components/thread-route.svelte` is controller plumbing around
 //!   one headline visual fact: the document title renders the thread's
 //!   display title, which the Forge resolves and the listing carries. It
@@ -26,50 +26,58 @@
 //!   [`ConversationHost`]/[`ConversationSurface`] tree, which this screen
 //!   mounts as its transcript column rather than re-implementing.
 //! - `routes/components/thread-panel.svelte` (mounted by the shell as the
-//!   inspector column for a thread surface) contributes the environment card
-//!   (`thread-environment-card.svelte`), the terminals card
-//!   (`thread-terminals-card.svelte` + `thread-terminals.svelte` rows), and
-//!   the checklist card. Row content is projected through the already-ported
-//!   [`crate::thread_environment_presentation`],
+//!   inspector column for a thread surface) contributes the row content of
+//!   the environment card (`thread-environment-card.svelte`), the checklist,
+//!   and the terminals card (`thread-terminals-card.svelte` +
+//!   `thread-terminals.svelte` rows). Natively the column follows the ruled
+//!   desktop shell instead of the legacy floating glass cards: a flat
+//!   true-black column exactly as wide as the expanded left sidebar
+//!   ([`THREAD_INSPECTOR_WIDTH_PX`]), with a one-device-pixel left rule and
+//!   the unlabelled Context rows followed by the Agents, Checklist and
+//!   Terminals sections under muted labels set like the sidebar's thread-age
+//!   groups. The shell paints the junction crosshair
+//!   where that rule meets the titlebar. Row content is projected through the
+//!   already-ported [`crate::thread_environment_presentation`],
 //!   [`crate::terminal_presentation`], and [`crate::thread_panel_policy`]
 //!   policies.
 //!
 //! The composer is packet 2's [`NativeComposer`](crate::native_composer)
 //! entity, consumed as-is and docked at the bottom of the frame. Anything
-//! this screen cannot honestly render yet (project selector row, row icons,
-//! remote chip, terminal tail viewer, `LipCard` overlay chrome) is listed in
-//! the report as a gap, not faked.
+//! this screen cannot honestly render yet (project picker, remote chip,
+//! terminal tail viewer, `LipCard` overlay chrome) is listed in the report as
+//! a gap, not faked; inspector rows stay non-interactive.
 
 #![forbid(unsafe_code)]
 
 use std::rc::Rc;
 
 use artisan_assets::AssetId;
-use artisan_domain::ThreadId;
+use artisan_domain::{PlanEntry, PlanEntryStatus, ThreadId};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
 use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
-use artisan_ui::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens, ThemeMode};
+use artisan_ui::theme::{
+    ArtisanTheme, DesktopTheme, ProseTypography, RadiusStep, RadiusTokens, ThemeMode,
+};
+use artisan_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
-    App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla, IntoElement, Render,
+    App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
     SharedString, Subscription, Window, div,
     prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
     px, rgb, rgb_to_hsla,
 };
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
+use crate::desktop_shell::{
+    DESKTOP_COLUMN_INSET_PX, DESKTOP_SIDEBAR_WIDTH_PX, DesktopShellStyle, desktop_section_label,
+};
 use crate::native_composer::NativeComposer;
-use crate::native_composer_material::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
-use crate::shell_layout::{
-    ProseWidth, desktop_inspector_column_pixels, desktop_thread_inspector_fits,
-};
+use crate::shell_layout::{ProseWidth, desktop_inspector_pixels};
 use crate::terminal_presentation::{
     TerminalSession, TerminalState, terminal_command_line, terminal_display_name,
 };
+use crate::thread_agents::{ThreadAgentEntry, ThreadAgentState};
 use crate::thread_environment_presentation::{ThreadEnvironmentInput, present_thread_environment};
 use crate::thread_panel_policy::{ChecklistEntry, ChecklistEntryState, present_checklist_entry};
 use crate::thread_route_gate_policy::{ThreadRouteGateRender, thread_route_gate_render};
@@ -93,6 +101,13 @@ pub const THREAD_SCREEN_SELECTOR: &str = "artisan-thread-screen";
 /// Stable debug selector for the gate loading indicator.
 pub const THREAD_SCREEN_LOADING_SELECTOR: &str = "artisan-thread-screen-loading";
 
+/// Stable debug selector for the wordmark inside the gate loading branch.
+pub const THREAD_SCREEN_LOADING_MARK_SELECTOR: &str = "artisan-thread-screen-loading-mark";
+
+/// How long the loading gate stays blank before its mark fades in, so a
+/// thread that presents quickly never flashes it.
+pub const THREAD_SCREEN_LOADING_MARK_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Stable debug selector for the gate failure branch.
 pub const THREAD_SCREEN_FAILURE_SELECTOR: &str = "artisan-thread-screen-failure";
 
@@ -105,6 +120,10 @@ pub const THREAD_SCREEN_TRANSCRIPT_SELECTOR: &str = "artisan-thread-screen-trans
 /// Stable debug selector for the inspector column.
 pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspector";
 
+/// Stable debug selector for the inspector column's one-device-pixel left
+/// rule.
+pub const THREAD_SCREEN_INSPECTOR_RULE_SELECTOR: &str = "artisan-thread-screen-inspector-rule";
+
 /// Stable debug selector for the composer dock.
 pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-composer-dock";
 
@@ -112,10 +131,36 @@ pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-compose
 /// overlay frame (the native `prose-column w-full max-w-(--prose-width)`).
 pub const THREAD_SCREEN_COMPOSER_CARD_SELECTOR: &str = "artisan-thread-screen-composer-card";
 
-/// Stable debug selector for the environment card.
-pub const THREAD_SCREEN_ENV_CARD_SELECTOR: &str = "artisan-thread-screen-env-card";
+/// Stable debug selector for the inspector's Context section.
+pub const THREAD_SCREEN_CONTEXT_SELECTOR: &str = "artisan-thread-screen-context";
 
-/// Stable debug selector for one environment-card row.
+/// Stable debug selector for the inspector's Agents section.
+pub const THREAD_SCREEN_AGENTS_SELECTOR: &str = "artisan-thread-screen-agents";
+
+/// Stable debug selector for the Agents section's muted label.
+pub const THREAD_SCREEN_AGENTS_LABEL_SELECTOR: &str = "artisan-thread-screen-agents-label";
+
+/// Stable debug-selector prefix for one agent row; the agent's identity is
+/// appended after a `-` separator.
+pub const THREAD_SCREEN_AGENT_ROW_PREFIX: &str = "artisan-thread-screen-agent";
+
+/// Stable debug selector for the inspector's Checklist section.
+pub const THREAD_SCREEN_CHECKLIST_SELECTOR: &str = "artisan-thread-screen-checklist";
+
+/// Stable debug selector for the Checklist section's muted label.
+pub const THREAD_SCREEN_CHECKLIST_LABEL_SELECTOR: &str = "artisan-thread-screen-checklist-label";
+
+/// Stable debug selector for the inspector's Terminals section.
+pub const THREAD_SCREEN_TERMINALS_SELECTOR: &str = "artisan-thread-screen-terminals";
+
+/// Stable debug selector for the Terminals section's muted label.
+pub const THREAD_SCREEN_TERMINALS_LABEL_SELECTOR: &str = "artisan-thread-screen-terminals-label";
+
+/// Stable debug selector for the Context section's Project row.
+pub const THREAD_SCREEN_PROJECT_ROW_SELECTOR: &str = "artisan-thread-screen-project-row";
+
+/// Stable debug selector for one environment row of the Context section
+/// (Machine, Changes, Branch, Worktree).
 pub const THREAD_SCREEN_ENV_ROW_SELECTOR: &str = "artisan-thread-screen-env-row";
 
 /// `--prose-width: 48rem` (`lib/styles/theme.css:157`); `1rem` is `16px`.
@@ -148,25 +193,23 @@ pub(crate) const fn composer_pad_bottom(viewport_width_px: f32) -> f32 {
 /// `max-w-md` on the gate failure column.
 const FAILURE_MAX_WIDTH_PX: f32 = 448.0;
 
-/// `p-1` on the inspector column root.
-const INSPECTOR_PAD_PX: f32 = 4.0;
+/// `gap-4` (16 px) between a terminal row's name cluster and its muted
+/// command line.
+const TERMINAL_ROW_GAP_PX: f32 = 16.0;
 
-/// `gap-4` between inspector cards (`thread-panel.svelte` hover-pill group).
-const INSPECTOR_GAP_PX: f32 = 16.0;
-
-/// Inspector column width. Legacy reserves
-/// `w-[calc(clamp(16rem,25vw,350px)+1rem)]` in the shell row; the live width
-/// now comes from [`thread_inspector_width`], and this midpoint remains only
-/// as the fallback before the route integrator publishes a viewport width.
-const INSPECTOR_WIDTH_PX: f32 = 320.0;
+/// Full desktop inspector column width: exactly the expanded left sidebar
+/// ([`DESKTOP_SIDEBAR_WIDTH_PX`], 327 px), so the two ruled columns frame the
+/// conversation as a pair. On narrower windows it shrinks with the sidebar
+/// (see [`thread_inspector_width`]).
+pub(crate) const THREAD_INSPECTOR_WIDTH_PX: f32 = DESKTOP_SIDEBAR_WIDTH_PX;
 
 /// True-black shell paint (`#000000`).
 ///
 /// The explicit black-shell request overrides the Electron dark chrome
 /// (`--surface-950` background, `--surface-900/925` card gradient) for shell
-/// surfaces only: title header, transcript column, inspector column gutters,
-/// composer dock, and gate branches. Cards, message bubbles, controls, and
-/// overlays keep their themed fills so intentional contrast survives.
+/// surfaces only: title header, transcript column, the flat inspector column,
+/// composer dock, and gate branches. Message bubbles, controls, and overlays
+/// keep their themed fills so intentional contrast survives.
 const SHELL_BLACK_HEX: u32 = 0x0000_0000;
 
 /// Resolves the true-black shell paint.
@@ -174,55 +217,53 @@ pub(crate) fn shell_black() -> Hsla {
     rgb_to_hsla(rgb(SHELL_BLACK_HEX))
 }
 
-/// Returns whether the inspector column renders for a content width.
+/// Resolves the inspector column width for a content width, or `None` while
+/// it does not fit.
 ///
-/// This is the `shell-layout.ts` band authority at the native balanced prose
-/// width, measured from the width left after the desktop sidebar (window minus
-/// [`DesktopShellStyle::sidebar_width`](crate::desktop_shell::DesktopShellStyle),
-/// both in logical pixels) — never from a physical-pixel screenshot reading.
-/// A 1280 px window with the expanded rail leaves 1062 px of content (hidden);
-/// 1400 px leaves 1182 px (still hidden, no squeeze); the column returns once
-/// content reaches 1280 px. Non-positive and non-finite widths never fit.
-pub(crate) fn thread_inspector_visible(content_width_px: f32) -> bool {
-    desktop_thread_inspector_fits(f64::from(content_width_px), ProseWidth::Balanced)
+/// The `shell-layout.ts` desktop policy at the native balanced prose width,
+/// measured from the width left after the desktop sidebar (window minus
+/// [`DesktopShellStyle::sidebar_width`], both in logical pixels) — never from
+/// a physical-pixel screenshot reading. The chat keeps its 864 px minimum
+/// (768 px prose plus the 48 px rail clearance each side); the column takes
+/// what remains up to [`THREAD_INSPECTOR_WIDTH_PX`] and hides below 240 px.
+/// Hidden, the column takes no space. Non-positive and non-finite widths
+/// never fit.
+pub(crate) fn thread_inspector_width(content_width_px: f32) -> Option<f32> {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the resolved width is bounded by the f32 column constant"
+    )]
+    desktop_inspector_pixels(
+        f64::from(content_width_px),
+        ProseWidth::Balanced,
+        f64::from(THREAD_INSPECTOR_WIDTH_PX),
+    )
+    .map(|width| width as f32)
 }
-
-/// Resolves the inspector column width for a content width.
-///
-/// This is the `shell-layout.ts` `InspectorColumnPixels` clamp
-/// (`clamp(16rem, 25vw, 350px)`) read from content width. The clamp bounds the
-/// result to the finite 256..350 px range, so the narrowing `as` cast below
-/// is exact and safe (standard Rust has no checked float-narrowing `TryFrom`).
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the shared helper clamps its result to the finite 256..=350 px range, so the narrowing back to f32 is exact"
-)]
-pub(crate) fn thread_inspector_width(content_width_px: f32) -> f32 {
-    desktop_inspector_column_pixels(f64::from(content_width_px)) as f32
-}
-
-/// Inspector glass-card inner inset: the card child's `p-1`
-/// (`thread-environment-card.svelte:294`, `thread-terminals-card.svelte:201`)
-/// — 4 px, not the 16 px compact-card band.
-const CARD_INSET_PX: f32 = 4.0;
-
-/// Inspector loading-shimmer inner padding: `p-3`
-/// (`thread-terminals-card.svelte:194`) — 12 px.
-const LOADING_PAD_PX: f32 = 12.0;
 
 /// Inspector loading-shimmer bar height: `h-4`
 /// (`thread-terminals-card.svelte:195-196`) — 16 px.
 const LOADING_BAR_PX: f32 = 16.0;
+
+/// Slot holding an agent row's state mark: the row glyph's 16 px, so the
+/// working arc and the settled dot share one center.
+const AGENT_STATE_SLOT_PX: f32 = 16.0;
+
+/// Settled agent state dot: `state-dot size-1.5` (`thread-agents.svelte`).
+const AGENT_STATE_DOT_PX: f32 = 6.0;
 
 /// Which inspector row a glyph belongs to.
 ///
 /// Identities transcribe the `@tabler/icons-svelte` imports in
 /// `thread-environment-card.svelte:2-6` (`device-laptop`, `file-diff`,
 /// `git-branch`, `folder-code`) and `thread-terminals.svelte:2`
-/// (`terminal-2`). Host-mark brand icons and dropdown chevrons have no exact
-/// catalog glyph behind an honest affordance and stay gaps.
+/// (`terminal-2`); the Project row takes the plain `folder` glyph the sidebar
+/// project picker already uses. Host-mark brand icons and dropdown chevrons
+/// have no exact catalog glyph behind an honest affordance and stay gaps.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum InspectorRowIcon {
+    /// `folder` on the Project row.
+    Project,
     /// `device-laptop` on the Machine row.
     Machine,
     /// `file-diff` on the Changes row.
@@ -233,21 +274,27 @@ pub(crate) enum InspectorRowIcon {
     Worktree,
     /// `terminal-2` on terminal rows.
     Terminal,
+    /// `bot-id` on agent rows (`thread-agents.svelte`).
+    Agent,
 }
 
 /// Returns the exact catalog glyph for an inspector row kind.
 #[must_use]
 pub(crate) const fn inspector_row_icon(kind: InspectorRowIcon) -> AssetId {
     match kind {
+        InspectorRowIcon::Project => AssetId::TABLER_FOLDER,
         InspectorRowIcon::Machine => AssetId::TABLER_DEVICE_LAPTOP,
         InspectorRowIcon::Changes => AssetId::TABLER_FILE_DIFF,
         InspectorRowIcon::Branch => AssetId::TABLER_GIT_BRANCH,
         InspectorRowIcon::Worktree => AssetId::TABLER_FOLDER_CODE,
         InspectorRowIcon::Terminal => AssetId::TABLER_TERMINAL_2,
+        InspectorRowIcon::Agent => AssetId::TABLER_BOT_ID,
     }
 }
 
-/// `px-2 py-2` on inspector rows and card headings.
+/// `px-2 py-2` on inspector rows: the 8 px horizontal inset matches the
+/// shared section label ([`crate::desktop_shell::DESKTOP_COLUMN_ROW_INSET_PX`])
+/// and the left sidebar's rows, so labels and row text share one edge.
 const ROW_PAD_PX: f32 = 8.0;
 
 /// `gap-2` inside inspector rows.
@@ -273,15 +320,6 @@ mod tests {
         reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
     )]
     use super::*;
-
-    /// Reference `text-sm` line height (Tailwind sets 14 px type on a 20 px
-    /// line). Test-only: layout never measures text with it.
-    const REFERENCE_TEXT_LINE_PX: f32 = 20.0;
-
-    /// Reference single-row environment-card height: `p-1` (4 + 4) around one
-    /// `px-2 py-2` row (8 + 20 + 8) — 44 px
-    /// (`thread-environment-card.svelte:294,372-376`). Test-only pin.
-    const REFERENCE_ENV_CARD_PX: f32 = 44.0;
 
     #[test]
     fn live_terminal_filter_keeps_opening_and_active_only() {
@@ -342,63 +380,170 @@ mod tests {
         assert_eq!(presented.text, "Port the transcript");
     }
 
+    fn plan_entry(id: &str, status: PlanEntryStatus, text: &str) -> PlanEntry {
+        PlanEntry::new(
+            artisan_domain::ObservationId::parse(id).expect("plan entry id"),
+            status,
+            text.to_owned(),
+        )
+        .expect("plan entry")
+    }
+
+    /// Each protocol plan status lands on its checklist policy state, with
+    /// identity and text copied exactly; the borrowed comparison agrees with
+    /// the copy and catches a changed entry.
+    #[test]
+    fn plan_entries_map_onto_checklist_policy_states() {
+        for (status, state) in [
+            (PlanEntryStatus::Pending, ChecklistEntryState::Pending),
+            (PlanEntryStatus::InProgress, ChecklistEntryState::Active),
+            (PlanEntryStatus::Completed, ChecklistEntryState::Completed),
+        ] {
+            let source = plan_entry("step-1", status, "Wire the inspector");
+            let entry = ThreadChecklistEntry::from_plan_entry(&source);
+            assert_eq!(
+                entry,
+                ThreadChecklistEntry {
+                    id: String::from("step-1"),
+                    state,
+                    text: String::from("Wire the inspector"),
+                }
+            );
+            assert!(entry.presents(&source));
+        }
+        let entry = ThreadChecklistEntry::from_plan_entry(&plan_entry(
+            "step-1",
+            PlanEntryStatus::InProgress,
+            "Wire the inspector",
+        ));
+        assert!(!entry.presents(&plan_entry(
+            "step-1",
+            PlanEntryStatus::Completed,
+            "Wire the inspector",
+        )));
+        assert!(!entry.presents(&plan_entry(
+            "step-1",
+            PlanEntryStatus::InProgress,
+            "Wire the panel",
+        )));
+    }
+
+    /// The environment and checklist setters report a change only when the
+    /// value actually differs, so the per-render route sync never notifies
+    /// for an unchanged frame; the borrowed plan check follows suit.
+    #[gpui::test]
+    fn inspector_setters_report_only_real_changes(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-setters", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                probe.screen.update(probe_cx, |screen, _| {
+                    let environment = ThreadEnvironmentInput {
+                        identity: Some(
+                            crate::thread_environment_presentation::HostIdentitySnapshot::new(
+                                "forge-host",
+                            ),
+                        ),
+                        ..ThreadEnvironmentInput::default()
+                    };
+                    assert!(screen.set_environment(environment.clone()));
+                    assert!(!screen.set_environment(environment.clone()));
+                    assert_eq!(screen.environment(), &environment);
+
+                    let plan = [
+                        plan_entry("step-1", PlanEntryStatus::Completed, "Read"),
+                        plan_entry("step-2", PlanEntryStatus::InProgress, "Wire"),
+                    ];
+                    assert!(screen.checklist_presents(&[]));
+                    assert!(!screen.checklist_presents(&plan));
+                    let entries: Vec<ThreadChecklistEntry> = plan
+                        .iter()
+                        .map(ThreadChecklistEntry::from_plan_entry)
+                        .collect();
+                    assert!(screen.set_checklist(entries.clone()));
+                    assert!(!screen.set_checklist(entries));
+                    assert!(screen.checklist_presents(&plan));
+                    assert!(!screen.checklist_presents(&plan[..1]));
+                    assert!(screen.set_checklist(Vec::new()));
+                    assert!(screen.checklist().is_empty());
+                });
+            });
+        });
+    }
+
     /// Mounted-total equivalents in logical pixels (window minus the live
     /// [`DesktopShellStyle`](crate::desktop_shell::DesktopShellStyle) rail,
-    /// never a scaled screenshot reading): 1280 px expanded leaves 1062 px,
-    /// 1400 px expanded leaves 1182 px, 1920 px expanded leaves 1702 px, and
+    /// never a scaled screenshot reading): 1280 px expanded leaves 953 px,
+    /// 1400 px expanded leaves 1073 px, 1920 px expanded leaves 1593 px, and
     /// 1400 px collapsed leaves 1342 px.
-    const EXPANDED_1280_CONTENT: f32 = 1062.0;
-    const EXPANDED_1400_CONTENT: f32 = 1182.0;
-    const EXPANDED_WIDE_CONTENT: f32 = 1702.0;
+    const EXPANDED_1280_CONTENT: f32 = 953.0;
+    const EXPANDED_1400_CONTENT: f32 = 1073.0;
+    const EXPANDED_WIDE_CONTENT: f32 = 1593.0;
     const COLLAPSED_1400_CONTENT: f32 = 1342.0;
 
     #[test]
     fn inspector_hides_at_mounted_1280_and_1400_with_expanded_rail() {
-        assert!(!thread_inspector_visible(EXPANDED_1280_CONTENT));
-        assert!(!thread_inspector_visible(EXPANDED_1400_CONTENT));
+        assert!(thread_inspector_width(EXPANDED_1280_CONTENT).is_none());
+        assert!(thread_inspector_width(EXPANDED_1400_CONTENT).is_none());
     }
 
     #[test]
     fn inspector_returns_when_wide_with_room_to_spare() {
-        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
-        let width = thread_inspector_width(EXPANDED_WIDE_CONTENT);
-        assert!(
-            (width - 350.0).abs() < 0.01,
-            "wide content caps the inspector at 350px, got {width}px"
+        assert!(thread_inspector_width(EXPANDED_WIDE_CONTENT).is_some());
+    }
+
+    /// Inclusive boundary of the fit: 1104 px of content is the 864 px
+    /// minimum chat (768 px prose plus 48 px rail clearance each side) plus
+    /// the 240 px column minimum; one pixel less hides it. The column grows
+    /// with the content up to the full 327 px. Crossing back and forth
+    /// toggles in both directions.
+    #[test]
+    fn inspector_visibility_flips_at_the_column_minimum() {
+        let threshold = 768.0 + 2.0 * 48.0 + 240.0;
+        assert_eq!(threshold, 1104.0);
+        assert_eq!(thread_inspector_width(threshold), Some(240.0));
+        assert_eq!(thread_inspector_width(threshold - 1.0), None);
+        assert_eq!(thread_inspector_width(threshold - 0.5), None);
+        assert_eq!(thread_inspector_width(threshold + 40.0), Some(280.0));
+        assert_eq!(
+            thread_inspector_width(768.0 + 96.0 + THREAD_INSPECTOR_WIDTH_PX),
+            Some(THREAD_INSPECTOR_WIDTH_PX)
+        );
+        assert_eq!(
+            thread_inspector_width(EXPANDED_WIDE_CONTENT),
+            Some(THREAD_INSPECTOR_WIDTH_PX)
         );
     }
 
     #[test]
     fn collapsed_rail_seats_the_inspector_at_1400_total() {
-        assert!(thread_inspector_visible(COLLAPSED_1400_CONTENT));
+        assert!(thread_inspector_width(COLLAPSED_1400_CONTENT).is_some());
     }
 
     #[test]
     fn inspector_visibility_toggles_in_both_resize_directions() {
-        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
-        assert!(!thread_inspector_visible(EXPANDED_1280_CONTENT));
-        assert!(thread_inspector_visible(EXPANDED_WIDE_CONTENT));
-        assert!(!thread_inspector_visible(EXPANDED_1400_CONTENT));
+        assert!(thread_inspector_width(EXPANDED_WIDE_CONTENT).is_some());
+        assert!(thread_inspector_width(EXPANDED_1280_CONTENT).is_none());
+        assert!(thread_inspector_width(EXPANDED_WIDE_CONTENT).is_some());
+        assert!(thread_inspector_width(EXPANDED_1400_CONTENT).is_none());
     }
 
     #[test]
     fn inspector_never_fits_malformed_content_widths() {
-        assert!(!thread_inspector_visible(0.0));
-        assert!(!thread_inspector_visible(-1280.0));
-        assert!(!thread_inspector_visible(f32::NAN));
+        assert!(thread_inspector_width(0.0).is_none());
+        assert!(thread_inspector_width(-1280.0).is_none());
+        assert!(thread_inspector_width(f32::NAN).is_none());
     }
 
     #[test]
-    fn inspector_width_follows_the_content_clamp() {
-        let narrow = thread_inspector_width(EXPANDED_1280_CONTENT);
-        assert!(
-            (narrow - 265.5).abs() < 0.01,
-            "1062px content reads 25vw, got {narrow}px"
-        );
-        let floored = thread_inspector_width(0.0);
-        assert!(
-            (floored - 256.0).abs() < 0.01,
-            "empty content floors at 256px, got {floored}px"
+    fn inspector_width_is_the_expanded_sidebar_width() {
+        assert_eq!(THREAD_INSPECTOR_WIDTH_PX, DESKTOP_SIDEBAR_WIDTH_PX);
+        assert_eq!(THREAD_INSPECTOR_WIDTH_PX, 327.0);
+        // Rows and section labels share the sidebar's 8 px text inset.
+        assert_eq!(
+            ROW_PAD_PX,
+            crate::desktop_shell::DESKTOP_COLUMN_ROW_INSET_PX
         );
     }
 
@@ -470,7 +615,7 @@ mod tests {
         );
     }
 
-    /// At wide content the inspector returns as a distinct clamped column that
+    /// At wide content the inspector returns as a distinct 327 px column that
     /// neither overlaps the transcript nor the composer.
     #[gpui::test]
     fn wide_content_seats_a_disjoint_inspector_column(cx: &mut gpui::TestAppContext) {
@@ -488,9 +633,9 @@ mod tests {
             .debug_bounds(THREAD_SCREEN_COMPOSER_SELECTOR)
             .expect("composer dock lays out");
         let inspector_width = f32::from(inspector.size.width);
-        assert!(
-            (inspector_width - 350.0).abs() < 1.0,
-            "wide content clamps the inspector at 350px, laid out {inspector_width}px"
+        assert_eq!(
+            inspector_width, THREAD_INSPECTOR_WIDTH_PX,
+            "the inspector is exactly as wide as the expanded sidebar"
         );
         let inspector_left = f32::from(inspector.origin.x);
         let transcript_right = f32::from(transcript.origin.x) + f32::from(transcript.size.width);
@@ -507,7 +652,7 @@ mod tests {
 
     /// Resize is truly live: narrowing a mounted wide screen drops the
     /// inspector (change-guarded notify defeats GPUI child caching), and
-    /// widening it again seats the clamped column back.
+    /// widening it again seats the 327 px column back.
     #[gpui::test]
     fn resize_toggles_the_mounted_inspector_column(cx: &mut gpui::TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, cx| {
@@ -545,9 +690,10 @@ mod tests {
         let inspector = cx
             .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
             .expect("widened content seats the inspector again");
-        assert!(
-            (f32::from(inspector.size.width) - 350.0).abs() < 1.0,
-            "returned inspector keeps the 350px clamp"
+        assert_eq!(
+            f32::from(inspector.size.width),
+            THREAD_INSPECTOR_WIDTH_PX,
+            "returned inspector keeps the fixed sidebar width"
         );
     }
 
@@ -565,6 +711,10 @@ mod tests {
 
     #[test]
     fn inspector_row_icons_map_to_the_exact_reference_glyphs() {
+        assert_eq!(
+            inspector_row_icon(InspectorRowIcon::Project),
+            AssetId::TABLER_FOLDER
+        );
         assert_eq!(
             inspector_row_icon(InspectorRowIcon::Machine),
             AssetId::TABLER_DEVICE_LAPTOP
@@ -588,28 +738,17 @@ mod tests {
     }
 
     #[test]
-    fn environment_card_matches_the_reference_density_arithmetic() {
-        // Card child `p-1`, rows `px-2 py-2`, cards `radius-xl`, rows
-        // `rounded-lg` — all resolved from shared tokens, never local magic.
-        assert_eq!(CARD_INSET_PX, 4.0);
+    fn inspector_rows_keep_the_reference_row_geometry() {
+        // Rows keep `px-2 py-2` and `rounded-lg` from shared tokens, never
+        // local magic; the column pads like the left sidebar.
         assert_eq!(ROW_PAD_PX, 8.0);
-        assert_eq!(
-            RadiusTokens::value(RadiusStep::Xl),
-            px(14.0),
-            "inspector glass cards keep the reference radius-xl"
-        );
+        assert_eq!(ROW_GAP_PX, 8.0);
+        assert_eq!(DESKTOP_COLUMN_INSET_PX, 10.0);
         assert_eq!(
             RadiusTokens::value(RadiusStep::Lg),
             px(10.0),
             "inspector rows keep the reference rounded-lg"
         );
-        // Single-row card: p-1 (4 + 4) around one py-2 row (8 + 20 + 8)
-        // on the text-sm 20 px line — the reference 44 px.
-        assert_eq!(
-            CARD_INSET_PX * 2.0 + (ROW_PAD_PX * 2.0 + REFERENCE_TEXT_LINE_PX),
-            REFERENCE_ENV_CARD_PX
-        );
-        assert_eq!(REFERENCE_ENV_CARD_PX, 44.0);
     }
 
     /// The host viewport spans the full card: the surface root coincides
@@ -849,31 +988,266 @@ mod tests {
         );
     }
 
-    /// The mounted single-row environment card honors the `p-1` inset in the
-    /// real tree: card minus row is exactly 8 px whatever the font metrics,
-    /// and the card stays near the 44 px reference instead of the 72 px
-    /// compact-card mismatch.
+    /// Publishes one screen update and lets the window repaint.
+    fn update_screen(
+        view: &Entity<ShellProofProbe>,
+        cx: &mut gpui::VisualTestContext,
+        update: impl FnOnce(&mut ThreadScreen) -> bool,
+    ) {
+        cx.update(|_, app| {
+            view.update(app, |probe, probe_cx| {
+                probe.screen.update(probe_cx, |screen, screen_cx| {
+                    if update(screen) {
+                        screen_cx.notify();
+                    }
+                });
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    /// The Context section is flat and unlabelled: its single Machine row
+    /// heads the column directly (no label, card inset, frame, or fill),
+    /// starting at the sidebar-matched column inset, and the section is
+    /// exactly that row.
     #[gpui::test]
-    fn environment_card_keeps_reference_inset_in_layout(cx: &mut gpui::TestAppContext) {
+    fn context_section_sits_flat_on_the_column(cx: &mut gpui::TestAppContext) {
         let (_view, cx) = cx.add_window_view(|_, cx| {
             mount_proof_screen("shell-proof-density", EXPANDED_WIDE_CONTENT, cx)
         });
         cx.run_until_parked();
-        let card = cx
-            .debug_bounds(THREAD_SCREEN_ENV_CARD_SELECTOR)
-            .expect("environment card lays out");
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("inspector lays out");
+        let section = cx
+            .debug_bounds(THREAD_SCREEN_CONTEXT_SELECTOR)
+            .expect("context section lays out");
         let row = cx
             .debug_bounds(THREAD_SCREEN_ENV_ROW_SELECTOR)
             .expect("machine row lays out");
-        let card_height = f32::from(card.size.height);
-        let row_height = f32::from(row.size.height);
-        assert!(
-            (card_height - row_height - 2.0 * CARD_INSET_PX).abs() < 1.0,
-            "card {card_height}px must exceed its single row {row_height}px by exactly the p-1 inset"
+        let inset = inspector.origin.x + px(DESKTOP_COLUMN_INSET_PX);
+        assert_eq!(row.origin.x, inset, "row starts at the column inset");
+        assert_eq!(
+            row.origin.y,
+            inspector.origin.y + px(DESKTOP_COLUMN_INSET_PX),
+            "the first row heads the column"
         );
+        assert_eq!(section, row, "the section is exactly its one row");
+    }
+
+    /// The panel's left rule is one device pixel wide at the column's left
+    /// edge and runs the column's full height (the whole body below the
+    /// titlebar); it leaves with the column when the content narrows.
+    #[gpui::test]
+    fn inspector_left_rule_follows_the_column(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-rule", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let root = cx
+            .debug_bounds(THREAD_SCREEN_SELECTOR)
+            .expect("screen root lays out");
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("inspector lays out");
+        let rule = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_RULE_SELECTOR)
+            .expect("visible inspector paints its left rule");
+        let one_device_pixel = cx.update(|window, _| {
+            DesktopShellStyle::resolve(false, window.scale_factor()).one_device_pixel
+        });
+        assert_eq!(rule.origin.x, inspector.origin.x);
+        assert_eq!(rule.size.width, one_device_pixel);
+        assert_eq!(rule.origin.y, root.origin.y);
+        assert_eq!(rule.size.height, root.size.height);
+        let visible_width =
+            cx.update(|_, app| view.read(app).screen.read(app).visible_inspector_width());
+        assert_eq!(visible_width, Some(px(THREAD_INSPECTOR_WIDTH_PX)));
+
+        update_screen(&view, cx, |screen| {
+            screen.set_content_width(EXPANDED_1280_CONTENT)
+        });
         assert!(
-            card_height <= REFERENCE_ENV_CARD_PX + 8.0,
-            "single-row card {card_height}px must stay near the 44px reference, not the 72px compact mismatch"
+            cx.debug_bounds(THREAD_SCREEN_INSPECTOR_RULE_SELECTOR)
+                .is_none()
+        );
+        let hidden_width =
+            cx.update(|_, app| view.read(app).screen.read(app).visible_inspector_width());
+        assert_eq!(hidden_width, None, "a hidden column publishes no junction");
+    }
+
+    /// The mounted column crosses the 1104 px threshold in both directions:
+    /// exactly at it the 240 px minimum column seats, one pixel below it is
+    /// gone with no reserved space, and it returns on widening.
+    #[gpui::test]
+    fn mounted_inspector_toggles_at_the_threshold(cx: &mut gpui::TestAppContext) {
+        let threshold = 1104.0;
+        let (view, cx) =
+            cx.add_window_view(|_, cx| mount_proof_screen("shell-proof-threshold", threshold, cx));
+        cx.simulate_resize(gpui::size(px(threshold), px(800.0)));
+        cx.run_until_parked();
+        for (content, visible) in [
+            (threshold, true),
+            (threshold - 1.0, false),
+            (threshold, true),
+        ] {
+            update_screen(&view, cx, |screen| screen.set_content_width(content));
+            let inspector = cx.debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR);
+            assert_eq!(inspector.is_some(), visible, "content={content}");
+            if let Some(inspector) = inspector {
+                assert_eq!(f32::from(inspector.size.width), 240.0);
+            } else {
+                let transcript = cx
+                    .debug_bounds(THREAD_SCREEN_TRANSCRIPT_SELECTOR)
+                    .expect("transcript lays out");
+                let root = cx
+                    .debug_bounds(THREAD_SCREEN_SELECTOR)
+                    .expect("screen root lays out");
+                assert_eq!(
+                    transcript.size.width, root.size.width,
+                    "a hidden inspector reserves no space"
+                );
+            }
+        }
+    }
+
+    /// With the rail collapsed the same fit seats the column at 1400 px total,
+    /// still exactly 327 px wide rather than growing with the freed room.
+    #[gpui::test]
+    fn collapsed_rail_keeps_the_fixed_inspector_width(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-collapsed", COLLAPSED_1400_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("collapsed rail seats the inspector");
+        assert_eq!(f32::from(inspector.size.width), THREAD_INSPECTOR_WIDTH_PX);
+    }
+
+    /// Sections read Context, Agents, Checklist, Terminals top to bottom.
+    /// Context is unlabelled; the others open with their muted label and
+    /// render only with content.
+    #[gpui::test]
+    fn inspector_sections_follow_their_content(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-sections", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds(THREAD_SCREEN_CONTEXT_SELECTOR).is_some());
+        assert!(cx.debug_bounds(THREAD_SCREEN_AGENTS_SELECTOR).is_none());
+        assert!(cx.debug_bounds(THREAD_SCREEN_CHECKLIST_SELECTOR).is_none());
+        assert!(cx.debug_bounds(THREAD_SCREEN_TERMINALS_SELECTOR).is_none());
+
+        update_screen(&view, cx, |screen| {
+            screen.set_agents(vec![ThreadAgentEntry {
+                id: String::from("agent-1"),
+                name: String::from("Wire the inspector feed"),
+                state: ThreadAgentState::Working,
+            }]);
+            screen.set_checklist(vec![ThreadChecklistEntry {
+                id: String::from("entry-1"),
+                state: ChecklistEntryState::Active,
+                text: String::from("Port the inspector"),
+            }]);
+            screen.set_terminals(vec![TerminalSession::new(
+                "t1",
+                "pwsh",
+                Vec::<String>::new(),
+                TerminalState::Active,
+            )]);
+            true
+        });
+        let tops = [
+            (
+                THREAD_SCREEN_CONTEXT_SELECTOR,
+                THREAD_SCREEN_ENV_ROW_SELECTOR,
+            ),
+            (
+                THREAD_SCREEN_AGENTS_SELECTOR,
+                THREAD_SCREEN_AGENTS_LABEL_SELECTOR,
+            ),
+            (
+                THREAD_SCREEN_CHECKLIST_SELECTOR,
+                THREAD_SCREEN_CHECKLIST_LABEL_SELECTOR,
+            ),
+            (
+                THREAD_SCREEN_TERMINALS_SELECTOR,
+                THREAD_SCREEN_TERMINALS_LABEL_SELECTOR,
+            ),
+        ]
+        .map(|(section, head_selector)| {
+            let head = cx
+                .debug_bounds(head_selector)
+                .unwrap_or_else(|| panic!("{section} head lays out"));
+            let bounds = cx
+                .debug_bounds(section)
+                .unwrap_or_else(|| panic!("{section} lays out"));
+            assert_eq!(
+                head.origin, bounds.origin,
+                "{section} opens with its label, or its first row when unlabelled"
+            );
+            bounds.origin.y
+        });
+        assert!(
+            tops.windows(2).all(|pair| pair[0] < pair[1]),
+            "sections must read Context, Agents, Checklist, Terminals: {tops:?}"
+        );
+
+        update_screen(&view, cx, |screen| {
+            screen.set_terminals(Vec::new());
+            screen.set_terminals_loading(true);
+            true
+        });
+        assert!(
+            cx.debug_bounds("artisan-thread-screen-terminals-loading")
+                .is_some(),
+            "loading keeps the Terminals section with its bars"
+        );
+        update_screen(&view, cx, |screen| {
+            screen.set_terminals_loading(false);
+            screen.set_checklist(Vec::new());
+            screen.set_agents(Vec::new());
+            true
+        });
+        assert!(cx.debug_bounds(THREAD_SCREEN_AGENTS_SELECTOR).is_none());
+        assert!(cx.debug_bounds(THREAD_SCREEN_CHECKLIST_SELECTOR).is_none());
+        assert!(cx.debug_bounds(THREAD_SCREEN_TERMINALS_SELECTOR).is_none());
+    }
+
+    /// The Project row appears only once a project label is published, and
+    /// then leads the Context section above Machine.
+    #[gpui::test]
+    fn project_row_renders_only_with_a_label(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-project", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_PROJECT_ROW_SELECTOR)
+                .is_none()
+        );
+
+        update_screen(&view, cx, |screen| {
+            screen.set_project_label(Some(String::from("Artisan Editor")))
+        });
+        let project = cx
+            .debug_bounds(THREAD_SCREEN_PROJECT_ROW_SELECTOR)
+            .expect("labelled project renders its row");
+        let machine = cx
+            .debug_bounds(THREAD_SCREEN_ENV_ROW_SELECTOR)
+            .expect("machine row lays out");
+        let section = cx
+            .debug_bounds(THREAD_SCREEN_CONTEXT_SELECTOR)
+            .expect("context section lays out");
+        assert_eq!(project.origin, section.origin, "Project heads the section");
+        assert!(project.bottom() <= machine.top());
+        assert_eq!(project.size.height, machine.size.height);
+
+        update_screen(&view, cx, |screen| screen.set_project_label(None));
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_PROJECT_ROW_SELECTOR)
+                .is_none()
         );
     }
     #[gpui::test]

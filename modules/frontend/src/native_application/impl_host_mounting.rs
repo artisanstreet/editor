@@ -170,17 +170,26 @@ impl NativeApplication {
         let Some(thread_id) = self.pending_thread.take() else {
             return;
         };
-        let carry_draft = self
-            .thread_switch_flight
-            .as_ref()
-            .map_or(!self.project_navigation.restore_draft, |flight| {
-                flight.carry_draft
-            });
+        self.project_navigation.new_task_open = false;
+        // Only text the user typed follows into the thread; a draft the
+        // composer merely restored stays with its own scope, which a carry
+        // would release.
+        let carry_draft = self.thread_switch_flight.as_ref().map_or_else(
+            || {
+                !self.project_navigation.restore_draft
+                    && self.composer.read(cx).has_authored_draft()
+            },
+            |flight| flight.carry_draft,
+        );
         self.project_navigation.restore_draft = false;
         self.composer.update(cx, |composer, cx| {
             composer.switch_thread(thread_id.as_str(), carry_draft, cx);
         });
         self.selected_thread = Some(thread_id.clone());
+        // This mount's subscription replays the history afresh; the thread
+        // presents once its end-of-history marker arrives.
+        self.observation_history_current = None;
+        self.reset_history_paging();
         if let Some(project) = self.selected_project.clone() {
             self.report_navigation(project, Some(thread_id.clone()));
         }
@@ -220,6 +229,8 @@ impl NativeApplication {
         let subscription = cx.observe(&host, |application, host, cx| {
             application.collect_host_effects(&host, cx);
             application.pump_host_boundary(&host, cx);
+            // A section that just opened reads its turn's work rows.
+            application.request_open_turn_work(cx);
         });
         self.conversation_host = Some(host.clone());
         let images = self.message_images.clone();
@@ -412,6 +423,12 @@ impl NativeApplication {
                         self.conversation_effects.remove(0);
                     }
                     ConversationHostEffect::ScrollIntent { target } => {
+                        // A message in a turn that is not loaded is read
+                        // first; the viewport goes there when it arrives.
+                        if self.jump_to_earlier_turn(&target, cx) {
+                            self.conversation_effects.remove(0);
+                            continue;
+                        }
                         let surface = host.read(cx).surface().clone();
                         let accepted = surface.update(cx, |surface, surface_cx| {
                             surface.schedule_scroll_target(target, surface_cx)
@@ -436,6 +453,10 @@ impl NativeApplication {
                             return;
                         }
                         self.conversation_effects.remove(0);
+                    }
+                    ConversationHostEffect::EarlierTurnsWanted => {
+                        self.conversation_effects.remove(0);
+                        self.note_reader_near_start(cx);
                     }
                     _ => {
                         self.set_failure(invalid_service_failure(), cx);

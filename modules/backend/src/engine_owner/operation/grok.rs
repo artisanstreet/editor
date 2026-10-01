@@ -491,6 +491,7 @@ async fn grok_pump_loop(
     use super::super::acp::UpdateEvent;
 
     let mut usage_sequence: u64 = 0;
+    let mut question_sequence: u64 = 0;
     loop {
         if shutdown.is_cancelled() {
             return GrokPumpOutcome::Failed(EngineOperationError::Shutdown);
@@ -523,7 +524,26 @@ async fn grok_pump_loop(
                     }
                 }
                 Ok(UpdateEvent::AgentRequest { id, method, params }) => {
-                    note_grok_agent_request(bridges, &id, &method, &params);
+                    if method == super::super::grok::GROK_ELICITATION_METHOD {
+                        question_sequence = question_sequence.saturating_add(1);
+                        if ask_grok_questionnaire(observations, run_id, question_sequence, &id, &params)
+                            .await
+                            .is_some()
+                        {
+                            return GrokPumpOutcome::Terminal(TerminalState::Interrupted);
+                        }
+                        // Questions never block the turn: release the form
+                        // now; the answer arrives later as a user message.
+                        if transport
+                            .respond(&id, serde_json::json!({ "action": "cancel" }))
+                            .await
+                            .is_err()
+                        {
+                            return GrokPumpOutcome::Failed(EngineOperationError::StreamFailed);
+                        }
+                    } else {
+                        note_grok_agent_request(bridges, &id, &method, &params);
+                    }
                 }
                 Ok(UpdateEvent::PromptResult(outcome)) => {
                     if let Some(sample) = outcome
@@ -565,6 +585,61 @@ async fn grok_pump_loop(
             },
         }
     }
+}
+
+/// Asks one ACP elicitation form as a questionnaire on the thread.
+///
+/// The form's fields become the questionnaire's questions, keyed under the
+/// run and request so they stay unique on the thread after the request is
+/// released. A malformed or non-form request asks nothing. Returns
+/// [`Some`] only when the observation sink closed.
+async fn ask_grok_questionnaire(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    sequence: u64,
+    id: &super::super::acp::AcpId,
+    params: &Value,
+) -> Option<()> {
+    let provider_id = match id {
+        super::super::acp::AcpId::Number(number) => number.to_string(),
+        super::super::acp::AcpId::Text(text) => text.clone(),
+    };
+    let pending =
+        super::super::acp_bridges::normalize_elicitation_request(provider_id.as_str(), params)
+            .ok()?;
+    let group = format!("{}-form-{provider_id}", run_id.as_str());
+    let group_id = artisan_domain::ObservationId::parse(group.clone()).ok()?;
+    let sequence = artisan_domain::ObservationSequence::new(sequence).ok()?;
+    for (index, question) in pending.questions().iter().enumerate() {
+        let mut input = question.input().clone();
+        let Ok(question_id) =
+            artisan_domain::ObservationId::parse(format!("{group}:{}", input.question_id.as_str()))
+        else {
+            continue;
+        };
+        input.question_id = question_id;
+        let Ok(observation_id) = artisan_domain::ObservationId::parse(format!(
+            "{}:grok:{}:question-{index}",
+            run_id.as_str(),
+            sequence.get()
+        )) else {
+            continue;
+        };
+        let Ok(row) =
+            artisan_domain::QuestionObservation::requested(observation_id, sequence, input)
+        else {
+            continue;
+        };
+        let row = artisan_domain::Observation::Question(row.with_group(group_id.clone()));
+        if observations
+            .send(EngineObservation::Activity(row))
+            .await
+            .is_err()
+        {
+            return Some(());
+        }
+    }
+    None
 }
 
 /// Tracks one agent-initiated ACP request in the pending bridge table.

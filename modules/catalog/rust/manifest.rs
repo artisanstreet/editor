@@ -128,6 +128,39 @@ pub struct NativeContextWindowOption {
     pub tokens: u64,
 }
 
+impl NativeContextWindowOption {
+    /// The label a picker shows for this option.
+    ///
+    /// The catalog label is used below one million tokens. Larger windows
+    /// are always formatted from the token count so a snapshot that carries
+    /// `1000K` reads `1M`; an empty label is formatted the same way.
+    #[must_use]
+    pub fn display_label(&self) -> String {
+        if self.tokens >= 1_000_000 || self.label.trim().is_empty() {
+            context_window_label(self.tokens)
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+/// Formats a context capacity as a compact token label: `200K`, `1M`.
+///
+/// Counts round to the nearest thousand and read in `K`; from a thousand
+/// thousands up they round to the nearest million and read in `M`, so
+/// `1000K` never appears and a provider's 1,050,000-token window reads `1M`
+/// like its own catalog says. Counts below a thousand read exactly.
+#[must_use]
+pub fn context_window_label(tokens: u64) -> String {
+    if tokens >= 999_500 {
+        format!("{}M", (tokens + 500_000) / 1_000_000)
+    } else if tokens >= 1_000 {
+        format!("{}K", (tokens + 500) / 1_000)
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// A model's context-window capability.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeContextWindowCapability {

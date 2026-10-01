@@ -48,6 +48,8 @@ pub(super) struct NativeMessageFlight {
     pub(super) scope: artisan_domain::ComposerDraftScope,
     pub(super) request_id: RequestId,
     pub(super) token: SubmissionToken,
+    /// The model the composer showed when Send was pressed.
+    pub(super) selection: Option<artisan_domain::CatalogSelection>,
 }
 
 impl NativeMessageFlight {

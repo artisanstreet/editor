@@ -66,8 +66,10 @@ impl NativeApplication {
     /// A reconnected connection lists the projects and reads the recent
     /// threads again, which also resumes their pushes, and sends the drafts
     /// it parked.
-    pub(super) fn resume_after_reconnect(&mut self) {
-        self.resume_composer_drafts();
+    pub(super) fn resume_after_reconnect(&mut self, cx: &mut Context<Self>) {
+        self.resume_composer_drafts(cx);
+        // History reads in flight were lost with the connection.
+        self.reset_history_reads();
         let _ = self.submit_command(NativeTransportCommand::ReadProjects);
         let _ = self.submit_command(NativeTransportCommand::ReadRecentThreads);
     }
@@ -361,6 +363,7 @@ mod tests {
         ThreadSummary {
             has_started_response: true,
             has_active_work: false,
+            attention: artisan_domain::ThreadAttention::None,
             last_message_at: Some(UnixMillis::from_millis(10)),
             thread_id: ThreadId::parse(id).unwrap(),
             project_id: ProjectId::parse(project).unwrap(),

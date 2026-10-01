@@ -167,3 +167,81 @@ pub(super) async fn respond_question(
         NativeTransportEvent::QuestionAnswered { command, receipt },
     )
 }
+
+pub(super) async fn answer_questions(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    command: artisan_domain::AnswerQuestions,
+) -> Result<(), ServiceFailure> {
+    let thread_id = command.thread_id().clone();
+    let request_id = command.request_id().clone();
+    let failed = |command, failure: ServiceFailure| NativeTransportEvent::QuestionsAnswerFailed {
+        command,
+        failure: failure.into(),
+    };
+    if known_thread_for_queue(&runtime.known_threads, &thread_id).is_err() {
+        return publish(
+            events,
+            failed(
+                command,
+                ServiceFailure::invalid(ServiceFailureStage::Request),
+            ),
+        );
+    }
+    let mutation =
+        match super::request_construction::answer_questions_stable_mutation(command.clone()) {
+            Ok(mutation) => mutation,
+            Err(failure) => return publish(events, failed(command, failure)),
+        };
+    let payload = match durable_save_request(
+        runtime,
+        frames,
+        &mutation,
+        ExpectedResponse::QuestionsAnswered {
+            thread_id: thread_id.clone(),
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(error) => {
+            return publish(
+                events,
+                NativeTransportEvent::QuestionsAnswerFailed {
+                    command,
+                    failure: error.into(),
+                },
+            );
+        }
+    };
+    let ResponsePayload::QuestionsAnswered(receipt) = payload else {
+        return publish(
+            events,
+            failed(
+                command,
+                ServiceFailure::invalid(ServiceFailureStage::Request),
+            ),
+        );
+    };
+    if receipt.thread_id != thread_id
+        || receipt.request_id != request_id
+        || &receipt.group_id != command.group_id()
+    {
+        return publish(
+            events,
+            failed(
+                command,
+                ServiceFailure::new(
+                    ServiceFailureStage::Request,
+                    ServiceFailureCategory::Integrity,
+                ),
+            ),
+        );
+    }
+    publish(
+        events,
+        NativeTransportEvent::QuestionsAnswered { command, receipt },
+    )
+}

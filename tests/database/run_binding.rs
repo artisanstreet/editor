@@ -469,23 +469,6 @@ async fn assert_snapshot_rejections(
             context,
             &binding,
             2,
-            UnixMillis::from_millis(OPERATED_AT_MS),
-            UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
-        ))
-        .await
-        .expect_err("expiry equality");
-    assert!(matches!(
-        err,
-        RunBindingError::Repository(RepositoryError::DispatchLeaseExpired { .. })
-    ));
-    assert_eq!(before, &persisted_rows(database).await);
-    let err = repository
-        .bind_run_provider(bind_command(
-            claimed,
-            receipt,
-            context,
-            &binding,
-            2,
             UnixMillis::from_millis(CLAIMED_AT_MS - 10),
             UnixMillis::from_millis(BOUND_AT_MS),
         ))
@@ -918,6 +901,26 @@ async fn post_dispatch_fence_failure_rolls_back_dispatch_stamp() {
         before, after,
         "post-dispatch fence must rollback entire transaction including tentative dispatch stamp"
     );
+}
+
+#[tokio::test]
+async fn owner_binds_after_its_lease_lapsed() {
+    let (_database, repository, claimed, receipt, context, _) = seeded_repository().await;
+    let binding = ProviderBindingBytes::new(vec![9; 8]).expect("binding");
+    // The owner token, not the clock, fences the bind: a stalled owner
+    // whose lease lapsed still binds the provider it launched.
+    repository
+        .bind_run_provider(bind_command(
+            &claimed,
+            &receipt,
+            &context,
+            &binding,
+            2,
+            UnixMillis::from_millis(OPERATED_AT_MS),
+            UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
+        ))
+        .await
+        .expect("the owner binds after its lease lapsed");
 }
 
 #[tokio::test]

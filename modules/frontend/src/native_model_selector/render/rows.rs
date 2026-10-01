@@ -978,7 +978,7 @@ impl NativeModelSelector {
                         .iter()
                         .map(|option| SelectorOption {
                             id: option.id.clone(),
-                            label: option.label.clone(),
+                            label: option.display_label(),
                             description: option.description.clone(),
                             advisory: option.advisory.clone(),
                             group: None,

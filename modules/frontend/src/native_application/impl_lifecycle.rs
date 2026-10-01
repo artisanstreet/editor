@@ -98,6 +98,9 @@ impl NativeApplication {
         let composer_subscription =
             cx.subscribe(&composer, |application, _composer, event, cx| match event {
                 NativeComposerEvent::SendRequested => application.begin_message_submission(cx),
+                NativeComposerEvent::QuestionnaireAnswered => {
+                    application.send_questionnaire_answer(cx);
+                }
                 NativeComposerEvent::ConfigureModel => application.navigate(
                     NativeRoute::Settings {
                         section: SettingsRoute::Engines,
@@ -119,6 +122,9 @@ impl NativeApplication {
         let command_menu_observation = cx.observe(&command_menu, |application, menu, cx| {
             application.route_command_action(&menu, cx);
         });
+        let application_entity = cx.entity();
+        let sidebar =
+            cx.new(|sidebar_cx| sidebar_view::SidebarView::new(&application_entity, sidebar_cx));
         let mut application = Self {
             window_error: None,
             machine_home: None,
@@ -136,7 +142,8 @@ impl NativeApplication {
             composer_queue: composer_queue_application::QueueApplicationState::new(cx),
             composer_controls,
             model_selector,
-            composer_model_choice: None,
+            composer_model_choices: HashMap::new(),
+            composer_model_scope: None,
             deferred_composer_policy: None,
             default_engine_config: None,
             legacy_import: None,
@@ -183,6 +190,7 @@ impl NativeApplication {
             profile_tip_tween: Rc::new(RefCell::new(ProfileTipTween::default())),
             command_menu,
             _command_menu_observation: command_menu_observation,
+            sidebar,
             sidebar_collapsed: false,
             sidebar_navigation_focus: cx.focus_handle(),
             sidebar_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
@@ -201,6 +209,7 @@ impl NativeApplication {
             project_options: Vec::new(),
             selected_project: None,
             titlebar_repository: None,
+            project_repository: None,
             titlebar_repository_project: None,
             thread_listing: None,
             sidebar_threads: impl_sidebar_threads::SidebarThreadsState::default(),
@@ -222,6 +231,10 @@ impl NativeApplication {
             conversation_host_subscription: None,
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             engine_observations: None,
+            observation_history_current: None,
+            observation_replay_deferred: false,
+            observation_replay_pending: false,
+            history_paging: super::history_paging::HistoryPaging::default(),
             last_picker_action: None,
             state,
             route_history: RouteHistory::new(),

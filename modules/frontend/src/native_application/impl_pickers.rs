@@ -287,14 +287,10 @@ impl NativeApplication {
         });
         match (selected_thread, selected_is_listed) {
             (Some(selected_thread), true) => {
-                self.pending_thread = self
-                    .conversation_host
-                    .as_ref()
-                    .is_some_and(|host| {
-                        host.read(cx).controller_view().delivery.thread_id == selected_thread
-                    })
-                    .then_some(selected_thread);
-                if self.pending_thread.is_some() {
+                let mounted = self.conversation_host.as_ref().is_some_and(|host| {
+                    host.read(cx).controller_view().delivery.thread_id == selected_thread
+                });
+                if mounted {
                     self.pending_thread = None;
                     if self
                         .conversation_host
@@ -304,6 +300,7 @@ impl NativeApplication {
                         self.state = NativeViewState::Ready;
                     }
                 } else {
+                    self.pending_thread = Some(selected_thread);
                     self.state = NativeViewState::Loading;
                     self.try_mount_pending_thread(cx);
                 }
@@ -323,7 +320,13 @@ impl NativeApplication {
                 }
             }
             (None, _) => {
-                self.pending_thread = self.remembered_project_thread(project_id, listing);
+                // The new-task screen the user opened is never replaced by
+                // a remembered thread.
+                self.pending_thread = if self.project_navigation.new_task_open {
+                    None
+                } else {
+                    self.remembered_project_thread(project_id, listing)
+                };
                 if self.pending_thread.is_none() {
                     self.state = NativeViewState::EmptyThreads;
                 } else {

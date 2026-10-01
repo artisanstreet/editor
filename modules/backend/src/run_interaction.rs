@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use artisan_domain::{MessageId, ObservationId, RequestId, RunId, ThreadId};
+use artisan_domain::{ImageAttachment, MessageId, ObservationId, RequestId, RunId, ThreadId};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
@@ -103,7 +103,7 @@ pub enum OwnedInteractionCommand {
         /// The explicit answers, possibly empty for a skipped question.
         answers: Vec<String>,
     },
-    /// Follow-up text steered into the owning live run.
+    /// Follow-up text and images steered into the owning live run.
     ///
     /// Carried from the durable outbox row (never a receipt table): the
     /// `request_id` is the ORIGINAL client request identity for ledger
@@ -115,8 +115,11 @@ pub enum OwnedInteractionCommand {
         request_id: RequestId,
         /// Persisted steered message identity (echo projection key).
         message_id: MessageId,
-        /// Validated follow-up text for the live provider session.
+        /// Validated follow-up text for the live provider session; empty
+        /// for an image-only steer.
         text: String,
+        /// Ordered image attachments carried with the steered message.
+        images: Vec<ImageAttachment>,
     },
 }
 

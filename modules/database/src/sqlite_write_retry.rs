@@ -1,6 +1,6 @@
 //! Bounded retry policy for SQLite writer-lock contention.
 //!
-//! The file-backed pool runs SQLite in WAL mode with `synchronous=NORMAL`.
+//! The file-backed pool runs SQLite in WAL mode with `synchronous=FULL`.
 //! A deferred transaction that reads first and writes later can fail with
 //! `SQLITE_BUSY_SNAPSHOT` when another connection commits in between, and
 //! `busy_timeout` does not cover that snapshot upgrade. Read-then-write

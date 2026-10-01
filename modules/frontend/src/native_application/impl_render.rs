@@ -9,8 +9,24 @@ impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_composer_controls(cx);
         self.sync_profile_actions();
-        let sidebar = self.desktop_sidebar(window, cx).into_any_element();
+        // The sidebar fills its shell slot and renders only when notified,
+        // so a transcript or composer frame reuses its previous paint.
+        let sidebar = crate::view_boundary::cached_view(
+            self.sidebar.clone(),
+            gpui::StyleRefinement::default().size_full(),
+            cx,
+        );
         let body = self.desktop_route_body(window, cx);
+        // Read after the route body so the thread screen has already taken
+        // this frame's gate and content width: the shell's right junction
+        // then appears and disappears with the inspector column itself.
+        let inspector_width = match self.route() {
+            NativeRoute::Thread { .. } => self
+                .thread_screen
+                .as_ref()
+                .and_then(|screen| screen.read(cx).visible_inspector_width()),
+            _ => None,
+        };
         let brand = self.desktop_brand(cx).into_any_element();
         let header = self
             .desktop_header_cluster()
@@ -19,13 +35,13 @@ impl Render for NativeApplication {
         let search = div().into_any_element();
         let shell = desktop_shell(
             self.desktop_theme,
-            self.sidebar_collapsed,
+            self.desktop_shell_style(window),
             brand,
             header,
             search,
             sidebar,
             body,
-            window.scale_factor(),
+            inspector_width,
             window.is_maximized(),
         );
         div()
@@ -42,7 +58,8 @@ impl Render for NativeApplication {
             .on_action(|_: &ToggleFrameCounter, window, cx| {
                 let visible = !crate::native_frame_rate::overlay_visible(cx);
                 if let Err(error) = crate::native_frame_rate::apply_overlay(visible, window, cx) {
-                    eprintln!("{error}");
+                    let action = if visible { "shown" } else { "hidden" };
+                    eprintln!("frame counter overlay could not be {action}: {error}");
                 }
             })
             .size_full()

@@ -10,16 +10,18 @@ use artisan_domain::{
     AgentMessageCompletedObservation, AssistantBody, AssistantMessageItem, AssistantMessagePhase,
     ConversationCursor, ConversationItem, ConversationLifecycle, ConversationPatch,
     ConversationSnapshot, ConversationTurn, EngineObservationAttribution, EngineObservationEvent,
-    ItemId, ItemOrdinal, MessageBody, MessagePhase, Observation, ObservationId,
-    ObservationSequence, PatchBatch, PatchId, PatchSequence, ReasoningSummaryCompletedObservation,
-    ReasoningSummaryDeltaObservation, Revision, RunId, TerminalActivityInput,
-    TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
-    TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
+    ItemId, ItemOrdinal, LiveThinking, LiveThinkingBlock, MessageBody, MessagePhase, Observation,
+    ObservationId, ObservationSequence, PatchBatch, PatchId, PatchSequence,
+    ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, Revision, RunId,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, ThreadId,
+    ToolAction, ToolObservation, TurnId, TurnOrdinal, UnixMillis, UserMessageItem,
 };
 use artisan_frontend::conversation_delivery_machine::{
     ConversationDeliveryEffect, ConversationDeliveryEvent,
 };
-use artisan_frontend::conversation_observation_projection::{activity_window, project_activities};
+use artisan_frontend::conversation_observation_projection::{
+    DERIVED_FACT_ORDINAL_BASE, activity_window, project_activities,
+};
 use artisan_frontend::conversation_scene::SCENE_MAX_ITEMS;
 use artisan_frontend::conversation_scene::{
     SceneId, TurnBlock, TurnNarration as SceneTurnNarration,
@@ -115,6 +117,21 @@ fn reasoning_completed(obs: &str, seq: u64, item: &str, text: Option<&str>) -> O
         )
         .expect("valid reasoning completion"),
     )
+}
+
+/// What the Forge pushes while `run`'s turn is thinking.
+fn live_thinking(item: &str, text: &str, run: &str, turn: &str, at: i64) -> LiveThinking {
+    LiveThinking {
+        thread_id: thread_id(),
+        current: Some(LiveThinkingBlock {
+            run_id: run_id(run),
+            turn_id: turn_id(turn),
+            item_id: item.to_owned(),
+            text: text.to_owned(),
+            started_at: stamp(at),
+            updated_at: stamp(at),
+        }),
+    }
 }
 
 fn attributed_event(
@@ -448,28 +465,22 @@ fn reconnect_wire_reset_applies_new_delivery_and_ignores_replay() {
 }
 
 #[test]
-fn duplicate_reasoning_deltas_upsert_one_cumulative_card() {
+fn a_growing_thinking_block_stays_one_card() {
     let mut state = EngineObservationState::new(thread_id());
-    state.apply(
-        1,
-        &attributed_event(
-            reasoning_delta("obs-rd-1", 1, "reason-1", "thinking "),
-            RUN_A,
-            TURN_A,
-            2_000,
-            10,
-        ),
-    );
-    state.apply(
-        2,
-        &attributed_event(
-            reasoning_delta("obs-rd-2", 2, "reason-1", "deeply."),
-            RUN_A,
-            TURN_A,
-            2_050,
-            11,
-        ),
-    );
+    assert!(state.set_live_thinking(&live_thinking(
+        "reason-1",
+        "thinking ",
+        RUN_A,
+        TURN_A,
+        2_000
+    )));
+    assert!(state.set_live_thinking(&live_thinking(
+        "reason-1",
+        "thinking deeply.",
+        RUN_A,
+        TURN_A,
+        2_000
+    )));
     let snapshot = snapshot(
         vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
         vec![make_user("user_a", TURN_A, 1)],
@@ -478,7 +489,7 @@ fn duplicate_reasoning_deltas_upsert_one_cumulative_card() {
     assert_eq!(
         projection.facts.len(),
         1,
-        "deltas must not repeat as new cards"
+        "a block that grew must not repeat as new cards"
     );
     assert!(
         matches!(&projection.facts[0].kind, SceneFactKind::Reasoning { body } if body == "thinking deeply."),
@@ -800,27 +811,55 @@ fn upsert_refuses_cross_turn_reassignment() {
 }
 
 #[test]
-fn reasoning_completion_without_delta_still_settles_public_summary() {
+fn thinking_is_live_only_and_goes_when_the_run_moves_on() {
     let mut state = EngineObservationState::new(thread_id());
-    state.apply(
+    // A stored thinking row, as an older Forge still replays it, shows
+    // nothing.
+    let _ = state.apply(
         1,
         &attributed_event(
-            reasoning_completed("obs-rc", 1, "reason-9", Some("public summary")),
+            reasoning_completed("obs-rc", 1, "reason-9", Some("stored summary")),
             RUN_A,
             TURN_A,
             2_000,
             10,
         ),
     );
+    let _ = state.apply(
+        2,
+        &attributed_event(
+            reasoning_delta("obs-rd", 2, "reason-9", "stored"),
+            RUN_A,
+            TURN_A,
+            2_001,
+            11,
+        ),
+    );
     let snapshot = snapshot(
         vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
         vec![make_user("user_a", TURN_A, 1)],
     );
+    assert!(project_activities(&state, &snapshot).facts.is_empty());
+
+    assert!(state.set_live_thinking(&live_thinking(
+        "reason-9",
+        "public summary",
+        RUN_A,
+        TURN_A,
+        2_100
+    )));
     let projection = project_activities(&state, &snapshot);
     assert_eq!(projection.facts.len(), 1);
     assert!(
         matches!(&projection.facts[0].kind, SceneFactKind::Reasoning { body } if body == "public summary")
     );
+
+    // The run moved on: the block is gone, not kept as history.
+    assert!(state.set_live_thinking(&LiveThinking {
+        thread_id: thread_id(),
+        current: None,
+    }));
+    assert!(project_activities(&state, &snapshot).facts.is_empty());
 }
 
 #[test]
@@ -907,6 +946,25 @@ fn snapshot_for_growth() -> ConversationSnapshot {
     )
 }
 
+/// The retained rows projected as facts, moved onto ordinal 2.
+///
+/// A projected fact takes its ordinal from its own first event, far above
+/// every durable ordinal, so canonical growth never lands on one. The
+/// controller still rebases a derived fact that growth does land on; these
+/// facts are placed where the growth batch puts its assistant item to
+/// exercise exactly that.
+fn facts_on_a_durable_ordinal(state: &EngineObservationState) -> Vec<SceneFact> {
+    let mut facts = project_activities(state, &snapshot_for_growth()).facts;
+    for fact in &mut facts {
+        assert!(
+            fact.ordinal >= DERIVED_FACT_ORDINAL_BASE,
+            "projected facts sit above every durable ordinal"
+        );
+        fact.ordinal = 2;
+    }
+    facts
+}
+
 /// Starts turn one with one retained attributed tool row projected and
 /// upserted, returning the observation state and the stable fact id. The
 /// derived fact owns ordinal 2.
@@ -923,12 +981,11 @@ fn activity_setup() -> (EngineObservationState, SceneId) {
         ),
     );
     let base = snapshot_for_growth();
-    let projection = project_activities(&state, &base);
-    assert_eq!(projection.facts.len(), 1);
-    assert_eq!(projection.facts[0].ordinal, 2);
-    let fact_id = projection.facts[0].id.clone();
+    let facts = facts_on_a_durable_ordinal(&state);
+    assert_eq!(facts.len(), 1);
+    let fact_id = facts[0].id.clone();
     let mut controller = controller_with_snapshot(base.clone());
-    upsert_all(&mut controller, projection.facts);
+    upsert_all(&mut controller, facts);
     assert_eq!(controller.view().scene_fact_count, 1);
     (state, fact_id)
 }
@@ -937,8 +994,7 @@ fn activity_setup() -> (EngineObservationState, SceneId) {
 fn canonical_growth_rebases_derived_activity_without_conflict() {
     let (state, fact_id) = activity_setup();
     let mut controller = controller_with_snapshot(snapshot_for_growth());
-    let projection = project_activities(&state, &snapshot_for_growth());
-    upsert_all(&mut controller, projection.facts);
+    upsert_all(&mut controller, facts_on_a_durable_ordinal(&state));
 
     // Canonical growth reuses ordinal 2 for the settled assistant. Acceptance
     // rebases the derived fact above the new watermark instead of refusing.
@@ -982,8 +1038,7 @@ fn canonical_growth_rebases_derived_activity_without_conflict() {
 fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
     let (state, fact_id) = activity_setup();
     let mut controller = controller_with_snapshot(snapshot_for_growth());
-    let projection = project_activities(&state, &snapshot_for_growth());
-    upsert_all(&mut controller, projection.facts);
+    upsert_all(&mut controller, facts_on_a_durable_ordinal(&state));
     let scene_before = controller.scene().expect("scene builds");
 
     // A stale batch (cursor 5 names a superseded tail) reuses ordinal 2.
@@ -1078,8 +1133,7 @@ fn stale_batch_with_colliding_ordinal_rolls_back_without_side_effects() {
 fn capacity_blocked_delivery_mutates_neither_ordinals_nor_effects() {
     let (state, _) = activity_setup();
     let mut controller = controller_with_snapshot(snapshot_for_growth());
-    let projection = project_activities(&state, &snapshot_for_growth());
-    upsert_all(&mut controller, projection.facts);
+    upsert_all(&mut controller, facts_on_a_durable_ordinal(&state));
 
     // Fill the bounded outbox through accepted ordinary turn events (one
     // invalidation each) so the delivery reservation fails before any
@@ -1133,16 +1187,7 @@ fn projected_facts_carry_their_attributed_run() {
             10,
         ),
     );
-    state.apply(
-        8,
-        &attributed_event(
-            reasoning_completed("obs-reason-1", 2, "item-1", Some("thinking")),
-            RUN_B,
-            TURN_A,
-            2_100,
-            11,
-        ),
-    );
+    assert!(state.set_live_thinking(&live_thinking("item-1", "thinking", RUN_B, TURN_A, 2_100)));
     let snapshot = snapshot(
         vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
         vec![make_user("user_a", TURN_A, 1)],
@@ -1158,73 +1203,6 @@ fn projected_facts_carry_their_attributed_run() {
         runs.contains(&Some(RUN_A.to_owned())) && runs.contains(&Some(RUN_B.to_owned())),
         "every projected fact carries its attributed run, got {runs:?}"
     );
-}
-
-#[test]
-fn late_reasoning_joins_the_session_without_a_visible_row() {
-    // Screenshot shape through the real pipeline: a settled reply first,
-    // then reasoning landing later from retained observations. The late
-    // work joins the session trace in place; the transcript shows user →
-    // session → final reply → footer, with no work block after the reply
-    // and no visible reasoning row.
-    let mut state = EngineObservationState::new(thread_id());
-    state.apply(
-        7,
-        &attributed_event(
-            reasoning_completed(
-                "obs-reason-late",
-                2,
-                "item-late",
-                Some("Planning playful ambiguous response"),
-            ),
-            RUN_A,
-            TURN_A,
-            4_900,
-            12,
-        ),
-    );
-    let snapshot = snapshot(
-        vec![make_turn(TURN_A, 0, ConversationLifecycle::Completed)],
-        vec![
-            make_user("user_a", TURN_A, 1),
-            make_assistant("reply_a", TURN_A, 2, RUN_A),
-        ],
-    );
-    let projection = project_activities(&state, &snapshot);
-    assert_eq!(projection.facts.len(), 1);
-
-    let mut controller = controller_with_snapshot(snapshot);
-    upsert_all(&mut controller, projection.facts);
-    let scene = controller.scene().expect("scene builds");
-    let blocks = scene
-        .turn_scene(&turn_id(TURN_A))
-        .expect("turn present")
-        .blocks();
-    let kinds: Vec<&str> = blocks
-        .iter()
-        .map(|block| match block {
-            TurnBlock::UserMessage(_) => "user",
-            TurnBlock::WorkGroup(_) => "session",
-            TurnBlock::AssistantMessage(_) => "reply",
-            TurnBlock::TurnStatus(_) => "status",
-            TurnBlock::TurnFooter(_) => "footer",
-            _ => "other",
-        })
-        .collect();
-    assert_eq!(kinds, vec!["user", "session", "reply", "status", "footer"]);
-    // Settled reasoning paints no member rows and no live summary on a
-    // settled turn; the group keeps the newest body only as the source of
-    // its collapsed thinking chip label.
-    for block in blocks {
-        if let TurnBlock::WorkGroup(group) = block {
-            assert!(group.items.is_empty());
-            assert!(group.session_details.is_empty());
-            assert_eq!(
-                group.reasoning_summary.as_deref(),
-                Some("Planning playful ambiguous response")
-            );
-        }
-    }
 }
 
 #[test]
@@ -1434,4 +1412,157 @@ fn activity_slides_to_the_newest_window_and_frees_room_for_live_work() {
         "the newest row is shown"
     );
     assert!(!ids.iter().any(|id| id.as_str().ends_with("-tool-3")));
+}
+
+fn held_back_turn(
+    turn: &str,
+    run: &str,
+    rows: u32,
+    first: u64,
+) -> artisan_domain::HeldBackTurnWork {
+    artisan_domain::HeldBackTurnWork {
+        turn_id: turn_id(turn),
+        run_id: run_id(run),
+        row_count: rows,
+        first_committed_at: stamp(1_500),
+        first_delivery_sequence: first,
+    }
+}
+
+/// Activity rows a turn's work section holds, whichever layout it takes.
+fn activity_rows(controller: &ConversationStateController, turn: &str) -> usize {
+    let scene = controller.scene().expect("scene builds");
+    scene
+        .turn_scene(&turn_id(turn))
+        .expect("turn scene exists")
+        .blocks()
+        .iter()
+        .map(|block| match block {
+            TurnBlock::WorkGroup(group) => {
+                group.items.len()
+                    + group
+                        .session_details
+                        .iter()
+                        .filter(|detail| {
+                            matches!(
+                                detail,
+                                artisan_frontend::conversation_scene::SessionDetail::Activity { .. }
+                            )
+                        })
+                        .count()
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
+/// A settled turn whose work rows are still on the Forge keeps one stand-in
+/// row, so its section exists and the turn reads as worked; reading the rows
+/// replaces the stand-in without moving anything that was already there.
+#[test]
+fn held_back_work_projects_one_stand_in_until_its_rows_are_read() {
+    let snapshot = snapshot(
+        vec![
+            make_turn(TURN_A, 0, ConversationLifecycle::Completed),
+            make_turn(TURN_B, 3, ConversationLifecycle::Active),
+        ],
+        vec![
+            make_user("user_a", TURN_A, 1),
+            make_assistant("reply_a", TURN_A, 2, RUN_A),
+            make_user("user_b", TURN_B, 4),
+        ],
+    );
+    let mut state = EngineObservationState::new(thread_id());
+    // The running turn's row arrived with the subscription.
+    let _ = state.apply(
+        1,
+        &attributed_event(
+            tool_observation("obs-live", 1, "tool-live", ToolAction::Started),
+            RUN_B,
+            TURN_B,
+            3_000,
+            30,
+        ),
+    );
+    assert!(state.set_held_back(&artisan_domain::HeldBackWork {
+        thread_id: thread_id(),
+        turns: vec![held_back_turn(TURN_A, RUN_A, 2, 10)],
+    }));
+    let projection = project_activities(&state, &snapshot);
+    assert_eq!(projection.facts.len(), 2);
+    let stand_in = &projection.facts[0];
+    assert_eq!(stand_in.turn_id, turn_id(TURN_A));
+    assert!(
+        matches!(
+            &stand_in.kind,
+            SceneFactKind::Activity { body, kind, .. }
+                if body == "Loading 2 steps…" && kind.as_deref() == Some("held_back")
+        ),
+        "unexpected stand-in {:?}",
+        stand_in.kind
+    );
+    let live_ordinal = projection.facts[1].ordinal;
+    assert!(stand_in.ordinal < live_ordinal);
+    let stand_in_id = stand_in.id.clone();
+
+    let mut controller = controller_with_snapshot(snapshot.clone());
+    upsert_all(&mut controller, projection.facts);
+    assert_eq!(activity_rows(&controller, TURN_A), 1);
+
+    // The section opened: the turn's rows are read, oldest first, after the
+    // newer turn's row was already here.
+    for (obs, tool, sequence) in [("obs-1", "tool-1", 10), ("obs-2", "tool-2", 11)] {
+        let _ = state.apply(
+            0,
+            &attributed_event(
+                tool_observation(obs, 1, tool, ToolAction::Completed),
+                RUN_A,
+                TURN_A,
+                1_500,
+                sequence,
+            ),
+        );
+    }
+    // While pages are still arriving the stand-in sits beside the rows.
+    let partial = project_activities(&state, &snapshot);
+    assert_eq!(partial.facts.len(), 4);
+    state.mark_turn_work_loaded(&turn_id(TURN_A));
+    assert!(!state.holds_back(&turn_id(TURN_A)));
+    let read = project_activities(&state, &snapshot);
+    assert_eq!(read.facts.len(), 3);
+    assert!(
+        read.facts
+            .iter()
+            .all(|fact| !matches!(&fact.kind, SceneFactKind::Activity { kind, .. } if kind.as_deref() == Some("held_back")))
+    );
+    // Rows read later slot in by their own place in the thread: the newer
+    // turn's row keeps its ordinal and every ordinal stays unique, so the
+    // registry takes them without a conflict.
+    assert_eq!(
+        read.facts
+            .iter()
+            .find(|fact| fact.turn_id == turn_id(TURN_B))
+            .expect("live row")
+            .ordinal,
+        live_ordinal
+    );
+    controller
+        .remove_fact(stand_in_id)
+        .expect("the stand-in leaves");
+    upsert_all(&mut controller, read.facts);
+    assert_eq!(controller.view().scene_fact_count, 3);
+    assert_eq!(activity_rows(&controller, TURN_A), 2);
+    controller.scene().expect("scene builds");
+
+    // A resume repeats the count: the turn stays read. More rows than were
+    // read mean it gained some while the Editor was away.
+    assert!(!state.set_held_back(&artisan_domain::HeldBackWork {
+        thread_id: thread_id(),
+        turns: vec![held_back_turn(TURN_A, RUN_A, 2, 10)],
+    }));
+    assert!(state.set_held_back(&artisan_domain::HeldBackWork {
+        thread_id: thread_id(),
+        turns: vec![held_back_turn(TURN_A, RUN_A, 3, 10)],
+    }));
+    assert!(state.holds_back(&turn_id(TURN_A)));
 }

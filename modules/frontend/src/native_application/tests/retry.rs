@@ -370,6 +370,7 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
                 scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-first").expect("request"),
                 token,
+                selection: None,
             });
             application.handle_service_event(
                 NativeTransportEvent::MessageQueued(first_receipt(
@@ -402,6 +403,7 @@ fn accepted_and_duplicate_receipts_clear_only_the_matching_flight(cx: &mut TestA
                 scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-second").expect("request"),
                 token,
+                selection: None,
             });
             application.composer.update(application_cx, |composer, _| {
                 composer.set_draft("newer draft while duplicate is pending");
@@ -451,6 +453,7 @@ fn stale_queue_results_do_not_clear_a_newer_draft(cx: &mut TestAppContext) {
                 scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-newer").expect("request"),
                 token,
+                selection: None,
             });
             application.handle_service_event(
                 NativeTransportEvent::MessageQueued(first_receipt(
@@ -487,6 +490,7 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
                 scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-failure").expect("request"),
                 token,
+                selection: None,
             });
             application.handle_service_event(
                 NativeTransportEvent::MessageFailed {
@@ -519,6 +523,7 @@ fn queue_failure_and_service_stop_retain_the_draft(cx: &mut TestAppContext) {
                 scope: artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
                 request_id: artisan_domain::RequestId::parse("request-stop").expect("request"),
                 token,
+                selection: None,
             });
             application.handle_service_event(
                 NativeTransportEvent::Stopped(ServiceStopStatus::Clean),
@@ -554,6 +559,7 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
                 request_id: artisan_domain::RequestId::parse("request-transition")
                     .expect("request"),
                 token,
+                selection: None,
             });
             application.message_receipt = Some(first_receipt(
                 "request-old",
@@ -589,6 +595,7 @@ fn real_thread_transition_and_shutdown_retain_and_clear_old_presentation(cx: &mu
                 scope: artisan_domain::ComposerDraftScope::Thread(old_thread),
                 request_id: artisan_domain::RequestId::parse("request-shutdown").expect("request"),
                 token,
+                selection: None,
             });
             application.prepare_shutdown(application_cx);
             assert!(application.message_flight.is_none());

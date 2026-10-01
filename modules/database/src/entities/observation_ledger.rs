@@ -28,6 +28,9 @@ pub struct Model {
     pub binding_version: i64,
     pub observation_version: i64,
     pub observation_bytes: OpaqueBytes,
+    /// The payload's own observation tag, copied out so a history read can
+    /// tell a work row from the rest without decoding the payload.
+    pub observation_tag: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

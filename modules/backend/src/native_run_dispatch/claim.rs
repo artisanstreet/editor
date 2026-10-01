@@ -18,7 +18,7 @@ use artisan_database::{
     Repository, RequeueMessageDispatch, RunBatchScope, SessionContinuationLookup,
     SessionContinuationQuery,
 };
-use artisan_domain::{EngineId, EngineSelection, UnixMillis};
+use artisan_domain::{EngineId, EngineSelection, ErrorChain, UnixMillis};
 #[cfg(test)]
 use artisan_domain::{ItemId, PatchId, RunId, TurnId};
 use artisan_native_engine::{
@@ -46,6 +46,7 @@ use crate::{
 };
 
 use super::claim_lease::{ClaimLease, drive_with_claim_lease};
+use super::diagnostics::{StepError, report_abandoned, report_claim_failure};
 use super::dispatch_policy::{
     LaunchAuthority, PromptAuthorization, SettingsLoadDecision, classify_launch_result,
     classify_settings_load, continuation_incompatible_reason, continuation_unavailable_reason,
@@ -110,13 +111,20 @@ async fn run_claim(context: ClaimExecution<'_>, launch_mode: ClaimLaunchMode) ->
             return ClaimCustody::Released;
         }
     };
-    let Ok(cancellation) = loaded
+    let cancellation = match loaded
         .context
         .cancellation
         .register_exclusive(loaded.payload.thread_id.clone(), ids.run_id.clone())
-    else {
-        loaded.context.requeue("run cancellation unavailable").await;
-        return ClaimCustody::Released;
+    {
+        Ok(cancellation) => cancellation,
+        Err(error) => {
+            report_claim_failure(
+                &loaded.context.claimed.message_id,
+                &StepError::failed("registering the run for cancellation", error),
+            );
+            loaded.context.requeue("run cancellation unavailable").await;
+            return ClaimCustody::Released;
+        }
     };
     let Some(launched) = launch_claim(loaded, ids, cancellation, continuation).await else {
         return ClaimCustody::Released;
@@ -140,9 +148,30 @@ async fn load_claim(
     context: ClaimExecution<'_>,
     launch_mode: ClaimLaunchMode,
 ) -> Option<LoadedClaim<'_>> {
-    let Some(payload) = read_payload(context.repository, &context.claimed).await else {
-        context.requeue("message payload unavailable").await;
-        return None;
+    let payload = match context
+        .repository
+        .read_queue_message_dispatch_payload(&context.claimed.message_id)
+        .await
+    {
+        Ok(Some(payload)) => payload,
+        Ok(None) => {
+            report_claim_failure(
+                &context.claimed.message_id,
+                &StepError::refused(
+                    "reading the claimed message's payload: the dispatch row has no payload",
+                ),
+            );
+            context.requeue("message payload unavailable").await;
+            return None;
+        }
+        Err(error) => {
+            report_claim_failure(
+                &context.claimed.message_id,
+                &StepError::failed("reading the claimed message's payload", error),
+            );
+            context.requeue("message payload unavailable").await;
+            return None;
+        }
     };
     // Launch resolves from the settings snapshot captured with the
     // accepted command, never from current thread settings: a message
@@ -172,7 +201,14 @@ async fn load_claim(
                 return None;
             }
         },
-        Err(_) => {
+        Err(error) => {
+            report_claim_failure(
+                &context.claimed.message_id,
+                &StepError::failed(
+                    "reading the engine settings captured with the message",
+                    error,
+                ),
+            );
             context.requeue("engine settings snapshot unreadable").await;
             return None;
         }
@@ -184,7 +220,12 @@ async fn load_claim(
     {
         Ok(root) => root,
         Err(error) => {
-            if is_permanent_configuration_error(&error) {
+            let permanent = is_permanent_configuration_error(&error);
+            report_claim_failure(
+                &context.claimed.message_id,
+                &StepError::failed("reading the thread's project root", error),
+            );
+            if permanent {
                 context.fail("project root corrupt").await;
             } else {
                 context.requeue("project root unavailable").await;
@@ -205,13 +246,20 @@ async fn load_claim(
         EngineSelection::OpenCode2(selection) => match launch_mode {
             ClaimLaunchMode::Configured => {
                 let profile_id = selection.profile_id();
-                let Ok(launch) = context
+                let launch = match context
                     .config
                     .authority
                     .resolve_profile_launch(context.database_path, profile_id)
-                else {
-                    context.requeue("engine profile unavailable").await;
-                    return None;
+                {
+                    Ok(launch) => launch,
+                    Err(error) => {
+                        report_claim_failure(
+                            &context.claimed.message_id,
+                            &StepError::failed("resolving the engine profile's launch", error),
+                        );
+                        context.requeue("engine profile unavailable").await;
+                        return None;
+                    }
                 };
                 ResolvedLaunch::Configured(Box::new(launch))
             }
@@ -346,7 +394,13 @@ async fn resolve_continuation(
             exclude_run_id: Some(ids.run_id.clone()),
         })
         .await
-        .map_err(|_| "provider continuation lookup failed")?;
+        .map_err(|error| {
+            report_claim_failure(
+                &claim.context.claimed.message_id,
+                &StepError::failed("looking up the provider session to continue", error),
+            );
+            "provider continuation lookup failed"
+        })?;
     match lookup {
         SessionContinuationLookup::NoHistory => Ok(None),
         SessionContinuationLookup::Usable(continuation) => {
@@ -463,6 +517,13 @@ pub(super) async fn launch_claim(
         // external effect from the original attempt.
         LaunchAuthority::Replay => return None,
         LaunchAuthority::Requeue => {
+            if let Err(error) = &launch_result {
+                eprintln!(
+                    "native run claim failed (message {}): storing the run launch: {}",
+                    loaded.context.claimed.message_id,
+                    ErrorChain(error)
+                );
+            }
             loaded.context.requeue("run launch unavailable").await;
             return None;
         }
@@ -544,22 +605,42 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             },
             attempt_budget,
         ),
-        ResolvedLaunch::Claude(launch) => context.owner.admit_claude_turn(
-            EngineClaudeTurnInput {
-                run_id: receipt.run_id.clone(),
-                thread_id: payload.thread_id.clone(),
-                project_root,
-                prompt_id,
-                prompt,
-                settings: settings.clone(),
-                launch: *launch,
-                continuation,
-                prompt_delivery,
-                stream_after,
-                control_capacity,
-            },
-            attempt_budget,
-        ),
+        ResolvedLaunch::Claude(launch) => {
+            // A failed read only skips title generation for this turn.
+            let awaits_title = context
+                .repository
+                .thread_awaits_generated_title(&payload.thread_id)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!(
+                        "Claude title generation skipped (thread {} run {}): {}",
+                        payload.thread_id,
+                        receipt.run_id,
+                        ErrorChain(&StepError::failed(
+                            "reading whether the thread awaits a title",
+                            error
+                        ))
+                    );
+                    false
+                });
+            context.owner.admit_claude_turn(
+                EngineClaudeTurnInput {
+                    run_id: receipt.run_id.clone(),
+                    thread_id: payload.thread_id.clone(),
+                    project_root,
+                    prompt_id,
+                    prompt,
+                    settings: settings.clone(),
+                    launch: *launch,
+                    continuation,
+                    prompt_delivery,
+                    stream_after,
+                    control_capacity,
+                    awaits_title,
+                },
+                attempt_budget,
+            )
+        }
         ResolvedLaunch::Grok(launch) => context.owner.admit_grok_turn(
             EngineGrokTurnInput {
                 run_id: receipt.run_id.clone(),
@@ -608,10 +689,17 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             attempt_budget,
         ),
     };
-    let Ok(mut turn) = turn_result else {
-        let failure = StartFailure::NotAdmitted;
-        settle_unstarted_claim(&context, &ids, &receipt, engine, &failure).await;
-        return (None, ClaimCustody::Released);
+    let mut turn = match turn_result {
+        Ok(turn) => turn,
+        Err(refusal) => {
+            eprintln!(
+                "native run not admitted by the engine owner (thread {} run {}, engine {engine:?}): {refusal:?}",
+                receipt.thread_id, receipt.run_id
+            );
+            let failure = StartFailure::NotAdmitted;
+            settle_unstarted_claim(&context, &ids, &receipt, engine, &failure).await;
+            return (None, ClaimCustody::Released);
+        }
     };
     let launch_deadline = context.config.launch_deadline;
     let session = match await_provider_start(&mut turn, &run_cancel, launch_deadline).await {
@@ -689,6 +777,13 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     };
     let Some(raw_binding) = binding_bytes_vec(binding_engine, &binding_profile, session.session())
     else {
+        report_abandoned(
+            &receipt.thread_id,
+            &receipt.run_id,
+            &StepError::refused(
+                "building the provider binding: the engine tag, profile id, or provider session id is empty or over its bound",
+            ),
+        );
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,
@@ -707,6 +802,13 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         &binding_profile,
         session.session(),
     ) {
+        report_abandoned(
+            &receipt.thread_id,
+            &receipt.run_id,
+            &StepError::refused(
+                "verifying the provider binding: the encoded bytes do not read back as the selected engine, profile, and session",
+            ),
+        );
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,
@@ -717,18 +819,31 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             },
         );
     }
-    let Some(binding_bytes) = ProviderBindingBytes::new(raw_binding).ok() else {
-        let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
-        return (
-            None,
-            if custody {
-                ClaimCustody::Retained(cancellation)
-            } else {
-                ClaimCustody::Released
-            },
-        );
+    let binding_bytes = match ProviderBindingBytes::new(raw_binding) {
+        Ok(binding_bytes) => binding_bytes,
+        Err(error) => {
+            report_abandoned(
+                &receipt.thread_id,
+                &receipt.run_id,
+                &StepError::failed("validating the provider binding bytes", error),
+            );
+            let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
+            return (
+                None,
+                if custody {
+                    ClaimCustody::Retained(cancellation)
+                } else {
+                    ClaimCustody::Released
+                },
+            );
+        }
     };
     let Some(bound_at) = at_or_after(context.origin, ids.operated_at) else {
+        report_abandoned(
+            &receipt.thread_id,
+            &receipt.run_id,
+            &StepError::refused("reading the clock to bind the provider session"),
+        );
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
             None,
@@ -776,7 +891,12 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     let (bound, already_bound) = match bind_result {
         Ok(BindRunProviderOutcome::Bound(receipt)) => (receipt, false),
         Ok(BindRunProviderOutcome::AlreadyBound(receipt)) => (receipt, true),
-        Err(_) => {
+        Err(error) => {
+            report_abandoned(
+                &receipt.thread_id,
+                &receipt.run_id,
+                &StepError::failed("storing the provider session binding", error),
+            );
             let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
             return (
                 None,
@@ -791,10 +911,21 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
     if run_cancel.is_cancelled() {
         turn.cancel();
     }
-    let authorization_failed = match prompt_authorization_after_binding(already_bound) {
-        PromptAuthorization::DoNotAuthorize => true,
-        PromptAuthorization::Authorize => turn.authorize().is_err(),
+    let authorization_refusal = match prompt_authorization_after_binding(already_bound) {
+        PromptAuthorization::DoNotAuthorize => Some(StepError::refused(
+            "authorizing the prompt: the run was already bound by an earlier attempt, so sending the prompt again could repeat it",
+        )),
+        PromptAuthorization::Authorize => turn
+            .authorize()
+            .err()
+            .map(|error| StepError::failed("authorizing the prompt on the engine turn", error)),
     };
+    let authorization_failed = authorization_refusal.is_some();
+    if let Some(refusal) = &authorization_refusal
+        && !run_cancel.is_cancelled()
+    {
+        report_abandoned(&receipt.thread_id, &receipt.run_id, refusal);
+    }
     if authorization_failed && !run_cancel.is_cancelled() {
         let custody = abandon_turn(turn, context.stop, context.process_cancel).await;
         return (
@@ -859,7 +990,15 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         .register(receipt.thread_id.clone(), receipt.run_id.clone())
     {
         Ok((lease, receiver)) => (Some(lease), Some(receiver)),
-        Err(_) => (None, None),
+        Err(error) => {
+            eprintln!(
+                "native run cannot receive approvals, answers, or steers (thread {} run {}): registering the run's interaction route: {}",
+                receipt.thread_id,
+                receipt.run_id,
+                ErrorChain(&error)
+            );
+            (None, None)
+        }
     };
     let mut inbox = inbox;
     // The claim heartbeat keeps the lease alive for the whole turn, so a
@@ -886,10 +1025,18 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
     // Pending rows are per-run: the settle wipes them so decisions never leak
     // across runs. Receipts stay: replays must still answer `duplicate`.
     // Best-effort beside terminal settlement; the delete is idempotent.
-    let _ = context
+    if let Err(error) = context
         .repository
         .settle_run_interactions(&receipt.run_id)
-        .await;
+        .await
+    {
+        eprintln!(
+            "native run step failed (thread {} run {}): clearing the run's pending approvals and questions: {}",
+            receipt.thread_id,
+            receipt.run_id,
+            ErrorChain(&error)
+        );
+    }
     if custody_unresolved {
         ClaimCustody::Retained(cancellation)
     } else {
@@ -909,17 +1056,6 @@ pub(super) fn drain_interactions(
     }
 }
 
-async fn read_payload(
-    repository: &Repository,
-    claimed: &ClaimedMessageDispatch,
-) -> Option<artisan_database::QueueMessageDispatchPayload> {
-    repository
-        .read_queue_message_dispatch_payload(&claimed.message_id)
-        .await
-        .ok()
-        .flatten()
-}
-
 pub(super) async fn requeue_claim(
     repository: &Repository,
     claimed: ClaimedMessageDispatch,
@@ -927,16 +1063,37 @@ pub(super) async fn requeue_claim(
     origin: &SystemCommandOrigin,
     reason: &'static str,
 ) {
+    let message_id = claimed.message_id.clone();
+    eprintln!("native run claim requeued (message {message_id}): {reason}");
     let Some(operated_at) = wall_clock(origin) else {
+        report_claim_failure(
+            &message_id,
+            &StepError::refused(
+                "requeueing the message: the clock could not be read, so the claim is left to lease expiry",
+            ),
+        );
         return;
     };
     let Some(available_at) = add_duration(operated_at, config.retry_backoff) else {
+        report_claim_failure(
+            &message_id,
+            &StepError::refused(
+                "requeueing the message: the retry instant overflowed, so the claim is left to lease expiry",
+            ),
+        );
         return;
     };
-    let Ok(reason) = DispatchFailureReason::parse(reason) else {
-        return;
+    let reason = match DispatchFailureReason::parse(reason) {
+        Ok(reason) => reason,
+        Err(error) => {
+            report_claim_failure(
+                &message_id,
+                &StepError::failed("validating the requeue reason", error),
+            );
+            return;
+        }
     };
-    let _ = repository
+    if let Err(error) = repository
         .requeue_message_dispatch(RequeueMessageDispatch {
             message_id: claimed.message_id,
             owner: claimed.owner,
@@ -944,7 +1101,16 @@ pub(super) async fn requeue_claim(
             available_at,
             reason,
         })
-        .await;
+        .await
+    {
+        report_claim_failure(
+            &message_id,
+            &StepError::failed(
+                "storing the requeue (the claim is left to lease expiry)",
+                error,
+            ),
+        );
+    }
 }
 
 pub(super) async fn fail_claim(
@@ -953,20 +1119,44 @@ pub(super) async fn fail_claim(
     origin: &SystemCommandOrigin,
     reason: &'static str,
 ) {
+    let message_id = claimed.message_id.clone();
+    eprintln!("native run claim refused (message {message_id}): {reason}");
     let Some(operated_at) = wall_clock(origin) else {
+        report_claim_failure(
+            &message_id,
+            &StepError::refused(
+                "failing the message: the clock could not be read, so the claim is left to lease expiry",
+            ),
+        );
         return;
     };
-    let Ok(reason) = DispatchFailureReason::parse(reason) else {
-        return;
+    let reason = match DispatchFailureReason::parse(reason) {
+        Ok(reason) => reason,
+        Err(error) => {
+            report_claim_failure(
+                &message_id,
+                &StepError::failed("validating the failure reason", error),
+            );
+            return;
+        }
     };
-    let _ = repository
+    if let Err(error) = repository
         .fail_message_dispatch(FailMessageDispatch {
             message_id: claimed.message_id,
             owner: claimed.owner,
             operated_at,
             reason,
         })
-        .await;
+        .await
+    {
+        report_claim_failure(
+            &message_id,
+            &StepError::failed(
+                "storing the failed message (the claim is left to lease expiry)",
+                error,
+            ),
+        );
+    }
 }
 
 async fn launch_with_retry(

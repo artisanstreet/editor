@@ -31,15 +31,15 @@ use super::claude::{
     CLAUDE_MAX_ANSWERS, CLAUDE_MAX_FRAME_BYTES, ClaudeApplyOutcome, ClaudeAssistantContent,
     ClaudeAssistantFrame, ClaudeContinuationDecision, ClaudeContinuationGateInput, ClaudeEvent,
     ClaudePendingTracker, ClaudeQuotaWindowKind, ClaudeSession, ClaudeSettings,
-    ClaudeUsageAttribution, ClaudeUsageContext, ClaudeUsageScope, answer_approval,
-    answer_questions, apply_event, approval_response_line, check_claude_native_continuation,
-    clamp_claude_percent_used, classify_claude_quota_window_kind, classify_exit,
-    claude_cli_meets_minimum, claude_cli_usage_args, claude_project_directory_name,
-    claude_requires_group_termination, claude_resume_session, claude_session_title_from_lines,
-    claude_session_transcript_path, claude_usage_report, has_stalled, new_session_id,
-    parse_claude_assistant_usage, parse_claude_cli_reset_at, parse_claude_cli_usage_windows,
-    parse_claude_result_usage, parse_frame, read_claude_session_title, steer_live_turn,
-    terminal_observation, user_message_line, write_line,
+    ClaudeUsageAttribution, ClaudeUsageContext, ClaudeUsageScope, answer_approval, apply_event,
+    approval_response_line, check_claude_native_continuation, clamp_claude_percent_used,
+    classify_claude_quota_window_kind, classify_exit, claude_cli_meets_minimum,
+    claude_cli_usage_args, claude_project_directory_name, claude_requires_group_termination,
+    claude_resume_session, claude_session_title_from_lines, claude_session_transcript_path,
+    claude_usage_report, has_stalled, new_session_id, parse_claude_assistant_usage,
+    parse_claude_cli_reset_at, parse_claude_cli_usage_windows, parse_claude_result_usage,
+    parse_frame, read_claude_session_title, steer_live_turn, terminal_observation,
+    user_message_line, write_line,
 };
 use super::observation::{
     EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
@@ -346,7 +346,8 @@ fn init_delta_phases_and_message_start_decode() {
         ClaudeEvent::Assistant(frame) => assert_eq!(
             frame.content,
             vec![ClaudeAssistantContent::Thinking {
-                text: String::new()
+                text: String::new(),
+                title: None
             }]
         ),
         _ => panic!("expected buffered thinking frame"),
@@ -553,6 +554,32 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
     assert_eq!(value["response"]["response"]["behavior"], "allow");
 }
 
+#[test]
+fn dismissed_question_reports_user_disregarded_it() {
+    let mut tracker = ClaudePendingTracker::new();
+    let event = parse_frame(
+        r#"{"type":"control_request","request_id":"dismiss-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","options":[{"label":"Red"}]}]}}}"#,
+        1,
+    )
+    .expect("question decodes");
+    let ClaudeEvent::QuestionRequested(request) = event else {
+        panic!("expected question")
+    };
+    tracker.note_questions(&request);
+    let reply = tracker
+        .record_question_answer("dismiss-1:0", &[])
+        .expect("dismissal records")
+        .expect("dismissal replies");
+    let value: serde_json::Value = serde_json::from_str(&reply).expect("reply json");
+    assert_eq!(value["response"]["request_id"], "dismiss-1");
+    assert_eq!(value["response"]["response"]["behavior"], "deny");
+    assert_eq!(
+        value["response"]["response"]["message"],
+        "User disregarded your question"
+    );
+    assert!(!tracker.waiting_on_user());
+}
+
 #[expect(
     clippy::assertions_on_constants,
     reason = "documents the domain answer ceiling against the engine constant"
@@ -568,19 +595,31 @@ async fn question_answer_and_steer_verbs_shape_lines() {
     let ClaudeEvent::QuestionRequested(request) = event else {
         panic!("expected question")
     };
-    assert_eq!(tracker.note_questions(&request), 1);
+    assert_eq!(tracker.note_questions(&request).len(), 1);
+    assert!(
+        tracker.waiting_on_user(),
+        "an open request keeps the turn alive"
+    );
+    assert!(
+        tracker.note_questions(&request).is_empty(),
+        "a repeated request never asks its questions twice"
+    );
 
+    let reply = tracker
+        .record_question_answer("qreq-1:0", &["Red".to_owned()])
+        .expect("the answer records")
+        .expect("the whole request replies");
+    assert_eq!(tracker.pending_questions(), 0);
+    assert!(!tracker.waiting_on_user());
+    assert!(
+        tracker
+            .record_question_answer("qreq-1:0", &["Blue".to_owned()])
+            .is_err(),
+        "an answered question never answers twice"
+    );
     let (mut client, server) = tokio::io::duplex(65_536);
     let mut server = BufReader::new(server);
-    answer_questions(
-        &mut client,
-        &mut tracker,
-        &request,
-        &[("qreq-1:0".to_owned(), vec!["Red".to_owned()])],
-    )
-    .await
-    .expect("question answer writes");
-    assert_eq!(tracker.pending_questions(), 0);
+    write_line(&mut client, &reply).await.expect("reply writes");
     let mut line = String::new();
     server.read_line(&mut line).await.expect("answer readable");
     let value: serde_json::Value = serde_json::from_str(line.trim()).expect("answer json");
@@ -596,7 +635,7 @@ async fn question_answer_and_steer_verbs_shape_lines() {
         "verbatim input must be amended, not replaced"
     );
 
-    steer_live_turn(&mut client, "session-1", "follow up")
+    steer_live_turn(&mut client, "session-1", "follow up", &[])
         .await
         .expect("steer writes");
     line.clear();
@@ -609,6 +648,60 @@ async fn question_answer_and_steer_verbs_shape_lines() {
 
     // Answer option counts stay within the domain ceiling.
     assert!(CLAUDE_MAX_ANSWERS <= 16);
+}
+
+#[tokio::test]
+async fn steer_line_carries_images_as_native_content_blocks() {
+    use base64::Engine as _;
+
+    let bytes = vec![0, 127, 128, 255];
+    let image = artisan_domain::ImageAttachment::new("image/png", bytes.clone(), "pasted.png")
+        .expect("valid image attachment");
+    let (mut client, server) = tokio::io::duplex(65_536);
+    let mut server = BufReader::new(server);
+    let mut line = String::new();
+
+    // Text plus image: text block first, then the base64 image block.
+    steer_live_turn(
+        &mut client,
+        "session-1",
+        "look at this",
+        std::slice::from_ref(&image),
+    )
+    .await
+    .expect("steer writes");
+    server.read_line(&mut line).await.expect("steer readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    assert_eq!(steer["type"], "user");
+    assert_eq!(steer["session_id"], "session-1");
+    let content = steer["message"]["content"]
+        .as_array()
+        .expect("content array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "look at this");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["type"], "base64");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(content[1]["source"]["data"].as_str().expect("image data"))
+            .expect("valid base64"),
+        bytes
+    );
+
+    // Image-only: no empty text block precedes the image.
+    steer_live_turn(&mut client, "session-1", "", &[image])
+        .await
+        .expect("image-only steer writes");
+    line.clear();
+    server.read_line(&mut line).await.expect("steer readable");
+    let steer: serde_json::Value = serde_json::from_str(line.trim()).expect("steer json");
+    let content = steer["message"]["content"]
+        .as_array()
+        .expect("content array");
+    assert_eq!(content.len(), 1);
+    assert_eq!(content[0]["type"], "image");
 }
 
 #[expect(
@@ -785,6 +878,57 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
     .await;
     assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
     assert!(receiver.try_recv().is_err(), "no root observation");
+}
+
+#[tokio::test]
+async fn background_agents_keep_input_open_past_the_result() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, _receiver) = mpsc::channel(8);
+    let mut active = None;
+    let mut sequence = 0;
+    let mut apply = async |line: &str, tracker: &mut ClaudePendingTracker| {
+        sequence += 1;
+        let event = parse_frame(line, sequence).expect("frame decodes");
+        apply_event(
+            event,
+            &run,
+            SESSION,
+            tracker,
+            &mut active,
+            &sender,
+            sequence,
+            None,
+        )
+        .await
+    };
+    let keep = ClaudeApplyOutcome::Continue { end_input: false };
+    let end = ClaudeApplyOutcome::Continue { end_input: true };
+
+    // Only agents and workflows are waited for: the CLI reaps background
+    // shells once input closes, and ambient watchers are never activity.
+    let level = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent","description":"Implement"},{"task_id":"b1","task_type":"local_bash","description":"dev server"},{"task_id":"w1","task_type":"local_agent","description":"watch","ambient":true}]}"#;
+    assert_eq!(apply(level, &mut tracker).await, keep);
+
+    // The reply is done but the agent still runs: stdin stays open, so a
+    // steer can still be written.
+    assert_eq!(apply(&result_line(), &mut tracker).await, keep);
+    assert!(tracker.result_seen());
+    assert!(!tracker.input_settled());
+
+    // The agent ending settles the session without closing on the frame
+    // itself: its report opens a follow-up turn.
+    let only_shell = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b1","task_type":"local_bash","description":"dev server"}]}"#;
+    assert_eq!(apply(only_shell, &mut tracker).await, keep);
+    assert!(tracker.input_settled());
+    let follow_up =
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_2"}}}"#;
+    assert_eq!(apply(follow_up, &mut tracker).await, keep);
+    assert!(!tracker.input_settled());
+
+    // With nothing waited for, the next result ends input as before.
+    assert_eq!(apply(&result_line(), &mut tracker).await, end);
+    assert!(tracker.input_settled());
 }
 
 #[tokio::test]
@@ -1762,11 +1906,9 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
             }
             _ => panic!("root rows never share the subagent assertions"),
         };
-        assert!(
-            commit_subagent_observation(&repository, &config, &origin, &mut cursor, observation)
-                .await,
-            "S1b commit persists row"
-        );
+        commit_subagent_observation(&repository, &config, &origin, &mut cursor, observation)
+            .await
+            .expect("S1b commit persists row");
         committed += 1;
     }
     assert_eq!(committed, 2);

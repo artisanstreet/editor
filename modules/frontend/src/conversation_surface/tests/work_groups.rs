@@ -54,10 +54,10 @@ fn group_detail_rows_paint_in_durable_order(cx: &mut TestAppContext) {
     )
     .expect("conversation scene is valid");
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
-        let mut surface = ConversationSurface::new(detail_scene, ThemeMode::Dark, surface_cx);
+        let surface = ConversationSurface::new(detail_scene, ThemeMode::Dark, surface_cx);
         surface
             .trace_groups_open
-            .get_mut()
+            .borrow_mut()
             .insert("work-a".to_owned(), true);
         surface
     });
@@ -225,10 +225,10 @@ fn session_activity_chain_carries_kind_and_detail(cx: &mut TestAppContext) {
     )
     .expect("session activity scene is valid");
     let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
-        let mut surface = ConversationSurface::new(session_scene, ThemeMode::Dark, surface_cx);
+        let surface = ConversationSurface::new(session_scene, ThemeMode::Dark, surface_cx);
         surface
             .trace_groups_open
-            .get_mut()
+            .borrow_mut()
             .insert("work-a".to_owned(), true);
         surface
     });
@@ -300,7 +300,9 @@ fn unresolved_assistant_links_queue_one_bounded_resolve_request(cx: &mut TestApp
         surface.update(app, |surface, _| {
             assert_eq!(
                 surface
-                    .rich_link_titles
+                    .shaper
+                    .titles()
+                    .borrow()
                     .lookup("https://example.com/page#section"),
                 Some(SharedString::from("Resolved Docs"))
             );
@@ -325,7 +327,9 @@ fn unresolved_assistant_links_queue_one_bounded_resolve_request(cx: &mut TestApp
         surface.update(app, |surface, _| {
             assert!(
                 surface
-                    .rich_link_titles
+                    .shaper
+                    .titles()
+                    .borrow()
                     .lookup("https://example.com/page")
                     .is_none(),
                 "a failed resolution keeps the authored label"
@@ -344,12 +348,13 @@ fn unresolved_assistant_links_queue_one_bounded_resolve_request(cx: &mut TestApp
 #[gpui::test]
 fn group_disclosure_toggle_emits_typed_action(cx: &mut TestAppContext) {
     // Clicking the group's disclosure trigger must emit exactly one
-    // typed toggle request; the scene stays authoritative afterwards.
+    // typed toggle request; the scene stays authoritative afterwards. The
+    // turn is settled: a live section carries no toggle.
     let open_scene = ConversationScene::build(
         vec![SceneTurn::new(
             turn_id("turn_a"),
             0,
-            ConversationLifecycle::Active,
+            ConversationLifecycle::Completed,
         )],
         vec![item(
             "work-a",
@@ -363,7 +368,7 @@ fn group_disclosure_toggle_emits_typed_action(cx: &mut TestAppContext) {
         )],
         vec![TurnNarrationEntry::new(
             turn_id("turn_a"),
-            TurnNarration::Working,
+            TurnNarration::WorkedFor { millis: 5_000 },
         )],
         Vec::new(),
     )
@@ -565,10 +570,11 @@ fn closing_history_never_reexpands_when_late_tool_rows_arrive(cx: &mut TestAppCo
         "artisan-conversation-surface-turn-turn_a-block-work-work-a-disclosure-content";
     fn updated_scene(rows: u64, disclosure: SceneDisclosure) -> ConversationScene {
         ConversationScene::build(
+            // Settled history: a live section cannot collapse.
             vec![SceneTurn::new(
                 turn_id("turn_a"),
                 0,
-                ConversationLifecycle::Active,
+                ConversationLifecycle::Completed,
             )],
             (0..rows)
                 .map(|index| {
@@ -591,21 +597,21 @@ fn closing_history_never_reexpands_when_late_tool_rows_arrive(cx: &mut TestAppCo
                 .collect(),
             vec![TurnNarrationEntry::new(
                 turn_id("turn_a"),
-                TurnNarration::Working,
+                TurnNarration::WorkedFor { millis: 5_000 },
             )],
             Vec::new(),
         )
         .unwrap()
     }
     let (surface, cx) = cx.add_window_view(|_, surface_cx| {
-        let mut surface = ConversationSurface::new(
+        let surface = ConversationSurface::new(
             updated_scene(1, SceneDisclosure::Open),
             ThemeMode::Dark,
             surface_cx,
         );
         surface
             .trace_groups_open
-            .get_mut()
+            .borrow_mut()
             .insert("work-a".to_owned(), true);
         surface
     });
@@ -821,6 +827,7 @@ fn session_details_sort_by_stable_ordinal() {
         session: Some(scene_id("session-turn_a")),
         session_run: None,
         superseded: false,
+        continuation: None,
         reasoning_summary: None,
         progress: ProgressPhase::Work,
         transition: None,
@@ -846,6 +853,16 @@ fn session_details_sort_by_stable_ordinal() {
                 id: scene_id("fact-3"),
                 text: "third".to_owned(),
                 ordinal: 6,
+                disclosure: None,
+            },
+            // Opened ahead of its first text: not a row, so it neither
+            // paints a gap nor splits the chain around it.
+            SessionDetail::Assistant {
+                id: scene_id("asst-unwritten"),
+                body: String::new(),
+                phase: AssistantPhase::Unspecified,
+                ordinal: 5,
+                provenance: None,
                 disclosure: None,
             },
         ],
@@ -1026,6 +1043,16 @@ fn activity_chain_clauses_describe_composition() {
     );
     // A kind-less legacy row counts as generic tool work.
     assert_eq!(activity_chain_clause(["tool"].into_iter()), "Used a tool");
+    // Differently named tools share one clause: a recognised tool kind and
+    // an unrecognised one both read as tools.
+    assert_eq!(
+        activity_chain_clause(["bash", "ToolSearch", "SendMessage"].into_iter()),
+        "Ran a command, used 2 tools"
+    );
+    assert_eq!(
+        activity_chain_icon(["ToolSearch", "SendMessage"].into_iter()),
+        AssetId::TABLER_TOOL
+    );
     assert_eq!(activity_chain_clause(std::iter::empty()), "");
 }
 
@@ -1144,31 +1171,38 @@ fn work_group_header_row_wraps_the_disclosure_trigger(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn work_group_header_row_paints_without_a_disclosure_wrapper(cx: &mut TestAppContext) {
+    // A group without a disclosure value still titles itself with its
+    // turn's outcome; only a group with nothing to say paints no header row
+    // (its tool chains carry their own).
     const HEADER: &str = "artisan-conversation-surface-turn-turn_a-block-work-plain-first-header";
+    let plain = |id: &str, ordinal| {
+        item(
+            id,
+            ordinal,
+            SceneItemKind::Activity {
+                body: body(),
+                kind: None,
+                detail: None,
+            },
+            None,
+        )
+    };
+    let settled = |narration| {
+        ConversationScene::build(
+            vec![SceneTurn::new(
+                turn_id("turn_a"),
+                0,
+                ConversationLifecycle::Completed,
+            )],
+            vec![plain("plain-first", 1), plain("plain-target", 2)],
+            vec![TurnNarrationEntry::new(turn_id("turn_a"), narration)],
+            Vec::new(),
+        )
+        .expect("plain group scene is valid")
+    };
     let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(
-            scene(vec![
-                item(
-                    "plain-first",
-                    1,
-                    SceneItemKind::Activity {
-                        body: body(),
-                        kind: None,
-                        detail: None,
-                    },
-                    None,
-                ),
-                item(
-                    "plain-target",
-                    2,
-                    SceneItemKind::Activity {
-                        body: body(),
-                        kind: None,
-                        detail: None,
-                    },
-                    None,
-                ),
-            ]),
+            settled(TurnNarration::WorkedFor { millis: 5_000 }),
             ThemeMode::Dark,
             surface_cx,
         )
@@ -1178,6 +1212,15 @@ fn work_group_header_row_paints_without_a_disclosure_wrapper(cx: &mut TestAppCon
     assert!(
         cx.debug_bounds(HEADER).is_some(),
         "the plain header row paints without a disclosure wrapper"
+    );
+    let (_surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(settled(TurnNarration::Quiet), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(240.0)));
+    settle(cx);
+    assert!(
+        cx.debug_bounds(HEADER).is_none(),
+        "an untitled plain group leaves no header row above its chain"
     );
 }
 

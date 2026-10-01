@@ -169,6 +169,11 @@ pub(crate) fn encode_engine_observation(
             encoded.set_id(observation.id().as_str());
             encoded.set_sequence(observation.sequence().get());
             encoded.set_question_id(observation.question_id().as_str());
+            encoded.set_group_id(
+                observation
+                    .explicit_group_id()
+                    .map_or("", ObservationId::as_str),
+            );
             encoded.set_state(encode_observation_question_state(observation.state()));
             encoded.set_text(observation.text());
             encoded.set_header(observation.header().unwrap_or(""));

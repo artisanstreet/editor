@@ -149,6 +149,16 @@ impl NativeApplication {
         );
     }
 
+    /// The shell geometry for this frame: the sidebar shrinks with the
+    /// window so the chat keeps its minimum width.
+    pub(super) fn desktop_shell_style(&self, window: &Window) -> DesktopShellStyle {
+        DesktopShellStyle::for_window(
+            self.sidebar_collapsed,
+            window.bounds().size.width,
+            window.scale_factor(),
+        )
+    }
+
     pub(super) fn toggle_sidebar(
         &mut self,
         _: &ClickEvent,
@@ -210,16 +220,24 @@ impl NativeApplication {
                 .last_threads
                 .insert(project_id.clone(), thread);
         }
+        // Choosing a project while starting a new thread keeps the reader on
+        // the new-thread screen, now scoped to that project: the choice is
+        // where the next task goes, never a request to reopen the
+        // destination's remembered thread.
+        let starting_new_thread = matches!(self.route(), NativeRoute::NewThread { .. });
         if !opens_thread
-            && (self.selected_thread_is_draft() || self.composer.read(cx).has_unsent_draft())
+            && (starting_new_thread
+                || self.selected_thread_is_draft()
+                || self.composer.read(cx).has_unsent_draft())
             && self.command_submission_is_available()
             && !self.composer.read(cx).is_submitting()
             && self.message_flight.is_none()
         {
-            // The unsent prompt follows the workspace into the destination's
-            // new-task draft, without replacing a destination conversation's
-            // saved draft. Its threads stay unlisted here (no remembered
-            // thread opens over the prompt); sending lists the project again.
+            // The new-thread screen and any unsent prompt follow the
+            // workspace into the destination's new-task draft, without
+            // replacing a destination conversation's saved draft. Its threads
+            // stay unlisted here (no remembered thread opens over the
+            // prompt); sending lists the project again.
             self.selected_project = Some(project_id.clone());
             self.intake_failure_operation = None;
             self.intake_retry_available = false;
@@ -253,6 +271,7 @@ impl NativeApplication {
         self.pending_thread = None;
         self.pending_snapshot = None;
         self.project_navigation.awaiting_threads = true;
+        self.project_navigation.new_task_open = false;
         if self.selected_project.as_ref() != Some(&project_id) {
             if self.conversation_host.is_some() && self.selected_thread.is_some() {
                 // Keep the source subscription until its stop receipt. The

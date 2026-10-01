@@ -1,12 +1,12 @@
 //! One-line rendering of a complete error source chain for process diagnostics.
 //!
-//! Forge errors keep their Display messages short and stage-classified and
+//! Error types keep their Display messages short and stage-classified and
 //! carry the underlying typed cause as `source()`. Printing only the top
-//! message loses that cause, so fatal paths render the whole chain as
-//! `top: cause: cause`.
+//! message loses that cause, so every diagnostic line renders the whole
+//! chain as `top: cause: cause`.
 //!
 //! The chain only formats Display text that each error type already exposes;
-//! Forge error types never format capability, credential, or payload bytes.
+//! error types never format capability, credential, or payload bytes.
 //! Peer-supplied text that can reach a transport error (for example a QUIC
 //! close reason) is rendered with control characters escaped, so it cannot
 //! forge additional log lines.

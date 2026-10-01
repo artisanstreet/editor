@@ -336,6 +336,12 @@ pub(crate) fn decode_engine_observation(
                 )?,
                 "event.engineObservation.question.questionId",
             )?;
+            let group_id = absent_if_empty(read_text(
+                observation.get_group_id(),
+                "event.engineObservation.question.groupId",
+            )?)
+            .map(|group| parse_observation_id(group, "event.engineObservation.question.groupId"))
+            .transpose()?;
             let state = decode_observation_question_state(observation.get_state()?);
             let text = read_text(
                 observation.get_text(),
@@ -406,13 +412,17 @@ pub(crate) fn decode_engine_observation(
                 multi_select,
                 options,
             };
+            let grouped = |question: QuestionObservation| match group_id {
+                Some(group_id) => question.with_group(group_id),
+                None => question,
+            };
             match (state, answers) {
-                (QuestionState::Requested, None) => Ok(Observation::Question(
+                (QuestionState::Requested, None) => Ok(Observation::Question(grouped(
                     QuestionObservation::requested(id, sequence, input)?,
-                )),
-                (QuestionState::Resolved, Some(answers)) => Ok(Observation::Question(
+                ))),
+                (QuestionState::Resolved, Some(answers)) => Ok(Observation::Question(grouped(
                     QuestionObservation::resolved(id, sequence, input, answers)?,
-                )),
+                ))),
                 (QuestionState::Requested, Some(_)) => {
                     Err(ObservationError::UnexpectedField { field: "answers" }.into())
                 }

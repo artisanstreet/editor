@@ -25,6 +25,7 @@ impl ConversationStateController {
             delivery,
             turns: BTreeMap::new(),
             turn_engine_labels: BTreeMap::new(),
+            optimistic_cancelled_turn: None,
             disclosures: BTreeMap::new(),
             facts: BTreeMap::new(),
             viewport: ViewportController::new(),
@@ -68,6 +69,14 @@ impl ConversationStateController {
                 turn_id,
                 engine_label,
             } => self.set_turn_engine_label(turn_id, engine_label),
+            ConversationStateEvent::SetOptimisticCancellation { turn_id } => {
+                if self.optimistic_cancelled_turn != turn_id {
+                    self.ensure_effect_capacity(1)?;
+                    self.optimistic_cancelled_turn = turn_id;
+                    self.push_effect(ConversationStateEffect::SceneInvalidated);
+                }
+                Ok(())
+            }
             ConversationStateEvent::RegisterDisclosure {
                 scene_id,
                 initially_working,
@@ -389,9 +398,28 @@ impl ConversationStateController {
         // or a refused delivery dispatch — leaves ordinals and effects
         // untouched. Stable ids, turns, and timing never move, and manually
         // registered facts keep conflict-on-collision semantics.
-        let rebase = self.plan_derived_rebase(event)?;
-        let rebase_effects = usize::from(!rebase.is_empty());
-        self.ensure_effect_capacity(rebase_effects.saturating_add(MAX_DELIVERY_EFFECTS_PER_EVENT))?;
+        //
+        // Derived activity is also a window sized to the scene room the
+        // transcript leaves, so canonical growth takes that room back: the
+        // oldest derived facts leave atomically with acceptance, under the
+        // same rollback. Without this a thread whose activity fills the
+        // window would refuse its own next message and stop updating.
+        let evicted = self.take_derived_overflow(event);
+        let rebase = match self.plan_derived_rebase(event) {
+            Ok(rebase) => rebase,
+            Err(error) => {
+                self.restore_facts(evicted);
+                return Err(error);
+            }
+        };
+        let speculative = !rebase.is_empty() || !evicted.is_empty();
+        let rebase_effects = usize::from(speculative);
+        if let Err(error) = self
+            .ensure_effect_capacity(rebase_effects.saturating_add(MAX_DELIVERY_EFFECTS_PER_EVENT))
+        {
+            self.restore_facts(evicted);
+            return Err(error);
+        }
         let saved: Vec<(SceneId, u64)> = rebase
             .iter()
             .filter_map(|(id, _)| self.facts.get(id).map(|fact| (id.clone(), fact.ordinal)))
@@ -406,14 +434,18 @@ impl ConversationStateController {
                 self.validate_snapshot_for_scene(snapshot)
             }
             ConversationDeliveryEvent::BatchReceived(batch) => self.validate_batch_for_scene(batch),
+            ConversationDeliveryEvent::EarlierTurnsReceived(page) => {
+                self.validate_earlier_turns_for_scene(page)
+            }
             ConversationDeliveryEvent::SubscriptionResumed { .. }
             | ConversationDeliveryEvent::RetryRequested
             | ConversationDeliveryEvent::Closed => Ok(()),
         } {
             self.restore_fact_ordinals(&saved);
+            self.restore_facts(evicted);
             return Err(error);
         }
-        let rebase_effect_index = if rebase.is_empty() {
+        let rebase_effect_index = if !speculative {
             None
         } else {
             let index = self.effects.len();
@@ -424,16 +456,17 @@ impl ConversationStateController {
         // rejected snapshot, thread mismatch) as `Ok` plus a `ReportRefusal`
         // effect, so dispatch success alone does not prove acceptance. Only
         // an advanced canonical snapshot keeps the speculative ordinals.
-        let before = if rebase.is_empty() {
-            None
-        } else {
+        let before = if speculative {
             self.delivery.snapshot().cloned()
+        } else {
+            None
         };
         match self.delivery.dispatch(event) {
             Ok(()) => {
                 self.push_delivery_effects();
-                if !rebase.is_empty() && self.delivery.snapshot() == before.as_ref() {
+                if speculative && self.delivery.snapshot() == before.as_ref() {
                     self.restore_fact_ordinals(&saved);
+                    self.restore_facts(evicted);
                     if let Some(index) = rebase_effect_index {
                         self.effects.remove(index);
                     }
@@ -444,12 +477,110 @@ impl ConversationStateController {
             }
             Err(error) => {
                 self.restore_fact_ordinals(&saved);
+                self.restore_facts(evicted);
                 if let Some(index) = rebase_effect_index {
                     self.effects.remove(index);
                 }
                 self.push_delivery_effects();
                 Err(ConversationStateError::Delivery(error))
             }
+        }
+    }
+
+    /// Removes the oldest derived facts that incoming canonical growth
+    /// leaves no scene room for, returning them for rollback.
+    ///
+    /// The scene holds durable items and facts under one bound. A batch that
+    /// adds items, or a snapshot that carries more, needs the room the
+    /// activity window was sized to fill; the facts with the lowest ordinals
+    /// make way, exactly as the observation projection slides its window.
+    /// Manually registered facts never leave: when derived facts alone
+    /// cannot make the room, validation refuses the delivery as before.
+    fn take_derived_overflow(&mut self, event: &ConversationDeliveryEvent) -> Vec<SceneFact> {
+        // A snapshot that replaces the window may hold fewer turns than the
+        // one before it: a recovery read opens on the newest turns again.
+        // Derived facts of the turns it leaves out go with them; the
+        // observation projection brings them back if those turns are read
+        // again.
+        let mut taken: Vec<SceneFact> = Vec::new();
+        if let ConversationDeliveryEvent::SnapshotReceived(snapshot) = event
+            && snapshot.thread_id() == self.thread_id()
+        {
+            let kept: BTreeSet<&TurnId> =
+                snapshot.turns().iter().map(|turn| &turn.turn_id).collect();
+            let orphaned: Vec<SceneId> = self
+                .facts
+                .values()
+                .filter(|fact| fact.derived && !kept.contains(&fact.turn_id))
+                .map(|fact| fact.id.clone())
+                .collect();
+            taken.extend(orphaned.iter().filter_map(|id| self.facts.remove(id)));
+        }
+        taken.extend(self.take_derived_room(event));
+        taken
+    }
+
+    /// The part of [`Self::take_derived_overflow`] that makes scene room.
+    fn take_derived_room(&mut self, event: &ConversationDeliveryEvent) -> Vec<SceneFact> {
+        let durable = match event {
+            ConversationDeliveryEvent::SnapshotReceived(snapshot)
+                if snapshot.thread_id() == self.thread_id() =>
+            {
+                snapshot.items().len()
+            }
+            ConversationDeliveryEvent::BatchReceived(batch)
+                if batch.thread_id() == self.thread_id() =>
+            {
+                let Some(snapshot) = self.delivery.snapshot() else {
+                    return Vec::new();
+                };
+                let mut item_ids: BTreeSet<&ItemId> = snapshot
+                    .items()
+                    .iter()
+                    .map(ConversationItem::item_id)
+                    .collect();
+                for patch in batch.patches() {
+                    if let ConversationPatch::ItemUpsert { item, .. } = patch {
+                        item_ids.insert(item.item_id());
+                    }
+                }
+                item_ids.len()
+            }
+            // A page of older turns adds its items to the ones loaded.
+            ConversationDeliveryEvent::EarlierTurnsReceived(page)
+                if page.thread_id() == self.thread_id() =>
+            {
+                let Some(snapshot) = self.delivery.snapshot() else {
+                    return Vec::new();
+                };
+                snapshot.items().len().saturating_add(page.items().len())
+            }
+            _ => return Vec::new(),
+        };
+        let overflow = durable
+            .saturating_add(self.facts.len())
+            .saturating_sub(crate::conversation_scene::SCENE_MAX_ITEMS);
+        if overflow == 0 {
+            return Vec::new();
+        }
+        let mut oldest: Vec<(u64, SceneId)> = self
+            .facts
+            .values()
+            .filter(|fact| fact.derived)
+            .map(|fact| (fact.ordinal, fact.id.clone()))
+            .collect();
+        oldest.sort();
+        oldest
+            .into_iter()
+            .take(overflow)
+            .filter_map(|(_, id)| self.facts.remove(&id))
+            .collect()
+    }
+
+    /// Returns facts removed for a delivery that was then refused.
+    fn restore_facts(&mut self, facts: Vec<SceneFact>) {
+        for fact in facts {
+            self.facts.insert(fact.id.clone(), fact);
         }
     }
 
@@ -483,7 +614,8 @@ impl ConversationStateController {
         event: &ConversationDeliveryEvent,
     ) -> Result<Vec<(SceneId, u64)>, ConversationStateError> {
         let incoming_ordinals: BTreeSet<u64> = match event {
-            ConversationDeliveryEvent::SnapshotReceived(snapshot) => {
+            ConversationDeliveryEvent::SnapshotReceived(snapshot)
+            | ConversationDeliveryEvent::EarlierTurnsReceived(snapshot) => {
                 if snapshot.thread_id() != self.thread_id() {
                     return Ok(Vec::new());
                 }

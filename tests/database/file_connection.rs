@@ -109,7 +109,7 @@ async fn file_database_applies_the_production_pragmas() -> Result<(), Box<dyn Er
 
     assert_eq!(pragma_i64(&database, "foreign_keys").await?, 1);
     assert_eq!(pragma_string(&database, "journal_mode").await?, "wal");
-    assert_eq!(pragma_i64(&database, "synchronous").await?, 1);
+    assert_eq!(pragma_i64(&database, "synchronous").await?, 2);
     assert_eq!(pragma_i64(&database, "busy_timeout").await?, 5_000);
     assert_eq!(pragma_i64(&database, "temp_store").await?, 2);
     assert_eq!(pragma_i64(&database, "cache_size").await?, -65_536);

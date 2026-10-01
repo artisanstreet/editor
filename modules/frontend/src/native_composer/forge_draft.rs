@@ -41,7 +41,83 @@ pub(crate) struct OutgoingDraft {
     pub(crate) awaiting: bool,
 }
 
+/// The draft one scope showed when the view left it: its text and every
+/// ready image, uploaded or still uploading.
+#[derive(Clone, Default)]
+pub(crate) struct ScopeDraft {
+    text: String,
+    attachments: Vec<ComposerAttachment>,
+}
+
+impl ScopeDraft {
+    /// The content its Forge draft stores.
+    fn body(&self) -> DraftBody {
+        DraftBody {
+            text: self.text.clone(),
+            attachments: self
+                .attachments
+                .iter()
+                .filter_map(|attachment| attachment.stored.clone())
+                .collect(),
+        }
+    }
+}
+
 impl NativeComposer {
+    /// Remembers the draft the view shows for the scope `key` names as it
+    /// leaves it. A view still waiting for the scope's Forge draft, or still
+    /// fetching the bytes of an image it restored, is not that draft: the
+    /// scope is read from the Forge again when it reopens.
+    pub(super) fn remember_scope_draft(&mut self, key: &str) {
+        let Some(scope) = scope_for_key(key) else {
+            return;
+        };
+        let restoring = self
+            .attachments
+            .iter()
+            .any(|attachment| !attachment.is_ready() && attachment.stored.is_some());
+        if self.awaiting_forge_draft || restoring {
+            self.scope_drafts.remove(&scope);
+            return;
+        }
+        // Images still being prepared never reached the draft.
+        let attachments = self
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.is_ready())
+            .cloned()
+            .collect();
+        let draft = ScopeDraft {
+            text: self.state.draft().to_owned(),
+            attachments,
+        };
+        self.scope_drafts.insert(scope, draft);
+    }
+
+    /// A carried draft left the scope `key` names: its Forge draft is
+    /// released, so the scope reopens empty.
+    pub(super) fn forget_released_scope_draft(&mut self, key: Option<&str>) {
+        if let Some(scope) = key.and_then(scope_for_key) {
+            self.scope_drafts.insert(scope, ScopeDraft::default());
+        }
+    }
+
+    /// Shows the remembered draft of the scope `key` names. Returns whether
+    /// there was one; otherwise the view is emptied to wait for the Forge's.
+    pub(super) fn restore_scope_draft(&mut self, key: &str) -> bool {
+        let draft = scope_for_key(key).and_then(|scope| self.scope_drafts.get(&scope).cloned());
+        let restored = draft.is_some();
+        let draft = draft.unwrap_or_default();
+        self.replace_draft_text(draft.text);
+        self.attachments = draft.attachments;
+        restored
+    }
+
+    /// Counts each scope switch; a Forge draft read belongs to one switch.
+    pub(crate) const fn draft_generation(&self) -> u64 {
+        self.draft_generation
+    }
+
     pub(super) fn capture_draft(&self, key: &str) -> Option<OutgoingDraft> {
         Some(OutgoingDraft {
             scope: scope_for_key(key)?,
@@ -59,8 +135,14 @@ impl NativeComposer {
     /// Records an authored change the Forge draft must receive. Local edits
     /// win over a Forge draft that has not arrived yet.
     pub(super) fn note_draft_change(&mut self) {
+        // Typing an answer is not a draft change: the draft put aside for
+        // it stays the Forge's draft.
+        if self.writing_answer() {
+            return;
+        }
         self.draft_change = self.draft_change.wrapping_add(1);
         self.awaiting_forge_draft = false;
+        self.authored_since_open = true;
     }
 
     /// Advances on every authored change of the current draft.
@@ -87,6 +169,9 @@ impl NativeComposer {
     /// every stored attachment in tray order. Images still preparing or
     /// uploading join once stored.
     pub(crate) fn draft_body(&self) -> DraftBody {
+        if let Some(aside) = self.draft_aside_body() {
+            return aside;
+        }
         DraftBody {
             text: self.state.draft().to_owned(),
             attachments: self
@@ -143,27 +228,35 @@ impl NativeComposer {
     }
 
     /// Records the Forge store's reference for an uploaded attachment that is
-    /// still in this scope's tray.
+    /// still in its scope's tray. When the view has left that scope, its
+    /// remembered draft takes the reference and is returned for saving.
     pub(crate) fn mark_attachment_stored(
         &mut self,
         scope: &ComposerDraftScope,
         attachment_id: &str,
         reference: ComposerAttachmentRef,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<DraftBody> {
         if self.draft_scope().as_ref() != Some(scope) {
-            return;
+            let draft = self.scope_drafts.get_mut(scope)?;
+            let attachment = draft
+                .attachments
+                .iter_mut()
+                .find(|attachment| attachment.id == attachment_id && attachment.stored.is_none())?;
+            attachment.stored = Some(reference);
+            return Some(draft.body());
         }
         let Some(attachment) = self
             .attachments
             .iter_mut()
             .find(|attachment| attachment.id == attachment_id && attachment.bytes.is_some())
         else {
-            return;
+            return None;
         };
         attachment.stored = Some(reference);
         self.note_draft_change();
         cx.notify();
+        None
     }
 
     /// Waits for the current scope's Forge draft again, when the Forge wrote
@@ -189,6 +282,13 @@ impl NativeComposer {
             return Vec::new();
         }
         self.awaiting_forge_draft = false;
+        // A questionnaire open on the scope owns the editor: the Forge draft
+        // lands in the draft put aside, under the answer being typed.
+        let typed_answer = self.writing_answer().then(|| {
+            let typed = self.state.draft().to_owned();
+            self.return_draft_aside();
+            typed
+        });
         self.replace_draft_text(draft.text().as_str().to_owned());
         let mut reserved = HashSet::new();
         for reference in draft.attachments() {
@@ -205,6 +305,10 @@ impl NativeComposer {
             );
             attachment.stored = Some(reference.clone());
             self.attachments.push(attachment);
+        }
+        if let Some(typed) = typed_answer {
+            self.put_draft_aside();
+            self.replace_draft_text(typed);
         }
         cx.notify();
         let mut digests = draft

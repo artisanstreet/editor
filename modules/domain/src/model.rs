@@ -254,6 +254,27 @@ impl ProjectListing {
     }
 }
 
+/// What a thread wants from its reader, beyond the live work
+/// [`ThreadSummary::has_active_work`] reports.
+///
+/// The Forge resolves it for the list surfaces: an open approval or question
+/// on the live run, or the outcome of the latest run when it settled after
+/// the reader last had the thread open. A cancelled run wants nothing: the
+/// reader stopped it.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ThreadAttention {
+    /// Nothing new since the reader last had the thread open.
+    #[default]
+    None,
+    /// The live run waits on the reader: an approval or a question is open.
+    AwaitingAnswer,
+    /// The latest run completed after the reader last had the thread open.
+    Finished,
+    /// The latest run failed or was interrupted after the reader last had
+    /// the thread open.
+    Failed,
+}
+
 /// One project-scoped thread as the list surfaces need it.
 ///
 /// Deliberate subset of the legacy projection (`ThreadListItem` in
@@ -269,6 +290,8 @@ pub struct ThreadSummary {
     pub has_started_response: bool,
     /// Whether Forge currently owns a nonterminal run for this thread.
     pub has_active_work: bool,
+    /// What the thread wants from its reader.
+    pub attention: ThreadAttention,
     /// Most recent accepted user message, absent before the first message.
     pub last_message_at: Option<UnixMillis>,
     /// Forge-minted thread identity.
@@ -281,6 +304,20 @@ pub struct ThreadSummary {
     pub created_at: UnixMillis,
     /// Moment the projection last changed, as signed Unix epoch millis.
     pub updated_at: UnixMillis,
+}
+
+impl ThreadSummary {
+    /// Records whether the Forge owns a live run for this thread.
+    ///
+    /// An open approval or question only waits on the reader while its run
+    /// is live; one left behind by a run the Forge no longer owns is not
+    /// attention.
+    pub fn set_active_work(&mut self, live: bool) {
+        self.has_active_work = live;
+        if !live && self.attention == ThreadAttention::AwaitingAnswer {
+            self.attention = ThreadAttention::None;
+        }
+    }
 }
 
 /// Failure raised when a thread listing would violate its documented bounds.

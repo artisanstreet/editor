@@ -345,7 +345,7 @@ async fn expired_launching_no_item_single_turn_patch() {
         .find(|c| c.run_id.as_str() == "run-1")
         .expect("candidate");
     assert_eq!(candidate.lifecycle, StartupRunLifecycle::Launching);
-    assert!(candidate.assistant_item_id.is_none());
+    assert!(candidate.assistant_item_ids.is_empty());
 
     let before = fetch_all(&database).await;
     let before_run = before
@@ -376,7 +376,7 @@ async fn expired_launching_no_item_single_turn_patch() {
             candidate,
             operated_at,
             turn_patch_id: &turn_patch,
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("dispose");
@@ -560,7 +560,7 @@ async fn expired_running_with_item_two_patches_binding_retained() {
         .expect("candidate");
     assert_eq!(candidate.lifecycle, StartupRunLifecycle::Running);
     assert_eq!(
-        candidate.assistant_item_id.as_ref().map(ItemId::as_str),
+        candidate.assistant_item_ids.first().map(ItemId::as_str),
         Some("assistant-1")
     );
 
@@ -572,7 +572,7 @@ async fn expired_running_with_item_two_patches_binding_retained() {
             candidate,
             operated_at,
             turn_patch_id: &turn_patch,
-            item_patch_id: Some(&item_patch),
+            item_patch_ids: std::slice::from_ref(&item_patch),
         })
         .await
         .expect("dispose");
@@ -719,7 +719,7 @@ async fn unexpired_boundary_rejected_unchanged() {
             candidate: &candidate_at_expiry,
             operated_at,
             turn_patch_id: &PatchId::parse("turn-patch-unexp").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("dispose unexpired");
@@ -766,7 +766,7 @@ async fn stale_run_snapshot_skipped_no_partial() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-stale-run").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("stale run");
@@ -808,7 +808,7 @@ async fn stale_dispatch_snapshot_skipped_no_partial() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-stale-dispatch").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("stale dispatch");
@@ -852,7 +852,7 @@ async fn idempotent_replay_no_duplicate() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &turn_patch,
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("first");
@@ -866,7 +866,7 @@ async fn idempotent_replay_no_duplicate() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &turn_patch,
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("second");
@@ -930,7 +930,7 @@ async fn idempotent_replay_with_item_no_duplicate() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &turn_patch,
-            item_patch_id: Some(&item_patch),
+            item_patch_ids: std::slice::from_ref(&item_patch),
         })
         .await
         .expect("first");
@@ -944,7 +944,7 @@ async fn idempotent_replay_with_item_no_duplicate() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &turn_patch,
-            item_patch_id: Some(&item_patch),
+            item_patch_ids: std::slice::from_ref(&item_patch),
         })
         .await
         .expect("second");
@@ -989,7 +989,7 @@ async fn mismatched_item_input_fails_typed_and_rolls_back() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-mismatch").expect("p"),
-            item_patch_id: Some(&PatchId::parse("item-patch-mismatch").expect("p")),
+            item_patch_ids: &[PatchId::parse("item-patch-mismatch").expect("p")],
         })
         .await
         .expect_err("mismatched item input should fail");
@@ -1044,7 +1044,7 @@ async fn mismatched_item_input_fails_typed_and_rolls_back() {
             candidate: &cand2,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-mismatch2").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect_err("missing item patch should fail");
@@ -1101,7 +1101,7 @@ async fn duplicate_patch_identity_fails_typed_and_rolls_back() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &dup,
-            item_patch_id: Some(&dup),
+            item_patch_ids: std::slice::from_ref(&dup),
         })
         .await
         .expect_err("duplicate patch identity should fail");
@@ -1150,7 +1150,7 @@ async fn patch_sequence_overflow_fails_typed_and_rolls_back() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-overflow").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect_err("patch sequence overflow should fail");
@@ -1199,7 +1199,7 @@ async fn revision_overflow_fails_typed_and_rolls_back() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-rev-overflow").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect_err("revision overflow should fail");
@@ -1269,7 +1269,7 @@ async fn existing_patch_identity_fails_typed() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &colliding,
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect_err("existing patch should fail");
@@ -1358,14 +1358,14 @@ async fn terminal_runs_never_touched() {
         lease_expires_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
         run_updated_at: UnixMillis::from_millis(BATCH_AT_MS + 10),
         dispatch_updated_at: UnixMillis::from_millis(BATCH_AT_MS + 10),
-        assistant_item_id: Some(assistant_item.clone()),
+        assistant_item_ids: vec![assistant_item.clone()],
     };
     let outcome = repository
         .dispose_expired_startup_candidate(StartupReconciliationDisposition {
             candidate: &fake_candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS + 1000),
             turn_patch_id: &PatchId::parse("turn-patch-term").expect("p"),
-            item_patch_id: Some(&PatchId::parse("item-patch-term").expect("p")),
+            item_patch_ids: &[PatchId::parse("item-patch-term").expect("p")],
         })
         .await
         .expect("fake dispose");
@@ -1438,14 +1438,14 @@ async fn queued_and_leased_dispatches_never_touched() {
         lease_expires_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
         run_updated_at: UnixMillis::from_millis(OPERATED_AT_MS),
         dispatch_updated_at: UnixMillis::from_millis(CLAIMED_AT_MS),
-        assistant_item_id: None,
+        assistant_item_ids: vec![],
     };
     let outcome_q = repository
         .dispose_expired_startup_candidate(StartupReconciliationDisposition {
             candidate: &fake_queued,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-q").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("queued fake");
@@ -1464,14 +1464,14 @@ async fn queued_and_leased_dispatches_never_touched() {
         lease_expires_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
         run_updated_at: UnixMillis::from_millis(OPERATED_AT_MS),
         dispatch_updated_at: UnixMillis::from_millis(CLAIMED_AT_MS),
-        assistant_item_id: None,
+        assistant_item_ids: vec![],
     };
     let outcome_l = repository
         .dispose_expired_startup_candidate(StartupReconciliationDisposition {
             candidate: &fake_leased,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-l").expect("p"),
-            item_patch_id: None,
+            item_patch_ids: &[],
         })
         .await
         .expect("leased fake");
@@ -1540,7 +1540,7 @@ async fn error_bounds_and_provider_binding_bytes_preserved() {
             candidate: &candidate,
             operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
             turn_patch_id: &PatchId::parse("turn-patch-err").expect("p"),
-            item_patch_id: Some(&PatchId::parse("item-patch-err").expect("p")),
+            item_patch_ids: &[PatchId::parse("item-patch-err").expect("p")],
         })
         .await
         .expect("dispose");
@@ -1618,7 +1618,7 @@ async fn live_lease_expiry_records_its_own_reason_and_replays() {
         candidate: &candidate,
         operated_at: UnixMillis::from_millis(LEASE_EXPIRES_AT_MS),
         turn_patch_id: &turn_patch,
-        item_patch_id: None,
+        item_patch_ids: &[],
     };
     let first = repository
         .dispose_expired_candidate(command(), ExpiredLeaseRecovery::LiveLeaseExpiry)
@@ -1779,7 +1779,7 @@ async fn unstarted_run_fails_live_with_its_launch_error() {
 }
 
 #[tokio::test]
-async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
+async fn owner_fails_its_unstarted_run_after_its_lease_lapsed() {
     let (database, repository) = memory_database().await;
     seed_project_and_thread(&database, &repository, "thread-1").await;
     let (claimed, receipt, start_key, creds) = queue_claim_launch(
@@ -1804,17 +1804,43 @@ async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
         error_message: &message,
         dispatch_reason: &reason,
     };
-    let before = fetch_all(&database).await;
-    // A lapsed lease belongs to recovery, not to this dispatcher.
+    // The owner token, not the clock, fences the dispatch: a stalled owner
+    // whose lease lapsed still settles the run it launched.
     assert_eq!(
         repository
             .fail_unstarted_run(command(LEASE_EXPIRES_AT_MS))
             .await
             .expect("expired attempt"),
-        FailUnstartedRunOutcome::Moved
+        FailUnstartedRunOutcome::Failed
     );
-    assert_eq!(fetch_all(&database).await, before);
+}
 
+#[tokio::test]
+async fn bound_runs_are_never_failed_as_unstarted() {
+    let (database, repository) = memory_database().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (claimed, receipt, start_key, creds) = queue_claim_launch(
+        &repository,
+        &database,
+        "thread-1",
+        "message-1",
+        "run-1",
+        "turn-1",
+    )
+    .await;
+    let (code, message, reason) = unstarted_texts();
+    let turn_patch = PatchId::parse("turn-patch-unstarted").expect("p");
+    let command = |operated_at_ms: i64| FailUnstartedRun {
+        claimed: &claimed,
+        receipt: &receipt,
+        run_start_key: &start_key,
+        credentials: &creds,
+        operated_at: UnixMillis::from_millis(operated_at_ms),
+        turn_patch_id: &turn_patch,
+        error_code: &code,
+        error_message: &message,
+        dispatch_reason: &reason,
+    };
     let _bound = bind_running(&repository, &claimed, &receipt, &start_key, &creds).await;
     let bound = fetch_all(&database).await;
     assert_eq!(
@@ -1826,3 +1852,6 @@ async fn bound_or_expired_runs_are_never_failed_as_unstarted() {
     );
     assert_eq!(fetch_all(&database).await, bound);
 }
+
+#[path = "startup_reconciliation_disposition/crash.rs"]
+mod crash;

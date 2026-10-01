@@ -32,15 +32,15 @@ use gpui::{
 use crate::engine_section_indicator_policy::{
     EngineSectionIndicatorMeasurement, EngineSectionIndicatorPolicy,
 };
-use crate::native_composer_material::{
-    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
 use crate::native_model_catalog::{
     NativeModelCatalog, NativeModelDefinition, NativeModelPolicy, NativeModelView,
     NativeOptionValue, NativePolicyValidationError, NativeThinkingCapability,
 };
 use crate::speed_presentation::SpeedGradient;
+use artisan_ui::glass::{
+    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 
 #[path = "native_picker_motion.rs"]
 mod native_picker_motion;

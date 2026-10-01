@@ -9,11 +9,12 @@ use std::{cell::Cell, rc::Rc, sync::Arc};
 use super::native_composer_attachments::ComposerAttachment;
 use super::{
     DocumentEnd, DocumentHome, NATIVE_COMPOSER_ATTACHMENT_BLOCKED_SELECTOR,
-    NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_EDITOR_SELECTOR,
-    NATIVE_COMPOSER_PLACEHOLDER_SELECTOR, NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer,
-    NativeComposerEvent, SelectDocumentEnd, SelectDocumentHome, SelectEnd, SelectHome,
-    caret_offset_for_paint, localize_painted_point, logical_vertical_target, offset_layout_bounds,
-    replace_text_preserving_raw, utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
+    NATIVE_COMPOSER_ATTACHMENT_TRAY_SELECTOR, NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR,
+    NATIVE_COMPOSER_EDITOR_SELECTOR, NATIVE_COMPOSER_PLACEHOLDER_SELECTOR,
+    NATIVE_COMPOSER_SEND_SELECTOR, NativeComposer, NativeComposerEvent, SelectDocumentEnd,
+    SelectDocumentHome, SelectEnd, SelectHome, caret_offset_for_paint, localize_painted_point,
+    logical_vertical_target, offset_layout_bounds, replace_text_preserving_raw,
+    utf8_offset_to_utf16, utf16_offset_to_utf8, utf16_range_to_utf8,
 };
 use crate::composer::DraftDisposition;
 use crate::native_composer_visuals::composer_placeholder_phrase;
@@ -800,6 +801,54 @@ fn attachment_tray_remove_action_keeps_the_text_transport_refusal_visible(cx: &m
     cx.update(|_, app| {
         assert_eq!(view.read(app).attachment_count(), 0);
         assert!(!view.read(app).send_ready());
+    });
+}
+
+/// A draft attachment opens the same full-window preview persisted message
+/// images do: it covers the whole window instead of sitting inside the
+/// composer card, and Escape closes it.
+#[gpui::test]
+fn attachment_preview_covers_the_window_and_closes_on_escape(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    cx.update(|_, app| {
+        view.update(app, |composer, composer_cx| {
+            composer
+                .attachments
+                .push(ready_attachment("capture", RECALL_PRIMARY_PNG));
+            composer_cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
+            .is_none()
+    );
+
+    let tile = cx
+        .debug_bounds("artisan-native-composer-attachment")
+        .expect("ready attachment tile");
+    cx.simulate_click(tile.center(), Modifiers::none());
+    cx.run_until_parked();
+    let window = cx.update(|window, _| window.viewport_size());
+    let viewer = cx
+        .debug_bounds(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
+        .expect("the clicked attachment opens its preview");
+    assert_eq!(viewer.origin, point(px(0.0), px(0.0)));
+    assert_eq!(viewer.size, window, "the preview covers the whole window");
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(NATIVE_COMPOSER_ATTACHMENT_VIEWER_SELECTOR)
+            .is_none(),
+        "escape closes the preview"
+    );
+    cx.update(|window, app| {
+        assert!(
+            view.read(app).focus_handle.is_focused(window),
+            "closing hands focus back to the editor"
+        );
     });
 }
 

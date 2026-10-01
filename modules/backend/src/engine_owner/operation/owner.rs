@@ -1,6 +1,7 @@
 //! Owner task: the admission loop, generation minting, deadline and
 //! cancellation rejection, and the quarantine tail.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use artisan_transport::CancelHandle;
@@ -93,6 +94,32 @@ struct LegacyOwnerConfig {
     bounds: EngineBounds,
 }
 
+/// Owner-lifetime memory of observed hosted-highlights refusals.
+///
+/// Anthropic's server accepts `highlights` only for execution contexts it
+/// hosts, and the CLI's rejection is invisible on the turn stream: it
+/// retries with `omitted`, which looks like a thinking block with no text or
+/// title. The owner records a context once such an empty stretch settles
+/// after a `highlights` request and requests `summarized` for that context on
+/// later launches. Keyed by profile, explicit target model, and CLI version;
+/// never persisted, so a runtime restart re-probes.
+#[derive(Debug, Default)]
+pub(crate) struct ClaudeDisplayRefusals {
+    refused: HashSet<(String, Option<String>, String)>,
+}
+
+impl ClaudeDisplayRefusals {
+    /// Returns whether highlights was observed refused for this context.
+    pub(crate) fn refused(&self, context: &(String, Option<String>, String)) -> bool {
+        self.refused.contains(context)
+    }
+
+    /// Records one observed highlights refusal for this context.
+    pub(crate) fn mark_refused(&mut self, context: (String, Option<String>, String)) {
+        self.refused.insert(context);
+    }
+}
+
 async fn run_owner_loop(
     mut jobs: mpsc::Receiver<Job>,
     shutdown: Arc<CancelHandle>,
@@ -100,6 +127,7 @@ async fn run_owner_loop(
     legacy: Option<LegacyOwnerConfig>,
     generations: &mut GenerationAllocator,
 ) {
+    let mut claude_displays = ClaudeDisplayRefusals::default();
     loop {
         tokio::select! {
             biased;
@@ -150,7 +178,7 @@ async fn run_owner_loop(
                         Box::pin(execute_catalog_job(job, &shutdown)).await
                     }
                     job @ Job::Turn { .. } => {
-                        Box::pin(execute_configured_job(job, &shutdown)).await
+                        Box::pin(execute_configured_job(job, &shutdown, &mut claude_displays)).await
                     }
                 };
                 match execution {

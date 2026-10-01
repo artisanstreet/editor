@@ -55,6 +55,7 @@ fn thread(value: &str, project_id: &str) -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse(value).expect("valid thread"),
         project_id: ProjectId::parse(project_id).expect("valid project"),
@@ -573,6 +574,7 @@ fn authoritative_refreshes_require_full_summary_equality() {
     let live_threads = ThreadListing::new(vec![ThreadSummary {
         has_started_response: true,
         has_active_work: true,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: Some(UnixMillis::from_millis(500)),
         ..created.clone()
     }])
@@ -615,7 +617,7 @@ fn request_families_are_exact() {
         ClientRequest::Query(Query::ListProjectThreads(ListProjectThreads { .. }))
     ));
     assert!(matches!(
-        snapshot_request(thread_id).expect("snapshot"),
+        snapshot_request(thread_id),
         ClientRequest::Conversation(artisan_domain::ConversationRequest::Query(query))
             if matches!(query.bounds, ConversationQueryBounds::Window { .. })
     ));

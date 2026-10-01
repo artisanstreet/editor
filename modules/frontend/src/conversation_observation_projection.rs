@@ -40,7 +40,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use artisan_domain::{
-    ConversationLifecycle, ConversationSnapshot, RunId, TerminalActivityState, ToolAction, TurnId,
+    ConversationLifecycle, ConversationSnapshot, ObservationId, RunId, TerminalActivityState,
+    ToolAction, TurnId,
 };
 
 use crate::conversation_scene::{
@@ -102,6 +103,53 @@ pub fn stable_fact_id(run_id: &RunId, provider_id: &str, prefix: &str) -> Option
     SceneId::parse(text).ok()
 }
 
+/// First ordinal of the facts derived from observations.
+///
+/// Durable turns and items count up from zero; derived facts live far above
+/// them, so canonical growth never lands on a fact and a fact never needs
+/// moving.
+pub const DERIVED_FACT_ORDINAL_BASE: u64 = 1 << 40;
+
+/// The largest delivery sequence an ordinal is derived from; anything
+/// beyond it (the live thinking block, which is always newest) shares the
+/// last place.
+const DERIVED_FACT_MAX_SEQUENCE: u64 = 1 << 60;
+
+/// Scene ordinal of the fact whose first event has `first_delivery_sequence`.
+///
+/// The sequence is unique in its thread and never changes, so the ordinal
+/// does not depend on which other rows are loaded: older turns read on
+/// demand, or a settled turn's work read when its section opens, slot in
+/// without moving anything. The row that stands in for held-back work takes
+/// the place just before the first row it stands for.
+fn derived_fact_ordinal(first_delivery_sequence: u64, stand_in: bool) -> u64 {
+    let place = first_delivery_sequence.min(DERIVED_FACT_MAX_SEQUENCE) * 2;
+    DERIVED_FACT_ORDINAL_BASE + place - u64::from(stand_in && place > 0)
+}
+
+/// Activity kind of the one row that stands in for a settled turn's work
+/// while it is still on the Forge.
+pub const HELD_BACK_ACTIVITY_KIND: &str = "held_back";
+
+/// Scene id of the row that stands in for `turn_id`'s held-back work.
+#[must_use]
+pub fn held_back_fact_id(turn_id: &TurnId) -> Option<SceneId> {
+    let text = format!("obs-held-{}", turn_id.as_str());
+    if text.len() > SCENE_ID_MAX_BYTES {
+        return None;
+    }
+    SceneId::parse(text).ok()
+}
+
+/// What the stand-in row says while the turn's rows are being read.
+fn held_back_text(row_count: u32) -> String {
+    if row_count == 1 {
+        String::from("Loading 1 step…")
+    } else {
+        format!("Loading {row_count} steps…")
+    }
+}
+
 /// Builds the stable run-scoped scene id for one timeline row.
 ///
 /// The run-local sequence scopes the id; the thread-scoped delivery sequence
@@ -144,9 +192,12 @@ pub fn truncate_bounded(text: &str, maximum: usize) -> String {
 ///   later). Thread mismatch yields empty output.
 /// - Legacy rows without attribution never project.
 /// - Plain message rows never project.
-/// - Ordinals start above the durable watermark (`max durable ordinal + 1`)
-///   in `(committed_at, delivery_sequence)` order, so scene order is stable
-///   without clock sampling and never collides with durable items.
+/// - Ordinals come from each row's first delivery sequence, far above every
+///   durable ordinal, so scene order is stable without clock sampling, never
+///   collides with durable items, and does not depend on which rows are
+///   loaded.
+/// - A settled turn whose work rows are still on the Forge projects one row
+///   standing in for them.
 /// - Only the newest [`activity_window`] facts are kept; older rows count as
 ///   `evicted`.
 /// - Bodies are truncated to scene bounds; only the public reasoning summary
@@ -179,14 +230,6 @@ pub fn project_activities(
                 .insert(message.run_id.as_str());
         }
     }
-    let durable_watermark = snapshot
-        .turns()
-        .iter()
-        .map(|turn| turn.ordinal.get())
-        .chain(snapshot.items().iter().map(|item| item.ordinal().get()))
-        .max()
-        .unwrap_or(0);
-
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut pending = 0usize;
     let mut rejected = 0usize;
@@ -219,6 +262,10 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             activity_lifecycle: None,
             kind: CandidateKind::Reasoning {
                 body: truncate_bounded(row.text(), MAX_CUMULATIVE_REASONING_BYTES),
@@ -259,6 +306,10 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             activity_lifecycle: Some(tool_activity_lifecycle(row.action())),
             kind: CandidateKind::Activity { body, kind, detail },
         });
@@ -301,6 +352,10 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             activity_lifecycle,
             kind,
         });
@@ -323,7 +378,10 @@ pub fn project_activities(
             rejected += 1;
             continue;
         }
-        let Some(id) = stable_fact_id(run, row.approval_id(), "approval") else {
+        let (Some(id), Ok(approval_id)) = (
+            stable_fact_id(run, row.approval_id(), "approval"),
+            ObservationId::parse(row.approval_id()),
+        ) else {
             rejected += 1;
             continue;
         };
@@ -334,9 +392,14 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             activity_lifecycle: None,
             kind: CandidateKind::Approval {
                 prompt: truncate_bounded(row.description(), MAX_ACTIVITY_BODY_BYTES),
+                approval_id,
             },
         });
     }
@@ -369,9 +432,16 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             activity_lifecycle: None,
             kind: CandidateKind::Question {
                 prompt: truncate_bounded(row.text(), MAX_ACTIVITY_BODY_BYTES),
+                answer: row
+                    .answers()
+                    .map(|answers| truncate_bounded(&answers.join(", "), MAX_ACTIVITY_BODY_BYTES)),
             },
         });
     }
@@ -407,10 +477,49 @@ pub fn project_activities(
             committed_at_ms: committed_at.as_millis(),
             first_committed_at_ms: row.first_committed_at().unwrap_or(committed_at).as_millis(),
             delivery_sequence,
+            ordinal: derived_fact_ordinal(
+                row.first_delivery_sequence().unwrap_or(delivery_sequence),
+                false,
+            ),
             // Timeline rows carry no lifecycle report: unknown never means
             // live, so these facts never count as tool progress.
             activity_lifecycle: None,
             kind,
+        });
+    }
+
+    // A settled turn's work rows stay on the Forge until its section opens.
+    // One row stands in for them at the place of the first, so the turn
+    // keeps its section, and its `Worked for` line, before they are read.
+    for held in state.held_back() {
+        if !known_turns.contains(&held.turn_id) {
+            pending += 1;
+            continue;
+        }
+        if is_foreign_run(&known_runs_by_turn, &held.turn_id, &held.run_id) {
+            rejected += 1;
+            continue;
+        }
+        let Some(id) = held_back_fact_id(&held.turn_id) else {
+            rejected += 1;
+            continue;
+        };
+        let text = held_back_text(held.row_count);
+        candidates.push(Candidate {
+            id,
+            turn: held.turn_id.clone(),
+            run: held.run_id.clone(),
+            committed_at_ms: held.first_committed_at.as_millis(),
+            first_committed_at_ms: held.first_committed_at.as_millis(),
+            delivery_sequence: held.first_delivery_sequence,
+            ordinal: derived_fact_ordinal(held.first_delivery_sequence, true),
+            // Unknown never means live: the stand-in is not tool progress.
+            activity_lifecycle: None,
+            kind: CandidateKind::Activity {
+                body: text.clone(),
+                kind: String::from(HELD_BACK_ACTIVITY_KIND),
+                detail: Some(text),
+            },
         });
     }
 
@@ -420,13 +529,11 @@ pub fn project_activities(
     });
     let evicted = candidates.len().saturating_sub(activity_window(snapshot));
 
-    // Ordinals count every projectable row, evicted ones included, so a fact
-    // keeps its place while the window slides past older rows.
+    // A fact's ordinal comes from its own first event, so it keeps its place
+    // while the window slides and while older rows are read in later.
     let mut facts = Vec::with_capacity(candidates.len() - evicted);
-    for (index, candidate) in candidates.into_iter().enumerate().skip(evicted) {
-        let ordinal = durable_watermark
-            .saturating_add(1)
-            .saturating_add(index as u64);
+    for candidate in candidates.into_iter().skip(evicted) {
+        let ordinal = candidate.ordinal;
         let kind = match candidate.kind {
             CandidateKind::Reasoning { body } => SceneFactKind::Reasoning { body },
             CandidateKind::Activity { body, kind, detail } => SceneFactKind::Activity {
@@ -434,8 +541,16 @@ pub fn project_activities(
                 kind: Some(kind),
                 detail,
             },
-            CandidateKind::Approval { prompt } => SceneFactKind::Approval { prompt },
-            CandidateKind::Question { prompt } => SceneFactKind::Question { prompt },
+            CandidateKind::Approval {
+                prompt,
+                approval_id,
+            } => SceneFactKind::Approval {
+                prompt,
+                approval_id,
+            },
+            CandidateKind::Question { prompt, answer } => {
+                SceneFactKind::Question { prompt, answer }
+            }
             CandidateKind::Compaction { summary } => SceneFactKind::Compaction { summary },
         };
         let Ok(fact) = SceneFact::new(candidate.id, candidate.turn, ordinal, kind) else {
@@ -556,9 +671,11 @@ enum CandidateKind {
     },
     Approval {
         prompt: String,
+        approval_id: ObservationId,
     },
     Question {
         prompt: String,
+        answer: Option<String>,
     },
     Compaction {
         summary: String,
@@ -572,6 +689,9 @@ struct Candidate {
     committed_at_ms: i64,
     first_committed_at_ms: i64,
     delivery_sequence: u64,
+    /// Scene ordinal, fixed by where the row's first event sits in the
+    /// thread.
+    ordinal: u64,
     activity_lifecycle: Option<ConversationLifecycle>,
     kind: CandidateKind,
 }

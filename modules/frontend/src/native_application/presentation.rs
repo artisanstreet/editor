@@ -14,6 +14,9 @@ use gpui::{Div, FontWeight, div};
 use super::selectors::NATIVE_STATUS_SELECTOR;
 use super::state::NativeViewState;
 use crate::repository_mark::RepositoryLogo;
+use crate::thread_environment_presentation::{
+    GitBranchState, ProjectRepository, RepositoryRemote, RepositoryState,
+};
 use crate::titlebar_header_presentation::{TitlebarRepository, titlebar_repository_from_remote};
 
 #[cfg(test)]
@@ -91,6 +94,47 @@ pub(super) fn titlebar_repository_for_project(
         .iter()
         .find(|remote| remote.name() == default_remote)?;
     titlebar_repository_from_remote(remote.host().as_str(), remote.web_url())
+}
+
+/// Projects one inspected repository observation onto the environment
+/// card's repository input.
+///
+/// Every fact is copied exactly: the branch keeps its attached, unborn, or
+/// detached state, and remotes keep their wire order and browser URLs. A
+/// directory Git does not track stays a known non-repository, which the
+/// projection presents with no branch.
+pub(super) fn environment_repository_for_project(
+    repository: &artisan_protocol::ProjectRepository,
+) -> ProjectRepository {
+    let Some(snapshot) = repository.snapshot() else {
+        return ProjectRepository::new(RepositoryState::NotRepository, None, None, Vec::new());
+    };
+    let branch = match snapshot.branch() {
+        artisan_protocol::RepositoryBranchState::Attached { name } => {
+            GitBranchState::attached(name.as_str())
+        }
+        artisan_protocol::RepositoryBranchState::Unborn { name } => {
+            GitBranchState::unborn(name.as_str())
+        }
+        artisan_protocol::RepositoryBranchState::Detached => GitBranchState::detached(),
+    };
+    let remotes = snapshot
+        .remotes()
+        .iter()
+        .map(|remote| {
+            let projected = RepositoryRemote::new(remote.name());
+            match remote.web_url() {
+                Some(web_url) => projected.with_web_url(web_url),
+                None => projected,
+            }
+        })
+        .collect();
+    ProjectRepository::new(
+        RepositoryState::Repository,
+        Some(branch),
+        snapshot.default_remote().map(str::to_owned),
+        remotes,
+    )
 }
 
 /// The muted-foreground tone carried by the titlebar header's workspace

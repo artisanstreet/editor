@@ -263,6 +263,10 @@ struct StoredQuestion<'a> {
     id: &'a str,
     sequence: u64,
     question_id: &'a str,
+    /// Written only for an explicit questionnaire, so a question asked alone
+    /// keeps the exact pre-questionnaire bytes and digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<&'a str>,
     state: &'static str,
     text: &'a str,
     header: Option<&'a str>,
@@ -705,6 +709,7 @@ fn stored_observation(observation: &Observation) -> StoredObservation<'_> {
                 id: value.id().as_str(),
                 sequence: value.sequence().get(),
                 question_id: value.question_id().as_str(),
+                group_id: value.explicit_group_id().map(ObservationId::as_str),
                 state: value.state().as_str(),
                 text: value.text(),
                 header: value.header(),

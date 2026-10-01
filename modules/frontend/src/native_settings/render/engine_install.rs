@@ -75,7 +75,13 @@ impl SettingsScreen {
             Self::install_note(theme, install.integrity_copy()),
         ];
         if let Some(failure) = &install.request_failure {
-            blocks.push(Self::install_note(theme, failure.clone()));
+            blocks.push(
+                div().child(crate::dismissible_notice::DismissibleNotice::new(
+                    format!("install-error-{}-{failure}", snapshot.engine_id),
+                    Self::install_note(theme, failure.clone()),
+                    *theme,
+                )),
+            );
         }
         match &install.versions {
             SettingsEngineVersions::NotLoaded => {}
@@ -86,7 +92,13 @@ impl SettingsScreen {
                 ));
             }
             SettingsEngineVersions::Failed(failure) => {
-                blocks.push(Self::install_note(theme, failure.clone()));
+                blocks.push(
+                    div().child(crate::dismissible_notice::DismissibleNotice::new(
+                        format!("install-error-{}-{failure}", snapshot.engine_id),
+                        Self::install_note(theme, failure.clone()),
+                        *theme,
+                    )),
+                );
             }
             SettingsEngineVersions::Loaded(versions) => {
                 blocks.push(Self::version_list(theme, &engine_id, versions, cx));

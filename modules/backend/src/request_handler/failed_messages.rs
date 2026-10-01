@@ -32,6 +32,8 @@ impl RequestHandler {
             Command::WithdrawQueuedMessage(withdraw) => &withdraw.thread_id,
             Command::RetryFailedMessage(retry) => &retry.target.thread_id,
             Command::RecoverFailedMessage(recover) => &recover.target.thread_id,
+            // An answer resolves questions on the questionnaire's thread.
+            Command::AnswerQuestions(answer) => answer.thread_id(),
             // A new task's thread has no subscriber yet.
             Command::SubmitComposerDraft(submit) => match &submit.scope {
                 artisan_domain::ComposerDraftScope::Thread(thread_id) => thread_id,

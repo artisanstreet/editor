@@ -159,7 +159,8 @@ impl SqliteConfig {
                     .create_if_missing(true)
                     .foreign_keys(true)
                     .journal_mode(SqliteJournalMode::Wal)
-                    .synchronous(SqliteSynchronous::Normal)
+                    // A receipt must survive host/VM loss, not just a Forge process exit.
+                    .synchronous(SqliteSynchronous::Full)
                     .busy_timeout(BUSY_TIMEOUT)
                     .pragma("temp_store", "MEMORY")
                     .pragma("cache_size", "-65536")

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use artisan_domain::{ObservationId, RunId};
+use artisan_domain::{ImageAttachment, ObservationId, RunId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -92,47 +92,65 @@ pub(crate) enum LaunchAdmissionError {
 /// Typed, payload-free failure of one engine operation.
 ///
 /// Variants carry no path, payload, or operating-system strings; raw I/O
-/// stays private to the owner task.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// stays private to the owner task. Every `Display` is a constant sentence,
+/// and a wrapped typed cause is the `source()`.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum EngineOperationError {
     /// The owner shut down before the operation settled.
+    #[error("the engine owner shut down before the operation settled")]
     Shutdown,
     /// The operation was cancelled or abandoned by its caller.
+    #[error("the operation was cancelled by its caller")]
     Cancelled,
     /// The caller-supplied budget elapsed, queue waiting included.
+    #[error("the operation's time budget elapsed")]
     Deadline,
     /// The checked generation space is exhausted.
+    #[error("the engine generation counter is exhausted")]
     GenerationExhausted,
     /// The child could not be spawned.
+    #[error("the engine process could not be spawned")]
     SpawnFailed,
     /// Operating-system entropy for the 32-byte secret failed.
+    #[error("operating-system entropy for the engine secret failed")]
     EntropyFailed,
     /// Bounded readiness parsing failed.
-    ReadinessFailed(ReadinessError),
+    #[error("the engine's readiness line could not be read")]
+    ReadinessFailed(#[source] ReadinessError),
     /// Bounded health handshake failed.
-    HealthFailed(HealthError),
+    #[error("the engine's health handshake failed")]
+    HealthFailed(#[source] HealthError),
     /// Runtime model catalog discovery failed after the owner authenticated
     /// the certified engine.
-    CatalogFailed(CatalogError),
+    #[error("the engine's model catalog could not be discovered")]
+    CatalogFailed(#[source] CatalogError),
     /// Health version was incompatible with the expected value.
+    #[error("the engine reported an incompatible version")]
     IncompatibleVersion,
     /// Persisted turn settings could not be translated into owner limits.
+    #[error("the turn's settings could not be translated into engine limits")]
     Configuration,
     /// The provider session could not be created or the prompt could not be
     /// delivered. The exact provider payload remains private to the owner.
+    #[error("the provider session could not be created or the prompt could not be delivered")]
     ProviderRequestFailed,
     /// The authenticated observation stream did not settle normally.
+    #[error("the engine's observation stream did not settle normally")]
     StreamFailed,
     /// One provider line exceeded the configured frame bound while it was
     /// read; the oversized bytes were never held whole in memory.
+    #[error("one provider line exceeded the configured frame bound")]
     FrameTooLarge,
     /// Cleanup could not observe the child's death and no primary cause
     /// existed to preserve alongside it.
+    #[error("cleanup could not confirm the engine process exited")]
     ReapUnresolved,
     /// A primary failure whose separately observed cleanup could not confirm
     /// the child's reap within the close budget.
+    #[error("cleanup could not confirm the engine process exited after a failure")]
     UnresolvedReapDuring {
         /// The original typed cause.
+        #[source]
         primary: Box<EngineOperationError>,
     },
 }
@@ -473,26 +491,47 @@ pub(crate) enum SteerError {
     DeliveryFailed,
 }
 
-/// One follow-up text delivery into a live provider pump.
+/// One follow-up message delivery (text plus ordered images) into a live
+/// provider pump.
 ///
 /// PRIVATE provider implementation: constructed only inside
-/// [`AcceptedTurn::steer_text`] and consumed only by the owning pump loop.
-/// Nothing outside `steer_text` names this shape; `message_id` stays with
+/// [`AcceptedTurn::steer_message`] and consumed only by the owning pump
+/// loop. Nothing outside `steer_message` names this shape; `message_id` stays with
 /// durable dispatch and never enters the provider request. The pump writes
 /// the engine verb with its owned writer/handles, then resolves `ack` with
 /// the real provider ack/write outcome — never mere channel enqueue.
 pub(crate) struct SteerDelivery {
-    #[allow(dead_code)]
     pub(super) request_id: String,
     pub(super) text: String,
-    pub(super) approval_response: Option<(String, bool)>,
+    pub(super) images: Vec<ImageAttachment>,
+    /// A durable interaction decision to hand the provider instead of a
+    /// steer text; [`None`] for a plain steer.
+    pub(super) response: Option<ProviderResponse>,
     pub(super) ack: oneshot::Sender<Result<(), SteerError>>,
+}
+
+/// One durable interaction decision the provider pump writes back onto its
+/// pending request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderResponse {
+    /// The decision for one pending approval.
+    Approval {
+        /// Provider approval identity.
+        approval_id: String,
+        approved: bool,
+    },
+    /// The answers to one pending question; empty for a skipped question.
+    Question {
+        /// Provider question identity.
+        question_id: String,
+        answers: Vec<String>,
+    },
 }
 
 impl SteerDelivery {
     /// Creates one delivery for focused provider tests.
     ///
-    /// Production construction stays inside [`AcceptedTurn::steer_text`];
+    /// Production construction stays inside [`AcceptedTurn::steer_message`];
     /// this constructor exists only so tests can drive the servicing path
     /// without a live owner.
     #[cfg(test)]
@@ -504,9 +543,18 @@ impl SteerDelivery {
         Self {
             request_id,
             text,
-            approval_response: None,
+            images: Vec::new(),
+            response: None,
             ack,
         }
+    }
+
+    /// Attaches ordered images to one focused-test delivery.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_images(mut self, images: Vec<ImageAttachment>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -518,7 +566,7 @@ pub(crate) const STEER_CHANNEL_CAPACITY: usize = 16;
 /// Resolves every unsettled steer delivery as failed: buffered pre-turn
 /// writes, correlated-but-unanswered provider requests, and queued channel
 /// arrivals. Called exactly once on every pump exit (terminal, failure,
-/// shutdown, cancel, deadline) so `steer_text` never wedges on an
+/// shutdown, cancel, deadline) so `steer_message` never wedges on an
 /// indefinite ack await and stop/cancel interrupts pending steers
 /// deterministically. Sending is best-effort: a gone caller already
 /// observed cancellation through its own control race.
@@ -602,10 +650,10 @@ impl AcceptedTurn {
         self.observations.recv().await
     }
 
-    /// Writes follow-up text into the live turn's provider session.
+    /// Writes a follow-up message into the live turn's provider session.
     ///
     /// Returns an OWNED future (not `async fn`): the future captures a
-    /// CLONED sender and owned request/text, never a borrowed turn, so the
+    /// CLONED sender and owned request/text/images, never a borrowed turn, so the
     /// dispatch-side arm can drive it with `select!` while draining
     /// observations inline through `&mut turn`. A taken/consumed sender
     /// or a `&self`-borrowing future would either break subsequent steers
@@ -622,7 +670,8 @@ impl AcceptedTurn {
     /// inside it).
     ///
     /// `request_id` is the ORIGINAL client request id (for wire correlation
-    /// and log tracing only). `text` is the validated follow-up text. The
+    /// and log tracing only). `text` is the validated follow-up text (empty
+    /// for an image-only steer) and `images` its ordered attachments. The
     /// sender is retained across calls, so consecutive steers on one turn
     /// each write exactly once; no accessor exposes the sender. A turn
     /// without a steer channel resolves [`SteerError::Unsupported`]; a
@@ -641,28 +690,60 @@ impl AcceptedTurn {
     /// its reply while streaming past channel capacity wedges neither
     /// side. There is no ack timeout and no retry: one write attempt per
     /// call, and an ambiguous outcome fails typed instead of resending.
-    pub(crate) fn steer_text(
+    pub(crate) fn steer_message(
         &self,
         request_id: &str,
         text: &str,
+        images: Vec<ImageAttachment>,
     ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
-        self.send_provider_delivery(request_id, text, None)
+        self.send_provider_delivery(request_id, text, images, None)
     }
 
+    /// Hands one durable approval decision to the provider pump, which
+    /// writes it onto the pending request; the ack is the write outcome.
     pub(crate) fn answer_provider_approval(
         &self,
         request_id: &str,
         target: &str,
         approved: bool,
     ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
-        self.send_provider_delivery(request_id, "", Some((target.to_owned(), approved)))
+        self.send_provider_delivery(
+            request_id,
+            "",
+            Vec::new(),
+            Some(ProviderResponse::Approval {
+                approval_id: target.to_owned(),
+                approved,
+            }),
+        )
+    }
+
+    /// Hands one durable question answer to the provider pump. The pump
+    /// replies to the provider once every question of the request has its
+    /// answer; the ack is the record (and, for the last one, write) outcome.
+    pub(crate) fn answer_provider_question(
+        &self,
+        request_id: &str,
+        target: &str,
+        answers: &[String],
+    ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
+        self.send_provider_delivery(
+            request_id,
+            "",
+            Vec::new(),
+            Some(ProviderResponse::Question {
+                question_id: target.to_owned(),
+                answers: answers.to_vec(),
+            }),
+        )
     }
 
     fn send_provider_delivery(
         &self,
         request_id: &str,
         text: &str,
-        approval_response: Option<(String, bool)>,
+        images: Vec<ImageAttachment>,
+        response: Option<ProviderResponse>,
     ) -> impl std::future::Future<Output = Result<(), SteerError>> + Send + use<> {
         let sender = self.steer_tx.clone();
         let control = Arc::clone(&self.control);
@@ -676,7 +757,8 @@ impl AcceptedTurn {
             let delivery = SteerDelivery {
                 request_id,
                 text,
-                approval_response,
+                images,
+                response,
                 ack: ack_tx,
             };
             let sent = tokio::select! {

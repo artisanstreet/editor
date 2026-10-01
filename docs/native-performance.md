@@ -170,3 +170,33 @@ The historical renderer also applied a separate visual-only glide capped at
 Regression coverage includes live/failed chains staying closed, explicit tool
 navigation, streaming resize without detachment, wheel leeway before smoothing,
 reserved turn space, and the existing host/controller and tolerance tests.
+
+## Render reuse (2026-09-30)
+
+GPUI re-renders the whole view tree on every frame unless a view is mounted with
+`Entity::cached(style)`; a `cx.notify()` dirties the notifying view and its ancestors,
+never its siblings. The Editor now uses that in three places (`modules/frontend/src/
+view_boundary.rs` mounts a cached view):
+
+- The sidebar is its own view (`native_application/sidebar_view.rs`), mounted cached with
+  `size_full`; the transcript host is mounted cached inside the thread screen. A transcript
+  animation frame (thinking shimmer, header entrance, copy feedback) no longer rebuilds the
+  sidebar, and a sidebar frame (working-dot pulse, hover) no longer rebuilds the transcript.
+  The thread screen itself stays uncached because the app pushes gate/width/inspector facts
+  into it during its own render; caching it means moving those syncs into state-change paths.
+- Every transcript turn renders from its own `TurnRowView`
+  (`conversation_surface/turn_row.rs`), cached at its measured height while none of its
+  inputs changed, it was not notified, no scroll target is pending and no anchor scroll is in
+  flight. A streaming delta or a live shimmer re-renders one row; the other built rows replay.
+  Scrolling moves every row's bounds, so rows re-render then (GPUI's cache rule).
+- Markdown bodies are prepared once per parse (`modules/ui/src/markdown_renderer/prepared.rs`):
+  flattened inline text as `SharedString`, theme-independent style runs, links, code ranges,
+  citations and element ids; fence highlights are cached per `(language, source)` so a
+  streaming body re-highlights only the fence that changed; unchanged bodies are found by
+  pointer identity without hashing. `SelectableText` keeps its compiled runs while text,
+  style, ranges and selection are unchanged.
+
+None of this throttles animation: the frame rate is whatever the display and the FPS setting
+allow; each frame just rebuilds less. In test builds cached views render uncached unless the
+`CachedViewsInTests` global is set, because the test harness records debug bounds only while
+painting; the render-boundary tests set it.

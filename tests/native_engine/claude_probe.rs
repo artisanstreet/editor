@@ -193,7 +193,7 @@ fn thinking_display_support_is_separate_from_the_continuation_floor() {
     assert_eq!(CLAUDE_NATIVE_CONTINUATION_VERSION, "2.1.220");
     assert_eq!(
         claude_thinking_display_support("2.1.282 (Claude Code)"),
-        ClaudeThinkingDisplaySupport::Summarized
+        ClaudeThinkingDisplaySupport::DisplayControl
     );
     assert_eq!(
         claude_thinking_display_support("2.1.281 (Claude Code)"),
@@ -252,7 +252,7 @@ fn verified_launch_carries_display_support_for_supported_and_older_clis() {
     assert_eq!(supported.executable_path(), executable);
     assert_eq!(
         supported.thinking_display(),
-        ClaudeThinkingDisplaySupport::Summarized
+        ClaudeThinkingDisplaySupport::DisplayControl
     );
     drop(supported);
     // An older CLI above the unchanged continuation floor still launches; it

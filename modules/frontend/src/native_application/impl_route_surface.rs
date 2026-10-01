@@ -47,27 +47,19 @@ impl NativeApplication {
                     .expect("onboarding screen mounted")
                     .into_any_element()
             }
-            NativeRoute::Thread { thread, .. } => {
+            NativeRoute::Thread { project, thread } => {
                 let key = Some((thread.clone(), self.conversation_host.is_some()));
                 if self.thread_screen_key != key || self.thread_screen.is_none() {
-                    // The environment card must never infer a disconnect from
-                    // its empty default: feed the readily existing profile
-                    // hostname (the same authoritative identity behind the
-                    // sidebar) so Machine names this computer instead of
-                    // reporting `Not connected` while connected.
-                    let environment = ThreadEnvironmentInput {
-                        identity: self.profile_hostname.clone().map(HostIdentitySnapshot::new),
-                        ..ThreadEnvironmentInput::default()
-                    };
+                    // A fresh screen starts on its loading gate with an empty
+                    // inspector; the live sync below opens the gate with the
+                    // thread's history readiness and fills the inspector for
+                    // this thread before the first paint, so no fact of the
+                    // previous thread's screen can carry over.
                     let mounted = match self.conversation_host.clone() {
                         Some(host) => {
                             let composer = self.composer.clone();
                             let screen = cx.new(|screen_cx| {
                                 ThreadScreen::new(host, composer, ThemeMode::Dark, screen_cx)
-                            });
-                            screen.update(cx, |screen, _| {
-                                screen.set_gate(ThreadScreenGate::Open);
-                                screen.set_environment(environment.clone());
                             });
                             // Typed text reaches the composer only while it
                             // holds window focus (the platform registers its
@@ -80,16 +72,32 @@ impl NativeApplication {
                             window.focus(&focus, cx);
                             Some(screen)
                         }
-                        None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx)
-                            .ok()
-                            .inspect(|screen| {
-                                screen.update(cx, |screen, _| {
-                                    screen.set_environment(environment);
-                                });
-                            }),
+                        None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
                     };
                     self.thread_screen = mounted;
                     self.thread_screen_key = key;
+                }
+                // A mounted thread presents only whole: its transcript
+                // snapshot and its tool/reasoning history must both be in.
+                // Until then the cold-load gate holds, so tool groups never
+                // pop in under already-painted prose and a `Thought for`
+                // label never flips to `Worked for` once its tools arrive.
+                if let (Some(screen), Some(host)) =
+                    (self.thread_screen.clone(), self.conversation_host.clone())
+                {
+                    let presentable = self.selected_thread.as_ref() == Some(&thread)
+                        && self.selected_history_current()
+                        && host.read(cx).has_snapshot();
+                    let gate = if presentable {
+                        ThreadScreenGate::Open
+                    } else {
+                        ThreadScreenGate::Loading
+                    };
+                    screen.update(cx, |screen, screen_cx| {
+                        if screen.set_gate(gate) {
+                            screen_cx.notify();
+                        }
+                    });
                 }
                 // Live presentation sync on every render (not just on mount):
                 // the content width (window minus the live sidebar, both in
@@ -98,17 +106,20 @@ impl NativeApplication {
                 // notify loops; the conversation title lives in the titlebar
                 // header, not on this screen.
                 if let Some(screen) = self.thread_screen.clone() {
-                    let sidebar_width = f32::from(
-                        DesktopShellStyle::resolve(self.sidebar_collapsed, window.scale_factor())
-                            .sidebar_width,
-                    );
+                    let sidebar_width = f32::from(self.desktop_shell_style(window).sidebar_width);
                     let content_width_px = f32::from(window.bounds().size.width) - sidebar_width;
                     screen.update(cx, |screen, screen_cx| {
                         if screen.set_content_width(content_width_px) {
                             screen_cx.notify();
                         }
                     });
+                    self.sync_thread_inspector(&screen, &project, &thread, cx);
                 }
+                // Not a cached view: the syncs above push this frame's gate,
+                // width, and inspector facts while the frame is drawing, and a
+                // notify made mid-draw neither dirties a cached view for this
+                // frame nor schedules another, so a cached screen would paint
+                // them late. The transcript inside it is the cached region.
                 self.thread_screen.clone().map_or_else(
                     || status_panel(&self.theme, &self.state).into_any_element(),
                     gpui::IntoElement::into_any_element,
@@ -218,5 +229,98 @@ impl NativeApplication {
                 .new_thread_surface_section(window, cx)
                 .into_any_element(),
         }
+    }
+
+    /// Publishes the open thread's inspector facts on every render: the
+    /// Project row, the Machine and Branch rows' environment, and the
+    /// Checklist.
+    ///
+    /// Each fact is read from state the application already retains, so it
+    /// follows that state live rather than freezing at mount:
+    ///
+    /// - Project names `project` exactly as the titlebar header does: the
+    ///   inspected repository's qualified `owner/repository` label when its
+    ///   default remote is browsable, the project's own display name
+    ///   otherwise.
+    /// - Machine names the connected host exactly as the sidebar's profile
+    ///   footer does: the host's registered name (`machine_label`), never the
+    ///   computer's raw hostname. It is published as the snapshot's current
+    ///   machine, so the row never falls back to the hostname or infers `Not
+    ///   connected` from an empty default. Branch comes from the selected
+    ///   project's `QueryProjectRepository` reply.
+    /// - Checklist is the thread's latest plan update from its engine
+    ///   observations.
+    /// - Agents are the subagents the thread's current run has started, read
+    ///   from the same observations ([`thread_agent_rows`]).
+    ///
+    /// Every fact is fenced to the route's own `project` and `thread`:
+    /// repository facts retained (or requested) for another project, and
+    /// observations retained for another thread, publish nothing, so a
+    /// switch never shows the previous thread's project, branch, checklist,
+    /// or agents. The setters are change-guarded, and the checklist and the
+    /// agents are compared borrowed before any entry is copied, so an
+    /// unchanged frame notifies nothing and copies no entry.
+    fn sync_thread_inspector(
+        &self,
+        screen: &Entity<ThreadScreen>,
+        project: &ProjectId,
+        thread: &ThreadId,
+        cx: &mut Context<Self>,
+    ) {
+        let repository_current = self.titlebar_repository_project.as_ref() == Some(project);
+        let project_label = self
+            .project_options
+            .iter()
+            .find(|option| &option.id == project)
+            .map(|option| {
+                self.titlebar_repository
+                    .as_ref()
+                    .filter(|_| repository_current)
+                    .map_or_else(
+                        || option.name.to_string(),
+                        TitlebarRepository::qualified_label,
+                    )
+            });
+        let environment = ThreadEnvironmentInput {
+            machines: Some(HostMachinesSnapshot::new(vec![HostMachineSnapshot::new(
+                self.machine_home.as_deref().map_or_else(
+                    || self.machine_label.clone(),
+                    |home| home.to_string_lossy().into_owned(),
+                ),
+                HostMachineKind::Local,
+                self.machine_label.clone(),
+            )])),
+            repository: self
+                .project_repository
+                .clone()
+                .filter(|_| repository_current),
+            ..ThreadEnvironmentInput::default()
+        };
+        let observations = self
+            .engine_observations
+            .as_ref()
+            .filter(|observations| observations.thread_id() == thread);
+        let plan = observations
+            .and_then(EngineObservationState::latest_plan)
+            .map_or(&[][..], |plan| plan.entries().as_slice());
+        let agents = observations.map(thread_agent_rows).unwrap_or_default();
+        screen.update(cx, |screen, screen_cx| {
+            let mut changed = screen.set_project_label(project_label);
+            changed |= screen.set_environment(environment);
+            if !screen.agents_present(&agents) {
+                changed |=
+                    screen.set_agents(agents.iter().copied().map(thread_agent_entry).collect());
+            }
+            if !screen.checklist_presents(plan) {
+                changed |= screen.set_checklist(
+                    plan.iter()
+                        .map(ThreadChecklistEntry::from_plan_entry)
+                        .collect(),
+                );
+            }
+            if changed {
+                screen_cx.notify();
+            }
+        });
     }
 }

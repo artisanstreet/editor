@@ -11,15 +11,63 @@
 //! and those two commands are serialized through the window lock: they read
 //! the current window, and a renewal never moves it underneath them.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 
 use artisan_database::{ClaimedMessageDispatch, Repository};
-use artisan_domain::UnixMillis;
+use artisan_domain::{ErrorChain, MessageId, UnixMillis};
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::SystemCommandOrigin;
 
 use super::dispatch_support::{add_duration, claim_renew_interval, wall_clock};
+
+/// Messages whose claim one of this Forge's dispatch workers is executing.
+///
+/// The lease guards against an owner that is gone (a previous Forge). Inside
+/// the owning process the claim's liveness is known exactly, so the live
+/// recovery sweep consults this set instead of the lease clock.
+#[derive(Clone, Default)]
+pub(crate) struct LiveClaims(Arc<StdMutex<HashSet<MessageId>>>);
+
+impl LiveClaims {
+    /// Marks `message_id` live until the returned guard drops.
+    pub(crate) fn hold(&self, message_id: MessageId) -> LiveClaimGuard {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(message_id.clone());
+        LiveClaimGuard {
+            claims: self.clone(),
+            message_id,
+        }
+    }
+
+    /// Whether a worker is still executing the claim of `message_id`.
+    pub(crate) fn holds(&self, message_id: &MessageId) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(message_id)
+    }
+}
+
+/// Keeps one claim live; dropping it hands the claim back to recovery.
+pub(crate) struct LiveClaimGuard {
+    claims: LiveClaims,
+    message_id: MessageId,
+}
+
+impl Drop for LiveClaimGuard {
+    fn drop(&mut self) {
+        self.claims
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.message_id);
+    }
+}
 
 /// The live lease of one claimed dispatch.
 pub(crate) struct ClaimLease {
@@ -53,16 +101,26 @@ impl ClaimLease {
     }
 
     /// Best-effort owner-fenced renewal. A failed renewal is never fatal by
-    /// itself: if the lease truly lapsed, recovery owns the outcome.
+    /// itself: the owner still fences every write, and the live sweep skips
+    /// claims this process holds. Failures are logged so a lapsed lease is
+    /// explainable.
     pub(crate) async fn renew(&self, repository: &Repository, origin: &SystemCommandOrigin) {
         let mut current = self.current.lock().await;
         let Some(operated_at) = wall_clock(origin) else {
+            eprintln!(
+                "dispatch lease renewal skipped (message {}): the clock could not be read",
+                current.message_id
+            );
             return;
         };
         let Some(lease_expires_at) = add_duration(operated_at, self.claim_lease) else {
+            eprintln!(
+                "dispatch lease renewal skipped (message {}): the lease expiry overflows",
+                current.message_id
+            );
             return;
         };
-        if let Ok(renewed) = repository
+        match repository
             .renew_message_dispatch_lease(
                 &current.message_id,
                 &current.owner,
@@ -71,7 +129,13 @@ impl ClaimLease {
             )
             .await
         {
-            Self::record(&mut current, lease_expires_at, renewed.updated_at);
+            Ok(renewed) => Self::record(&mut current, lease_expires_at, renewed.updated_at),
+            Err(error) => eprintln!(
+                "dispatch lease renewal failed (message {}, lease expires at {}): {}",
+                current.message_id,
+                current.lease_expires_at.as_millis(),
+                ErrorChain(&error)
+            ),
         }
     }
 }

@@ -189,7 +189,10 @@ fn remove_profile_ae(progress: &mut Progress) {
             progress.stage("profile", &format!("removed {}", removed.join(", ")));
         }
         Ok(_) => {}
-        Err(error) => eprintln!("dev: warning: the Nix profile was left alone: {error}"),
+        Err(error) => eprintln!(
+            "dev: warning: the Nix profile was left alone: {}",
+            crate::error_chain(&error)
+        ),
     }
 }
 

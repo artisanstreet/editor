@@ -5,7 +5,8 @@
 //! json`, close stdin immediately (its `-p` prompt would otherwise wait on
 //! an open pipe), bound stdout/stderr to 1 MiB each, enforce one overall
 //! deadline with kill plus reap, then parse the session and weekly lines
-//! from the embedded result text.
+//! from the embedded result text. The child runs in UTC
+//! ([`CLAUDE_USAGE_TIMEZONE`]) so its reset times resolve to instants.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -29,6 +30,14 @@ pub const CLAUDE_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const CLAUDE_USAGE_MAX_BYTES: usize = 1_048_576;
 /// Arguments passing the usage slash command as JSON through `-p`.
 pub const CLAUDE_USAGE_ARGS: &[&str] = &["-p", "/usage", "--output-format", "json"];
+/// Timezone the usage child runs in.
+///
+/// The CLI prints each reset as a wall-clock time in the process timezone
+/// (`resets Sep 30, 12am (Europe/Oslo)`), and this build carries no IANA
+/// timezone database to turn a named zone back into an instant. Running the
+/// child in UTC makes it print `(UTC)`, which [`parse_reset_at`] resolves
+/// exactly; without it every reset on a non-UTC machine parses to nothing.
+pub const CLAUDE_USAGE_TIMEZONE: (&str, &str) = ("TZ", "UTC");
 
 /// Configures one external Claude CLI account-usage read.
 #[derive(Clone, Debug)]
@@ -96,6 +105,7 @@ pub fn read_claude_usage(config: &ClaudeUsageConfig) -> Result<ProviderUsage, Us
     }
     command
         .args(&argv)
+        .env(CLAUDE_USAGE_TIMEZONE.0, CLAUDE_USAGE_TIMEZONE.1)
         .envs(config.spawn_env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

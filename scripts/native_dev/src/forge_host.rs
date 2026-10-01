@@ -10,7 +10,7 @@ use artisan_editor_cli::{
     host_access::{self, HostAccess, ListenAddress},
     process::{self, ForgeReadiness},
 };
-use native_dev::provision;
+use native_dev::{error_chain, provision};
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
@@ -27,21 +27,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Renders `error` and every source beneath it as `top: cause: cause`.
-fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut rendered = error.to_string();
-    let mut current = error.source();
-    while let Some(source) = current {
-        let message = source.to_string();
-        if !rendered.ends_with(&message) {
-            rendered.push_str(": ");
-            rendered.push_str(&message);
-        }
-        current = source.source();
-    }
-    rendered
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {

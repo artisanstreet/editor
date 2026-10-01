@@ -22,7 +22,6 @@ const CODEX_MAX_TEXT_FIELD_BYTES: usize = 8 * 1024;
 const CODEX_MAX_QUESTIONS_PER_FRAME: usize = 32;
 
 /// Maximum answers retained per question response.
-#[cfg(test)]
 pub(crate) const CODEX_MAX_ANSWERS: usize = 32;
 
 /// Payload-free failure of the Codex wire boundary.
@@ -249,18 +248,38 @@ impl CodexApprovalRequest {
     }
 }
 
-/// One typed Codex question (`requestUserInput` equivalent).
+/// Maximum suggested answers retained per question.
+const CODEX_MAX_OPTIONS_PER_QUESTION: usize = 16;
+
+/// One typed Codex question from an `item/tool/requestUserInput` request.
+///
+/// The request asks several questions together and stays open until the
+/// user answers them all; the questions join one questionnaire
+/// (`group_id`: the request's tool item) and present the same as every
+/// other engine's questions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodexQuestion {
+    /// Unique on the thread: the questionnaire prefixes the provider id.
     question_id: String,
+    /// The provider's own id for the question inside its request.
+    provider_id: String,
+    group_id: String,
     text: String,
     header: Option<String>,
+    /// Suggested answers as `(label, description)`, recommended first.
+    options: Vec<(String, Option<String>)>,
 }
 
 impl CodexQuestion {
     /// Returns the provider question identity.
+    #[cfg(test)]
     pub(crate) fn question_id(&self) -> &str {
         &self.question_id
+    }
+
+    /// Returns the questionnaire identity this question was asked in.
+    pub(crate) fn group_id(&self) -> &str {
+        &self.group_id
     }
 
     /// Maps this question onto the domain question vocabulary.
@@ -272,12 +291,24 @@ impl CodexQuestion {
     pub(crate) fn to_domain_input(&self) -> Result<QuestionInput, CodexTurnError> {
         let question_id = ObservationId::parse(self.question_id.clone())
             .map_err(|_| CodexTurnError::Configuration)?;
+        let options = if self.options.is_empty() {
+            None
+        } else {
+            let mut options = Vec::with_capacity(self.options.len());
+            for (label, description) in &self.options {
+                options.push(
+                    artisan_domain::QuestionOption::new(label.clone(), description.clone())
+                        .map_err(|_| CodexTurnError::Configuration)?,
+                );
+            }
+            Some(options)
+        };
         Ok(QuestionInput {
             question_id,
             text: self.text.clone(),
             header: self.header.clone(),
             multi_select: false,
-            options: None,
+            options,
         })
     }
 }
@@ -285,11 +316,16 @@ impl CodexQuestion {
 /// One typed Codex question request frame.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodexQuestionRequest {
+    /// The JSON-RPC request id the answer reply must echo.
+    rpc_id: Value,
+    /// The questionnaire identity every question of the request shares.
+    group_id: String,
     questions: Vec<CodexQuestion>,
 }
 
 impl CodexQuestionRequest {
     /// Returns the questions in this request group.
+    #[cfg(test)]
     pub(crate) fn questions(&self) -> &[CodexQuestion] {
         &self.questions
     }
@@ -551,6 +587,34 @@ fn claimed_scope(params: &Value) -> Option<(String, String)> {
 }
 
 /// Extracts one bounded non-empty provider string from a nested item object.
+/// Reads `requestUserInput` options: `[{label, description}]`, bounded.
+fn labelled_options(options: Option<&Value>) -> Vec<(String, Option<String>)> {
+    options
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .take(CODEX_MAX_OPTIONS_PER_QUESTION)
+                .filter_map(|option| {
+                    let label = option.get("label")?.as_str()?;
+                    if label.is_empty() || label.len() > CODEX_MAX_TEXT_FIELD_BYTES {
+                        return None;
+                    }
+                    let description = option
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .filter(|description| {
+                            !description.is_empty()
+                                && description.len() <= CODEX_MAX_TEXT_FIELD_BYTES
+                        })
+                        .map(str::to_owned);
+                    Some((label.to_owned(), description))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn nested_text(item: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
     let text = item.get(field)?.as_str()?;
     if text.is_empty() || text.len() > CODEX_MAX_TEXT_FIELD_BYTES {
@@ -673,6 +737,17 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             })
         }
         "item/tool/requestUserInput" => {
+            // The request blocks until its reply carries every answer, so
+            // it must have an id to answer under.
+            let Some(rpc_id) = envelope.get("id").cloned() else {
+                return CodexEvent::UnknownMethod;
+            };
+            // The questionnaire is the request's tool item; the JSON-RPC id
+            // stands in when an older server omits it.
+            let group_id = raw_text(params, "itemId")
+                .filter(|item| !item.is_empty())
+                .or_else(|| envelope.get("id").map(|id| format!("request-{id}")))
+                .unwrap_or_default();
             let questions = params
                 .get("questions")
                 .and_then(Value::as_array)
@@ -683,16 +758,23 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                         .filter_map(|item| {
                             let id = item.get("id")?.as_str()?;
                             let text = item.get("question")?.as_str()?;
-                            if id.is_empty() || text.is_empty() {
+                            if id.is_empty() || text.is_empty() || group_id.is_empty() {
                                 return None;
                             }
+                            // Provider ids are short per-request keys; the
+                            // questionnaire prefix keeps them unique on the
+                            // thread, where questions outlive their request.
                             Some(CodexQuestion {
-                                question_id: id.to_owned(),
+                                question_id: format!("{group_id}:{id}"),
+                                provider_id: id.to_owned(),
+                                group_id: group_id.clone(),
                                 text: text.to_owned(),
                                 header: item
                                     .get("header")
                                     .and_then(Value::as_str)
+                                    .filter(|header| !header.is_empty())
                                     .map(str::to_owned),
+                                options: labelled_options(item.get("options")),
                             })
                         })
                         .collect::<Vec<_>>()
@@ -701,7 +783,11 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             if questions.is_empty() {
                 return CodexEvent::UnknownMethod;
             }
-            CodexEvent::QuestionRequested(CodexQuestionRequest { questions })
+            CodexEvent::QuestionRequested(CodexQuestionRequest {
+                rpc_id,
+                group_id,
+                questions,
+            })
         }
         "item/subAgent/discovered" | "item/collabAgent/discovered" => {
             let agent_thread_id = raw_text(params, "agentThreadId").unwrap_or_default();
@@ -1103,7 +1189,9 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
 #[derive(Debug, Default)]
 pub(crate) struct CodexPendingTracker {
     approvals: HashMap<String, CodexApprovalRequest>,
-    questions: HashMap<String, CodexQuestion>,
+    /// Open question requests by questionnaire, each with the answers
+    /// recorded so far by provider question id.
+    question_requests: HashMap<String, PendingQuestionRequest>,
     subagents: Vec<(String, String)>,
     /// The root native thread bound by the pump from `thread/start` (or the
     /// resumed thread). Rich activity frames must claim exactly this thread;
@@ -1136,11 +1224,17 @@ impl CodexPendingTracker {
         self.native_thread_id.as_deref()
     }
 
+    ///
+    /// The decision uses the app-server v2 vocabulary of the
+    /// `item/commandExecution/requestApproval` and
+    /// `item/fileChange/requestApproval` responses (`accept`, `decline`).
+    /// Codex rejects any other spelling and aborts the turn.
     pub(crate) fn approval_reply(&self, id: &str, approved: bool) -> Option<Value> {
         let request = self.approvals.get(id)?;
-        Some(
-            serde_json::json!({"id": request.rpc_id, "result": {"decision": if approved {"approved"} else {"denied"}}}),
-        )
+        Some(serde_json::json!({
+            "id": request.rpc_id,
+            "result": {"decision": if approved { "accept" } else { "decline" }},
+        }))
     }
 
     /// Notes one approval request; re-noting the same id is a no-op.
@@ -1158,23 +1252,76 @@ impl CodexPendingTracker {
         true
     }
 
-    /// Notes one question request group; re-noting the same id is a no-op.
+    /// Notes one question request; re-noting the same questionnaire is a
+    /// no-op. Returns the questions newly asked.
     ///
     /// Each question is validated through the domain constructor first, so
-    /// an out-of-bound provider frame never reaches the durable rows.
-    pub(crate) fn note_questions(&mut self, request: &CodexQuestionRequest) -> usize {
-        let mut added = 0;
-        for question in request.questions() {
-            if question.to_domain_input().is_err() {
-                continue;
-            }
-            if !self.questions.contains_key(question.question_id()) {
-                self.questions
-                    .insert(question.question_id().to_owned(), question.clone());
-                added += 1;
-            }
+    /// an out-of-bound provider frame never reaches the durable rows; a
+    /// request whose questions all fail validation is not tracked, since
+    /// nothing could ever answer it.
+    pub(crate) fn note_question_request(
+        &mut self,
+        request: &CodexQuestionRequest,
+    ) -> Vec<CodexQuestion> {
+        if self.question_requests.contains_key(&request.group_id) {
+            return Vec::new();
         }
-        added
+        let asked: Vec<CodexQuestion> = request
+            .questions
+            .iter()
+            .filter(|question| question.to_domain_input().is_ok())
+            .cloned()
+            .collect();
+        if asked.is_empty() {
+            return Vec::new();
+        }
+        self.question_requests.insert(
+            request.group_id.clone(),
+            PendingQuestionRequest {
+                rpc_id: request.rpc_id.clone(),
+                questions: asked.clone(),
+                answers: HashMap::new(),
+            },
+        );
+        asked
+    }
+
+    /// Records the durable answer to one question of an open request.
+    ///
+    /// Returns the reply line once every question of the request has an
+    /// answer, and [`None`] while others are still open; the request then
+    /// leaves the tracker. Unknown or already answered questions are
+    /// refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodexTurnError::Configuration`] when no open request holds
+    /// the question.
+    pub(crate) fn record_question_answer(
+        &mut self,
+        question_id: &str,
+        answers: &[String],
+    ) -> Result<Option<String>, CodexTurnError> {
+        let Some((group_id, request)) = self
+            .question_requests
+            .iter_mut()
+            .find(|(_, request)| request.is_open(question_id))
+        else {
+            return Err(CodexTurnError::Configuration);
+        };
+        let Some(provider_id) = request.provider_id(question_id) else {
+            return Err(CodexTurnError::Configuration);
+        };
+        request.answers.insert(provider_id, answers.to_vec());
+        if request.answers.len() < request.questions.len() {
+            return Ok(None);
+        }
+        let group_id = group_id.clone();
+        let request = self
+            .question_requests
+            .remove(&group_id)
+            .ok_or(CodexTurnError::Configuration)?;
+        Ok(Some(request.reply_line()))
     }
 
     /// Notes one subagent discovery without adopting the root turn.
@@ -1199,29 +1346,77 @@ impl CodexPendingTracker {
         self.approvals.remove(approval_id).is_some()
     }
 
-    /// Resolves one question; returns whether it was pending.
-    ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
-    pub(crate) fn resolve_question(&mut self, question_id: &str) -> bool {
-        self.questions.remove(question_id).is_some()
-    }
-
     /// Returns the number of pending approvals.
+    #[cfg(test)]
     pub(crate) fn pending_approvals(&self) -> usize {
         self.approvals.len()
     }
 
-    /// Returns the number of pending questions.
+    /// Returns the number of questions still waiting for an answer.
     #[cfg(test)]
     pub(crate) fn pending_questions(&self) -> usize {
-        self.questions.len()
+        self.question_requests
+            .values()
+            .map(|request| request.questions.len() - request.answers.len())
+            .sum()
+    }
+
+    /// Returns whether the provider is waiting on the user: an open
+    /// approval or question keeps the turn alive however long the user
+    /// takes.
+    pub(crate) fn waiting_on_user(&self) -> bool {
+        !self.approvals.is_empty() || !self.question_requests.is_empty()
     }
 
     /// Returns the number of discovered subagents.
     #[cfg(test)]
     pub(crate) fn subagent_count(&self) -> usize {
         self.subagents.len()
+    }
+}
+
+/// One open `requestUserInput` request with the answers recorded so far.
+#[derive(Debug)]
+struct PendingQuestionRequest {
+    rpc_id: Value,
+    questions: Vec<CodexQuestion>,
+    /// Answers by provider question id; a skipped question records an
+    /// empty list.
+    answers: HashMap<String, Vec<String>>,
+}
+
+impl PendingQuestionRequest {
+    fn provider_id(&self, question_id: &str) -> Option<String> {
+        self.questions
+            .iter()
+            .find(|question| question.question_id == question_id)
+            .map(|question| question.provider_id.clone())
+    }
+
+    /// Whether the request holds the question and it has no answer yet.
+    fn is_open(&self, question_id: &str) -> bool {
+        self.provider_id(question_id)
+            .is_some_and(|provider_id| !self.answers.contains_key(&provider_id))
+    }
+
+    /// The JSON-RPC reply that answers the request: every answered
+    /// question by its provider id, skipped questions left out (Codex treats
+    /// a missing answer as "continue with best judgment").
+    fn reply_line(&self) -> String {
+        let mut map = serde_json::Map::new();
+        for (provider_id, answers) in self
+            .answers
+            .iter()
+            .filter(|(_, answers)| !answers.is_empty())
+            .take(CODEX_MAX_ANSWERS)
+        {
+            map.insert(
+                provider_id.clone(),
+                serde_json::json!({ "answers": answers }),
+            );
+        }
+        serde_json::json!({ "id": self.rpc_id, "result": { "answers": Value::Object(map) } })
+            .to_string()
     }
 }
 
@@ -1369,7 +1564,10 @@ pub(crate) fn parse_thread_token_usage(params: &Value) -> Option<CodexTokenUsage
 }
 
 /// Encode each attachment as native image input, never as a filename in text.
-fn prompt_input(text: &str, images: &[artisan_domain::ImageAttachment]) -> Value {
+///
+/// Shared by `turn/start` and `turn/steer`: both take the same ordered
+/// `UserInput` array, and an image-only message carries no empty text item.
+pub(crate) fn prompt_input(text: &str, images: &[artisan_domain::ImageAttachment]) -> Value {
     let mut content = Vec::new();
     if !text.is_empty() || images.is_empty() {
         content.push(serde_json::json!({"type":"text", "text":text, "text_elements":[]}));

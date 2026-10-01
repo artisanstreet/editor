@@ -239,10 +239,17 @@ pub enum SceneFactKind {
         /// Bounded checklist entries.
         entries: Vec<String>,
     },
-    /// Approval request card.
-    Approval { prompt: String },
-    /// Question card.
-    Question { prompt: String },
+    /// Approval request card: the prompt and the engine's approval identity.
+    Approval {
+        prompt: String,
+        approval_id: ObservationId,
+    },
+    /// Agent question: its prompt and, once given, the answer (empty when
+    /// the user skipped it).
+    Question {
+        prompt: String,
+        answer: Option<String>,
+    },
     /// Redacted or otherwise renderer-safe error card.
     Error { message: String },
     /// Usage/provider interruption card.
@@ -279,8 +286,12 @@ impl fmt::Debug for SceneFactKind {
             Self::Compaction { summary }
             | Self::Reasoning { body: summary }
             | Self::WorkSession { title: summary }
-            | Self::Approval { prompt: summary }
-            | Self::Question { prompt: summary }
+            | Self::Approval {
+                prompt: summary, ..
+            }
+            | Self::Question {
+                prompt: summary, ..
+            }
             | Self::Error { message: summary }
             | Self::UsageInterruption { detail: summary }
             | Self::NativeFact { text: summary } => {
@@ -335,11 +346,16 @@ impl SceneFactKind {
                 title: title.clone(),
                 entries: entries.clone(),
             },
-            Self::Approval { prompt } => SceneItemKind::Approval {
+            Self::Approval {
+                prompt,
+                approval_id,
+            } => SceneItemKind::Approval {
                 prompt: prompt.clone(),
+                approval_id: approval_id.clone(),
             },
-            Self::Question { prompt } => SceneItemKind::Question {
+            Self::Question { prompt, answer } => SceneItemKind::Question {
                 prompt: prompt.clone(),
+                answer: answer.clone(),
             },
             Self::Error { message } => SceneItemKind::Error {
                 message: message.clone(),
@@ -386,6 +402,9 @@ pub enum ConversationStateEvent {
     Delivery(ConversationDeliveryEvent),
     /// Route one event to a delivery-derived turn.
     Turn { turn_id: TurnId, event: TurnEvent },
+    /// Immediately present this exact turn as cancelled without changing durable history.
+    /// Clearing the override restores authoritative presentation after a failed Stop.
+    SetOptimisticCancellation { turn_id: Option<TurnId> },
     /// Set or clear one turn's send-time engine display label.
     ///
     /// Carries only validated display metadata captured at send time; it
@@ -436,6 +455,12 @@ impl fmt::Debug for ConversationStateEvent {
                 .field("to_cursor", &batch.to_cursor())
                 .field("patch_count", &batch.patches().len())
                 .finish(),
+            Self::Delivery(ConversationDeliveryEvent::EarlierTurnsReceived(page)) => formatter
+                .debug_struct("DeliveryEarlierTurnsReceived")
+                .field("thread_id", page.thread_id())
+                .field("turn_count", &page.turns().len())
+                .field("item_count", &page.items().len())
+                .finish(),
             Self::Delivery(ConversationDeliveryEvent::SubscriptionResumed {
                 thread_id,
                 cursor,
@@ -454,6 +479,10 @@ impl fmt::Debug for ConversationStateEvent {
                 .debug_struct("Turn")
                 .field("turn_id", turn_id)
                 .field("event", event)
+                .finish(),
+            Self::SetOptimisticCancellation { turn_id } => formatter
+                .debug_struct("SetOptimisticCancellation")
+                .field("turn_id", turn_id)
                 .finish(),
             Self::SetTurnEngineLabel {
                 turn_id,
@@ -497,6 +526,10 @@ impl PartialEq for ConversationStateEvent {
                     event: right_event,
                 },
             ) => left_id == right_id && left_event == right_event,
+            (
+                Self::SetOptimisticCancellation { turn_id: left },
+                Self::SetOptimisticCancellation { turn_id: right },
+            ) => left == right,
             (
                 Self::SetTurnEngineLabel {
                     turn_id: left_id,
@@ -542,6 +575,10 @@ fn delivery_event_eq(left: &ConversationDeliveryEvent, right: &ConversationDeliv
         (
             ConversationDeliveryEvent::SnapshotReceived(left),
             ConversationDeliveryEvent::SnapshotReceived(right),
+        )
+        | (
+            ConversationDeliveryEvent::EarlierTurnsReceived(left),
+            ConversationDeliveryEvent::EarlierTurnsReceived(right),
         ) => left == right,
         (
             ConversationDeliveryEvent::BatchReceived(left),

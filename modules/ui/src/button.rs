@@ -17,6 +17,7 @@ use gpui::{
 use thiserror::Error;
 
 use crate::asset_seam::asset_glyph;
+use crate::gradient::hover_fill_gradient;
 use crate::motion::MotionPolicy;
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
 
@@ -320,6 +321,7 @@ pub struct Button {
     icon_slot: Option<gpui::AnyElement>,
     disabled: bool,
     bare: bool,
+    hover_fill: bool,
     corner_radius_override: Option<Pixels>,
     tint: Option<ButtonTint>,
     on_activate: Option<ActivationHandler>,
@@ -369,6 +371,7 @@ impl Button {
             icon_slot: None,
             disabled: false,
             bare: false,
+            hover_fill: false,
             corner_radius_override: None,
             tint: None,
             on_activate: None,
@@ -436,6 +439,16 @@ impl Button {
         self
     }
 
+    /// Hovers with the shared hover-pill face
+    /// ([`hover_fill_gradient`]) instead of the variant's own hover
+    /// background, for a control that sits on a surface whose rows and
+    /// actions already highlight that way.
+    #[must_use]
+    pub const fn hover_fill(mut self) -> Self {
+        self.hover_fill = true;
+        self
+    }
+
     /// Adds a stable selector for GPUI inspection and behavior tests.
     #[must_use]
     pub fn debug_selector(mut self, selector: impl Into<SharedString>) -> Self {
@@ -474,6 +487,7 @@ impl RenderOnce for Button {
         let style = self.visual_style();
         let disabled = self.disabled;
         let bare = self.bare;
+        let hover_fill = self.hover_fill.then(|| hover_fill_gradient(self.theme));
         let focus_visibility = self.focus_visibility;
         let focus = self.focus.clone();
         let on_activate = self.on_activate;
@@ -542,6 +556,8 @@ impl RenderOnce for Button {
                 let hover = hover.text_color(hover_foreground);
                 if bare {
                     hover
+                } else if let Some(fill) = hover_fill {
+                    hover.bg(fill)
                 } else {
                     hover.bg(style.hover_background)
                 }

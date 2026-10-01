@@ -3,7 +3,7 @@ name = "artisan-native-dev"
 description = "`nix run .#dev`: build the product with Nix and deploy the Linux Forge service and the Editor through the shipping installer"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 

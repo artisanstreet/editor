@@ -6,7 +6,7 @@
 //! contract; render and scroll-identity code share these exact decisions,
 //! so paint and measured identities stay one-to-one.
 
-use artisan_domain::EngineId;
+use artisan_domain::{ConversationLifecycle, EngineId};
 use artisan_ui::inline_code_text::{claude_first_clause, claude_label_line, summary_line};
 
 use crate::conversation_scene::{
@@ -34,29 +34,6 @@ pub(super) fn format_elapsed_seconds(total_seconds: u64) -> String {
     }
 }
 
-/// Formats the app-style collapsed thinking chip: `label · duration`, the
-/// one-line trace a thinking stretch leaves behind (`Recommending a modern
-/// tech stack for a SaaS product · 9s` in the Claude app).
-#[must_use]
-pub fn thinking_chip(label: &str, duration_millis: u64) -> String {
-    format!("{label} · {}", format_elapsed_millis(duration_millis))
-}
-
-/// Returns the label that rides a collapsed thinking chip, if the turn's
-/// summary policy produces one.
-///
-/// Only the Claude first-line policy becomes a header chip: it reduces
-/// public thinking prose to the short title form the Claude app shows.
-/// The Codex sentence policy keeps its own live summary line, so it never
-/// returns a chip label.
-#[must_use]
-pub fn thinking_chip_label(summary: Option<&str>, engine: Option<EngineId>) -> Option<String> {
-    match SummaryLinePolicy::for_engine(engine) {
-        SummaryLinePolicy::FirstLine => status_summary_copy(summary, engine),
-        SummaryLinePolicy::Sentence => None,
-    }
-}
-
 /// Returns the work-group header copy for one terminal label.
 ///
 /// `None` stays headerless: live groups carry no generic title, since the
@@ -65,22 +42,6 @@ pub fn thinking_chip_label(summary: Option<&str>, engine: Option<EngineId>) -> O
 #[must_use]
 pub fn work_group_header_copy(label: Option<WorkGroupLabel>) -> Option<String> {
     label.map(format_work_group_label)
-}
-
-/// Returns the work-group header copy with the collapsed thinking chip
-/// applied on a thinking stretch: `label · duration` beside the group's
-/// reduced thinking label, the plain terminal copy otherwise.
-#[must_use]
-pub fn thinking_header_copy(
-    label: Option<WorkGroupLabel>,
-    thinking_label: Option<&str>,
-) -> Option<String> {
-    match (label, thinking_label) {
-        (Some(WorkGroupLabel::ThoughtFor { millis }), Some(thinking)) => {
-            Some(thinking_chip(thinking, millis))
-        }
-        _ => work_group_header_copy(label),
-    }
 }
 
 /// Returns the scene-owned display label for one terminal work-group label.
@@ -93,6 +54,9 @@ pub fn format_work_group_label(label: WorkGroupLabel) -> String {
         crate::conversation_scene::WorkGroupLabel::ThoughtFor { millis } => {
             format!("Thought for {}", format_elapsed_millis(millis))
         }
+        crate::conversation_scene::WorkGroupLabel::Failed => "Failed".to_owned(),
+        crate::conversation_scene::WorkGroupLabel::Interrupted => "Interrupted".to_owned(),
+        crate::conversation_scene::WorkGroupLabel::Cancelled => "Cancelled".to_owned(),
     }
 }
 
@@ -165,7 +129,7 @@ pub fn live_status_copy(
 
 /// Returns the live Thinking/Working header owned by at most one work group.
 ///
-/// Terminal labels always win through [`thinking_header_copy`]; this covers
+/// Terminal labels always win through [`work_group_header_copy`]; this covers
 /// the live line only. A thinking stretch that reduced to a label takes the
 /// collapsed chip form, counting on the same elapsed basis. Any other
 /// narration yields no group header, so the turn status row below remains
@@ -175,23 +139,11 @@ pub fn live_group_header_copy(
     narration: TurnNarration,
     active_started_at_ms: Option<i64>,
     frame_now_ms: Option<i64>,
-    thinking_label: Option<&str>,
 ) -> Option<String> {
     match narration {
-        TurnNarration::Thinking => {
-            let Some(thinking) = thinking_label else {
-                return live_status_copy(narration, active_started_at_ms, frame_now_ms);
-            };
-            match (active_started_at_ms, frame_now_ms) {
-                (Some(started_at_ms), Some(now_ms)) => {
-                    let elapsed_ms =
-                        u64::try_from(now_ms.saturating_sub(started_at_ms).max(0)).unwrap_or(0);
-                    Some(thinking_chip(thinking, elapsed_ms))
-                }
-                (None, _) | (_, None) => Some(thinking.to_owned()),
-            }
+        TurnNarration::Thinking | TurnNarration::Working => {
+            live_status_copy(narration, active_started_at_ms, frame_now_ms)
         }
-        TurnNarration::Working => live_status_copy(narration, active_started_at_ms, frame_now_ms),
         _ => None,
     }
 }
@@ -201,13 +153,66 @@ pub fn live_group_header_copy(
 /// Exactly one group owns it: the latest non-superseded group, nearest the
 /// status row it replaces. A superseded session never narrates — the
 /// turn-level status row at turn end narrates current work instead. Earlier
-/// groups render items only, so the live line paints once per turn.
+/// groups render items only, so the live line paints once per turn. A
+/// session continuation (the segment after a mid-run user message) is never
+/// an owner: the section's one header sits on its first segment and keeps
+/// the live line there for the whole turn, however much work arrives below.
 #[must_use]
 pub fn owning_group_index(turn: &TurnScene) -> Option<usize> {
     turn.blocks().iter().rposition(|block| match block {
-        TurnBlock::WorkGroup(group) => !group.superseded,
+        TurnBlock::WorkGroup(group) => !group.superseded && group.continuation.is_none(),
         _ => false,
     })
+}
+
+/// Returns whether a turn is still live, so its work sections stay open.
+///
+/// A section cannot be collapsed before its turn settles: while the
+/// authoritative lifecycle is pending, streaming, active, or waiting, the
+/// header carries no chevron and no toggle and the panel is forced open
+/// whatever disclosure state is stored. Completed, failed, and cancelled
+/// turns settle; so does an interrupted one, which shows its outcome until a
+/// resume makes it live again.
+#[must_use]
+pub fn turn_is_live(turn: &TurnScene) -> bool {
+    matches!(
+        turn.lifecycle,
+        ConversationLifecycle::Pending
+            | ConversationLifecycle::Streaming
+            | ConversationLifecycle::Active
+            | ConversationLifecycle::Waiting
+    )
+}
+
+/// Titles a turn's work section from the turn's own state when neither a
+/// terminal label nor a live Thinking/Working line reached the section.
+///
+/// The section header always names what the turn is doing or how it ended,
+/// never a generic title. A live turn counts on the turn's one elapsed basis
+/// whatever its narration (a provider wait, a streaming reply, compaction, a
+/// background wait), so the header keeps counting while the status row says
+/// what is happening; without a basis it reads the bare verb. A settled turn
+/// reads its lifecycle outcome: the duration belongs to the terminal label,
+/// so a completed turn that lost its narration reads plain `Worked`.
+#[must_use]
+pub fn turn_section_title(turn: &TurnScene, frame_now_ms: Option<i64>) -> String {
+    match turn.lifecycle {
+        ConversationLifecycle::Completed => "Worked".to_owned(),
+        ConversationLifecycle::Failed => "Failed".to_owned(),
+        ConversationLifecycle::Interrupted => "Interrupted".to_owned(),
+        ConversationLifecycle::Cancelled => "Cancelled".to_owned(),
+        ConversationLifecycle::Pending
+        | ConversationLifecycle::Streaming
+        | ConversationLifecycle::Active
+        | ConversationLifecycle::Waiting => {
+            let basis = turn.blocks().iter().find_map(|block| match block {
+                TurnBlock::TurnStatus(status) => status.active_started_at_ms,
+                _ => None,
+            });
+            live_status_copy(TurnNarration::Working, basis, frame_now_ms)
+                .unwrap_or_else(|| "Working".to_owned())
+        }
+    }
 }
 
 /// Engine policy reducing one raw reasoning summary to its thinking line.
@@ -277,15 +282,11 @@ pub fn provider_wait_copy(engine_label: Option<&str>) -> String {
 #[must_use]
 pub fn turn_owner_header(turn: &TurnScene, frame_now_ms: Option<i64>) -> Option<String> {
     owning_group_index(turn)?;
-    let (narration, basis, thinking) = turn.blocks().iter().find_map(|block| match block {
-        TurnBlock::TurnStatus(status) => Some((
-            status.narration,
-            status.active_started_at_ms,
-            thinking_chip_label(status.reasoning_summary.as_deref(), status.engine),
-        )),
+    let (narration, basis) = turn.blocks().iter().find_map(|block| match block {
+        TurnBlock::TurnStatus(status) => Some((status.narration, status.active_started_at_ms)),
         _ => None,
     })?;
-    live_group_header_copy(narration, basis, frame_now_ms, thinking.as_deref())
+    live_group_header_copy(narration, basis, frame_now_ms)
 }
 
 /// Computes the exact status row copy for one scene status block: summary
@@ -326,7 +327,6 @@ pub fn turn_status_block_paints(
         status.narration,
         copy.as_deref(),
         owner_header.as_deref(),
-        thinking_chip_label(status.reasoning_summary.as_deref(), status.engine).as_deref(),
     )
 }
 
@@ -370,28 +370,18 @@ fn status_copy(
 ///
 /// Combines the structural visibility rule with the header-ownership rule.
 /// Render and scroll-identity code share this decision point: any divergence
-/// misaligns measured child bounds with their identities. `chipped_label` is
-/// the reduced thinking label the owning header may carry as its collapsed
-/// chip; it never suppresses a row whose copy is a distinct line.
+/// misaligns measured child bounds with their identities.
 #[must_use]
 pub fn turn_status_paints(
     turn_has_work_group: bool,
     narration: TurnNarration,
     copy: Option<&str>,
     owner_header: Option<&str>,
-    chipped_label: Option<&str>,
 ) -> bool {
     if !status_row_visible(turn_has_work_group, narration) {
         return false;
     }
     match narration {
-        // The collapsed chip titles the thinking stretch inside the owning
-        // header, so the row never repeats that label.
-        TurnNarration::Thinking
-            if owner_header.is_some() && chipped_label.is_some() && chipped_label == copy =>
-        {
-            false
-        }
         TurnNarration::Thinking | TurnNarration::Working => {
             !status_duplicates_owner(copy, owner_header)
         }
@@ -416,19 +406,23 @@ pub fn status_duplicates_owner(status_copy: Option<&str>, owner_header: Option<&
 /// Returns whether a status row paints for one narration in a turn that may
 /// already carry its line in a work-group header.
 ///
-/// Terminal durations prefer the group header. Live Working rows are decided
-/// by content, not by phase: [`status_duplicates_owner`] suppresses only the
-/// identical duplicate, so a summary narration beside an elapsed header still
-/// paints. Live Thinking rows always stand down behind the owning header.
-/// `Quiet` and `StreamingSuppression` never paint.
+/// Terminal narrations (the durations, `Failed`, `Interrupted`, `Cancelled`)
+/// prefer the group header, which titles the collapsed work with the turn's
+/// own outcome. Live Working rows are decided by content, not by phase:
+/// [`status_duplicates_owner`] suppresses only the identical duplicate, so a
+/// summary narration beside an elapsed header still paints. Live Thinking
+/// rows always stand down behind the owning header. `Quiet` and
+/// `StreamingSuppression` never paint.
 #[must_use]
 pub fn status_row_visible(turn_has_work_group: bool, narration: TurnNarration) -> bool {
     match turn_status_copy(narration) {
         None => false,
         Some(_) => match narration {
-            TurnNarration::WorkedFor { .. } | TurnNarration::ThoughtFor { .. } => {
-                !turn_has_work_group
-            }
+            TurnNarration::WorkedFor { .. }
+            | TurnNarration::ThoughtFor { .. }
+            | TurnNarration::Failed
+            | TurnNarration::Interrupted
+            | TurnNarration::Cancelled => !turn_has_work_group,
             _ => true,
         },
     }

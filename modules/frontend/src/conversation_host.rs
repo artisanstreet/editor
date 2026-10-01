@@ -82,6 +82,9 @@ pub enum ConversationHostEffect {
         /// Canonical absolute HTTP(S) URLs that need a resolve attempt.
         urls: Vec<String>,
     },
+    /// The reader is near the start of the loaded turns; the outer adapter
+    /// reads older ones when the thread has any.
+    EarlierTurnsWanted,
     /// Read exact durable usage for a revealed settled footer.
     ReadFooterUsage {
         /// Exact immutable thread and run scope.
@@ -208,6 +211,13 @@ pub struct ConversationHost {
     footer_usage: HashMap<artisan_domain::RunId, Option<artisan_domain::RunUsageReport>>,
     /// Retained clock task; dropping the host drops the task with it.
     clock_task: Option<gpui::Task<()>>,
+    /// Whether a batched dispatch accepted a render invalidation whose scene
+    /// replacement still waits for [`Self::present_batched_scene`].
+    scene_stale: bool,
+    /// How often the host has rendered: the seam the application's
+    /// render-boundary tests count.
+    #[cfg(test)]
+    renders: usize,
 }
 
 impl ConversationHost {
@@ -266,6 +276,12 @@ impl ConversationHost {
         let surface_subscription = cx.observe(&surface, |host, surface, cx| {
             host.route_surface_actions(&surface, cx);
         });
+        // The surface answers engine approvals for exactly this thread; each
+        // block brings its own run and interaction identity.
+        let thread_id = controller.thread_id().clone();
+        surface.update(cx, |surface, surface_cx| {
+            surface.set_answer_thread(thread_id, surface_cx);
+        });
         let mut host = Self {
             controller,
             surface,
@@ -276,6 +292,9 @@ impl ConversationHost {
             clock_running: false,
             footer_usage: HashMap::new(),
             clock_task: None,
+            scene_stale: false,
+            #[cfg(test)]
+            renders: 0,
         };
         host.flush_controller_effects();
         host
@@ -309,6 +328,36 @@ impl ConversationHost {
     #[must_use]
     pub fn canonical_snapshot(&self) -> Option<ConversationSnapshot> {
         self.controller.snapshot().cloned()
+    }
+
+    /// Borrows the controller's last-good canonical snapshot, for readers
+    /// that only inspect it (activity replay runs on every observation).
+    #[must_use]
+    pub fn snapshot(&self) -> Option<&ConversationSnapshot> {
+        self.controller.snapshot()
+    }
+
+    /// The thread this host projects, without building the controller view.
+    #[must_use]
+    pub fn thread_id(&self) -> &ThreadId {
+        self.controller.thread_id()
+    }
+
+    /// Whether the controller holds its canonical snapshot, without cloning
+    /// it or building the full controller view (render paths ask this).
+    #[must_use]
+    pub fn has_snapshot(&self) -> bool {
+        self.controller.snapshot().is_some()
+    }
+
+    /// Whether `turn_id`'s work section is open, or `None` when the turn has
+    /// no section of its own.
+    #[must_use]
+    pub fn session_disclosure(
+        &self,
+        turn_id: &TurnId,
+    ) -> Option<crate::conversation_scene::SceneDisclosure> {
+        self.controller.session_disclosure(turn_id)
     }
 
     /// Identities of the registered observation-derived facts.
@@ -405,6 +454,57 @@ impl ConversationHost {
         event: ConversationStateEvent,
         cx: &mut Context<Self>,
     ) -> Result<(), ConversationHostError> {
+        self.dispatch_event(event, false, cx)
+    }
+
+    /// Dispatches one event of a batch exactly like [`Self::dispatch`], but
+    /// an accepted render invalidation only marks the scene stale instead of
+    /// re-projecting and replacing it.
+    ///
+    /// A caller dispatching many events in one pass (activity replay
+    /// upserts every retained fact) calls [`Self::present_batched_scene`]
+    /// once afterwards, so the scene is rebuilt once per batch rather than
+    /// once per accepted event. Any later [`Self::dispatch`] also presents a
+    /// stale scene.
+    ///
+    /// # Errors
+    ///
+    /// The same typed refusals as [`Self::dispatch`], minus scene
+    /// projection, which surfaces from [`Self::present_batched_scene`].
+    pub fn dispatch_batched(
+        &mut self,
+        event: ConversationStateEvent,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ConversationHostError> {
+        self.dispatch_event(event, true, cx)
+    }
+
+    /// Re-projects and replaces the scene once if a batched dispatch left it
+    /// stale; otherwise does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConversationHostError::SceneProjection`] when the controller
+    /// cannot project its scene.
+    pub fn present_batched_scene(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ConversationHostError> {
+        if !self.scene_stale {
+            return Ok(());
+        }
+        let presented = self.replace_scene(cx);
+        self.flush_controller_effects();
+        cx.notify();
+        presented
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: ConversationStateEvent,
+        batched: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ConversationHostError> {
         self.flush_controller_effects();
         if let Err(error) = self.dispatch_pending_extent_changes() {
             self.flush_controller_effects();
@@ -424,35 +524,15 @@ impl ConversationHost {
         match self.controller.dispatch(event) {
             Ok(()) => {
                 let requires_extent_change = self.controller_effects_require_extent_change(before);
-                if self.controller_effects_invalidate_render(before) {
-                    let scene = match self.controller.scene() {
-                        Ok(scene) => scene,
-                        Err(error) => {
-                            self.flush_controller_effects();
-                            cx.notify();
-                            return Err(ConversationHostError::SceneProjection(error));
-                        }
-                    };
-                    let live_turns: Vec<TurnId> = scene
-                        .turn_scenes()
-                        .iter()
-                        .map(|turn| turn.turn_id.clone())
-                        .collect();
-                    let clock_wanted = scene_has_active_work(&scene);
-                    self.surface.update(cx, |surface, surface_cx| {
-                        surface.replace_scene(scene, surface_cx);
-                    });
-                    self.footer_policies
-                        .retain(|turn_id, _| live_turns.contains(turn_id));
-                    if let Some(snapshot) = self.canonical_snapshot() {
-                        self.footer_usage.retain(|run, _| snapshot.items().iter().any(|item| {
-                            matches!(item, artisan_domain::ConversationItem::AssistantMessage(message) if &message.run_id == run)
-                        }));
-                    }
-                    for turn in &live_turns {
-                        self.sync_footer_speed(turn, false, cx);
-                    }
-                    self.reconcile_clock(clock_wanted, cx);
+                let invalidates = self.controller_effects_invalidate_render(before);
+                if invalidates && batched {
+                    self.scene_stale = true;
+                } else if (invalidates || self.scene_stale)
+                    && let Err(error) = self.replace_scene(cx)
+                {
+                    self.flush_controller_effects();
+                    cx.notify();
+                    return Err(error);
                 }
                 if requires_extent_change {
                     self.pending_extent_changes = self.pending_extent_changes.saturating_add(1);
@@ -479,6 +559,53 @@ impl ConversationHost {
         }
     }
 
+    /// Re-projects the controller scene into the surface and re-derives the
+    /// per-turn footer state and clock from it.
+    fn replace_scene(&mut self, cx: &mut Context<Self>) -> Result<(), ConversationHostError> {
+        self.scene_stale = false;
+        let scene = self
+            .controller
+            .scene()
+            .map_err(ConversationHostError::SceneProjection)?;
+        let live_turns: Vec<TurnId> = scene
+            .turn_scenes()
+            .iter()
+            .map(|turn| turn.turn_id.clone())
+            .collect();
+        let clock_wanted = scene_has_active_work(&scene);
+        // Ordinal zero is a thread's first turn: anything above it means
+        // older turns were left unread.
+        let earlier_turns = self
+            .controller
+            .snapshot()
+            .and_then(|snapshot| snapshot.turns().first())
+            .is_some_and(|turn| turn.ordinal.get() > 0);
+        self.surface.update(cx, |surface, surface_cx| {
+            surface.replace_scene(scene, surface_cx);
+            surface.set_earlier_turns_available(earlier_turns, surface_cx);
+        });
+        self.footer_policies
+            .retain(|turn_id, _| live_turns.contains(turn_id));
+        if let Some(snapshot) = self.controller.snapshot() {
+            let runs: std::collections::HashSet<&artisan_domain::RunId> = snapshot
+                .items()
+                .iter()
+                .filter_map(|item| match item {
+                    artisan_domain::ConversationItem::AssistantMessage(message) => {
+                        Some(&message.run_id)
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.footer_usage.retain(|run, _| runs.contains(run));
+        }
+        for turn in &live_turns {
+            self.sync_footer_speed(turn, false, cx);
+        }
+        self.reconcile_clock(clock_wanted, cx);
+        Ok(())
+    }
+
     fn route_surface_actions(
         &mut self,
         surface: &Entity<ConversationSurface>,
@@ -492,18 +619,29 @@ impl ConversationHost {
         });
         while let Some(action) = surface.read(cx).next_action().cloned() {
             let decision = match action {
-                ConversationSurfaceAction::DisclosureToggleRequested { id, requested_open } => self
-                    .route_controller_event(
-                        ConversationStateEvent::Disclosure {
-                            scene_id: id,
-                            event: if requested_open {
-                                crate::conversation_view_machine::DisclosureEvent::UserOpen
-                            } else {
-                                crate::conversation_view_machine::DisclosureEvent::UserClose
-                            },
-                        },
+                ConversationSurfaceAction::DisclosureToggleRequested { id, requested_open } => {
+                    // A user toggle anchors the reader where they clicked:
+                    // detach from tail following first, so the extent change
+                    // the toggle causes grows the transcript downward instead
+                    // of re-pinning the bottom and sliding the header up.
+                    match self.route_controller_event(
+                        ConversationStateEvent::Viewport(ViewportEvent::UserInterruptedScroll),
                         cx,
-                    ),
+                    ) {
+                        SurfaceRouteDecision::Accepted => self.route_controller_event(
+                            ConversationStateEvent::Disclosure {
+                                scene_id: id,
+                                event: if requested_open {
+                                    crate::conversation_view_machine::DisclosureEvent::UserOpen
+                                } else {
+                                    crate::conversation_view_machine::DisclosureEvent::UserClose
+                                },
+                            },
+                            cx,
+                        ),
+                        SurfaceRouteDecision::Backpressured => SurfaceRouteDecision::Backpressured,
+                    }
+                }
                 ConversationSurfaceAction::ViewportObserved(observation) => self
                     .route_controller_event(
                         ConversationStateEvent::Viewport(ViewportEvent::UserScrolled {
@@ -528,6 +666,16 @@ impl ConversationHost {
                 }
                 ConversationSurfaceAction::ResolveRichLinks { urls } => {
                     self.route_rich_link_requests(urls, cx)
+                }
+                ConversationSurfaceAction::EarlierTurnsWanted => {
+                    if self.total_pending_effect_count() >= CONVERSATION_HOST_MAX_EFFECTS {
+                        SurfaceRouteDecision::Backpressured
+                    } else {
+                        self.effects
+                            .push(ConversationHostEffect::EarlierTurnsWanted);
+                        cx.notify();
+                        SurfaceRouteDecision::Accepted
+                    }
                 }
                 ConversationSurfaceAction::TurnFooterRevealed { turn } => {
                     self.route_footer_revealed(&turn, surface, cx)
@@ -885,8 +1033,20 @@ fn effect_requires_extent_change(effect: &ConversationStateEffect) -> bool {
     )
 }
 
+impl ConversationHost {
+    /// How often the host has rendered.
+    #[cfg(test)]
+    pub(crate) const fn renders(&self) -> usize {
+        self.renders
+    }
+}
+
 impl Render for ConversationHost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         self.surface.clone()
     }
 }

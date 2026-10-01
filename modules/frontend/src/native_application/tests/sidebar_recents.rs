@@ -778,4 +778,31 @@ fn working_threads_show_the_state_dot_until_their_work_ends(cx: &mut TestAppCont
             .is_none(),
         "the dot leaves when the pushed list says the work ended"
     );
+
+    // Each other state shows its own dot, one at a time.
+    for (attention, shown) in [
+        (artisan_domain::ThreadAttention::AwaitingAnswer, "awaiting"),
+        (artisan_domain::ThreadAttention::Finished, "finished"),
+        (artisan_domain::ThreadAttention::Failed, "failed"),
+    ] {
+        let mut row = recent_row("busy", "alpha", "Busy thread", "owner/repo", HOUR_MS);
+        row.thread.has_active_work = attention == artisan_domain::ThreadAttention::AwaitingAnswer;
+        row.thread.attention = attention;
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                push_recent(application, recent_listing(vec![row]), cx);
+            });
+        });
+        cx.run_until_parked();
+        for state in ["awaiting", "working", "finished", "failed"] {
+            assert_eq!(
+                cx.debug_bounds(Box::leak(
+                    format!("artisan-sidebar-thread-busy-{state}").into_boxed_str()
+                ))
+                .is_some(),
+                state == shown,
+                "{attention:?} shows only the {shown} dot"
+            );
+        }
+    }
 }

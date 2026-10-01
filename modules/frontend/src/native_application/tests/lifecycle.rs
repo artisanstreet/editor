@@ -528,6 +528,7 @@ fn terminal_switch_refusal_preserves_old_host_and_disables_picker(cx: &mut TestA
                 scope: artisan_domain::ComposerDraftScope::Thread(source.clone()),
                 request_id: request("message-stopped"),
                 token,
+                selection: None,
             });
             let (sink, commands) = command_sink([Err(super::CommandSendError::Stopped)]);
             application.test_command_sink = Some(sink);
@@ -974,6 +975,64 @@ fn recovered_thread_opens_on_its_forge_draft_not_the_old_composer(cx: &mut TestA
 }
 
 #[gpui::test]
+fn choosing_a_project_on_the_new_thread_screen_stays_on_its_new_task_draft(
+    cx: &mut TestAppContext,
+) {
+    // With nothing typed, choosing another project while starting a new
+    // thread must keep the new-thread screen, scoped to that project: it
+    // never reads the destination's listing and reopens a remembered thread.
+    let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, commands) = command_sink([]);
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            application.test_command_sink = Some(sink);
+            let projects = ProjectListing::new(vec![
+                project("switch-alpha", "Alpha"),
+                project("switch-beta", "Beta"),
+            ])
+            .unwrap();
+            let alpha = ProjectId::parse("switch-alpha").unwrap();
+            let beta = ProjectId::parse("switch-beta").unwrap();
+            application.handle_projects(&projects, cx);
+            application.handle_empty_threads(&alpha, cx);
+            assert!(matches!(
+                application.route(),
+                NativeRoute::NewThread { project: Some(shown) } if shown == &alpha
+            ));
+            assert_eq!(application.composer.read(cx).draft(), "");
+            commands.borrow_mut().clear();
+            application.choose_project(beta.clone(), cx);
+            assert_eq!(application.selected_project.as_ref(), Some(&beta));
+            assert_eq!(application.selected_thread, None);
+            assert!(application.conversation_host.is_none());
+            assert!(matches!(
+                application.route(),
+                NativeRoute::NewThread { project: Some(shown) } if shown == &beta
+            ));
+            assert!(matches!(application.state, NativeViewState::EmptyThreads));
+            assert!(
+                !application.project_navigation.awaiting_threads,
+                "no remembered thread may open over the new-thread screen"
+            );
+            assert!(
+                !commands.borrow().iter().any(|command| matches!(
+                    command,
+                    NativeTransportCommand::SelectProject(_)
+                        | NativeTransportCommand::CreateTask(_)
+                        | NativeTransportCommand::StopRun(_)
+                )),
+                "{:?}",
+                commands.borrow()
+            );
+            assert_eq!(
+                application.composer.read(cx).draft_scope(),
+                Some(artisan_domain::ComposerDraftScope::Project(beta.clone()))
+            );
+        });
+    });
+}
+
+#[gpui::test]
 fn initially_empty_project_moves_its_draft_into_the_destination_new_task_draft(
     cx: &mut TestAppContext,
 ) {
@@ -1019,5 +1078,34 @@ fn initially_empty_project_moves_its_draft_into_the_destination_new_task_draft(
                 NativeTransportCommand::SubmitComposerDraft(_) | NativeTransportCommand::StopRun(_)
             )));
         });
+    });
+}
+
+#[gpui::test]
+fn reconnect_remounts_selected_thread_after_old_host_is_retired(cx: &mut TestAppContext) {
+    let (view, _) = cx.add_window_view(|window, cx| test_application(window, cx));
+    cx.update(|app| {
+        view.update(app, |application, cx| {
+            let project_id = ProjectId::parse("recovery-project").unwrap();
+            let thread_id = ThreadId::parse("recovery-thread").unwrap();
+            application.selected_project = Some(project_id.clone());
+            application.selected_thread = Some(thread_id.clone());
+            assert!(application.conversation_host.is_none());
+            let listing = ThreadListing::new(vec![thread(
+                "recovery-thread",
+                "recovery-project",
+                "Recovered",
+            )])
+            .unwrap();
+            application.handle_threads_without_switch(true, &project_id, &listing, cx);
+            let host = application
+                .conversation_host
+                .as_ref()
+                .expect("reconnect mounts the selected conversation");
+            assert_eq!(
+                host.read(cx).controller_view().delivery.thread_id,
+                thread_id
+            );
+        })
     });
 }

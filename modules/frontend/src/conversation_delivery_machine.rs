@@ -55,6 +55,9 @@ pub enum ConversationDeliveryEvent {
     SnapshotReceived(ConversationSnapshot),
     /// Authoritative patch batch received.
     BatchReceived(PatchBatch),
+    /// One page of older turns, read on demand, to add in front of the
+    /// loaded window. It changes neither the cursor nor the phase.
+    EarlierTurnsReceived(ConversationSnapshot),
     /// Authoritative resumed subscription acknowledgement received.
     SubscriptionResumed {
         /// Thread named by the acknowledgement.
@@ -195,6 +198,18 @@ impl Delivery {
         }
     }
 
+    /// Adds a page of older turns in front of the window. The page is
+    /// history, not delivery: whatever happens, the phase stays as it is.
+    fn extend_earlier(&mut self, context: &mut DeliveryContext, page: &ConversationSnapshot) {
+        match self.projection.extend_earlier(page) {
+            Ok(SnapshotDisposition::Applied) => {
+                context.push(ConversationDeliveryEffect::Invalidate);
+            }
+            Ok(SnapshotDisposition::Unchanged) => {}
+            Err(error) => context.push(ConversationDeliveryEffect::ReportRefusal { error }),
+        }
+    }
+
     fn current_phase(state: &State) -> DeliveryPhase {
         match state {
             State::AwaitingSnapshot { .. } => DeliveryPhase::AwaitingSnapshot,
@@ -260,6 +275,10 @@ impl Delivery {
                         }
                     }
                 }
+            }
+            ConversationDeliveryEvent::EarlierTurnsReceived(page) => {
+                self.extend_earlier(context, page);
+                Handled
             }
             ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
                 match self.projection.acknowledge_resumed(thread_id, *cursor) {
@@ -334,6 +353,10 @@ impl Delivery {
                     }
                 }
             }
+            ConversationDeliveryEvent::EarlierTurnsReceived(page) => {
+                self.extend_earlier(context, page);
+                Handled
+            }
             ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
                 match self.projection.acknowledge_resumed(thread_id, *cursor) {
                     Ok(()) => Handled,
@@ -392,6 +415,10 @@ impl Delivery {
                         Handled
                     }
                 }
+            }
+            ConversationDeliveryEvent::EarlierTurnsReceived(page) => {
+                self.extend_earlier(context, page);
+                Handled
             }
             ConversationDeliveryEvent::SubscriptionResumed { thread_id, cursor } => {
                 match self.projection.acknowledge_resumed(thread_id, *cursor) {

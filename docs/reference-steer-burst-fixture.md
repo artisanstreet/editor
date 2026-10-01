@@ -25,8 +25,10 @@ stays live — **no terminal event**. The turn closes only on
 
 Validated against the production verb (`engine_owner/codex.rs`
 `steer_live_turn`): `threadId == "thread-fixture-1"`,
-`expectedTurnId == "turn-1"`, `input` a non-empty array whose first item
-carries non-empty text. **Every** received request — valid or not — is
+`expectedTurnId == "turn-1"`, `input` a non-empty `UserInput` array whose
+every item is either `type: "text"` with non-empty `text` or
+`type: "image"` with a non-empty `url` (image-only steers are valid; the
+production verb shares `turn/start`'s `prompt_input` encoder). **Every** received request — valid or not — is
 appended as one JSON line (`id` + full `params`) to
 `steer-requests.jsonl` in the project cwd and flushed before any reply,
 so a test counting lines observes exactly one provider write per steer

@@ -67,7 +67,24 @@ let
     python3
     capnproto
   ];
-  common = {
+  # A build script that copies a file out of the read-only vendor directory
+  # (libsqlite3-sys and its prebuilt bindings) leaves a read-only file in its
+  # output directory and cannot run a second time: the copy fails with
+  # "Permission denied". Cargo reruns a build script whenever it judges one
+  # of its dependencies newer than the script, which a wall clock stepping
+  # backwards mid-build makes happen. The target directory is therefore made
+  # writable before every Cargo build: between the `check` and `build` of a
+  # dependency derivation, and after the cached artifacts are unpacked.
+  writableTarget = ''
+    if [ -d "''${CARGO_TARGET_DIR:-target}" ]; then
+      chmod -R u+w "''${CARGO_TARGET_DIR:-target}"
+    fi
+  '';
+  rerunnableBuild = {
+    preBuild = writableTarget;
+    cargoBuildCommand = "${writableTarget} cargoWithProfile build";
+  };
+  common = rerunnableBuild // {
     inherit src;
     pname = "artisan-workspace";
     inherit version;
@@ -122,6 +139,7 @@ let
       nativeTools
       releaseTrust
       graphicsLibraryPath
+      rerunnableBuild
       ;
   };
   production = stageBuilds.packages.linux-production;

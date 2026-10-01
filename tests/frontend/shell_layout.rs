@@ -10,11 +10,19 @@
 mod shell_layout;
 
 use shell_layout::{
-    BALANCED_PROSE_WIDTH_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS, INSPECTOR_MIN_WIDTH_PIXELS,
+    BALANCED_PROSE_WIDTH_PIXELS, DESKTOP_CHAT_FLOOR_PIXELS, DESKTOP_COLUMN_MIN_PIXELS,
+    DESKTOP_RAIL_CLEARANCE_PIXELS, INSPECTOR_MAX_WIDTH_PIXELS, INSPECTOR_MIN_WIDTH_PIXELS,
     LOOSE_PROSE_WIDTH_PIXELS, PROSE_GUTTER_PIXELS, ProseWidth, SHELL_CHROME_PIXELS,
     THREAD_RAIL_BAND_PIXELS, THREAD_RAIL_GAP_PIXELS, TIGHT_PROSE_WIDTH_PIXELS,
-    inspector_column_pixels, prose_column_pixels, thread_inspector_fits_beside_rail,
+    desktop_chat_min_pixels, desktop_full_window_pixels, desktop_inspector_pixels,
+    desktop_min_window_pixels, desktop_sidebar_pixels, inspector_column_pixels,
+    prose_column_pixels, thread_inspector_fits_beside_rail,
 };
+
+/// The desktop inspector width the shell passes in: its expanded sidebar
+/// width (`DESKTOP_SIDEBAR_WIDTH_PX`, not importable from this dependency-free
+/// harness).
+const DESKTOP_INSPECTOR_WIDTH_PIXELS: f64 = 327.0;
 
 #[test]
 fn prose_widths_match_the_typescript_tokens() {
@@ -163,6 +171,107 @@ fn invalid_viewports_have_a_finite_inspector_fallback_and_never_fit() {
             assert!(
                 !thread_inspector_fits_beside_rail(viewport, prose_width),
                 "invalid viewport unexpectedly fits: viewport={viewport} prose={prose_width:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn desktop_chat_keeps_the_prose_column_plus_rail_clearance() {
+    assert_eq!(DESKTOP_RAIL_CLEARANCE_PIXELS, 48.0);
+    assert_eq!(DESKTOP_COLUMN_MIN_PIXELS, 240.0);
+    for prose_width in ProseWidth::ALL {
+        assert_eq!(
+            desktop_chat_min_pixels(prose_width),
+            prose_column_pixels(prose_width) + 96.0
+        );
+    }
+    assert_eq!(desktop_chat_min_pixels(ProseWidth::Balanced), 864.0);
+    assert_eq!(DESKTOP_CHAT_FLOOR_PIXELS, 480.0);
+    assert_eq!(desktop_min_window_pixels(), DESKTOP_CHAT_FLOOR_PIXELS);
+    assert_eq!(
+        desktop_full_window_pixels(ProseWidth::Balanced, DESKTOP_INSPECTOR_WIDTH_PIXELS),
+        1518.0
+    );
+}
+
+#[test]
+fn desktop_sidebar_shrinks_to_its_minimum_then_hides_without_jumping() {
+    let full = DESKTOP_INSPECTOR_WIDTH_PIXELS;
+    let sidebar = |window| desktop_sidebar_pixels(window, ProseWidth::Balanced, full);
+    assert_eq!(sidebar(2000.0), Some(full));
+    assert_eq!(sidebar(864.0 + full), Some(full));
+    assert_eq!(sidebar(864.0 + 300.0), Some(300.0));
+    assert_eq!(sidebar(1104.0), Some(240.0));
+    assert_eq!(sidebar(1103.0), None);
+    assert_eq!(sidebar(DESKTOP_CHAT_FLOOR_PIXELS), None);
+    let mut previous = sidebar(1104.0).expect("sidebar seats at its minimum");
+    for window in (1104..2200).map(f64::from) {
+        let next = sidebar(window).expect("sidebar stays once it fits");
+        assert!(
+            next >= previous,
+            "sidebar shrank as the window grew at {window}"
+        );
+        assert!(next - previous <= 1.0, "sidebar jumped at {window}");
+        previous = next;
+    }
+}
+
+#[test]
+fn desktop_inspector_takes_what_the_chat_leaves_inclusively() {
+    let full = DESKTOP_INSPECTOR_WIDTH_PIXELS;
+    for prose_width in ProseWidth::ALL {
+        let boundary = desktop_chat_min_pixels(prose_width) + DESKTOP_COLUMN_MIN_PIXELS;
+        assert_eq!(
+            desktop_inspector_pixels(boundary, prose_width, full),
+            Some(DESKTOP_COLUMN_MIN_PIXELS),
+            "exact boundary should fit: prose={prose_width:?}"
+        );
+        assert_eq!(
+            desktop_inspector_pixels(boundary - 1.0, prose_width, full),
+            None,
+            "one pixel below boundary should not fit: prose={prose_width:?}"
+        );
+        assert_eq!(
+            desktop_inspector_pixels(boundary + 10_000.0, prose_width, full),
+            Some(full)
+        );
+    }
+    // The shrinking sidebar and the inspector agree: the inspector appears
+    // only once the sidebar is at full width, and the chat always keeps its
+    // minimum.
+    for window in (480..2400).map(f64::from) {
+        let sidebar = desktop_sidebar_pixels(window, ProseWidth::Balanced, full).unwrap_or(0.0);
+        let inspector =
+            desktop_inspector_pixels(window - sidebar, ProseWidth::Balanced, full).unwrap_or(0.0);
+        if inspector > 0.0 {
+            assert_eq!(sidebar, full, "window={window}");
+        }
+        if sidebar > 0.0 {
+            assert!(window - sidebar - inspector >= 864.0, "window={window}");
+        } else {
+            assert_eq!(inspector, 0.0, "chat-only window={window}");
+        }
+    }
+}
+
+#[test]
+fn desktop_layout_rejects_invalid_geometry() {
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+        for prose_width in ProseWidth::ALL {
+            assert_eq!(
+                desktop_inspector_pixels(invalid, prose_width, DESKTOP_INSPECTOR_WIDTH_PIXELS),
+                None,
+                "invalid content unexpectedly fits: content={invalid} prose={prose_width:?}"
+            );
+            assert_eq!(
+                desktop_inspector_pixels(10_000.0, prose_width, invalid),
+                None,
+                "invalid column unexpectedly fits: column={invalid} prose={prose_width:?}"
+            );
+            assert_eq!(
+                desktop_sidebar_pixels(invalid, prose_width, DESKTOP_INSPECTOR_WIDTH_PIXELS),
+                Some(DESKTOP_INSPECTOR_WIDTH_PIXELS)
             );
         }
     }

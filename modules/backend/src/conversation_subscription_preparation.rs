@@ -83,8 +83,9 @@ impl PreparedConversationSubscription {
 /// as `Pending` at exactly the cursor declared to the client.
 ///
 /// Fresh subscribes read one repository snapshot using
-/// [`ConversationQueryBounds::Window`] with exactly
-/// [`CONVERSATION_QUERY_MAX_TURNS`] before any registry mutation and register
+/// [`ConversationQueryBounds::Window`] with the newest turns the subscriber
+/// asked for, or [`CONVERSATION_QUERY_MAX_TURNS`] when it named no count,
+/// before any registry mutation and register
 /// `Pending` at `snapshot.cursor()` with `Fresh(Start(snapshot))`.
 ///
 /// Resume subscribes call `Repository::read_conversation_patch_replay` once.
@@ -122,10 +123,12 @@ pub async fn prepare_conversation_subscription(
             let query = ConversationQuery {
                 thread_id: subscribe.thread_id.clone(),
                 bounds: ConversationQueryBounds::Window {
-                    maximum_turn_count: QueryTurnCount::new(u64::from(
-                        CONVERSATION_QUERY_MAX_TURNS,
-                    ))
-                    .expect("CONVERSATION_QUERY_MAX_TURNS is within validated bounds"),
+                    // A subscriber that opens on its newest turns reads the
+                    // older ones on demand.
+                    maximum_turn_count: subscribe.newest_turns.unwrap_or_else(|| {
+                        QueryTurnCount::new(u64::from(CONVERSATION_QUERY_MAX_TURNS))
+                            .expect("CONVERSATION_QUERY_MAX_TURNS is within validated bounds")
+                    }),
                 },
             };
             let snapshot = repository.read_conversation_snapshot(&query).await?;

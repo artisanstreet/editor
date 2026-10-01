@@ -37,8 +37,10 @@ pub const CLAUDE_MINIMUM_CLI_VERSION: &str = "2.1.220";
 /// gate is enforced in this packet.
 pub const CLAUDE_NATIVE_CONTINUATION_VERSION: &str = "2.1.220";
 
-/// First Claude Code release whose `--thinking-display summarized` launch
-/// Artisan captured and verified (2026-09-25 capture).
+/// First Claude Code release whose `--thinking-display` launch Artisan
+/// captured and verified (2026-09-25 capture of `summarized`; the 2026-09-27
+/// `highlights` capture proved the same release accepts the flag and that
+/// display eligibility is a server-side property of the execution context).
 ///
 /// This is a known-good floor, not the first release that accepted the
 /// hidden flag: older CLIs keep their existing arguments. It is independent
@@ -54,8 +56,9 @@ pub const CLAUDE_THINKING_DISPLAY_VERSION: &str = "2.1.282";
 pub enum ClaudeThinkingDisplaySupport {
     /// Below the verified display floor or unparseable: omit the flag.
     Unsupported,
-    /// `--thinking-display summarized` is verified for this release.
-    Summarized,
+    /// `--thinking-display` is verified for this release; the requested
+    /// value is resolved per turn by the backend display policy.
+    DisplayControl,
 }
 
 /// Resolves the verified thinking-display support for one CLI version.
@@ -70,7 +73,9 @@ pub fn claude_thinking_display_support(version: &str) -> ClaudeThinkingDisplaySu
         parse_claude_version(version),
         parse_claude_version(CLAUDE_THINKING_DISPLAY_VERSION),
     ) {
-        (Ok(version), Ok(floor)) if version >= floor => ClaudeThinkingDisplaySupport::Summarized,
+        (Ok(version), Ok(floor)) if version >= floor => {
+            ClaudeThinkingDisplaySupport::DisplayControl
+        }
         _ => ClaudeThinkingDisplaySupport::Unsupported,
     }
 }
@@ -463,9 +468,9 @@ mod tests {
         for (version, support) in [
             (
                 "2.1.282 (Claude Code)",
-                ClaudeThinkingDisplaySupport::Summarized,
+                ClaudeThinkingDisplaySupport::DisplayControl,
             ),
-            ("2.2.0", ClaudeThinkingDisplaySupport::Summarized),
+            ("2.2.0", ClaudeThinkingDisplaySupport::DisplayControl),
             ("2.1.281", ClaudeThinkingDisplaySupport::Unsupported),
             ("2.1.220", ClaudeThinkingDisplaySupport::Unsupported),
             ("no version", ClaudeThinkingDisplaySupport::Unsupported),

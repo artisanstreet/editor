@@ -41,6 +41,9 @@ const USER_PREFERENCES_MIGRATION: &str = "m20260929_000019_user_preferences";
 const CHUNKED_ATTACHMENTS_MIGRATION: &str = "m20260930_000020_chunked_composer_attachments";
 const ITEM_THREAD_INDEX_MIGRATION: &str = "m20261001_000021_conversation_item_thread_index";
 const PROJECT_DRAFT_SUBMISSIONS_MIGRATION: &str = "m20261002_000022_project_draft_submissions";
+const THREAD_READS_MIGRATION: &str = "m20261003_000023_thread_reads";
+const DROP_STORED_THINKING_MIGRATION: &str = "m20261004_000024_drop_stored_thinking";
+const LEDGER_TAG_MIGRATION: &str = "m20261005_000025_observation_ledger_tag";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -127,7 +130,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        22
+        25
     );
     first
         .execute_unprepared(
@@ -161,7 +164,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        22
+        25
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -237,7 +240,10 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             USER_PREFERENCES_MIGRATION.to_string(),
             CHUNKED_ATTACHMENTS_MIGRATION.to_string(),
             ITEM_THREAD_INDEX_MIGRATION.to_string(),
-            PROJECT_DRAFT_SUBMISSIONS_MIGRATION.to_string()
+            PROJECT_DRAFT_SUBMISSIONS_MIGRATION.to_string(),
+            THREAD_READS_MIGRATION.to_string(),
+            DROP_STORED_THINKING_MIGRATION.to_string(),
+            LEDGER_TAG_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -1000,7 +1006,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        22
+        25
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1115,7 +1121,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        22,
+        25,
         "migration must record every version exactly once"
     );
     assert_eq!(
@@ -1217,6 +1223,120 @@ async fn user_preferences_start_empty_and_follow_their_projects() -> Result<(), 
         .await?,
         1
     );
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_reads_count_existing_threads_as_read_and_follow_their_thread()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    Migrator::up(&database, Some(22)).await?;
+    for statement in [
+        "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/p1', 'P1', 1)",
+        "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'T', 2, 2)",
+    ] {
+        database.execute_unprepared(statement).await?;
+    }
+    migrate_to_current(&database).await?;
+    // A history that predates read tracking does not light up at once.
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM thread_reads WHERE thread_id = 't1' AND read_at_ms > 0"
+        )
+        .await?,
+        1
+    );
+    // A thread created afterwards has never been open.
+    database
+        .execute_unprepared(
+            "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t2', 'p1', 'T', 3, 3)",
+        )
+        .await?;
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM thread_reads").await?,
+        1
+    );
+    database
+        .execute_unprepared("DELETE FROM threads WHERE thread_id = 't1'")
+        .await?;
+    assert_eq!(
+        scalar_i64(&database, "SELECT count(*) FROM thread_reads").await?,
+        0
+    );
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_thinking_rows_are_dropped_and_other_activity_is_kept() -> Result<(), Box<dyn Error>>
+{
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    Migrator::up(&database, Some(23)).await?;
+    for statement in [
+        "INSERT INTO attached_projects (project_id, root_path, display_name, attached_at_ms) VALUES ('p1', 'C:/p1', 'P1', 1)",
+        "INSERT INTO threads (thread_id, project_id, title, created_at_ms, updated_at_ms) VALUES ('t1', 'p1', 'T', 2, 2)",
+        "INSERT INTO messages (message_id, thread_id, ordinal, body, accepted_at_ms) VALUES ('m1', 't1', 0, 'hello', 7)",
+        "INSERT INTO conversation_ordinals (thread_id, ordinal, kind, entity_id) VALUES ('t1', 0, 'turn', 'turn1')",
+        "INSERT INTO conversation_turns (turn_id, thread_id, ordinal, kind, revision, lifecycle, created_at_ms, updated_at_ms) VALUES ('turn1', 't1', 0, 'turn', 0, 'pending', 7, 7)",
+        "INSERT INTO assistant_runs (run_id, thread_id, run_start_key, origin_message_id, origin_turn_id, lifecycle, generation, created_at_ms, updated_at_ms, engine_run_config_version, engine_run_config_revision, engine_run_config) VALUES ('r1', 't1', zeroblob(32), 'm1', 'turn1', 'queued', 0, 10, 10, 2, 1, X'00')",
+    ] {
+        database.execute_unprepared(statement).await?;
+    }
+    let row = |sequence: i64, observation: &str| {
+        format!(
+            "INSERT INTO observation_ledger (thread_id, delivery_sequence, run_id, \
+             observation_sequence, turn_id, committed_at_ms, engine, binding_version, \
+             observation_version, observation_bytes) VALUES ('t1', {sequence}, 'r1', {sequence}, \
+             'turn1', {sequence}, 'claude', 1, 1, CAST('{{\"format\":\"artisan.observation.v1\",\
+             \"version\":1,\"engine\":\"claude\",\"binding_version\":1,\
+             \"observations\":[{observation}]}}' AS BLOB))"
+        )
+    };
+    for statement in [
+        row(
+            1,
+            r#"{"tag":"reasoning_summary_delta","id":"o1","delta":"I"}"#,
+        ),
+        row(
+            2,
+            r#"{"tag":"reasoning_summary_completed","id":"o2","text":"I see"}"#,
+        ),
+        // A tool whose own text quotes the thinking tag is not a thinking row.
+        row(
+            3,
+            r#"{"tag":"tool","id":"o3","detail":"grep \"observations\":[{\"tag\":\"reasoning_summary_delta\""}"#,
+        ),
+        row(4, r#"{"tag":"terminal_activity","id":"o4"}"#),
+    ] {
+        database.execute_unprepared(&statement).await?;
+    }
+    migrate_to_current(&database).await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT group_concat(delivery_sequence) = '3,4' FROM observation_ledger"
+        )
+        .await?,
+        1,
+        "only the two thinking rows are removed"
+    );
+    // The kept rows record their payload's tag.
+    for (sequence, tag) in [(3, "tool"), (4, "terminal_activity")] {
+        assert_eq!(
+            scalar_i64(
+                &database,
+                &format!(
+                    "SELECT count(*) FROM observation_ledger \
+                     WHERE delivery_sequence = {sequence} AND observation_tag = '{tag}'"
+                )
+            )
+            .await?,
+            1,
+            "row {sequence} records the {tag} tag"
+        );
+    }
     database.close().await?;
     Ok(())
 }

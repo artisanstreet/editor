@@ -379,7 +379,7 @@ impl StartupReconciliationPatchSource for DeterministicSource {
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         let turn_patch =
             PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("turn patch");
-        let item_patch = candidate.assistant_item_id.as_ref().map(|_| {
+        let item_patch = candidate.assistant_item_ids.first().map(|_| {
             PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("item patch")
         });
         Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
@@ -394,6 +394,23 @@ impl StartupReconciliationPatchSource for PanickingSource {
         _candidate: &StartupReconciliationCandidate,
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         panic!("patch source must not be consulted for empty pass");
+    }
+}
+
+/// Holds every candidate, like the live sweep for claims its own workers
+/// are still executing; patches must never be requested.
+struct HoldingSource;
+
+impl StartupReconciliationPatchSource for HoldingSource {
+    fn patch_ids_for(
+        &mut self,
+        _candidate: &StartupReconciliationCandidate,
+    ) -> Result<StartupReconciliationPatches, PatchSourceError> {
+        panic!("a held candidate must never be disposed");
+    }
+
+    fn holds(&mut self, _candidate: &StartupReconciliationCandidate) -> bool {
+        true
     }
 }
 
@@ -420,7 +437,7 @@ impl StartupReconciliationPatchSource for FailingSource {
         }
         let turn_patch =
             PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("turn patch");
-        let item_patch = candidate.assistant_item_id.as_ref().map(|_| {
+        let item_patch = candidate.assistant_item_ids.first().map(|_| {
             PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("item patch")
         });
         Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
@@ -441,7 +458,7 @@ impl StartupReconciliationPatchSource for MismatchedShapeSource {
         let item_patch = match self.mode {
             0 => {
                 // missing item patch when item exists, extra when not
-                if candidate.assistant_item_id.is_some() {
+                if !candidate.assistant_item_ids.is_empty() {
                     None
                 } else {
                     Some(PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"))
@@ -450,7 +467,7 @@ impl StartupReconciliationPatchSource for MismatchedShapeSource {
             1 => {
                 // colliding identities
                 let colliding = turn_patch.clone();
-                if candidate.assistant_item_id.is_some() {
+                if !candidate.assistant_item_ids.is_empty() {
                     Some(colliding)
                 } else {
                     None
@@ -486,7 +503,7 @@ impl StartupReconciliationPatchSource for ShapeValidatingSource {
         &mut self,
         candidate: &StartupReconciliationCandidate,
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
-        let has_item = candidate.assistant_item_id.is_some();
+        let has_item = !candidate.assistant_item_ids.is_empty();
         self.calls
             .push((candidate.run_id.as_str().to_owned(), has_item));
         let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
@@ -517,8 +534,8 @@ impl StartupReconciliationPatchSource for SignalingStaleSource {
         }
         let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
         let item_patch = candidate
-            .assistant_item_id
-            .as_ref()
+            .assistant_item_ids
+            .first()
             .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
         Ok(StartupReconciliationPatches::new(turn_patch, item_patch))
     }
@@ -537,8 +554,8 @@ impl StartupReconciliationPatchSource for SignalingReplaySource {
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         let turn_patch = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
         let item_patch = candidate
-            .assistant_item_id
-            .as_ref()
+            .assistant_item_ids
+            .first()
             .map(|_| PatchId::parse(format!("item-{}", candidate.run_id.as_str())).expect("p"));
         if candidate.run_id.as_str() == self.target {
             let candidate_clone = candidate.clone();
@@ -565,7 +582,7 @@ impl StartupReconciliationPatchSource for FirstOkSecondMismatched {
         self.calls += 1;
         if self.calls == 1 {
             let turn = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
-            assert!(candidate.assistant_item_id.is_none());
+            assert!(candidate.assistant_item_ids.is_empty());
             return Ok(StartupReconciliationPatches::new(turn, None));
         }
         let turn = PatchId::parse(format!("turn-{}", candidate.run_id.as_str())).expect("p");
@@ -913,7 +930,7 @@ async fn identical_pass_replay_no_duplicate_and_already_interrupted() {
                         candidate: &candidate,
                         operated_at: UnixMillis::from_millis(SWEEP_OPERATED_AT_MS),
                         turn_patch_id: &turn_patch,
-                        item_patch_id: item_patch.as_ref(),
+                        item_patch_ids: &item_patch.into_iter().collect::<Vec<_>>(),
                     },
                 )
                 .await
@@ -1360,4 +1377,32 @@ fn live_lease_expiry_input_selects_the_live_recovery_text() {
         StartupReconciliationSweepInput::live_lease_expiry(at, 0),
         Err(StartupReconciliationSweepError::InvalidLimit { limit: 0 })
     ));
+}
+
+#[tokio::test]
+async fn held_candidates_are_never_reaped() {
+    let (database, repository) = memory_repository().await;
+    seed_project_and_thread(&database, &repository, "thread-1").await;
+    let (_claimed, _receipt, _sk, _creds) =
+        queue_claim_launch(&repository, "thread-1", "message-1", "run-1", "turn-1").await;
+    let before = fetch_all(&database).await;
+
+    let input =
+        StartupReconciliationSweepInput::new(UnixMillis::from_millis(SWEEP_OPERATED_AT_MS), 10)
+            .expect("input");
+    let report = sweep_startup_reconciliation(&repository, input, &mut HoldingSource)
+        .await
+        .expect("sweep");
+
+    assert_eq!(
+        report,
+        StartupReconciliationSweepReport {
+            discovered: 1,
+            attempted: 0,
+            interrupted: 0,
+            already_interrupted: 0,
+            skipped_moved: 0,
+        }
+    );
+    assert_eq!(fetch_all(&database).await, before);
 }

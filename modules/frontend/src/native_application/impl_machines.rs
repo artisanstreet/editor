@@ -87,7 +87,10 @@ impl NativeApplication {
                     cx.emit(SelectMachine(Some(home)));
                 }
                 Err(error) => {
-                    eprintln!("Host import failed: {error}");
+                    eprintln!(
+                        "Host import failed: {}",
+                        artisan_domain::ErrorChain(&error)
+                    );
                     app.window_error = Some("Could not add this host. Select a valid Forge invitation from a trusted machine.".into());
                     cx.notify();
                 }

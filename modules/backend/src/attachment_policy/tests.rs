@@ -18,11 +18,33 @@ fn dimensions_of(image: &ImageAttachment) -> (u32, u32) {
 #[test]
 fn an_oversized_picture_is_rescaled_to_the_long_edge_for_every_engine() {
     let source = picked(ImageMimeType::Png, png(2577, 3));
-    for engine in ["codex", "claude", "grok", "cursor", "opencode2"] {
+    for engine in ["codex", "grok", "cursor", "opencode2"] {
         let fitted =
             fit_draft_images(engine, &[(source.clone(), "wide.png".to_owned())]).expect("fits");
         assert_eq!(dimensions_of(&fitted[0]), (2576, 3), "{engine}");
     }
+}
+
+#[test]
+fn claude_pictures_fit_under_the_many_image_limit() {
+    let source = picked(ImageMimeType::Png, png(2000, 1124));
+    let fitted = fit_draft_images("claude", &[(source, "shot.png".to_owned())]).expect("fits");
+    assert_eq!(dimensions_of(&fitted[0]), (1568, 881));
+}
+
+#[test]
+fn webp_is_encoded_lossy() {
+    let noisy = DynamicImage::ImageRgb8(image::RgbImage::from_fn(640, 480, |x, y| {
+        let v = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) as u8;
+        image::Rgb([v, v.wrapping_add(85), v.wrapping_add(170)])
+    }));
+    let lossy = encode(&noisy, ImageMediaType::Webp).expect("webp");
+    assert_eq!(&lossy[12..16], b"VP8 ", "lossy WebP bitstream");
+    let mut lossless = Vec::new();
+    noisy
+        .write_to(&mut Cursor::new(&mut lossless), ImageFormat::WebP)
+        .expect("lossless webp");
+    assert!(lossy.len() < lossless.len());
 }
 
 #[test]

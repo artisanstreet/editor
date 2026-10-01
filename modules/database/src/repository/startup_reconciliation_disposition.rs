@@ -11,7 +11,8 @@
 
 use artisan_domain::{PatchId, UnixMillis};
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ConnectionTrait, DbBackend, EntityTrait, Statement,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
+    QueryFilter, QueryOrder, Statement,
 };
 use thiserror::Error;
 
@@ -27,8 +28,7 @@ use super::{Repository, RepositoryError, corrupt_data, database_error, millis};
 ///
 /// The interruption code, message, and dispatch reason are fixed typed
 /// bounded values selected by [`ExpiredLeaseRecovery`]; callers do not supply
-/// raw provider output or secrets. `item_patch_id` must be `Some` exactly when
-/// `candidate.assistant_item_id` is `Some`.
+/// raw provider output or secrets. `item_patch_ids` must correspond to every unsealed assistant item in candidate order.
 pub struct StartupReconciliationDisposition<'a> {
     /// Accepted expired candidate discovered by
     /// `list_startup_reconciliation_candidates`.
@@ -37,9 +37,8 @@ pub struct StartupReconciliationDisposition<'a> {
     pub operated_at: UnixMillis,
     /// Caller-minted `turn_lifecycle` patch identity.
     pub turn_patch_id: &'a PatchId,
-    /// Caller-minted `item_lifecycle` patch identity; required iff the
-    /// candidate carries an assistant item.
-    pub item_patch_id: Option<&'a PatchId>,
+    /// Caller-minted lifecycle patch identities in candidate item order.
+    pub item_patch_ids: &'a [PatchId],
 }
 
 /// Payload-free receipt of one interruption.
@@ -237,26 +236,27 @@ enum DispositionExecution {
 fn validate_disposition(
     command: &StartupReconciliationDisposition<'_>,
 ) -> Result<(), StartupReconciliationDispositionError> {
-    let has_item = command.candidate.assistant_item_id.is_some();
-    let has_patch = command.item_patch_id.is_some();
-    match (has_item, has_patch) {
-        (true, false) => {
-            return Err(StartupReconciliationDispositionError::IdentityConflict {
-                reason: "candidate has an assistant item but no item patch was supplied",
-            });
-        }
-        (false, true) => {
-            return Err(StartupReconciliationDispositionError::IdentityConflict {
-                reason: "candidate has no assistant item but an item patch was supplied",
-            });
-        }
-        _ => {}
+    if command.candidate.assistant_item_ids.len() != command.item_patch_ids.len() {
+        return Err(StartupReconciliationDispositionError::IdentityConflict {
+            reason: "candidate and item patch counts differ",
+        });
     }
-    if let Some(item_patch) = command.item_patch_id
-        && item_patch.as_str() == command.turn_patch_id.as_str()
+    let mut identities = std::collections::HashSet::new();
+    identities.insert(command.turn_patch_id);
+    if command
+        .item_patch_ids
+        .iter()
+        .any(|id| !identities.insert(id))
     {
         return Err(StartupReconciliationDispositionError::PatchConflict {
-            reason: "turn and item patch identities collide",
+            reason: "recovery patch identities collide",
+        });
+    }
+    let unique_items: std::collections::HashSet<_> =
+        command.candidate.assistant_item_ids.iter().collect();
+    if unique_items.len() != command.candidate.assistant_item_ids.len() {
+        return Err(StartupReconciliationDispositionError::IdentityConflict {
+            reason: "recovery item identities collide",
         });
     }
     if command.candidate.generation <= 0 {
@@ -472,7 +472,7 @@ async fn classify_replay(
     {
         return Ok(None);
     }
-    if let Some(item_id) = &command.candidate.assistant_item_id {
+    for (index, item_id) in command.candidate.assistant_item_ids.iter().enumerate() {
         let item = entities::conversation_item::Entity::find_by_id(item_id.as_str())
             .one(transaction)
             .await
@@ -487,14 +487,18 @@ async fn classify_replay(
         };
         if item.lifecycle != EntityLifecycle::Interrupted
             || item.updated_at_ms != millis(command.operated_at)
+            || item.thread_id != command.candidate.thread_id.as_str()
+            || item.turn_id != command.candidate.turn_id.as_str()
+            || item.run_id.as_deref() != Some(command.candidate.run_id.as_str())
         {
             return Ok(None);
         }
         // Both patches must exist with correct payload.
-        if !patches_match_for_replay(transaction, command, &turn, Some(&item)).await? {
+        if !patches_match_for_replay(transaction, command, &turn, Some((&item, index))).await? {
             return Ok(None);
         }
-    } else {
+    }
+    if command.candidate.assistant_item_ids.is_empty() {
         // No item expected; ensure turn patch exists and item patch absent check already done via command agreement.
         if !patches_match_for_replay(transaction, command, &turn, None).await? {
             return Ok(None);
@@ -513,7 +517,7 @@ async fn patches_match_for_replay(
     transaction: &sea_orm::DatabaseTransaction,
     command: &StartupReconciliationDisposition<'_>,
     turn: &entities::ConversationTurn,
-    item: Option<&entities::ConversationItem>,
+    item: Option<(&entities::ConversationItem, usize)>,
 ) -> Result<bool, StartupReconciliationDispositionError> {
     let turn_patch =
         entities::conversation_patch::Entity::find_by_id(command.turn_patch_id.as_str())
@@ -537,11 +541,11 @@ async fn patches_match_for_replay(
     {
         return Ok(false);
     }
-    if let Some(item) = item {
-        let Some(item_patch_id) = command.item_patch_id else {
+    if let Some((item, index)) = item {
+        let Some(item_patch_ids) = command.item_patch_ids.get(index) else {
             return Ok(false);
         };
-        let item_patch = entities::conversation_patch::Entity::find_by_id(item_patch_id.as_str())
+        let item_patch = entities::conversation_patch::Entity::find_by_id(item_patch_ids.as_str())
             .one(transaction)
             .await
             .map_err(|source| {
@@ -562,13 +566,8 @@ async fn patches_match_for_replay(
         {
             return Ok(false);
         }
-        // Sequences must be consecutive.
-        let (first, second) = if turn_patch.sequence < item_patch.sequence {
-            (turn_patch.sequence, item_patch.sequence)
-        } else {
-            (item_patch.sequence, turn_patch.sequence)
-        };
-        if second != first + 1 {
+        let offset = i64::try_from(index).ok().and_then(|v| v.checked_add(1));
+        if offset.and_then(|v| turn_patch.sequence.checked_add(v)) != Some(item_patch.sequence) {
             return Ok(false);
         }
     }
@@ -578,7 +577,7 @@ async fn patches_match_for_replay(
 struct DispositionContext {
     state: LoadedState,
     turn: LoadedTurn,
-    item: Option<entities::ConversationItem>,
+    items: Vec<entities::ConversationItem>,
 }
 
 struct LoadedState {
@@ -639,11 +638,13 @@ async fn load_disposition_context(
             },
         ));
     }
-    let patch_count: i64 = if command.candidate.assistant_item_id.is_some() {
-        2
-    } else {
-        1
-    };
+    let patch_count = i64::try_from(command.item_patch_ids.len())
+        .ok()
+        .and_then(|n| n.checked_add(1))
+        .ok_or(StartupReconciliationDispositionError::CounterOverflow {
+            counter: "patch count",
+            value: i64::MAX,
+        })?;
     if state_row
         .last_patch_sequence
         .checked_add(patch_count)
@@ -709,23 +710,33 @@ async fn load_disposition_context(
     // Revision overflow check.
     let _ = next_revision_value(turn_row.revision)?;
 
-    let item_row = if let Some(item_id) = &command.candidate.assistant_item_id {
-        let row = entities::conversation_item::Entity::find_by_id(item_id.as_str())
-            .one(transaction)
-            .await
-            .map_err(|source| {
-                StartupReconciliationDispositionError::Repository(database_error(
-                    "load dispose item",
-                    source,
-                ))
-            })?
-            .ok_or_else(|| {
-                StartupReconciliationDispositionError::Repository(corrupt_data(
-                    "conversation_items",
-                    "item_id",
-                    "fenced disposition lost its assistant item",
-                ))
-            })?;
+    let items = entities::conversation_item::Entity::find()
+        .filter(entities::conversation_item::Column::RunId.eq(command.candidate.run_id.as_str()))
+        .filter(
+            entities::conversation_item::Column::ItemKind
+                .eq(ConversationItemKind::AssistantMessage),
+        )
+        .filter(entities::conversation_item::Column::Lifecycle.is_in([
+            EntityLifecycle::Pending,
+            EntityLifecycle::Streaming,
+            EntityLifecycle::Active,
+            EntityLifecycle::Waiting,
+        ]))
+        .order_by_asc(entities::conversation_item::Column::ItemId)
+        .all(transaction)
+        .await
+        .map_err(|source| database_error::<RepositoryError>("load recovery items", source))?;
+    if !items.iter().map(|item| item.item_id.as_str()).eq(command
+        .candidate
+        .assistant_item_ids
+        .iter()
+        .map(artisan_domain::ItemId::as_str))
+    {
+        return Err(StartupReconciliationDispositionError::TargetConflict {
+            reason: "assistant items changed since discovery",
+        });
+    }
+    for row in &items {
         if row.thread_id != thread_id
             || row.turn_id != command.candidate.turn_id.as_str()
             || row.run_id.as_deref() != Some(command.candidate.run_id.as_str())
@@ -766,10 +777,7 @@ async fn load_disposition_context(
                 },
             ));
         }
-        Some(row)
-    } else {
-        None
-    };
+    }
 
     // Patch vacancy (non-replay path must be vacant).
     if entities::conversation_patch::Entity::find_by_id(command.turn_patch_id.as_str())
@@ -787,8 +795,8 @@ async fn load_disposition_context(
             reason: "turn patch identity already exists",
         });
     }
-    if let Some(item_patch_id) = command.item_patch_id {
-        if entities::conversation_patch::Entity::find_by_id(item_patch_id.as_str())
+    for item_patch_ids in command.item_patch_ids {
+        if entities::conversation_patch::Entity::find_by_id(item_patch_ids.as_str())
             .one(transaction)
             .await
             .map_err(|source| {
@@ -814,7 +822,7 @@ async fn load_disposition_context(
             turn_id: turn_row.turn_id,
             revision: turn_row.revision,
         },
-        item: item_row,
+        items,
     })
 }
 
@@ -848,11 +856,6 @@ async fn persist_disposition(
 ) -> Result<(), StartupReconciliationDispositionError> {
     let operated_at_ms = millis(command.operated_at);
     let turn_revision = next_revision_value(context.turn.revision)?;
-    let item_revision = if let Some(item) = &context.item {
-        Some(next_revision_value(item.revision)?)
-    } else {
-        None
-    };
 
     // Update turn.
     let turn_updated = Statement::from_sql_and_values(
@@ -889,8 +892,8 @@ RETURNING turn_id
     }
 
     // Update item if present.
-    if let Some(item) = &context.item {
-        let rev = item_revision.expect("item revision present");
+    for item in &context.items {
+        let rev = next_revision_value(item.revision)?;
         let item_updated = Statement::from_sql_and_values(
             DbBackend::Sqlite,
             r"
@@ -945,30 +948,26 @@ RETURNING item_id
         None,
     )
     .await?;
-    let final_sequence =
-        if let (Some(item), Some(item_patch_id)) = (&context.item, command.item_patch_id) {
-            let second_sequence = first_sequence.checked_add(1).ok_or(
-                StartupReconciliationDispositionError::CounterOverflow {
-                    counter: "patch sequence",
-                    value: first_sequence,
-                },
-            )?;
-            let rev = item_revision.expect("item revision");
-            insert_lifecycle_patch(
-                transaction,
-                command.candidate.thread_id.as_str(),
-                item_patch_id.as_str(),
-                second_sequence,
-                rev,
-                operated_at_ms,
-                None,
-                Some(item.item_id.as_str()),
-            )
-            .await?;
-            second_sequence
-        } else {
-            first_sequence
-        };
+    let mut final_sequence = first_sequence;
+    for (item, patch_id) in context.items.iter().zip(command.item_patch_ids) {
+        final_sequence = final_sequence.checked_add(1).ok_or(
+            StartupReconciliationDispositionError::CounterOverflow {
+                counter: "patch sequence",
+                value: final_sequence,
+            },
+        )?;
+        insert_lifecycle_patch(
+            transaction,
+            command.candidate.thread_id.as_str(),
+            patch_id.as_str(),
+            final_sequence,
+            next_revision_value(item.revision)?,
+            operated_at_ms,
+            None,
+            Some(item.item_id.as_str()),
+        )
+        .await?;
+    }
 
     // Advance conversation state.
     let state_updated = Statement::from_sql_and_values(

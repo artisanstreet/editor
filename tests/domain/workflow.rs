@@ -45,6 +45,7 @@ fn thread_summary(project: ProjectId, index: usize) -> ThreadSummary {
     ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse(format!("th-{index}")).expect("fixture ids are valid"),
         project_id: project,
@@ -198,6 +199,7 @@ fn events_record_only_post_acceptance_facts() {
     let thread = ThreadSummary {
         has_started_response: true,
         has_active_work: false,
+        attention: artisan_domain::ThreadAttention::None,
         last_message_at: None,
         thread_id: ThreadId::parse("th-2").expect("the fixture is valid"),
         project_id: project_id.clone(),

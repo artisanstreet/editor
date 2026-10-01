@@ -34,13 +34,13 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use artisan_domain::{
     ApprovalKind as DomainApprovalKind, ApprovalObservation, ApprovalState as DomainApprovalState,
-    EngineObservationAttribution, EngineObservationEvent, Observation, QuestionObservation,
-    QuestionState as DomainQuestionState, RunId, RunState, RunTerminalState,
+    EngineObservationAttribution, EngineObservationEvent, HeldBackTurnWork, Observation,
+    QuestionObservation, QuestionState as DomainQuestionState, RunId, RunState, RunTerminalState,
     TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
     TurnId, UnixMillis,
 };

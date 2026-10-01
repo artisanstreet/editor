@@ -60,7 +60,7 @@ impl ConversationConnectionContext {
 ///
 /// A thread has live work when the run registry holds a run whose durable
 /// lifecycle is not settled, exactly as the project thread listing marks
-/// it. Subtitles come from the cached repository observations; without the
+/// it; an open approval or question only waits on the reader on such a run. Subtitles come from the cached repository observations; without the
 /// subtitle cache every row shows its project's display name.
 async fn read_recent_threads(
     repository: &Repository,
@@ -110,13 +110,14 @@ async fn mark_live_work(
     for thread in threads.iter_mut() {
         // An unavailable registry reads as no live run: the listing is
         // presentation, never a reason to fail the connection.
-        let Some(run) = registry.active_run(&thread.thread_id).ok().flatten() else {
-            continue;
+        let live = match registry.active_run(&thread.thread_id).ok().flatten() {
+            Some(run) => repository
+                .read_assistant_run_status(&thread.thread_id, &run)
+                .await?
+                .is_some_and(|(lifecycle, _)| run_live_status(&lifecycle).is_some()),
+            None => false,
         };
-        thread.has_active_work = repository
-            .read_assistant_run_status(&thread.thread_id, &run)
-            .await?
-            .is_some_and(|(lifecycle, _)| run_live_status(&lifecycle).is_some());
+        thread.set_active_work(live);
     }
     Ok(())
 }

@@ -90,8 +90,18 @@ pub struct EngineObservationState {
     /// strictly increasing sequence plus the stable observation identity,
     /// never on the wire cursor.
     seen_delivery_sequences: HashSet<u64>,
-    reasoning: HashMap<String, ReasoningRow>,
-    reasoning_order: Vec<String>,
+    /// What the thread's live run is thinking right now, as the Forge last
+    /// pushed it. Thinking summaries are never stored or replayed: there is
+    /// at most this one block, and it goes when the run moves on.
+    live_thinking: Option<ReasoningRow>,
+    /// Work of settled turns that stayed on the Forge, by turn.
+    ///
+    /// The Forge sends a settled turn's tool calls and commands only when
+    /// its section is opened; until then one entry here stands for them.
+    held_back: BTreeMap<TurnId, HeldBackTurnWork>,
+    /// Turns whose held-back work was read, with how many rows that was:
+    /// their rows are all here.
+    work_loaded: BTreeMap<TurnId, u32>,
     tools: HashMap<String, ToolRow>,
     tool_order: Vec<String>,
     terminals: HashMap<String, TerminalRow>,
@@ -105,6 +115,21 @@ pub struct EngineObservationState {
     /// Latest harness-generated session title, retained as an owned string
     /// because [`RunTerminalView`] stays `Copy`.
     summary_title: Option<String>,
+    /// Latest plan update, the thread's checklist, with the durable delivery
+    /// sequence it was attributed to (`None` for legacy deliveries).
+    ///
+    /// Every plan observation carries the whole plan, so a newer one replaces
+    /// the one before it. Attributed plans order by delivery sequence, so a
+    /// late replay of an older plan cannot displace a newer one; legacy
+    /// plans, which carry no durable order, replace in application order.
+    latest_plan: Option<(Option<u64>, artisan_domain::PlanObservation)>,
+    /// The Forge run behind the newest attributed delivery, with that
+    /// delivery's sequence.
+    ///
+    /// Ordered by delivery sequence, so a late replay of an older run cannot
+    /// displace the run the thread is actually on. Legacy deliveries carry
+    /// no run and never set it.
+    latest_run: Option<(u64, RunId)>,
     timeline: Vec<TimelineRow>,
 }
 
@@ -117,8 +142,9 @@ impl EngineObservationState {
             last_cursor: 0,
             seen_ids: HashSet::new(),
             seen_delivery_sequences: HashSet::new(),
-            reasoning: HashMap::new(),
-            reasoning_order: Vec::new(),
+            live_thinking: None,
+            held_back: BTreeMap::new(),
+            work_loaded: BTreeMap::new(),
             tools: HashMap::new(),
             tool_order: Vec::new(),
             terminals: HashMap::new(),
@@ -130,6 +156,8 @@ impl EngineObservationState {
             run_state: None,
             run_terminal: None,
             summary_title: None,
+            latest_plan: None,
+            latest_run: None,
             timeline: Vec::new(),
         }
     }
@@ -149,7 +177,7 @@ impl EngineObservationState {
     /// Returns the total number of presentation rows retained.
     #[must_use]
     pub fn row_count(&self) -> usize {
-        self.reasoning_order.len()
+        usize::from(self.live_thinking.is_some())
             + self.tool_order.len()
             + self.terminal_order.len()
             + self.approval_order.len()
@@ -163,26 +191,103 @@ impl EngineObservationState {
         self.row_count() == 0
     }
 
-    /// Returns the reasoning row for `item_id`, if one has arrived.
-    ///
-    /// Legacy lookups use the bare provider id. Attributed rows are scoped by
-    /// Forge run; use [`Self::reasoning_scoped`] for an exact run-scoped read.
+    /// Replaces what the thread's live run is thinking with the Forge's
+    /// latest push; `None` means the run is not thinking. Returns whether
+    /// anything changed.
+    pub fn set_live_thinking(&mut self, thinking: &artisan_domain::LiveThinking) -> bool {
+        if thinking.thread_id != self.thread_id {
+            return false;
+        }
+        let row = thinking.current.as_ref().map(|block| ReasoningRow {
+            item_id: block.item_id.clone(),
+            text: block.text.clone(),
+            settled: false,
+            turn_id: block.turn_id.as_str().to_owned(),
+            cursor: 0,
+            sequence: 0,
+            // The block is newer than every stored row of its run: it is
+            // dropped the moment the run produces anything else.
+            attribution: Some(EngineObservationAttribution {
+                run_id: block.run_id.clone(),
+                turn_id: block.turn_id.clone(),
+                committed_at: block.updated_at,
+                delivery_sequence: u64::MAX,
+            }),
+            first_committed_at: Some(block.started_at),
+            first_delivery_sequence: Some(u64::MAX),
+        });
+        if self.live_thinking == row {
+            return false;
+        }
+        self.live_thinking = row;
+        true
+    }
+
+    /// Replaces what the Forge holds back for the turns a subscription
+    /// covers. Sent once per activation. A turn whose rows were already read
+    /// stays read unless it gained rows while the Editor was away; then it
+    /// is counted again and read when it next opens.
+    pub fn set_held_back(&mut self, work: &artisan_domain::HeldBackWork) -> bool {
+        if work.thread_id != self.thread_id {
+            return false;
+        }
+        let mut held_back = BTreeMap::new();
+        let mut work_loaded = BTreeMap::new();
+        for turn in &work.turns {
+            if self.work_loaded.get(&turn.turn_id) == Some(&turn.row_count) {
+                work_loaded.insert(turn.turn_id.clone(), turn.row_count);
+            } else {
+                held_back.insert(turn.turn_id.clone(), turn.clone());
+            }
+        }
+        if self.held_back == held_back && self.work_loaded == work_loaded {
+            return false;
+        }
+        self.held_back = held_back;
+        self.work_loaded = work_loaded;
+        true
+    }
+
+    /// Adds what the Forge holds back for a page of older turns.
+    pub fn add_held_back(&mut self, turns: &[HeldBackTurnWork]) {
+        for turn in turns {
+            if self.work_loaded.get(&turn.turn_id) != Some(&turn.row_count) {
+                self.work_loaded.remove(&turn.turn_id);
+                self.held_back.insert(turn.turn_id.clone(), turn.clone());
+            }
+        }
+    }
+
+    /// Records that every held-back row of `turn_id` was read.
+    pub fn mark_turn_work_loaded(&mut self, turn_id: &TurnId) {
+        if let Some(turn) = self.held_back.remove(turn_id) {
+            self.work_loaded.insert(turn_id.clone(), turn.row_count);
+        }
+    }
+
+    /// The turns whose work is still on the Forge, oldest turn id first.
+    pub fn held_back(&self) -> impl Iterator<Item = &HeldBackTurnWork> {
+        self.held_back.values()
+    }
+
+    /// Whether `turn_id`'s work is still on the Forge.
+    #[must_use]
+    pub fn holds_back(&self, turn_id: &TurnId) -> bool {
+        self.held_back.contains_key(turn_id)
+    }
+
+    /// Returns the live thinking block when it is `item_id`.
     #[must_use]
     pub fn reasoning(&self, item_id: &str) -> Option<&ReasoningRow> {
-        self.reasoning.get(item_id)
+        self.live_thinking
+            .as_ref()
+            .filter(|row| row.item_id == item_id)
     }
 
-    /// Returns the run-scoped reasoning row for one Forge run.
-    #[must_use]
-    pub fn reasoning_scoped(&self, run_id: &RunId, item_id: &str) -> Option<&ReasoningRow> {
-        self.reasoning
-            .get(&format!("{}#{item_id}", run_id.as_str()))
-    }
-
-    /// Returns reasoning rows in first-seen order.
+    /// Returns the live thinking block: one row at most.
     #[must_use]
     pub fn reasoning_in_order(&self) -> Vec<&ReasoningRow> {
-        Self::ordered(&self.reasoning_order, &self.reasoning)
+        self.live_thinking.iter().collect()
     }
 
     /// Returns the tool row for `tool_id`, if one has arrived.
@@ -258,6 +363,32 @@ impl EngineObservationState {
         Self::ordered(&self.question_order, &self.questions)
     }
 
+    /// Returns the open questionnaires, oldest first.
+    ///
+    /// A questionnaire is open while any of its questions is unanswered; it
+    /// lists only those. Questions stay open across runs until the user
+    /// answers or dismisses them.
+    #[must_use]
+    pub fn open_questionnaires(&self) -> Vec<OpenQuestionnaire> {
+        let mut open: Vec<OpenQuestionnaire> = Vec::new();
+        for row in self.questions_in_order() {
+            if row.answers().is_some() {
+                continue;
+            }
+            match open
+                .iter_mut()
+                .find(|questionnaire| questionnaire.group_id == row.group_id)
+            {
+                Some(questionnaire) => questionnaire.questions.push(row.clone()),
+                None => open.push(OpenQuestionnaire {
+                    group_id: row.group_id.clone(),
+                    questions: vec![row.clone()],
+                }),
+            }
+        }
+        open
+    }
+
     /// Returns the latest non-terminal run state, if one has arrived.
     #[must_use]
     pub const fn run_state(&self) -> Option<RunState> {
@@ -279,6 +410,31 @@ impl EngineObservationState {
     #[must_use]
     pub fn summary_title(&self) -> Option<&str> {
         self.summary_title.as_deref()
+    }
+
+    /// Returns the latest plan update applied for this thread, if any.
+    ///
+    /// The plan outlives its run: a finished run keeps its last checklist
+    /// until a later plan update replaces it.
+    #[must_use]
+    pub const fn latest_plan(&self) -> Option<&artisan_domain::PlanObservation> {
+        match &self.latest_plan {
+            Some((_, plan)) => Some(plan),
+            None => None,
+        }
+    }
+
+    /// Returns the Forge run behind the newest attributed delivery, if any
+    /// delivery carried one.
+    ///
+    /// This is the run the thread is on: the live run while one works, the
+    /// last run once it settles.
+    #[must_use]
+    pub const fn latest_run(&self) -> Option<&RunId> {
+        match &self.latest_run {
+            Some((_, run)) => Some(run),
+            None => None,
+        }
     }
 
     /// Returns discrete timeline rows in cursor application order.
@@ -339,6 +495,13 @@ impl EngineObservationState {
                 return ApplyOutcome::Duplicate;
             }
             self.seen_delivery_sequences.insert(attr.delivery_sequence);
+            if self
+                .latest_run
+                .as_ref()
+                .is_none_or(|(retained, _)| attr.delivery_sequence > *retained)
+            {
+                self.latest_run = Some((attr.delivery_sequence, attr.run_id.clone()));
+            }
             let sequence = event.observation.sequence().get();
             let (tag, settled_in_place) =
                 self.pair(cursor, sequence, &event.observation, Some(attr));
@@ -457,6 +620,7 @@ impl EngineObservationState {
             summary: detail,
             attribution: None,
             first_committed_at: None,
+            first_delivery_sequence: None,
         });
         ApplyOutcome::Applied {
             tag: "unknown",
@@ -512,12 +676,10 @@ impl EngineObservationState {
                 let settled = self.pair_question(cursor, sequence, value, attribution);
                 (observation.tag(), settled)
             }
-            Observation::ReasoningSummaryCompleted(value) => {
-                self.pair_reasoning_completed(cursor, sequence, value, attribution);
-                (observation.tag(), true)
-            }
-            Observation::ReasoningSummaryDelta(value) => {
-                self.pair_reasoning_delta(cursor, sequence, value, attribution);
+            // Thinking summaries arrive as pushed live state, never as
+            // stored observations; a row an older Forge still replays is
+            // not shown.
+            Observation::ReasoningSummaryCompleted(_) | Observation::ReasoningSummaryDelta(_) => {
                 (observation.tag(), false)
             }
             Observation::Retry(value) => {
@@ -595,6 +757,14 @@ impl EngineObservationState {
         value: &artisan_domain::PlanObservation,
         attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
+        let delivery_sequence = attribution.map(|attr| attr.delivery_sequence);
+        let newer = match (&self.latest_plan, delivery_sequence) {
+            (Some((Some(retained), _)), Some(incoming)) => incoming > *retained,
+            _ => true,
+        };
+        if newer {
+            self.latest_plan = Some((delivery_sequence, value.clone()));
+        }
         let summary = format!("plan with {} entries", value.entries().len());
         self.push_timeline(cursor, sequence, tag, summary, attribution);
         (tag, false)
@@ -733,71 +903,6 @@ impl EngineObservationState {
         (tag, false)
     }
 
-    fn pair_reasoning_delta(
-        &mut self,
-        cursor: u64,
-        sequence: u64,
-        value: &artisan_domain::ReasoningSummaryDeltaObservation,
-        attribution: Option<&EngineObservationAttribution>,
-    ) {
-        let key = scoped_row_key(attribution, value.item_id().as_str());
-        if !self.reasoning_order.iter().any(|known| known == &key) {
-            self.reasoning_order.push(key.clone());
-        }
-        self.reasoning
-            .entry(key)
-            .and_modify(|row| {
-                row.text.push_str(value.delta());
-                row.cursor = cursor;
-                row.sequence = sequence;
-                row.attribution = attribution.cloned();
-            })
-            .or_insert_with(|| ReasoningRow {
-                item_id: value.item_id().as_str().to_owned(),
-                text: value.delta().to_owned(),
-                settled: false,
-                turn_id: value.turn_id().as_str().to_owned(),
-                cursor,
-                sequence,
-                attribution: attribution.cloned(),
-                first_committed_at: attribution.map(|attr| attr.committed_at),
-            });
-    }
-
-    fn pair_reasoning_completed(
-        &mut self,
-        cursor: u64,
-        sequence: u64,
-        value: &artisan_domain::ReasoningSummaryCompletedObservation,
-        attribution: Option<&EngineObservationAttribution>,
-    ) {
-        let key = scoped_row_key(attribution, value.item_id().as_str());
-        if !self.reasoning_order.iter().any(|known| known == &key) {
-            self.reasoning_order.push(key.clone());
-        }
-        self.reasoning
-            .entry(key)
-            .and_modify(|row| {
-                if let Some(text) = value.text() {
-                    text.clone_into(&mut row.text);
-                }
-                row.settled = true;
-                row.cursor = cursor;
-                row.sequence = sequence;
-                row.attribution = attribution.cloned();
-            })
-            .or_insert_with(|| ReasoningRow {
-                item_id: value.item_id().as_str().to_owned(),
-                text: value.text().unwrap_or_default().to_owned(),
-                settled: true,
-                turn_id: value.turn_id().as_str().to_owned(),
-                cursor,
-                sequence,
-                attribution: attribution.cloned(),
-                first_committed_at: attribution.map(|attr| attr.committed_at),
-            });
-    }
-
     fn pair_tool(
         &mut self,
         cursor: u64,
@@ -812,6 +917,16 @@ impl EngineObservationState {
         self.tools
             .entry(key)
             .and_modify(|row| {
+                if arrives_out_of_order(row.attribution.as_ref(), attribution) {
+                    // An earlier event read after a later one says where the
+                    // call began, not what state it is in.
+                    note_earlier_start(
+                        &mut row.first_committed_at,
+                        &mut row.first_delivery_sequence,
+                        attribution,
+                    );
+                    return;
+                }
                 row.action = value.action();
                 row.detail = value.detail().map(str::to_owned);
                 row.cursor = cursor;
@@ -827,6 +942,7 @@ impl EngineObservationState {
                 sequence,
                 attribution: attribution.cloned(),
                 first_committed_at: attribution.map(|attr| attr.committed_at),
+                first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
             });
     }
 
@@ -844,6 +960,26 @@ impl EngineObservationState {
         self.terminals
             .entry(key)
             .and_modify(|row| {
+                if arrives_out_of_order(row.attribution.as_ref(), attribution) {
+                    // An earlier event read after a later one fills in what
+                    // the later ones left out and says where the command
+                    // began; it never rewinds the command's state.
+                    if row.command.is_none() {
+                        row.command = value.command().map(str::to_owned);
+                    }
+                    if row.shell.is_none() {
+                        row.shell = value.shell().map(str::to_owned);
+                    }
+                    if let Some(chunk) = value.output() {
+                        row.output.insert_str(0, chunk);
+                    }
+                    note_earlier_start(
+                        &mut row.first_committed_at,
+                        &mut row.first_delivery_sequence,
+                        attribution,
+                    );
+                    return;
+                }
                 if value.command().is_some() {
                     row.command = value.command().map(str::to_owned);
                 }
@@ -872,6 +1008,7 @@ impl EngineObservationState {
                 sequence,
                 attribution: attribution.cloned(),
                 first_committed_at: attribution.map(|attr| attr.committed_at),
+                first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
             });
     }
 
@@ -911,6 +1048,7 @@ impl EngineObservationState {
                 sequence,
                 attribution: attribution.cloned(),
                 first_committed_at: attribution.map(|attr| attr.committed_at),
+                first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
             });
         settled_in_place
     }
@@ -936,6 +1074,11 @@ impl EngineObservationState {
             .entry(key)
             .and_modify(|row| {
                 value.text().clone_into(&mut row.text);
+                // A resolution committed through its run may not repeat the
+                // group; the requested row already named it.
+                if let Some(group) = value.explicit_group_id() {
+                    group.as_str().clone_into(&mut row.group_id);
+                }
                 row.header = value.header().map(str::to_owned);
                 row.multi_select = value.multi_select();
                 row.options = value.options().map(|options| {
@@ -954,6 +1097,7 @@ impl EngineObservationState {
             })
             .or_insert_with(|| QuestionRow {
                 question_id: value.question_id().as_str().to_owned(),
+                group_id: value.group_id().as_str().to_owned(),
                 text: value.text().to_owned(),
                 header: value.header().map(str::to_owned),
                 multi_select: value.multi_select(),
@@ -971,6 +1115,7 @@ impl EngineObservationState {
                 sequence,
                 attribution: attribution.cloned(),
                 first_committed_at: attribution.map(|attr| attr.committed_at),
+                first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
             });
         settled_in_place
     }
@@ -1030,6 +1175,39 @@ impl EngineObservationState {
             summary,
             attribution: attribution.cloned(),
             first_committed_at: attribution.map(|attr| attr.committed_at),
+            first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
         });
+    }
+}
+
+/// Whether `incoming` was committed before the event a row already holds.
+///
+/// Rows are read in delivery order, except that a settled turn's work rows
+/// are read only when its section opens, which can be after a later event of
+/// the same activity arrived live.
+fn arrives_out_of_order(
+    current: Option<&EngineObservationAttribution>,
+    incoming: Option<&EngineObservationAttribution>,
+) -> bool {
+    matches!(
+        (current, incoming),
+        (Some(current), Some(incoming)) if incoming.delivery_sequence < current.delivery_sequence
+    )
+}
+
+/// Moves a row's first-event instant and sequence back to an earlier event.
+fn note_earlier_start(
+    first_committed_at: &mut Option<UnixMillis>,
+    first_delivery_sequence: &mut Option<u64>,
+    earlier: Option<&EngineObservationAttribution>,
+) {
+    let Some(earlier) = earlier else {
+        return;
+    };
+    if first_committed_at.is_none_or(|first| earlier.committed_at.as_millis() < first.as_millis()) {
+        *first_committed_at = Some(earlier.committed_at);
+    }
+    if first_delivery_sequence.is_none_or(|first| earlier.delivery_sequence < first) {
+        *first_delivery_sequence = Some(earlier.delivery_sequence);
     }
 }

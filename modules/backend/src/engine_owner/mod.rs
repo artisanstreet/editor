@@ -328,6 +328,9 @@ pub(crate) struct EngineClaudeTurnInput {
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
+    /// The thread still carries its placeholder title, so a completed turn
+    /// generates one.
+    pub(crate) awaits_title: bool,
 }
 
 impl std::fmt::Debug for EngineClaudeTurnInput {
@@ -412,6 +415,9 @@ pub(crate) struct InternalTurnInput {
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
+    /// Whether the executor should generate a title when the harness supplies
+    /// none. Only the Claude executor consults it.
+    pub(crate) awaits_title: bool,
 }
 
 impl std::fmt::Debug for InternalTurnInput {
@@ -943,6 +949,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: false,
         };
         self.admit_internal(internal, budget)
     }
@@ -971,6 +978,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: input.awaits_title,
         };
         self.admit_internal(internal, budget)
     }
@@ -999,6 +1007,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: false,
         };
         self.admit_internal(internal, budget)
     }
@@ -1027,6 +1036,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: false,
         };
         self.admit_internal(internal, budget)
     }
@@ -1054,6 +1064,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: false,
         };
         self.admit_internal(internal, budget)
     }
@@ -1180,6 +1191,7 @@ impl EngineOwner {
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
+            awaits_title: false,
         };
         self.admit_internal(internal, budget)
     }
@@ -1219,7 +1231,7 @@ impl EngineOwner {
         // One steer channel pair per turn for steer-capable engines
         // (codex/claude) ONLY. The receiver travels into the pump
         // input; the sender travels with `AcceptedTurn` and is retained
-        // across steers behind `steer_text`. Cursor/grok/opencode2 turns
+        // across steers behind `steer_message`. Cursor/grok/opencode2 turns
         // never carry a sender, so every steer attempt on them resolves
         // `Unsupported` without prompt-state plumbing.
         let steer_capable = matches!(

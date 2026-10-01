@@ -43,6 +43,7 @@ pub(super) fn flush_work(
         session: None,
         session_run: None,
         superseded: false,
+        continuation: None,
         reasoning_summary: None,
         progress: ProgressPhase::None,
         transition: None,
@@ -203,8 +204,13 @@ pub(super) fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildE
             }
             Ok(())
         }
-        SceneItemKind::Approval { prompt } | SceneItemKind::Question { prompt } => {
-            validate_general_text(prompt)
+        SceneItemKind::Approval { prompt, .. } => validate_general_text(prompt),
+        SceneItemKind::Question { prompt, answer } => {
+            validate_general_text(prompt)?;
+            match answer {
+                Some(answer) if !answer.is_empty() => validate_general_text(answer),
+                _ => Ok(()),
+            }
         }
         SceneItemKind::Error { message } => validate_general_text(message),
         SceneItemKind::UsageInterruption { detail } => validate_general_text(detail),
@@ -318,4 +324,15 @@ pub enum SceneBuildError {
     /// A derived session anchor exceeded the scene identity ceiling.
     #[error("session anchor is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     SessionAnchorTooLong { length: usize, maximum: usize },
+    /// A derived session continuation anchor (the segment after a mid-run
+    /// user message) exceeded the scene identity ceiling.
+    #[error(
+        "session continuation anchor {segment} for turn {turn_id} is {length} UTF-8 bytes; the maximum is {maximum} (bytes)"
+    )]
+    SessionContinuationAnchorTooLong {
+        turn_id: TurnId,
+        segment: usize,
+        length: usize,
+        maximum: usize,
+    },
 }

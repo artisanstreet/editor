@@ -100,8 +100,16 @@ mod disclosure_statig {
         Outcome::{Handled, Transition},
     };
 
+    /// Machine storage: whether the section's work is active right now.
+    ///
+    /// A section cannot be collapsed before its work settles, so user
+    /// close and toggle requests are refused while this is set. It follows
+    /// the initialization flag and the lifecycle events only; seeding a
+    /// leaf never changes it.
     #[derive(Default)]
-    pub(super) struct Machine;
+    pub(super) struct Machine {
+        working: bool,
+    }
 
     pub(super) enum Event {
         Initialize { is_working: bool },
@@ -138,19 +146,35 @@ mod disclosure_statig {
     )]
     impl Machine {
         #[state]
-        fn auto_open(context: &mut Context, event: &Event) -> Outcome<State> {
+        fn auto_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::Initialize { is_working: true } | Event::Seed(DisclosureState::AutoOpen) => {
+                Event::Initialize { is_working: true } => {
+                    self.working = true;
+                    Handled
+                }
+                Event::Seed(DisclosureState::AutoOpen) => Handled,
+                Event::Public(DisclosureEvent::WorkBecameActive) => {
+                    self.working = true;
                     Handled
                 }
                 Event::Initialize { is_working: false }
-                | Event::Seed(DisclosureState::AutoClosed)
                 | Event::Public(
                     DisclosureEvent::WorkSettledSuccessfully
                     | DisclosureEvent::WorkFailedOrInterrupted,
-                ) => Transition(State::auto_closed()),
+                ) => {
+                    self.working = false;
+                    Transition(State::auto_closed())
+                }
+                Event::Seed(DisclosureState::AutoClosed) => Transition(State::auto_closed()),
                 Event::Seed(DisclosureState::UserOpen)
                 | Event::Public(DisclosureEvent::UserOpen) => Transition(State::user_open()),
+                // Active work cannot be collapsed: the request is refused
+                // without a state change.
+                Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose)
+                    if self.working =>
+                {
+                    Handled
+                }
                 Event::Seed(DisclosureState::UserClosed)
                 | Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose) => {
                     Transition(State::user_closed())
@@ -159,27 +183,30 @@ mod disclosure_statig {
                     context.retire();
                     Transition(State::retired())
                 }
-                Event::Public(DisclosureEvent::WorkBecameActive) => Handled,
             }
         }
 
         #[state]
-        fn auto_closed(context: &mut Context, event: &Event) -> Outcome<State> {
+        fn auto_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
-                Event::Initialize { .. }
-                | Event::Seed(DisclosureState::AutoClosed)
-                | Event::Public(
+                Event::Initialize { .. } | Event::Seed(DisclosureState::AutoClosed) => Handled,
+                Event::Public(
                     DisclosureEvent::WorkSettledSuccessfully
                     | DisclosureEvent::WorkFailedOrInterrupted,
-                ) => Handled,
-                Event::Seed(DisclosureState::AutoOpen)
-                | Event::Public(DisclosureEvent::WorkBecameActive) => {
+                ) => {
+                    self.working = false;
+                    Handled
+                }
+                Event::Seed(DisclosureState::AutoOpen) => Transition(State::auto_open()),
+                Event::Public(DisclosureEvent::WorkBecameActive) => {
+                    self.working = true;
                     Transition(State::auto_open())
                 }
                 Event::Seed(DisclosureState::UserOpen)
                 | Event::Public(DisclosureEvent::UserOpen | DisclosureEvent::UserToggle) => {
                     Transition(State::user_open())
                 }
+                Event::Public(DisclosureEvent::UserClose) if self.working => Handled,
                 Event::Seed(DisclosureState::UserClosed)
                 | Event::Public(DisclosureEvent::UserClose) => Transition(State::user_closed()),
                 Event::Seed(DisclosureState::Retired) | Event::Public(DisclosureEvent::Removed) => {
@@ -190,16 +217,31 @@ mod disclosure_statig {
         }
 
         #[state]
-        fn user_open(context: &mut Context, event: &Event) -> Outcome<State> {
+        fn user_open(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
                 Event::Initialize { .. }
                 | Event::Seed(DisclosureState::UserOpen)
-                | Event::Public(
-                    DisclosureEvent::WorkBecameActive
-                    | DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted
-                    | DisclosureEvent::UserOpen,
-                ) => Handled,
+                | Event::Public(DisclosureEvent::UserOpen) => Handled,
+                // An explicit open survives lifecycle changes: it is already
+                // open while work runs and stays open once it settles.
+                Event::Public(DisclosureEvent::WorkBecameActive) => {
+                    self.working = true;
+                    Handled
+                }
+                Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => {
+                    self.working = false;
+                    Handled
+                }
+                // Active work cannot be collapsed: the request is refused
+                // without a state change.
+                Event::Public(DisclosureEvent::UserToggle | DisclosureEvent::UserClose)
+                    if self.working =>
+                {
+                    Handled
+                }
                 Event::Seed(
                     DisclosureState::AutoOpen
                     | DisclosureState::AutoClosed
@@ -216,16 +258,25 @@ mod disclosure_statig {
         }
 
         #[state]
-        fn user_closed(context: &mut Context, event: &Event) -> Outcome<State> {
+        fn user_closed(&mut self, context: &mut Context, event: &Event) -> Outcome<State> {
             match event {
                 Event::Initialize { .. }
                 | Event::Seed(DisclosureState::UserClosed)
-                | Event::Public(
-                    DisclosureEvent::WorkBecameActive
-                    | DisclosureEvent::WorkSettledSuccessfully
-                    | DisclosureEvent::WorkFailedOrInterrupted
-                    | DisclosureEvent::UserClose,
-                ) => Handled,
+                | Event::Public(DisclosureEvent::UserClose) => Handled,
+                Event::Public(
+                    DisclosureEvent::WorkSettledSuccessfully
+                    | DisclosureEvent::WorkFailedOrInterrupted,
+                ) => {
+                    self.working = false;
+                    Handled
+                }
+                // Work that becomes active again (a settled turn resuming,
+                // for example after recovery) always shows: the section
+                // reopens on the auto path, so settling collapses it again.
+                Event::Public(DisclosureEvent::WorkBecameActive) => {
+                    self.working = true;
+                    Transition(State::auto_open())
+                }
                 Event::Seed(
                     DisclosureState::AutoOpen
                     | DisclosureState::AutoClosed
@@ -250,7 +301,11 @@ mod disclosure_statig {
     }
 
     pub(super) fn new_machine() -> blocking::StateMachine<Machine> {
-        Machine.state_machine()
+        Machine::default().state_machine()
+    }
+
+    pub(super) fn working(machine: &blocking::StateMachine<Machine>) -> bool {
+        machine.inner().working
     }
 
     pub(super) fn public_state(state: &State) -> DisclosureState {
@@ -282,9 +337,17 @@ impl DisclosureController {
     }
 
     /// Seeds a settled or user-controlled view through an initialization event.
+    ///
+    /// Only an auto-open leaf implies active work (it is the leaf active work
+    /// opens); every other seeded leaf starts settled, so a seeded view never
+    /// refuses a user close it could not have reached while working.
     #[must_use]
     pub fn from_state(state: DisclosureState) -> Self {
-        let mut controller = Self::new(true);
+        Self::seeded(state, matches!(state, DisclosureState::AutoOpen))
+    }
+
+    fn seeded(state: DisclosureState, is_working: bool) -> Self {
+        let mut controller = Self::new(is_working);
         let _ = controller.dispatch(&disclosure_statig::Event::Seed(state));
         controller
     }
@@ -297,6 +360,12 @@ impl DisclosureController {
     #[must_use]
     pub fn disclosure(&self) -> Disclosure {
         self.state().disclosure()
+    }
+
+    /// Whether the section's work is active, so user collapse is refused.
+    #[must_use]
+    pub fn is_working(&self) -> bool {
+        disclosure_statig::working(&self.machine)
     }
 
     #[must_use]
@@ -328,7 +397,7 @@ impl DisclosureController {
 
 impl Clone for DisclosureController {
     fn clone(&self) -> Self {
-        Self::from_state(self.state())
+        Self::seeded(self.state(), self.is_working())
     }
 }
 

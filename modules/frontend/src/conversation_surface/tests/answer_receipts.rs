@@ -36,6 +36,7 @@ fn approval_scene() -> crate::conversation_scene::ConversationScene {
         1,
         SceneItemKind::Approval {
             prompt: String::from("Run the test suite?"),
+            approval_id: observation_id("approval-1"),
         },
         None,
     )])
@@ -100,9 +101,10 @@ fn mismatched_approval_receipt_reports_instead_of_settling(cx: &mut TestAppConte
     });
     cx.update(|_, app| {
         surface.update(app, |surface, cx| {
-            surface.set_answer_context(thread_id(), run_id(), cx);
+            surface.set_answer_thread(thread_id(), cx);
             assert!(surface.submit_approval_gesture(
                 "approval-1",
+                &run_id(),
                 &observation_id("approval-1"),
                 true,
                 cx,
@@ -140,9 +142,10 @@ fn unmatched_outcome_settles_nothing(cx: &mut TestAppContext) {
     });
     cx.update(|_, app| {
         surface.update(app, |surface, cx| {
-            surface.set_answer_context(thread_id(), run_id(), cx);
+            surface.set_answer_thread(thread_id(), cx);
             assert!(surface.submit_approval_gesture(
                 "approval-1",
+                &run_id(),
                 &observation_id("approval-1"),
                 true,
                 cx,

@@ -25,15 +25,24 @@ use super::*;
 ///
 /// A delivery that needs the command loop (a loss, or a batch that does not
 /// continue the forwarded cursor yet, such as the first batch of a fresh
-/// subscription whose response is still being read) is parked, and the
-/// exchange stops forwarding until its response settles. At most one
-/// delivery is parked; the command loop handles it before anything else.
+/// subscription whose response is still being read) is parked. The exchange
+/// keeps reading behind it so the Forge's push never waits on this side:
+/// everything that arrives after a parked delivery is held in arrival order
+/// (up to [`MAX_HELD_DELIVERIES`]) and forwarded once the head can continue,
+/// so nothing overtakes the parked delivery. The command loop handles the
+/// held deliveries, oldest first, before anything else.
 #[derive(Default)]
 pub(super) struct DeliveryInbox {
     pub(super) receiver: Option<tokio::sync::mpsc::Receiver<PrivateDelivery>>,
     events: Option<SyncSender<NativeTransportEvent>>,
-    pub(super) parked: Option<PrivateDelivery>,
+    /// The parked delivery at the front, then everything read behind it.
+    pub(super) parked: std::collections::VecDeque<PrivateDelivery>,
 }
+
+/// How many deliveries an exchange holds behind a parked one before it stops
+/// reading. Generous enough for a thread's whole activation push; past it the
+/// exchange falls back to waiting for its response without reading.
+pub(super) const MAX_HELD_DELIVERIES: usize = 8_192;
 
 impl DeliveryInbox {
     /// Installs the delivery channel and the application bridge.
@@ -53,28 +62,33 @@ impl DeliveryInbox {
         }
     }
 
-    /// Forwards the parked delivery once custody lets it continue. Returns
-    /// `false` only when the application bridge has closed.
+    /// Forwards parked deliveries, oldest first, while custody lets each one
+    /// continue; the first that cannot stays parked with everything behind
+    /// it. Returns `false` only when the application bridge has closed.
     pub(super) fn forward_parked_if_ready(&mut self, custody: &mut SubscriptionCustody) -> bool {
         let Some(events) = self.events.as_ref() else {
             return true;
         };
-        if !self
+        while self
             .parked
-            .as_ref()
+            .front()
             .is_some_and(|parked| forwards_without_recovery(custody, parked))
         {
-            return true;
+            let Some(parked) = self.parked.pop_front() else {
+                break;
+            };
+            if forward_delivery(custody, events, parked).is_err() {
+                return false;
+            }
         }
-        self.parked
-            .take()
-            .is_none_or(|parked| forward_delivery(custody, events, parked).is_ok())
+        true
     }
 
-    /// The next delivery for the command loop: the parked one first. A closed
-    /// channel is a delivery loss; without a channel this never resolves.
+    /// The next delivery for the command loop: the parked ones first. A
+    /// closed channel is a delivery loss; without a channel this never
+    /// resolves.
     async fn next(&mut self) -> PrivateDelivery {
-        if let Some(parked) = self.parked.take() {
+        if let Some(parked) = self.parked.pop_front() {
             return parked;
         }
         match self.receiver.as_mut() {
@@ -102,6 +116,7 @@ fn forwards_without_recovery(custody: &SubscriptionCustody, delivery: &PrivateDe
         }
         PrivateDelivery::Observation(_)
         | PrivateDelivery::Outbox(_)
+        | PrivateDelivery::ObservationHistoryCurrent(_)
         | PrivateDelivery::HostState(_) => true,
         PrivateDelivery::Lost(_) => false,
     }
@@ -154,6 +169,14 @@ fn forward_delivery(
         PrivateDelivery::Outbox(outbox) => {
             if custody.active_thread() == Some(outbox.thread_id()) {
                 publish(events, NativeTransportEvent::MessageOutbox(outbox))?;
+            }
+        }
+        PrivateDelivery::ObservationHistoryCurrent(thread_id) => {
+            if custody.active_thread() == Some(&thread_id) {
+                publish(
+                    events,
+                    NativeTransportEvent::ObservationHistoryCurrent(thread_id),
+                )?;
             }
         }
         PrivateDelivery::HostState(state) => {
@@ -342,19 +365,24 @@ impl ServiceRuntime {
         let mut request = std::pin::pin!(request);
         let inbox = &mut self.deliveries;
         let custody = &mut self.custody;
-        // A delivery parked during an earlier request of the same handler
+        // Deliveries parked during an earlier request of the same handler
         // (the first batch of a subscription whose response was still being
-        // read) may continue the cursor by now; forward it rather than stop
-        // reading for this request too.
+        // read, and what followed it) may continue the cursor by now; forward
+        // them before reading more.
         if !inbox.forward_parked_if_ready(custody) {
             return request.await;
         }
         loop {
-            let (Some(receiver), Some(events), None) = (
-                inbox.receiver.as_mut(),
-                inbox.events.as_ref(),
-                &inbox.parked,
-            ) else {
+            // A loss ends the delivery task, so nothing follows it; and a
+            // full hold stops reading rather than grow without bound.
+            let reading = inbox.parked.len() < MAX_HELD_DELIVERIES
+                && !inbox
+                    .parked
+                    .back()
+                    .is_some_and(|parked| matches!(parked, PrivateDelivery::Lost(_)));
+            let (Some(receiver), Some(events), true) =
+                (inbox.receiver.as_mut(), inbox.events.as_ref(), reading)
+            else {
                 return request.await;
             };
             tokio::select! {
@@ -362,8 +390,11 @@ impl ServiceRuntime {
                 attempt = &mut request => return attempt,
                 delivery = receiver.recv() => {
                     let delivery = delivery.unwrap_or_else(closed_delivery);
-                    if !forwards_without_recovery(custody, &delivery) {
-                        inbox.parked = Some(delivery);
+                    // Behind a parked delivery everything waits its turn, so
+                    // cursor order and the history-current marker's place
+                    // after the thread's pushes are kept.
+                    if !inbox.parked.is_empty() || !forwards_without_recovery(custody, &delivery) {
+                        inbox.parked.push_back(delivery);
                         continue;
                     }
                     // A closed bridge ends the service at the handler's own
@@ -428,6 +459,9 @@ pub async fn delivery_task_loop(
                     PrivateDelivery::Observation(observation)
                 }
                 Ok(UniDelivery::Outbox(outbox)) => PrivateDelivery::Outbox(outbox),
+                Ok(UniDelivery::ObservationHistoryCurrent(thread_id)) => {
+                    PrivateDelivery::ObservationHistoryCurrent(thread_id)
+                }
                 Ok(UniDelivery::HostState(state)) => PrivateDelivery::HostState(state),
                 Err(failure) => PrivateDelivery::Lost(failure),
             };
@@ -571,11 +605,18 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::RespondQuestion(command) => {
                         respond_question(runtime, frames, events, *command).await?;
                     }
+                    NativeTransportCommand::AnswerQuestions(command) => {
+                        super::answer_handlers::answer_questions(runtime, frames, events, *command)
+                            .await?;
+                    }
                     NativeTransportCommand::ReadMessageImage(reference) => {
                         read_message_image(runtime, frames, events, reference).await?;
                     }
                     NativeTransportCommand::RequestSnapshot(thread_id) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
+                    }
+                    NativeTransportCommand::ReadConversationHistory { thread_id, part } => {
+                        read_conversation_history(runtime, frames, events, thread_id, part).await?;
                     }
                     NativeTransportCommand::LoadThreadEngineSettings {
                         thread_id,

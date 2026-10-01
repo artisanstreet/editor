@@ -11,6 +11,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use super::*;
+use artisan_domain::ErrorChain;
 
 impl NativeTransportService {
     #[cfg(test)]
@@ -324,7 +325,10 @@ impl ServiceRuntime {
                     if let Some(session) = self.session.take()
                         && let Err(error) = session.shutdown(&self.cancel).await
                     {
-                        eprintln!("Forge session disconnect failed: {error}");
+                        eprintln!(
+                            "Forge connection cleanup failed: closing the session: {}",
+                            ErrorChain(&error)
+                        );
                         failed = true;
                     }
                 }
@@ -337,7 +341,13 @@ impl ServiceRuntime {
                     if let Some(lease) = self.reconnect_lease.take() {
                         match lease.quarantine_for_shutdown() {
                             Ok(lease) => self.reconnect_lease = Some(lease),
-                            Err(_) => failed = true,
+                            Err(error) => {
+                                eprintln!(
+                                    "Forge connection cleanup failed: quarantining the reconnect credential: {}",
+                                    ErrorChain(&error)
+                                );
+                                failed = true;
+                            }
                         }
                     }
                 }
@@ -364,10 +374,27 @@ async fn start_native_service(
     }
     // Without a host, only an explicitly requested development Forge on this
     // machine remains; the Editor never starts a Forge of its own.
-    match dev_endpoint::dev_home_from_env() {
-        Some(home) => start_dev_service(&home).await,
-        None => Err(StartupError::Stage(ServiceFailureStage::Instance)),
+    if let Some(home) = dev_endpoint::dev_home_from_env() {
+        return start_dev_service(&home).await;
     }
+    eprintln!(
+        "Forge connection not started: no host is selected and no development Forge home is set in the environment"
+    );
+    Err(StartupError::Stage(ServiceFailureStage::Instance))
+}
+
+/// Reports the step a development Forge connection stopped at, with its
+/// whole cause chain, and classifies it under `stage`.
+fn dev_startup_failure(
+    stage: ServiceFailureStage,
+    step: &str,
+    error: &(dyn std::error::Error + 'static),
+) -> StartupError {
+    eprintln!(
+        "artisan dev forge: connection failed ({stage:?}): {step}: {}",
+        ErrorChain(error)
+    );
+    StartupError::Stage(stage)
 }
 
 /// Starts the explicitly opted-in development session against a manually
@@ -377,19 +404,34 @@ async fn start_native_service(
 /// backend process. The QUIC handshake, bootstrap capability, reconnect
 /// store, and request surface are the ones a registered host uses; the
 /// Editor never owns the Forge process.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear connection sequence; each step reports its own failure"
+)]
 async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory), StartupError> {
     if !home.is_absolute() {
+        eprintln!(
+            "artisan dev forge: connection failed (Instance): the development Forge home {} is not an absolute path",
+            home.display()
+        );
         return Err(StartupError::Stage(ServiceFailureStage::Instance));
     }
     if dev_endpoint::dev_home_is_installed(home) {
+        eprintln!(
+            "artisan dev forge: connection failed (Instance): {} is an installed Artisan home, not a development Forge home",
+            home.display()
+        );
         return Err(StartupError::Stage(ServiceFailureStage::Instance));
     }
     // Provisioning first means the first dev run creates the credential
     // files the manually started backend needs; the readiness wait below
     // then fails honestly until that backend is up.
     let credentials = load_client_credentials(home).map_err(|error| {
-        eprintln!("artisan dev forge: credential load failed: {error}");
-        StartupError::Stage(ServiceFailureStage::Credentials)
+        dev_startup_failure(
+            ServiceFailureStage::Credentials,
+            "loading the client credentials",
+            &error,
+        )
     })?;
     let ready_path =
         dev_endpoint::dev_ready_path(home, dev_endpoint::dev_ready_override_from_env().as_deref());
@@ -398,24 +440,47 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     let (certificate, capability) = credentials.into_parts();
     let pinned_identity = PinnedIdentity::from_certificate(&certificate);
     if readiness.certificate_sha256() != pinned_identity.to_hex() {
+        eprintln!(
+            "artisan dev forge: connection failed (Readiness): the Forge at {} presents a different certificate than this home's credentials pin; the readiness receipt belongs to another Forge or the credentials were regenerated",
+            readiness.endpoint()
+        );
         return Err(StartupError::Stage(ServiceFailureStage::Readiness));
     }
-    let target = LoopbackTarget::new(
-        readiness
-            .endpoint()
-            .parse::<SocketAddr>()
-            .map_err(|_| StartupError::Stage(ServiceFailureStage::Readiness))?,
-    )
-    .map_err(|_| StartupError::Stage(ServiceFailureStage::Readiness))?;
-    let forge_pid = NonZeroU32::new(readiness.pid())
-        .ok_or(StartupError::Stage(ServiceFailureStage::Readiness))?;
+    let target = LoopbackTarget::new(readiness.endpoint().parse::<SocketAddr>().map_err(
+        |error| {
+            dev_startup_failure(
+                ServiceFailureStage::Readiness,
+                "parsing the readiness receipt's endpoint",
+                &error,
+            )
+        },
+    )?)
+    .map_err(|error| {
+        dev_startup_failure(
+            ServiceFailureStage::Readiness,
+            "accepting the readiness endpoint as a loopback target",
+            &error,
+        )
+    })?;
+    let forge_pid = NonZeroU32::new(readiness.pid()).ok_or_else(|| {
+        eprintln!(
+            "artisan dev forge: connection failed (Readiness): the readiness receipt carries process id 0"
+        );
+        StartupError::Stage(ServiceFailureStage::Readiness)
+    })?;
     let binding = ReconnectBinding::new(
         dev_endpoint::mint_dev_instance_id(),
         target.addr().port(),
         *pinned_identity.as_bytes(),
         forge_pid,
     )
-    .map_err(|_| StartupError::Stage(ServiceFailureStage::Instance))?;
+    .map_err(|error| {
+        dev_startup_failure(
+            ServiceFailureStage::Instance,
+            "building the reconnect binding",
+            &error,
+        )
+    })?;
     let mut frames = FrameFactory::new();
     let hello_stamp = frames.next()?;
     let hello = WireEnvelope {
@@ -423,8 +488,13 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
         frame_id: hello_stamp.frame_id,
         sent_at: hello_stamp.sent_at,
         body: WireEnvelopeBody::Hello(Hello {
-            supported_versions: VersionOffer::new(vec![1])
-                .map_err(|_| StartupError::Stage(ServiceFailureStage::Handshake))?,
+            supported_versions: VersionOffer::new(vec![1]).map_err(|error| {
+                dev_startup_failure(
+                    ServiceFailureStage::Handshake,
+                    "building the version offer",
+                    &error,
+                )
+            })?,
             credential: HelloCredential::Initial(capability),
             supports_lifecycle_control: false,
         }),
@@ -442,18 +512,32 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
             .await
             .map_err(|error| {
-                eprintln!("artisan dev forge: connect failed: {error}");
-                StartupError::Stage(ServiceFailureStage::Handshake)
+                dev_startup_failure(
+                    ServiceFailureStage::Handshake,
+                    "connecting and completing the handshake",
+                    &error,
+                )
             })?;
-    let reconnect_store = ReconnectCapabilityStore::from_home(home)
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Credentials))?;
+    let reconnect_store = ReconnectCapabilityStore::from_home(home).map_err(|error| {
+        dev_startup_failure(
+            ServiceFailureStage::Credentials,
+            "opening the reconnect capability store",
+            &error,
+        )
+    })?;
     let reconnect_lease = reconnect_store
         .initialize_owner_lease(
             binding,
             welcome.welcome.reconnect_capability,
             RECONNECT_LOCK_TIMEOUT,
         )
-        .map_err(|_| StartupError::Stage(ServiceFailureStage::Credentials))?;
+        .map_err(|error| {
+            dev_startup_failure(
+                ServiceFailureStage::Credentials,
+                "storing the first reconnect capability",
+                &error,
+            )
+        })?;
     eprintln!("artisan dev forge: connected ({})", readiness.endpoint());
     Ok((
         ServiceRuntime {
@@ -492,6 +576,11 @@ async fn wait_for_dev_readiness(path: &Path) -> Result<ForgeReadiness, StartupEr
             return Ok(readiness);
         }
         if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "artisan dev forge: connection failed (Readiness): no valid readiness receipt appeared at {} within {} ms; the development Forge is not running or has not finished starting",
+                path.display(),
+                dev_endpoint::DEV_READY_WAIT_MS
+            );
             return Err(StartupError::Stage(ServiceFailureStage::Readiness));
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -532,8 +621,8 @@ async fn service_main(
             // take_delivery exactly once for this session
             let delivery_started = {
                 let session = runtime.session.take();
-                match session {
-                    Some(session) => match session.take_delivery() {
+                if let Some(session) = session {
+                    match session.take_delivery() {
                         Ok((session, receiver)) => {
                             runtime.session = Some(session);
                             let cancel = Arc::new(CancelHandle::new());
@@ -551,9 +640,19 @@ async fn service_main(
                             runtime.delivery_join = Some(join);
                             Ok(())
                         }
-                        Err(_) => Err(ServiceFailure::local_session()),
-                    },
-                    None => Err(ServiceFailure::local_session()),
+                        Err(error) => {
+                            eprintln!(
+                                "Forge connection failed: taking the session's delivery stream: {}",
+                                ErrorChain(&error)
+                            );
+                            Err(ServiceFailure::local_session())
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "Forge connection failed: the started service holds no session to take deliveries from"
+                    );
+                    Err(ServiceFailure::local_session())
                 }
             };
             if let Err(failure) = delivery_started {
@@ -563,6 +662,9 @@ async fn service_main(
             } else {
                 let run_result = load_initial_catalog(&mut runtime, &mut frames, &events).await;
                 if let Err(failure) = run_result {
+                    eprintln!(
+                        "Forge connection failed while loading the initial catalog: {failure:?}"
+                    );
                     status = ServiceStopStatus::Failed;
                     crate::dev_startup_receipt::report_failed(failure);
                     let _ = publish(&events, NativeTransportEvent::Failed(failure));
@@ -576,13 +678,15 @@ async fn service_main(
                     )
                     .await;
                     if let Err(failure) = command_result {
+                        eprintln!("Forge connection ended with a failure: {failure:?}");
                         status = ServiceStopStatus::Failed;
                         crate::dev_startup_receipt::report_failed(failure);
                         let _ = publish(&events, NativeTransportEvent::Failed(failure));
                     }
                 }
             }
-            if runtime.cleanup().await.is_err() {
+            if let Err(failure) = runtime.cleanup().await {
+                eprintln!("Forge connection cleanup failed: {failure:?}");
                 status = ServiceStopStatus::Failed;
                 let _ = publish(
                     &events,
@@ -596,6 +700,7 @@ async fn service_main(
         Err(error) => {
             status = ServiceStopStatus::Failed;
             let failure = error.failure();
+            eprintln!("Forge connection could not start: {error} ({failure:?})");
             crate::dev_startup_receipt::report_failed(failure);
             let _ = publish(&events, NativeTransportEvent::Failed(failure));
         }

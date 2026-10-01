@@ -14,8 +14,9 @@ use super::usage::{ClaudeUsageSample, parse_claude_assistant_usage, parse_claude
 
 pub(crate) const CLAUDE_MAX_FRAME_BYTES: usize = 1_048_576;
 
-/// Maximum UTF-8 bytes retained for one approval/question text field.
-const CLAUDE_MAX_TEXT_FIELD_BYTES: usize = 8 * 1024;
+/// Maximum UTF-8 bytes retained for one approval/question text field and for
+/// one recognized `summaries[].summary` title.
+pub(super) const CLAUDE_MAX_TEXT_FIELD_BYTES: usize = 8 * 1024;
 
 /// Maximum questions retained per `AskUserQuestion` frame.
 const CLAUDE_MAX_QUESTIONS_PER_FRAME: usize = 32;
@@ -24,7 +25,6 @@ const CLAUDE_MAX_QUESTIONS_PER_FRAME: usize = 32;
 const CLAUDE_MAX_OPTIONS_PER_QUESTION: usize = 16;
 
 /// Maximum answers retained per question response (the domain ceiling).
-#[cfg(test)]
 pub(crate) const CLAUDE_MAX_ANSWERS: usize = 16;
 
 /// Maximum identities accepted for one session/task/request id.
@@ -44,15 +44,21 @@ pub(crate) enum ClaudeTurnError {
     StreamFailed,
 }
 
-/// Builds one stdio user-message line (`stream-input` fold shape).
+/// Builds one text-only stdio user-message line (`stream-input` fold shape).
 ///
-/// Steer-while-active reuses exactly this shape: the CLI folds stream-input
-/// messages into the live turn on its own timing, so Artisan documents the
-/// verb as experimental and never promises mid-turn interruption semantics.
+/// Test-only: production sends and steers build through
+/// [`user_message_with_images`].
+#[cfg(test)]
 pub(crate) fn user_message_line(session_id: &str, text: &str) -> String {
     user_message_with_images(session_id, Some(text), &[])
 }
 
+/// Builds one stdio user-message line (`stream-input` fold shape) with text
+/// followed by native base64 image content blocks.
+///
+/// Steer-while-active reuses exactly this shape: the CLI folds stream-input
+/// messages into the live turn on its own timing, so Artisan documents the
+/// verb as experimental and never promises mid-turn interruption semantics.
 pub(crate) fn user_message_with_images(
     session_id: &str,
     text: Option<&str>,
@@ -83,9 +89,6 @@ pub(crate) fn user_message_with_images(
 }
 
 /// Builds one stdio permission response line (`control_response`).
-///
-/// Test-only until dispatcher delivery wiring lands.
-#[cfg(test)]
 pub(crate) fn approval_response_line(request_id: &str, approved: bool) -> String {
     serde_json::json!({
         "type": "control_response",
@@ -103,9 +106,6 @@ pub(crate) fn approval_response_line(request_id: &str, approved: bool) -> String
 /// Claude collects answers through the permission response: the harness
 /// allows the call and returns the same input amended with an `answers`
 /// record keyed by question text, which the tool then reports as its result.
-///
-/// Test-only until dispatcher delivery wiring lands.
-#[cfg(test)]
 pub(crate) fn question_response_line(
     request_id: &str,
     input: &Value,
@@ -208,9 +208,6 @@ impl ClaudeQuestion {
     }
 
     /// Returns the question text (the answer-record key).
-    ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
     pub(crate) fn text(&self) -> &str {
         &self.text
     }
@@ -259,9 +256,6 @@ pub(crate) struct ClaudeQuestionRequest {
 
 impl ClaudeQuestionRequest {
     /// Returns the provider request identity answered by the response line.
-    ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
     pub(crate) fn request_id(&self) -> &str {
         &self.request_id
     }
@@ -297,9 +291,12 @@ pub(crate) enum ClaudeEvent {
     ThinkingTokens {
         estimated_tokens: u64,
     },
-    /// A streamed thinking block opened at this content-block index.
+    /// A streamed thinking block opened at this content-block index, with
+    /// its newest recognized server title when the block carried
+    /// `summaries`.
     ThinkingStarted {
         index: u64,
+        title: Option<String>,
     },
     /// One non-empty streamed thinking fragment of the block at `index`.
     ThinkingDelta {
@@ -321,6 +318,11 @@ pub(crate) enum ClaudeEvent {
     QuestionRequested(ClaudeQuestionRequest),
     SubagentLifecycle {
         task_id: String,
+    },
+    /// The live background-task level after a membership change: how many
+    /// agents and workflows still run behind the root turn.
+    BackgroundTasks {
+        waited: usize,
     },
     ChildTranscript {
         parent_tool_use_id: String,
@@ -474,12 +476,32 @@ fn decode_system(envelope: &Value) -> ClaudeEvent {
                 None => ClaudeEvent::Unknown,
             }
         }
+        "background_tasks_changed" => match envelope.get("tasks").and_then(Value::as_array) {
+            Some(tasks) => ClaudeEvent::BackgroundTasks {
+                waited: tasks.iter().filter(|task| is_waited_task(task)).count(),
+            },
+            None => ClaudeEvent::Unknown,
+        },
         "thinking_tokens" => match envelope.get("estimated_tokens").and_then(Value::as_u64) {
             Some(estimated_tokens) => ClaudeEvent::ThinkingTokens { estimated_tokens },
             None => ClaudeEvent::Unknown,
         },
         _ => ClaudeEvent::Unknown,
     }
+}
+
+/// Whether one live background task keeps the session working after a
+/// `result`.
+///
+/// Mirrors the CLI's own wind-down rule: it waits for background agents and
+/// workflows, which report back into the session, and reaps background
+/// shells once input closes. Ambient watchers are never activity.
+fn is_waited_task(task: &Value) -> bool {
+    let waited_type = matches!(
+        task.get("task_type").and_then(Value::as_str),
+        Some("local_agent" | "local_workflow")
+    );
+    waited_type && task.get("ambient").and_then(Value::as_bool) != Some(true)
 }
 
 fn decode_stream_event(envelope: &Value) -> ClaudeEvent {

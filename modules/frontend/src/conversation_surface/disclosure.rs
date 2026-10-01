@@ -92,7 +92,7 @@ pub(super) fn disclosure_frame(
     open: bool,
     motion: MotionPolicy,
     window: &mut Window,
-    cx: &mut Context<ConversationSurface>,
+    cx: &mut Context<TurnRowView>,
 ) -> DisclosureFrame {
     let panel_state = window.use_keyed_state(
         ElementId::Name(SharedString::from(format!(
@@ -187,16 +187,13 @@ pub(super) fn disclosure_flight_panel(
     frame: DisclosureFrame,
     controlled: bool,
     window: &mut Window,
-    cx: &mut Context<ConversationSurface>,
+    cx: &mut Context<TurnRowView>,
 ) -> AnyElement {
     let inner = div()
         .w_full()
         .min_w_0()
         .flex_shrink_0()
-        .debug_selector({
-            let content_selector = format!("{selector}-disclosure-content");
-            move || content_selector.clone()
-        })
+        .debug_selector(|| format!("{selector}-disclosure-content"))
         .child(content);
 
     if controlled {
@@ -240,9 +237,10 @@ pub(super) fn disclosure_flight_panel(
                 );
                 // One persisted clock drives height, opacity and chevron. Rebuilding
                 // the subtree cannot restart any part of the transition.
-                let surface = cx.entity().downgrade();
+                // The flight belongs to its turn row: only that row repaints.
+                let row = cx.entity().downgrade();
                 window.on_next_frame(move |_, app| {
-                    let _ = surface.update(app, |_, cx| cx.notify());
+                    let _ = row.update(app, |_, cx| cx.notify());
                 });
             } else {
                 disclosure = disclosure.child(panel.child(inner));

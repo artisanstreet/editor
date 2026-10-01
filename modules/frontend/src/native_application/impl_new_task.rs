@@ -51,6 +51,20 @@ impl NativeApplication {
         self.open_new_task_draft(project, cx);
     }
 
+    /// The wordmark's home navigation: the selected project's new-task
+    /// screen, exactly as New thread opens it; the unscoped home when no
+    /// project is selected or a new task cannot open now.
+    pub(super) fn go_home(&mut self, cx: &mut Context<Self>) {
+        if self.selected_project.is_some()
+            && !self.intake_retry_available
+            && self.add_project_action_is_admissible()
+        {
+            self.begin_new_task(cx);
+        } else {
+            self.navigate(NativeRoute::NewThread { project: None }, cx);
+        }
+    }
+
     /// Opens the new-thread screen on the project's new-task draft.
     ///
     /// No thread is created here: the screen asks what to build, and the
@@ -67,9 +81,13 @@ impl NativeApplication {
         }
         self.pending_thread = None;
         self.pending_snapshot = None;
-        // Typed text follows into the new task; an empty composer shows the
-        // project's saved draft instead of replacing it.
-        let carry = self.composer.read(cx).has_unsent_draft();
+        // The screen stays on the new task: a thread listing arriving now
+        // opens no remembered thread over it.
+        self.project_navigation.new_task_open = true;
+        // Text typed since the current scope opened follows into the new
+        // task; a draft that scope merely restored stays its own, and the
+        // project's saved draft is shown instead.
+        let carry = self.composer.read(cx).has_authored_draft();
         self.project_navigation.restore_draft = !carry;
         let key = format!("project:{}", project.as_str());
         self.composer

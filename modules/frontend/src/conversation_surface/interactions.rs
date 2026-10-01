@@ -31,7 +31,8 @@ impl ConversationSurface {
     /// handles. The surface starts with the supplied scene and no actions.
     #[must_use]
     pub fn new(scene: ConversationScene, theme_mode: ThemeMode, cx: &mut Context<Self>) -> Self {
-        let navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
+        let navigator_markers = Rc::new(turn_navigator_markers(&scene, &[]));
+        let followed_tail = tail_identity(&scene, &[]);
         let mut surface = Self {
             composer_clearance: HashMap::new(),
             pending_messages: Vec::new(),
@@ -42,9 +43,10 @@ impl ConversationSurface {
             message_images: None,
             message_images_observation: None,
             theme_mode,
-            markdown_renderer: MarkdownRenderer::new(),
-            rich_link_titles: RichLinkTitleTable::new(),
-            rich_link_missing: RefCell::new(Vec::new()),
+            shaper: Rc::new(TranscriptShaper::new()),
+            rich_link_generation: 0,
+            turn_rows: HashMap::new(),
+            scene_generation: 0,
             scroll_handle: ScrollHandle::new(),
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),
@@ -61,6 +63,8 @@ impl ConversationSurface {
             pending_viewport_observation: None,
             pending_viewport_extent_change: false,
             follow_bottom_pending: false,
+            followed_tail,
+            tail_follow_settling: false,
             last_viewport_geometry: None,
             viewport_observation_scheduled: false,
             viewport_next_frame_scheduled: false,
@@ -68,27 +72,29 @@ impl ConversationSurface {
             pending_scroll_targets: Vec::with_capacity(CONVERSATION_SURFACE_MAX_SCROLL_TARGETS),
             executed_scroll_targets: Vec::new(),
             scroll_anchors: Vec::new(),
+            scroll_targets_await_rows: false,
+            anchor_scrolls_in_flight: 0,
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
-            navigator_expanded: false,
+            navigator_rail_hovered: false,
+            navigator_menu_hovered: false,
             navigator_scroll: ScrollHandle::new(),
             navigator_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             navigator_hover_surface: Rc::new(RefCell::new(None)),
             navigator_focused_key: None,
-            navigator_width_generation: 0,
-            navigator_width_px: Rc::new(RefCell::new(40.0)),
-            navigator_width_from: 40.0,
+            earlier_turns_wanted_for: None,
+            earlier_turns_available: false,
+            earlier_turn_markers: Vec::new(),
             transcript_scroll: PickerScrollState::default(),
             transcript_scroll_frame_scheduled: false,
             active_now_ms: None,
             status_motion: MotionPolicy::Full,
-            trace_groups_open: RefCell::new(HashMap::new()),
+            trace_groups_open: Rc::new(RefCell::new(HashMap::new())),
             footer_mirrors: HashMap::new(),
             footer_focus: HashMap::new(),
             footer_revealed: None,
             question_focus: HashMap::new(),
             answer_thread: None,
-            answer_run: None,
             approval_gates: HashMap::new(),
             question_gates: HashMap::new(),
             question_choices: HashMap::new(),
@@ -182,8 +188,21 @@ impl ConversationSurface {
     pub fn set_jump_to_latest_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.jump_to_latest_visible != visible {
             self.jump_to_latest_visible = visible;
+            if visible {
+                // The controller detached the reader through a path this
+                // surface never observed (a disclosure toggle, an
+                // interrupted jump). Forget the last report so the reader's
+                // return to the end is reported again and re-attaches.
+                self.last_viewport_observation = None;
+            }
             cx.notify();
         }
+    }
+
+    /// The transcript tail an automatic follow brings into view: the last
+    /// Forge outbox row when one is painted, else the last turn.
+    pub(super) fn tail_identity(&self) -> Option<String> {
+        tail_identity(&self.scene, &self.pending_messages)
     }
 
     /// Requests the existing GPUI scroll handle to move to the transcript end.
@@ -221,13 +240,90 @@ impl ConversationSurface {
     /// Replaces the accepted scene. Disclosure state is not changed locally;
     /// the next replacement scene remains authoritative.
     pub fn replace_scene(&mut self, scene: ConversationScene, cx: &mut Context<Self>) {
-        self.navigator_markers = Rc::new(loaded_turn_navigator_markers(&scene));
+        self.navigator_markers =
+            Rc::new(turn_navigator_markers(&scene, &self.earlier_turn_markers));
+        let previous_first = self
+            .scene
+            .turn_scenes()
+            .first()
+            .map(|turn| turn.turn_id.clone());
         self.scene = scene;
         // Scene-keyed presentation state is pruned once here instead of on
         // every render, so a windowed render never scans the whole transcript.
         self.scene_replaced();
+        if let Some(previous_first) = previous_first {
+            self.hold_position_after_prepend(&previous_first);
+        }
         self.sync_question_focus(cx);
         cx.notify();
+    }
+
+    /// Records whether the thread has turns before the loaded ones, so the
+    /// surface asks for them as the reader nears the start.
+    pub fn set_earlier_turns_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        if self.earlier_turns_available != available {
+            self.earlier_turns_available = available;
+            cx.notify();
+        }
+    }
+
+    /// The turn navigator's labels, oldest first, each with whether its turn
+    /// is loaded. A review seam: tests read what the rail lists without
+    /// painting it.
+    #[must_use]
+    pub fn navigator_marker_labels(&self) -> Vec<(String, bool)> {
+        self.navigator_markers
+            .iter()
+            .map(|marker| (marker.label.clone(), marker.turn_index.is_some()))
+            .collect()
+    }
+
+    /// Lists the user messages of the turns that are not loaded, oldest
+    /// first, in front of the loaded ones in the turn navigator.
+    pub fn set_earlier_turn_markers(
+        &mut self,
+        markers: Vec<(ItemId, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.earlier_turn_markers != markers {
+            self.earlier_turn_markers = markers;
+            self.navigator_markers = Rc::new(turn_navigator_markers(
+                &self.scene,
+                &self.earlier_turn_markers,
+            ));
+            cx.notify();
+        }
+    }
+
+    /// Keeps the reader where they are when older turns were added above.
+    ///
+    /// Turns read on demand land in front of the loaded ones. The content
+    /// above the viewport grows by exactly the height their rows are planned
+    /// at, so the offset moves by the same amount and nothing on screen
+    /// shifts. A wheel glide in flight ends here: its target was an offset
+    /// in the shorter transcript.
+    fn hold_position_after_prepend(&mut self, previous_first: &TurnId) {
+        let Some(index) = self
+            .scene
+            .turn_scenes()
+            .iter()
+            .position(|turn| &turn.turn_id == previous_first)
+            .filter(|index| *index > 0)
+        else {
+            return;
+        };
+        let Some(added) = self.transcript_window.borrow().top_of(index) else {
+            return;
+        };
+        let offset = self.scroll_handle.offset();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "planned heights originate from GPUI's f32 pixel bounds"
+        )]
+        let held = f32::from(offset.y) - added as f32;
+        self.scroll_handle.set_offset(point(offset.x, px(held)));
+        self.transcript_scroll = PickerScrollState::default();
+        self.smooth_bottom_active = false;
     }
 
     /// Mirrors one host clock sample for live Thinking/Working elapsed paint.
@@ -344,33 +440,28 @@ impl ConversationSurface {
         expires_at_ms: i64,
         cx: &mut Context<Self>,
     ) {
-        let before = self.rich_link_titles.lookup(requested_url);
-        self.rich_link_titles
-            .resolve(requested_url, page_name.clone(), expires_at_ms);
+        let mut titles = self.shaper.titles().borrow_mut();
+        let before = titles.lookup(requested_url);
+        titles.resolve(requested_url, page_name.clone(), expires_at_ms);
+        drop(titles);
         if before.as_ref() != Some(page_name) {
+            self.rich_link_generation = self.rich_link_generation.wrapping_add(1);
             cx.notify();
         }
     }
 
     /// Records one failed rich-link resolution; the authored label stays.
     pub fn set_rich_link_favicon(&mut self, url: &str, bytes: &[u8], cx: &mut Context<Self>) {
-        self.rich_link_titles.resolve_icon(url, bytes);
+        self.shaper.titles().borrow_mut().resolve_icon(url, bytes);
+        self.rich_link_generation = self.rich_link_generation.wrapping_add(1);
         cx.notify();
     }
 
     /// Records a failed metadata lookup.
     pub fn set_rich_link_failure(&mut self, requested_url: &str, cx: &mut Context<Self>) {
-        self.rich_link_titles.fail(requested_url);
+        self.shaper.titles().borrow_mut().fail(requested_url);
+        self.rich_link_generation = self.rich_link_generation.wrapping_add(1);
         cx.notify();
-    }
-
-    /// Returns one render-scoped probe over the surface title table.
-    pub(super) fn rich_link_probe(&self, now_ms: i64) -> SurfaceRichLinkTitles<'_> {
-        SurfaceRichLinkTitles {
-            titles: &self.rich_link_titles,
-            missing: &self.rich_link_missing,
-            now_ms,
-        }
     }
 
     /// Queues every newly missing rich-link destination exactly once.
@@ -381,17 +472,19 @@ impl ConversationSurface {
     /// guarded by the table's pending state, so a second frame queues nothing
     /// and the loop ends.
     pub(super) fn flush_rich_link_requests(&mut self, cx: &mut Context<Self>) {
-        let missing = std::mem::take(&mut *self.rich_link_missing.borrow_mut());
+        let missing = self.shaper.take_missing_links();
         if missing.is_empty() {
             return;
         }
         let now_ms = crate::conversation_host::host_now_millis();
         let mut queued = Vec::new();
+        let mut titles = self.shaper.titles().borrow_mut();
         for destination in missing {
-            if let Some(url) = self.rich_link_titles.queue(&destination, now_ms) {
+            if let Some(url) = titles.queue(&destination, now_ms) {
                 queued.push(url);
             }
         }
+        drop(titles);
         if queued.is_empty() {
             return;
         }
@@ -400,26 +493,19 @@ impl ConversationSurface {
         }
     }
 
-    /// Sets the explicit live answer context for engine approval/question rows.
+    /// Sets the thread that owns the engine approval/question rows.
     ///
-    /// Both identities join each submit at dispatch; nothing ambient is read
-    /// elsewhere. Submit affordances stay disabled until the controller
-    /// supplies the live owning thread and run.
-    pub fn set_answer_context(
-        &mut self,
-        thread_id: ThreadId,
-        run_id: RunId,
-        cx: &mut Context<Self>,
-    ) {
+    /// The thread joins each submit at dispatch together with the block's own
+    /// run and interaction identities; nothing ambient is read elsewhere.
+    /// Submit affordances stay disabled until the host supplies it.
+    pub fn set_answer_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
         self.answer_thread = Some(thread_id);
-        self.answer_run = Some(run_id);
         cx.notify();
     }
 
-    /// Clears the live answer context, disabling submit affordances.
-    pub fn clear_answer_context(&mut self, cx: &mut Context<Self>) {
+    /// Clears the owning thread, disabling submit affordances.
+    pub fn clear_answer_thread(&mut self, cx: &mut Context<Self>) {
         self.answer_thread = None;
-        self.answer_run = None;
         cx.notify();
     }
 
@@ -505,26 +591,26 @@ impl ConversationSurface {
 
     /// Attempts one approval gesture for a rendered row.
     ///
-    /// Returns false when the row has no live context, no parsable approval
-    /// identity, or an outstanding flight; in all three cases nothing is
-    /// minted or dispatched. Every admitted attempt mints a fresh request
-    /// identity.
+    /// `run_id` and `approval_id` are the block's own identities from its
+    /// durable provenance. Returns false when the owning thread is unknown
+    /// or the row has an outstanding flight; in both cases nothing is minted
+    /// or dispatched. Every admitted attempt mints a fresh request identity.
     pub fn submit_approval_gesture(
         &mut self,
         block_key: &str,
+        run_id: &RunId,
         approval_id: &ObservationId,
         approved: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let (Some(thread_id), Some(run_id)) = (self.answer_thread.clone(), self.answer_run.clone())
-        else {
+        let Some(thread_id) = self.answer_thread.clone() else {
             return false;
         };
         let admitted = self
             .approval_gates
             .entry(block_key.to_owned())
             .or_default()
-            .begin(thread_id, run_id, approval_id.clone(), approved)
+            .begin(thread_id, run_id.clone(), approval_id.clone(), approved)
             .map(|attempt| AnswerDispatch {
                 action: AnswerDispatchAction::Approval(attempt.action),
                 command: attempt.command,
@@ -545,23 +631,27 @@ impl ConversationSurface {
     /// through [`Self::submit_question_option_gesture`] at click time);
     /// free-form rows submit the staged draft. Empty submissions are rejected
     /// client-side with the row staying pending.
-    pub fn submit_question_gesture(&mut self, block_key: &str, cx: &mut Context<Self>) -> bool {
-        let (answer_context, is_choice) = (
-            self.answer_thread.clone().zip(self.answer_run.clone()),
-            self.question_choices
-                .get(block_key)
-                .is_some_and(answer_state::QuestionChoiceCache::is_choice),
-        );
-        let (Some((thread_id, run_id)), Some(question_id)) =
-            (answer_context, ObservationId::parse(block_key).ok())
-        else {
+    pub fn submit_question_gesture(
+        &mut self,
+        block_key: &str,
+        run_id: &RunId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let is_choice = self
+            .question_choices
+            .get(block_key)
+            .is_some_and(answer_state::QuestionChoiceCache::is_choice);
+        let (Some(thread_id), Some(question_id)) = (
+            self.answer_thread.clone(),
+            ObservationId::parse(block_key).ok(),
+        ) else {
             return false;
         };
         let gate = self.question_gates.entry(block_key.to_owned()).or_default();
         let admitted = if is_choice {
-            gate.submit_selected(thread_id, run_id, question_id)
+            gate.submit_selected(thread_id, run_id.clone(), question_id)
         } else {
-            gate.submit_freeform(thread_id, run_id, question_id)
+            gate.submit_freeform(thread_id, run_id.clone(), question_id)
         }
         .map(|attempt| AnswerDispatch {
             action: AnswerDispatchAction::Question(attempt.action),
@@ -592,6 +682,7 @@ impl ConversationSurface {
     pub fn handle_question_key(
         &mut self,
         block_key: &str,
+        run_id: &RunId,
         key: &str,
         modifiers: &Modifiers,
         cx: &mut Context<Self>,
@@ -611,7 +702,7 @@ impl ConversationSurface {
             return QuestionKeyOutcome::FocusTranscript;
         }
         if key == "enter" && !modifiers.modified() {
-            return if self.submit_question_gesture(block_key, cx) {
+            return if self.submit_question_gesture(block_key, run_id, cx) {
                 QuestionKeyOutcome::Submitted
             } else {
                 QuestionKeyOutcome::Ignored
@@ -652,6 +743,7 @@ impl ConversationSurface {
     pub fn submit_question_option_gesture(
         &mut self,
         block_key: &str,
+        run_id: &RunId,
         option: String,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -667,9 +759,8 @@ impl ConversationSurface {
             cx.notify();
             return true;
         }
-        let (Some(thread_id), Some(run_id), Some(question_id)) = (
+        let (Some(thread_id), Some(question_id)) = (
             self.answer_thread.clone(),
-            self.answer_run.clone(),
             ObservationId::parse(block_key).ok(),
         ) else {
             return false;
@@ -678,7 +769,7 @@ impl ConversationSurface {
             .question_gates
             .entry(block_key.to_owned())
             .or_default()
-            .submit_single(thread_id, run_id, question_id, option)
+            .submit_single(thread_id, run_id.clone(), question_id, option)
             .map(|attempt| AnswerDispatch {
                 action: AnswerDispatchAction::Question(attempt.action),
                 command: attempt.command,
@@ -919,8 +1010,13 @@ impl ConversationSurface {
             self.scroll_handle.set_offset(point(offset.x, px(next)));
             cx.notify();
         }
-        if !self.transcript_scroll.active() {
+        if self.smooth_bottom_active && !self.transcript_scroll.active() {
+            // The jump settled at the end. Say so regardless of the last
+            // report: the controller is in its scrolling state until it
+            // hears the reader arrive, and a geometry observation may never
+            // differ from what was reported before the jump began.
             self.smooth_bottom_active = false;
+            self.report_reached_end(cx);
         }
         self.schedule_transcript_scroll_frame(window, cx);
     }
@@ -959,11 +1055,16 @@ impl ConversationSurface {
         // the first marker per turn reproduces the previous per-turn walk.
         let mut last_turn: Option<usize> = None;
         for marker in markers {
-            if last_turn == Some(marker.turn_index) {
+            // A message in a turn that is not loaded paints nowhere, so the
+            // reader cannot be at it.
+            let Some(turn_index) = marker.turn_index else {
+                continue;
+            };
+            if last_turn == Some(turn_index) {
                 continue;
             }
-            last_turn = Some(marker.turn_index);
-            let Some(bounds) = children_bounds.get(marker.turn_index) else {
+            last_turn = Some(turn_index);
+            let Some(bounds) = children_bounds.get(turn_index) else {
                 continue;
             };
             let content_top = f64::from(bounds.origin.y) - element_offset;
@@ -1033,7 +1134,10 @@ impl ConversationSurface {
     pub(crate) fn release_transient_scroll_custody(&mut self) {
         self.pending_scroll_targets.clear();
         self.executed_scroll_targets.clear();
-        self.scroll_anchors.clear();
+        for anchors in self.scroll_anchors.drain(..) {
+            anchors.borrow_mut().clear();
+        }
+        self.scroll_targets_await_rows = false;
         self.scroll_anchor_paint_token = None;
     }
 
@@ -1093,17 +1197,28 @@ impl ConversationSurface {
         }
     }
 
-    /// Executes queued scroll targets against freshly rendered anchors.
+    /// Executes queued scroll targets against the built rows' anchors.
     ///
     /// Painted matches run the GPUI anchor scroll and join the prepaint
     /// handoff; unpainted matches stay queued behind the paint gate and
-    /// unknown targets drop as no-ops. Returns whether any scroll executed.
+    /// unknown targets drop as no-ops. Rows render after this runs, from
+    /// their own views, so the anchors seen here are those of each row's
+    /// previous render: an unknown head target (a chain the target just
+    /// opened, a block that just arrived) waits one frame for the rows'
+    /// current anchors before it is dropped. Returns whether any scroll
+    /// executed.
     pub(super) fn drain_painted_scroll_targets(
         &mut self,
-        rendered_anchors: &[RenderedScrollAnchor],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let already_waited = std::mem::take(&mut self.scroll_targets_await_rows);
+        if self.pending_scroll_targets.is_empty() {
+            self.executed_scroll_targets.clear();
+            return false;
+        }
+        let row_anchors: Vec<_> = self.scroll_anchors.iter().map(|row| row.borrow()).collect();
+        let rendered_anchors = row_anchors.iter().flat_map(|row| row.iter());
         let pending_targets = std::mem::take(&mut self.pending_scroll_targets);
         // The handoff is render-local: leftovers from a draw whose prepaint
         // never resolved them must not leak into a later frame.
@@ -1118,11 +1233,24 @@ impl ConversationSurface {
             }
 
             match rendered_anchors
-                .iter()
+                .clone()
                 .find(|rendered| rendered.matches(&target))
             {
                 Some(rendered) if rendered.painted => {
                     rendered.anchor.scroll_to(window, cx);
+                    // GPUI applies the anchor from its recorded origin on
+                    // the next frame. A cached row that re-renders at moved
+                    // bounds records row-relative origins, so rows render
+                    // uncached until that callback, registered after GPUI's
+                    // own, has run.
+                    self.anchor_scrolls_in_flight += 1;
+                    let surface = cx.entity().downgrade();
+                    window.on_next_frame(move |_, app| {
+                        let _ = surface.update(app, |surface, _| {
+                            surface.anchor_scrolls_in_flight =
+                                surface.anchor_scrolls_in_flight.saturating_sub(1);
+                        });
+                    });
                     self.executed_scroll_targets.push(target);
                     scroll_executed = true;
                 }
@@ -1130,9 +1258,15 @@ impl ConversationSurface {
                     retained_targets.push(target);
                     waiting_for_paint = true;
                 }
+                None if !already_waited => {
+                    retained_targets.push(target);
+                    waiting_for_paint = true;
+                    self.scroll_targets_await_rows = true;
+                }
                 None => {}
             }
         }
+        drop(row_anchors);
         self.pending_scroll_targets = retained_targets;
         scroll_executed
     }
@@ -1175,6 +1309,24 @@ impl ConversationSurface {
         }
     }
 
+    /// Reports the reader at the transcript end regardless of the last
+    /// report: a settled jump or geometry that left nothing to scroll makes
+    /// following the only truthful state, and the controller must hear it
+    /// again even when the previous observation already said so (a detach
+    /// since then, from a disclosure toggle or an interrupted jump, left no
+    /// trace here).
+    pub(super) fn report_reached_end(&mut self, cx: &mut Context<Self>) {
+        self.last_viewport_observation = None;
+        let _ = self.observe_viewport(
+            ViewportObservation {
+                first_visible: None,
+                last_visible: None,
+                at_bottom: true,
+            },
+            cx,
+        );
+    }
+
     pub(super) fn enqueue_action(&mut self, action: ConversationSurfaceAction) -> bool {
         if self.actions.len() >= CONVERSATION_SURFACE_MAX_ACTIONS {
             return false;
@@ -1197,6 +1349,7 @@ impl ConversationSurface {
             viewport_height,
             scroll_height,
         };
+        self.observe_earlier_turns_wanted(scroll_top, viewport_height, cx);
         if self.last_viewport_geometry == Some(geometry) {
             return;
         }
@@ -1215,6 +1368,13 @@ impl ConversationSurface {
             // not reinterpret growing content as the reader scrolling away.
             self.pending_viewport_extent_change = true;
             self.retry_pending_viewport_observation(cx);
+            // Content that no longer overflows leaves the reader nowhere but
+            // the end: say so, even after a detach no observation recorded,
+            // so the controller re-attaches and hides a jump control that
+            // could scroll nothing.
+            if scroll_height <= viewport_height {
+                self.report_reached_end(cx);
+            }
             return;
         }
         if self.transcript_scroll.active() && !self.smooth_bottom_active {
@@ -1228,6 +1388,41 @@ impl ConversationSurface {
             at_bottom: conversation_is_following(scroll_top, scroll_height, viewport_height),
         };
         let _ = self.observe_viewport(observation, cx);
+    }
+
+    /// Asks for older turns once the reader is within two viewports of the
+    /// start of the loaded ones, so a scroll toward the start finds them
+    /// already there. A transcript still settling at its end does not ask:
+    /// its offset has not been placed yet.
+    fn observe_earlier_turns_wanted(
+        &mut self,
+        scroll_top: f64,
+        viewport_height: f64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.earlier_turns_available
+            || viewport_height <= 0.0
+            || self.follow_bottom_pending
+            || self.tail_follow_settling
+            || self.smooth_bottom_pending
+        {
+            return;
+        }
+        if scroll_top >= super::render_budget::EARLIER_TURNS_LEAD_VIEWPORTS * viewport_height {
+            self.earlier_turns_wanted_for = None;
+            return;
+        }
+        let Some(first) = self.scene.turn_scenes().first().map(|turn| &turn.turn_id) else {
+            return;
+        };
+        if self.earlier_turns_wanted_for.as_ref() == Some(first) {
+            return;
+        }
+        let first = first.clone();
+        if self.enqueue_action(ConversationSurfaceAction::EarlierTurnsWanted) {
+            self.earlier_turns_wanted_for = Some(first);
+            cx.notify();
+        }
     }
 
     pub(super) fn schedule_viewport_observation(
@@ -1261,4 +1456,18 @@ impl ConversationSurface {
             });
         });
     }
+}
+
+/// The transcript tail an automatic follow brings into view: the last Forge
+/// outbox row when one is painted, else the last turn.
+fn tail_identity(scene: &ConversationScene, pending: &[PendingMessageRow]) -> Option<String> {
+    pending
+        .last()
+        .map(|row| format!("pending:{}", row.message_id))
+        .or_else(|| {
+            scene
+                .turn_scenes()
+                .last()
+                .map(|turn| format!("turn:{}", turn.turn_id().as_str()))
+        })
 }

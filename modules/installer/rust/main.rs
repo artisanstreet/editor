@@ -128,10 +128,26 @@ enum Operation {
     },
 }
 
+/// Renders `error` and every source beneath it as `top: cause: cause`, so a
+/// failed step names the operating-system or network failure behind it.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut rendered = error.to_string();
+    let mut current = error.source();
+    while let Some(source) = current {
+        let message = source.to_string();
+        if !message.is_empty() && !rendered.ends_with(&message) {
+            rendered.push_str(": ");
+            rendered.push_str(&message);
+        }
+        current = source.source();
+    }
+    rendered
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("ae installer failed: {error}");
+        eprintln!("ae installer failed: {}", error_chain(&error));
         std::process::exit(1);
     }
 }

@@ -13,13 +13,14 @@ use std::time::Duration;
 use artisan_database::{
     DispatchFailureReason, FailUnstartedRun, LaunchedRunReceipt, RunErrorCode, RunErrorMessage,
 };
-use artisan_domain::EngineId;
+use artisan_domain::{EngineId, ErrorChain};
 use artisan_transport::CancelHandle;
 
 use crate::engine_owner::operation::{
     AcceptedTurn, EngineOperationError, PreparedSession, StartRefusal,
 };
 
+use super::diagnostics::StepError;
 use super::dispatch_support::{at_or_after, mint_patch_id};
 use super::{ClaimExecution, ClaimIds};
 
@@ -148,9 +149,10 @@ pub(super) fn describe(engine: EngineId, failure: &StartFailure) -> (&'static st
         EngineOperationError::ReadinessFailed(_) | EngineOperationError::HealthFailed(_) => {
             "it never became ready"
         }
-        EngineOperationError::ProviderRequestFailed | EngineOperationError::FrameTooLarge => {
+        EngineOperationError::ProviderRequestFailed => {
             "it exited or refused the session before announcing it"
         }
+        EngineOperationError::FrameTooLarge => "it sent a reply larger than the Editor accepts",
         _ => "its process failed during startup",
     };
     // The engine's own (sanitized, bounded) reason replaces the generic
@@ -183,30 +185,55 @@ pub(super) async fn settle_unstarted_claim(
     failure: &StartFailure,
 ) {
     let (code, message) = describe(engine, failure);
-    if matches!(
-        failure,
-        StartFailure::Failed(StartRefusal {
-            detail: Some(_),
-            ..
-        })
-    ) {
-        // One already-sanitized line; raw stderr never reaches the log.
-        eprintln!("native run start failed: {message}");
+    // The message is the user-facing sentence, built from the engine's
+    // already-sanitized reason; raw stderr never reaches the log. The typed
+    // cause beside it says which startup stage failed.
+    let cause = match failure {
+        StartFailure::NotAdmitted => String::from("the engine owner refused to admit the turn"),
+        StartFailure::DeadlineElapsed(deadline) => format!(
+            "the provider did not announce its session within {} ms",
+            deadline.as_millis()
+        ),
+        StartFailure::Failed(refusal) => ErrorChain(&refusal.error).to_string(),
+    };
+    eprintln!(
+        "native run start failed (thread {} run {}, engine {engine:?}, code {code}): {cause}; shown as: {message}",
+        receipt.thread_id, receipt.run_id
+    );
+    let settled = settle_start_failure(context, ids, receipt, code, message).await;
+    if let Err(error) = settled {
+        // The run keeps its launched row; lease recovery settles it later.
+        eprintln!(
+            "native run start failure could not be stored (thread {} run {}): {}",
+            receipt.thread_id,
+            receipt.run_id,
+            ErrorChain(&error)
+        );
     }
-    let (Ok(error_code), Ok(error_message), Ok(dispatch_reason)) = (
-        RunErrorCode::parse(code.to_owned()),
-        RunErrorMessage::parse(message.clone()),
-        DispatchFailureReason::parse(message),
-    ) else {
-        return;
-    };
-    let Some(turn_patch_id) = mint_patch_id(context.origin) else {
-        return;
-    };
+}
+
+/// Stores the startup failure on the launched run and its dispatch row.
+async fn settle_start_failure(
+    context: &ClaimExecution<'_>,
+    ids: &ClaimIds,
+    receipt: &LaunchedRunReceipt,
+    code: &'static str,
+    message: String,
+) -> Result<(), StepError> {
+    let error_code = RunErrorCode::parse(code.to_owned())
+        .map_err(|error| StepError::failed("validating the start failure code", error))?;
+    let error_message = RunErrorMessage::parse(message.clone())
+        .map_err(|error| StepError::failed("validating the start failure message", error))?;
+    let dispatch_reason = DispatchFailureReason::parse(message)
+        .map_err(|error| StepError::failed("validating the dispatch failure reason", error))?;
+    let turn_patch_id = mint_patch_id(context.origin).ok_or(StepError::refused(
+        "minting the turn patch id: entropy or identifier validation failed",
+    ))?;
+    let mut last = StepError::refused("storing the start failure: no attempt ran");
     for _ in 0..context.config.max_command_retries.get() {
-        let Some(operated_at) = at_or_after(context.origin, ids.operated_at) else {
-            return;
-        };
+        let operated_at = at_or_after(context.origin, ids.operated_at).ok_or(
+            StepError::refused("reading the clock to store the start failure"),
+        )?;
         let outcome = context
             .repository
             .fail_unstarted_run(FailUnstartedRun {
@@ -221,15 +248,19 @@ pub(super) async fn settle_unstarted_claim(
                 dispatch_reason: &dispatch_reason,
             })
             .await;
-        if outcome.is_ok() {
-            let _ = context
-                .config
-                .conversation_commit_notifier()
-                .publish(&receipt.thread_id);
-            context.config.notifier.wake_any();
-            return;
+        match outcome {
+            Ok(_) => {
+                let _ = context
+                    .config
+                    .conversation_commit_notifier()
+                    .publish(&receipt.thread_id);
+                context.config.notifier.wake_any();
+                return Ok(());
+            }
+            Err(error) => last = StepError::failed("storing the start failure", error),
         }
     }
+    Err(last)
 }
 
 #[cfg(test)]
@@ -286,6 +317,15 @@ mod tests {
             )
             .1,
             "Claude failed to start: it exited or refused the session before announcing it."
+        );
+        // An oversized reply is named as such, not as a refusal.
+        assert_eq!(
+            describe(
+                EngineId::Codex,
+                &StartFailure::Failed(EngineOperationError::FrameTooLarge.into())
+            )
+            .1,
+            "Codex failed to start: it sent a reply larger than the Editor accepts."
         );
     }
 

@@ -1009,9 +1009,8 @@ fn prose_reference_weights_request_exact_static_faces() {
     clippy::float_cmp,
     reason = "shadow layer alphas are exact authored constants; equality pins the verbatim stack"
 )]
-fn fence_card_lg_shadow_matches_reference_stack() {
-    // `card-lg` (`utilities.css:48–54`) is four ordinary outer layers; the
-    // fence paints them through the shared recipe with no new machinery.
+fn card_lg_shadow_matches_reference_stack() {
+    // `card-lg` (`utilities.css:48–54`) is four ordinary outer layers.
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         let shadow = ArtisanTheme::for_mode(mode).elevation.card_lg_shadow;
         assert_eq!(shadow.len(), 4);
@@ -1128,5 +1127,214 @@ fn mounted_heading_follower_gap_keeps_heading_bottom(cx: &mut TestAppContext) {
             "probe-markdown-block-1",
         ),
         px(24.0)
+    );
+}
+
+/// Mounts `source` and reports whether it rendered as Markdown blocks
+/// rather than the raw-source fallback, which paints no block selectors.
+fn mounts_as_blocks(cx: &mut TestAppContext, source: &'static str, block: &'static str) -> bool {
+    struct Probe {
+        renderer: MarkdownRenderer,
+        source: &'static str,
+    }
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(600.0)).child(self.renderer.render_source(
+                self.source,
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                "probe",
+            ))
+        }
+    }
+    let (_, cx) = cx.add_window_view(|_, _| Probe {
+        renderer: MarkdownRenderer::new(),
+        source,
+    });
+    cx.debug_bounds(block).is_some()
+}
+
+#[gpui::test]
+fn unhighlighted_fence_keeps_the_message_rendered(cx: &mut TestAppContext) {
+    // `ts` has no bundled grammar. The fence reads as plain code while the
+    // emphasis beside it keeps rendering; the message never drops to raw
+    // source, which showed literal `**` and `_` markers.
+    let source = "**Done.** See _below_:\n\n```ts\nconst x = 1;\n```\n";
+    assert!(mounts_as_blocks(cx, source, "probe-markdown-block-0"));
+    assert!(mounts_as_blocks(cx, source, "probe-markdown-block-1-code"));
+}
+
+#[gpui::test]
+fn bare_and_indented_code_keep_the_message_rendered(cx: &mut TestAppContext) {
+    assert!(mounts_as_blocks(
+        cx,
+        "**Done.**\n\n```\nplain\n```\n",
+        "probe-markdown-block-1-code",
+    ));
+    assert!(mounts_as_blocks(
+        cx,
+        "**Done.**\n\n    indented\n",
+        "probe-markdown-block-1-code",
+    ));
+}
+
+#[gpui::test]
+fn streaming_open_fence_keeps_the_message_rendered(cx: &mut TestAppContext) {
+    // Mid-stream the closing fence line has not arrived yet.
+    let source = "**Done.** Writing:\n\n```rust\nfn unfinished() {\n";
+    assert!(mounts_as_blocks(cx, source, "probe-markdown-block-0"));
+    assert!(mounts_as_blocks(cx, source, "probe-markdown-block-1-code"));
+}
+
+#[test]
+fn fence_inside_a_list_item_is_highlighted() {
+    let parsed = engine()
+        .parse_document("1. step\n\n   ```rust\n   fn main() {}\n   ```\n")
+        .expect("parse succeeds");
+
+    let [Block::List { items, .. }] = parsed.blocks() else {
+        panic!("expected one list, got {:?}", parsed.blocks());
+    };
+    let nested = fences(&items[0].blocks);
+    assert_eq!(nested.len(), 1);
+    assert!(nested[0].closed);
+    assert!(
+        nested[0]
+            .tokens
+            .as_ref()
+            .is_some_and(|tokens| !tokens.is_empty()),
+        "a closed known fence highlights at any depth"
+    );
+}
+
+/// Mounts `source` in a 600 px host and returns the painted fence card.
+fn mounted_fence(cx: &mut TestAppContext, source: &'static str) -> gpui::Bounds<gpui::Pixels> {
+    struct Probe {
+        renderer: MarkdownRenderer,
+        source: &'static str,
+    }
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(600.0)).child(self.renderer.render_source(
+                self.source,
+                ArtisanTheme::for_mode(ThemeMode::Dark),
+                "probe",
+            ))
+        }
+    }
+    let (_, cx) = cx.add_window_view(|_, _| Probe {
+        renderer: MarkdownRenderer::new(),
+        source,
+    });
+    cx.debug_bounds("probe-markdown-block-0-code")
+        .expect("the fence card must paint inspectable bounds")
+}
+
+#[gpui::test]
+fn fence_card_is_exactly_as_tall_as_its_lines(cx: &mut TestAppContext) {
+    let padding = 2.0 * ProseTypography::CODE_PAD_PX;
+    // The fence body ends in its last line's terminator, which must not
+    // paint as one more empty line.
+    assert_eq!(
+        mounted_fence(cx, "```sh\nsudo true\n```\n").size.height,
+        px(ProseTypography::CODE_LINE_PX + padding)
+    );
+    assert_eq!(
+        mounted_fence(cx, "```sh\none\ntwo\n```\n").size.height,
+        px(2.0 * ProseTypography::CODE_LINE_PX + padding)
+    );
+    assert_eq!(
+        mounted_fence(cx, "```sh\none\n\n```\n").size.height,
+        px(2.0 * ProseTypography::CODE_LINE_PX + padding),
+        "a blank line the author wrote stays"
+    );
+}
+
+#[gpui::test]
+fn fence_card_spans_the_prose_column(cx: &mut TestAppContext) {
+    let fence = mounted_fence(cx, "```sh\nls\n```\n");
+    assert_eq!(fence.left(), px(0.0));
+    assert_eq!(fence.size.width, px(600.0));
+}
+
+/// Mounts `source` in a 600 px host under `renderer` and returns the painted
+/// bounds of `selector`.
+fn mounted_bounds(
+    cx: &mut TestAppContext,
+    renderer: MarkdownRenderer,
+    source: &'static str,
+    selector: &'static str,
+) -> gpui::Bounds<gpui::Pixels> {
+    let (_, cx) = cx.add_window_view(|_, _| MountedMarkdownProbe { renderer, source });
+    cx.debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} must paint inspectable bounds"))
+}
+
+#[gpui::test]
+fn prose_measure_bounds_prose_but_not_fences(cx: &mut TestAppContext) {
+    // The host hands the renderer its whole 600 px column. Prose stops at
+    // the 400 px measure; the fence takes the full column.
+    let source = "alpha\n\n```sh\nls\n```\n";
+    let measured = || MarkdownRenderer::new().with_prose_measure(px(400.0));
+    let paragraph = mounted_bounds(cx, measured(), source, "probe-markdown-block-0");
+    assert_eq!(paragraph.left(), px(0.0));
+    assert_eq!(paragraph.size.width, px(400.0));
+    let fence = mounted_bounds(cx, measured(), source, "probe-markdown-block-1-code");
+    assert_eq!(fence.left(), px(0.0));
+    assert_eq!(fence.size.width, px(600.0));
+
+    // Without a measure every block fills the container, as before.
+    let unmeasured = mounted_bounds(
+        cx,
+        MarkdownRenderer::new(),
+        source,
+        "probe-markdown-block-0",
+    );
+    assert_eq!(unmeasured.size.width, px(600.0));
+}
+
+#[gpui::test]
+fn one_line_fence_centers_its_copy_action(cx: &mut TestAppContext) {
+    let source = "```sh\nnix run .#dev\n```\n";
+    let fence = mounted_bounds(
+        cx,
+        MarkdownRenderer::new(),
+        source,
+        "probe-markdown-block-0-code",
+    );
+    let copy = mounted_bounds(
+        cx,
+        MarkdownRenderer::new(),
+        source,
+        "probe-markdown-block-0-code-copy",
+    );
+    assert_eq!(copy.size, gpui::size(px(32.0), px(32.0)));
+    assert_eq!(fence.right() - copy.right(), px(8.0));
+    assert_eq!(
+        copy.center().y,
+        fence.center().y,
+        "a one-line fence centers the action vertically"
+    );
+}
+
+#[gpui::test]
+fn multi_line_fence_pins_its_copy_action_top_right(cx: &mut TestAppContext) {
+    let source = "```sh\none\ntwo\nthree\nfour\n```\n";
+    let fence = mounted_bounds(
+        cx,
+        MarkdownRenderer::new(),
+        source,
+        "probe-markdown-block-0-code",
+    );
+    let copy = mounted_bounds(
+        cx,
+        MarkdownRenderer::new(),
+        source,
+        "probe-markdown-block-0-code-copy",
+    );
+    assert_eq!(fence.right() - copy.right(), px(8.0));
+    assert_eq!(
+        copy.top() - fence.top(),
+        px(8.0),
+        "a fence with more than one line pins the action to its top-right corner"
     );
 }

@@ -1,7 +1,8 @@
 //! Forge-owned composer drafts for [`NativeApplication`].
 //!
-//! The composer is a view of its scope's Forge draft. Opening a scope reads
-//! the draft; every authored change is saved through a per-scope latest-wins
+//! The composer is a view of its scope's Forge draft. Opening a scope the
+//! view has not shown reads the draft (a scope it has shown reopens on the
+//! draft it left, at once); every authored change is saved through a per-scope latest-wins
 //! chain ([`DraftSync`]) that holds the connection until the Forge has
 //! acknowledged the latest save sent; ready images are uploaded to the Forge
 //! attachment store and the draft references them. The Forge assigns every
@@ -23,8 +24,11 @@ pub(super) struct ComposerDrafts {
     pub(super) sync: DraftSync<Hold>,
     /// The composer change counter already handed to the sync.
     seen_change: u64,
-    /// The scope whose Forge draft was last requested.
-    opened: Option<artisan_domain::ComposerDraftScope>,
+    /// The composer switch whose Forge draft was last requested: its scope
+    /// and the composer's switch generation. Keyed by the switch, not the
+    /// scope alone, so reopening a scope always reads a draft it has no
+    /// copy of, whatever the view showed in between.
+    opened: Option<(artisan_domain::ComposerDraftScope, u64)>,
     /// Composer attachment ids already uploading or uploaded; never re-sent.
     uploads: HashSet<String>,
     /// Draft commands a test-sink application admitted, kept apart from the
@@ -71,12 +75,19 @@ impl NativeApplication {
             return;
         };
         let awaiting = composer.awaiting_forge_draft();
+        let switch = (scope.clone(), composer.draft_generation());
         let change = composer.draft_change();
         let body = composer.draft_body();
         let unstored = composer.unstored_attachments();
-        if awaiting && self.composer_drafts.opened.as_ref() != Some(&scope) {
-            self.composer_drafts.opened = Some(scope.clone());
-            let _ = self.submit_draft(ComposerDraftCommand::Read(scope.clone()), None);
+        // The switch counts as read only once its read is admitted, so a
+        // read the connection refused is asked again on the next sync.
+        if awaiting
+            && self.composer_drafts.opened.as_ref() != Some(&switch)
+            && self
+                .submit_draft(ComposerDraftCommand::Read(scope.clone()), None)
+                .is_ok()
+        {
+            self.composer_drafts.opened = Some(switch);
         }
         for (attachment_id, image) in unstored {
             if !self.composer_drafts.uploads.insert(attachment_id.clone()) {
@@ -173,12 +184,21 @@ impl NativeApplication {
                 result,
             } => {
                 if let Ok(reference) = result {
-                    self.composer.update(cx, |composer, cx| {
-                        composer.mark_attachment_stored(&scope, &attachment_id, reference, cx);
+                    let left = self.composer.update(cx, |composer, cx| {
+                        composer.mark_attachment_stored(&scope, &attachment_id, reference, cx)
                     });
                     // Save the draft that references it now, under the
-                    // upload's hold, so a draining connection waits for both.
-                    self.sync_composer_draft(cx);
+                    // upload's hold, so a draining connection waits for both:
+                    // the scope the view shows, or the one it left.
+                    match left {
+                        Some(body) => {
+                            let holds = self.connection_holds();
+                            let acquire = || holds.as_ref()?.try_hold(HoldKind::Draft);
+                            let save = self.composer_drafts.sync.edit(&scope, body, acquire);
+                            self.submit_draft_save(save);
+                        }
+                        None => self.sync_composer_draft(cx),
+                    }
                 }
                 self.composer_drafts.sync.finish_upload(&scope);
             }
@@ -211,8 +231,11 @@ impl NativeApplication {
             .composer
             .update(cx, |composer, _| composer.await_forge_draft());
         if let Some(scope) = scope {
-            self.composer_drafts.opened = Some(scope.clone());
-            let _ = self.submit_draft(ComposerDraftCommand::Read(scope), None);
+            let switch = (scope.clone(), self.composer.read(cx).draft_generation());
+            self.composer_drafts.opened = self
+                .submit_draft(ComposerDraftCommand::Read(scope), None)
+                .is_ok()
+                .then_some(switch);
         }
     }
 
@@ -244,13 +267,16 @@ impl NativeApplication {
     }
 
     /// Saves the bodies a lost connection left unsent, now that the service
-    /// has reconnected (latest wins).
-    pub(super) fn resume_composer_drafts(&mut self) {
+    /// has reconnected (latest wins), and reads again a draft the view was
+    /// still waiting for: its read died with the connection.
+    pub(super) fn resume_composer_drafts(&mut self, cx: &mut Context<Self>) {
         let holds = self.connection_holds();
         let acquire = || holds.as_ref()?.try_hold(HoldKind::Draft);
         for save in self.composer_drafts.sync.resume(acquire) {
             self.submit_draft_save(Some(save));
         }
+        self.composer_drafts.opened = None;
+        self.sync_composer_draft(cx);
     }
 
     /// Drops every draft hold with the connection that owned it.

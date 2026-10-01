@@ -1932,3 +1932,132 @@ fn body_replacement_over_budget_is_rejected_with_full_rollback() {
         stamp(200)
     );
 }
+
+/// A window that opened on a thread's newest turn: turn `turn_b` at ordinal
+/// 10 with one user item, cursor four, watermark 30.
+fn windowed_projection() -> ConversationProjection {
+    let mut projection = ConversationProjection::new(thread_id());
+    assert_eq!(
+        projection.install_snapshot(&snapshot(
+            4,
+            vec![make_turn(TURN_B, 10, 0, ConversationLifecycle::Pending)],
+            vec![make_user(ITEM_USER, TURN_B, 11, "Newest")],
+            30,
+        )),
+        Ok(SnapshotDisposition::Applied)
+    );
+    projection
+}
+
+fn older_page(cursor: u64) -> ConversationSnapshot {
+    snapshot(
+        cursor,
+        vec![make_turn(TURN_A, 0, 0, ConversationLifecycle::Completed)],
+        vec![make_user("item_older", TURN_A, 1, "Older")],
+        30,
+    )
+}
+
+#[test]
+fn an_older_page_joins_in_front_without_moving_the_cursor() {
+    let mut projection = windowed_projection();
+    // The page was read later than the window, at a newer cursor: it is
+    // history, so the window's cursor and status stand.
+    assert_eq!(
+        projection.extend_earlier(&older_page(9)),
+        Ok(SnapshotDisposition::Applied)
+    );
+    let merged = projection.snapshot().expect("window present").clone();
+    assert_eq!(merged.cursor(), ConversationCursor::new(4));
+    assert_eq!(
+        merged
+            .turns()
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        [TURN_A, TURN_B]
+    );
+    assert_eq!(
+        merged
+            .items()
+            .iter()
+            .map(|item| item.item_id().as_str())
+            .collect::<Vec<_>>(),
+        ["item_older", ITEM_USER]
+    );
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+
+    // The same page again, or one that overlaps the window, changes nothing.
+    assert_eq!(
+        projection.extend_earlier(&older_page(9)),
+        Ok(SnapshotDisposition::Unchanged)
+    );
+    assert_eq!(
+        projection.extend_earlier(&snapshot(
+            9,
+            vec![make_turn(TURN_B, 10, 0, ConversationLifecycle::Pending)],
+            vec![make_user(ITEM_USER, TURN_B, 11, "Newest")],
+            30,
+        )),
+        Ok(SnapshotDisposition::Unchanged)
+    );
+    assert_eq!(projection.snapshot(), Some(&merged));
+
+    // Delivery continues from the window's cursor.
+    assert!(
+        projection
+            .apply_batch(&batch(
+                4,
+                5,
+                vec![append_patch(5, ITEM_USER, 1, " turn", 31)],
+            ))
+            .is_ok()
+    );
+    assert_eq!(
+        projection.snapshot().expect("window present").turns().len(),
+        2
+    );
+}
+
+#[test]
+fn an_older_page_is_refused_without_touching_the_window() {
+    // Before any window exists there is nothing to join.
+    let mut empty = ConversationProjection::new(thread_id());
+    assert_eq!(
+        empty.extend_earlier(&older_page(9)),
+        Err(ProjectionError::BaselineRequired)
+    );
+
+    let mut projection = windowed_projection();
+    let window = projection.snapshot().expect("window present").clone();
+    // A page whose item reuses a loaded item's identity cannot join.
+    let clashing = snapshot(
+        9,
+        vec![make_turn(TURN_A, 0, 0, ConversationLifecycle::Completed)],
+        vec![make_user(ITEM_USER, TURN_A, 1, "Older")],
+        30,
+    );
+    assert!(matches!(
+        projection.extend_earlier(&clashing),
+        Err(ProjectionError::Structure(_))
+    ));
+    assert_eq!(projection.snapshot(), Some(&window));
+    assert_eq!(projection.status(), ProjectionStatus::Ready);
+
+    // A required recovery is not cleared by a page.
+    assert!(
+        projection
+            .apply_batch(&batch(
+                9,
+                10,
+                vec![append_patch(10, ITEM_USER, 1, " gap", 31)],
+            ))
+            .is_err()
+    );
+    assert_eq!(projection.status(), ProjectionStatus::ResnapshotRequired);
+    assert_eq!(
+        projection.extend_earlier(&older_page(9)),
+        Ok(SnapshotDisposition::Applied)
+    );
+    assert_eq!(projection.status(), ProjectionStatus::ResnapshotRequired);
+}

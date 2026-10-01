@@ -83,7 +83,13 @@ pub(crate) fn headless() -> Option<std::process::ExitCode> {
             .ok_or_else(|| "invitation path required".to_owned())
             .and_then(|path| {
                 // Credential errors name paths and stages only, never secrets.
-                import(Path::new(path)).map_err(|error| format!("host import failed: {error}"))
+                import(Path::new(path)).map_err(|error| {
+                    format!(
+                        "host import failed for {}: {}",
+                        Path::new(path).display(),
+                        artisan_domain::ErrorChain(&error)
+                    )
+                })
             });
         return Some(match result {
             Ok(home) => {
@@ -116,7 +122,13 @@ fn probe() -> Result<(), &'static str> {
     if selected_home().is_none() {
         return Err("--host-home is required");
     }
-    let service = NativeTransportService::spawn().map_err(|_| "service start failed")?;
+    let service = NativeTransportService::spawn().map_err(|error| {
+        eprintln!(
+            "Host probe: the connection service could not start: {}",
+            artisan_domain::ErrorChain(&error)
+        );
+        "service start failed"
+    })?;
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut received_catalog = false;
     let mut failed = false;
@@ -127,7 +139,7 @@ fn probe() -> Result<(), &'static str> {
                 let _ = service.request_shutdown();
             }
             Ok(Some(NativeTransportEvent::Failed(failure))) => {
-                eprintln!("{failure:?}");
+                eprintln!("Host probe: the connection service reported {failure:?}");
                 failed = true;
                 let _ = service.request_shutdown();
             }

@@ -161,14 +161,23 @@ impl NativeApplication {
     /// choice, or the selector's policy. A send carries it as catalog
     /// identities for the Forge to resolve, save, and admit.
     pub(super) fn displayed_selection(&self, cx: &App) -> Option<artisan_domain::CatalogSelection> {
-        let displayed = match &self.composer_model_choice {
-            Some((thread, policy)) if thread == &self.selected_thread => Some(policy.clone()),
-            _ => self.model_selector.read(cx).state().policy().cloned(),
+        let displayed = match self.composer_model_choice(cx) {
+            Some(policy) => Some(policy.clone()),
+            None => self.model_selector.read(cx).state().policy().cloned(),
         }?;
         crate::picker_selection::selection_for_policy(&displayed)
     }
 
     pub(super) fn begin_message_submission(&mut self, cx: &mut Context<Self>) {
+        // While an answer is being written, sending records it: the Forge's
+        // draft is the one put aside, never the answer.
+        if self.composer.read(cx).writing_answer() {
+            self.composer.update(
+                cx,
+                crate::native_composer::NativeComposer::submit_written_answer,
+            );
+            return;
+        }
         // The composer is locked while a send is in flight.
         if self.message_flight.is_some() {
             return;
@@ -181,6 +190,9 @@ impl NativeApplication {
             self.refuse_unscoped_send(cx);
             return;
         };
+        // The model is the one shown as Send is pressed; the send carries it
+        // however long its draft takes to be stored.
+        let selection = self.displayed_selection(cx);
         if let artisan_domain::ComposerDraftScope::Project(project) = &scope {
             self.bind_new_task_composer(project, cx);
         }
@@ -229,6 +241,7 @@ impl NativeApplication {
             scope: scope.clone(),
             request_id,
             token,
+            selection,
         };
         self.launch_message_flight(flight, cx);
         self.begin_draft_submission(&scope, body, cx);
@@ -303,6 +316,22 @@ impl NativeApplication {
         self.drop_transient_service_reads();
         self.run_controls.clear_transient_observation();
         self.release_composer_drafts();
+        if let Some(flight) = self.thread_switch_flight.take() {
+            let request = match flight.phase {
+                ThreadSwitchPhase::AwaitingUnsubscribeStop { request_id }
+                | ThreadSwitchPhase::AwaitingSubscriptionStart { request_id } => request_id,
+                ThreadSwitchPhase::HostRetirement { request_id } => Some(request_id),
+                _ => None,
+            };
+            if let Some(request) = request {
+                self.remember_switch_request_id(request);
+            }
+        }
+        self.ordinary_unsubscribe_thread = None;
+        self.pending_thread = None;
+        self.intake_stage = None;
+        self.intake_restore_state = None;
+        self.intake_retry_available = false;
     }
 
     pub(super) fn handle_message_receipt(

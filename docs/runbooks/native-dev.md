@@ -92,6 +92,32 @@ of an old Forge. Use it, with `--windows-root`, `--listen`, and
 `--host-name`, for scratch deployments beside the real dev installation, and
 remove them with `<root>/bin/ae autostart --disable` and by deleting the roots.
 
+### Reading a failed run in the Forge log
+
+A run that stops early is stored with a fixed outcome (`provider_interrupted`,
+`provider_failed`, `provider_start_failed`). The reason is in the service log:
+
+```sh
+journalctl --user -u artisan-forge-dev.service | grep "native run"
+```
+
+Every line names the run, the step that failed, and the whole cause chain as
+`step: cause: cause`:
+
+| Line starts with | Meaning |
+| --- | --- |
+| `native run interrupted (thread … run …, engine …, batch …, …)` | The dispatcher ended a live run; the step after the colon is why. |
+| `native run batch commit failed (…, batch …, N attempt(s), retryable: …)` | One durable write was refused; the chain ends in the repository or SQLite failure. |
+| `native run engine turn failed (…)` | The engine turn itself ended with a typed error. |
+| `native run start failed (…, code …)` | The provider never started; `shown as:` is the sentence the Editor displays. |
+| `native run could not be settled as …` | The terminal state could not be stored; lease recovery settles the run later. |
+| `native run steer failed (…, message …)` | A steered message did not reach the provider or the transcript. |
+| `native run claim failed`, `requeued`, `refused (message …)` | A queued message did not become a run, with the fixed reason stored on its row. |
+| `native run abandoned before its turn was consumed (…)` | A launched run was dropped before its first observation. |
+
+Lines carry identities, counters, and typed error text only. Message bodies,
+provider payloads, and credentials never reach the log.
+
 ### Adopting a hand-deployed Forge
 
 Before the product owned its service, a Forge was deployed by hand
@@ -250,16 +276,22 @@ python3 scripts/claude_thinking_capture.py capture --out /tmp/start.jsonl --sess
 python3 scripts/claude_thinking_capture.py capture --out /tmp/resume.jsonl --session "$S" --resume \
   --prompt 'Now think carefully about which pair sums closest to 60. One sentence.'
 python3 scripts/claude_thinking_capture.py capture --out /tmp/flagless.jsonl --display '' --prompt '...'
+python3 scripts/claude_thinking_capture.py capture --out /tmp/highlights.jsonl --display highlights \
+  --debug --prompt '...'
 python3 scripts/claude_thinking_capture.py sanitize /tmp/resume.jsonl \
   tests/fixtures/claude/summarized-resume.jsonl --session fixture-session-resume
 ```
 
 `capture` uses Artisan's managed argv plus `--thinking-display` and writes one
-`{"t_ms", "frame"}` record per stdout line; `sanitize` removes signatures,
-identifiers, paths, and environment inventories while keeping frame order.
-Record CLI version, model, argv, date, provider/auth category, and first-summary
-timing in `tests/fixtures/claude/manifest.json`, keep `constructed-*` edge
-fixtures labeled, then run `cargo test -p artisan-backend engine_owner_claude`.
+`{"t_ms", "frame"}` record per stdout line; it also writes `<out>.diag.json`
+with the child's exit code and stderr. `--debug` appends the CLI debug flag;
+the `highlights` rejection is recorded only in the CLI's own debug log
+(Windows-side `~/.claude/debug/<session>.txt`), never on the turn stream.
+`sanitize` removes signatures, identifiers, paths, and environment inventories
+while keeping frame order. Record CLI version, model, argv, date, provider/auth
+category, first-summary timing, and observed highlights eligibility in
+`tests/fixtures/claude/manifest.json`, keep `constructed-*` edge fixtures
+labeled, then run `cargo test -p artisan-backend engine_owner_claude`.
 
 ## Packaging and signing
 

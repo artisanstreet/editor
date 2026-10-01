@@ -95,14 +95,66 @@ pub(super) async fn request_snapshot(
     let payload = runtime
         .request(
             frames,
-            snapshot_request(thread_id.clone())?,
+            snapshot_request(thread_id.clone()),
             ExpectedResponse::Snapshot(thread_id),
         )
         .await?;
     let ResponsePayload::ConversationSnapshot(snapshot) = payload else {
         return Err(ServiceFailure::invalid(ServiceFailureStage::Request));
     };
+    runtime.custody.on_window_snapshot(&snapshot);
     publish(events, NativeTransportEvent::Snapshot(snapshot))
+}
+
+/// Reads one on-demand part of a mounted thread's history: older turns, or
+/// a settled turn's held-back work rows.
+///
+/// A failed read publishes the typed outcome instead of failing the command
+/// loop: the part stays unread and the application may ask again.
+pub(super) async fn read_conversation_history(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    thread_id: ThreadId,
+    part: artisan_domain::ConversationHistoryPart,
+) -> Result<(), ServiceFailure> {
+    let outcome = runtime
+        .request(
+            frames,
+            history_request(thread_id.clone(), part.clone()),
+            ExpectedResponse::ConversationHistory(thread_id.clone()),
+        )
+        .await;
+    match outcome {
+        Ok(ResponsePayload::ConversationHistory(page)) => {
+            if let Some(snapshot) = &page.snapshot {
+                runtime.custody.on_earlier_turns(snapshot);
+            }
+            publish(
+                events,
+                NativeTransportEvent::ConversationHistory {
+                    part,
+                    page: Box::new(page),
+                },
+            )
+        }
+        Ok(_) => publish(
+            events,
+            NativeTransportEvent::ConversationHistoryFailed {
+                thread_id,
+                part,
+                failure: ServiceFailure::invalid(ServiceFailureStage::Request),
+            },
+        ),
+        Err(failure) => publish(
+            events,
+            NativeTransportEvent::ConversationHistoryFailed {
+                thread_id,
+                part,
+                failure: failure.into(),
+            },
+        ),
+    }
 }
 
 /// Resolves one assistant-authored HTTP(S) link's page title.

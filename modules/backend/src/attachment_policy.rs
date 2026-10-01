@@ -3,9 +3,10 @@
 //! The Editor uploads each image exactly as the user picked it; when a draft
 //! is sent the Forge applies the engine's image policy (formerly the
 //! Editor's intake): every image is decoded within a pixel budget, rescaled
-//! so its long edge fits [`MAXIMUM_IMAGE_LONG_EDGE_PIXELS`], and re-encoded
+//! so its long edge fits the engine's cap ([`image_long_edge_for`]), and re-encoded
 //! in the engine's best accepted format when it was rescaled or the encoding
-//! is smaller. GIF bytes (and their animation) pass through untouched. The
+//! is smaller. WebP is encoded lossy at [`WEBP_QUALITY`], the quality the
+//! Electron intake used. GIF bytes (and their animation) pass through untouched. The
 //! fitted images must fit the message bounds; anything else is refused with
 //! a reason the Editor shows as it is.
 
@@ -22,11 +23,15 @@ use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, imageo
 
 use crate::image_policy::{
     ImageDimensions, ImageMediaType, MAXIMUM_IMAGE_LONG_EDGE_PIXELS, best_image_format,
-    image_rescale_target,
+    image_long_edge_for, image_rescale_target_with_long_edge,
 };
 
 /// The decoded-pixel budget one image may use while it is fitted.
 const MAXIMUM_DECODED_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+
+/// Lossy WebP quality (0–100): visually lossless for screenshots at a fraction
+/// of the lossless size.
+const WEBP_QUALITY: f32 = 92.0;
 
 const TOO_LARGE: &str = "That image exceeds the 5 MiB limit.";
 const TOTAL_TOO_LARGE: &str = "Attached images together cannot exceed 12 MiB.";
@@ -72,7 +77,8 @@ fn fit_image(
             width: f64::from(decoded.width()),
             height: f64::from(decoded.height()),
         };
-        let target = image_rescale_target(source);
+        let target =
+            image_rescale_target_with_long_edge(source, image_long_edge_for(Some(engine_id)));
         let fitted = match target {
             Some(target) => decoded.resize_exact(
                 dimension(target.width),
@@ -131,11 +137,24 @@ fn encode(image: &DynamicImage, media_type: ImageMediaType) -> Result<Vec<u8>, (
         ImageMediaType::Gif => ImageFormat::Gif,
         ImageMediaType::Jpeg => ImageFormat::Jpeg,
         ImageMediaType::Png => ImageFormat::Png,
-        ImageMediaType::Webp => ImageFormat::WebP,
+        // The `image` crate only writes lossless WebP.
+        ImageMediaType::Webp => return encode_lossy_webp(image),
     };
     let mut output = Cursor::new(Vec::new());
     image.write_to(&mut output, format).map_err(|_| ())?;
     Ok(output.into_inner())
+}
+
+fn encode_lossy_webp(image: &DynamicImage) -> Result<Vec<u8>, ()> {
+    let (width, height) = (image.width(), image.height());
+    let encoded = if image.color().has_alpha() {
+        let rgba = image.to_rgba8();
+        webp::Encoder::from_rgba(&rgba, width, height).encode_simple(false, WEBP_QUALITY)
+    } else {
+        let rgb = image.to_rgb8();
+        webp::Encoder::from_rgb(&rgb, width, height).encode_simple(false, WEBP_QUALITY)
+    };
+    encoded.map(|memory| memory.to_vec()).map_err(|_| ())
 }
 
 fn mime_of(media_type: ImageMediaType) -> ImageMimeType {

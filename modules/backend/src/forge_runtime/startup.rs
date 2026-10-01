@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use artisan_database::{SqliteConfig, StartupReconciliationCandidate};
-use artisan_domain::PatchId;
+use artisan_domain::{ErrorChain, PatchId};
 use artisan_transport::{CancelHandle, PinnedIdentity, TransportError, server_config};
 use rustls_pki_types::CertificateDer;
 use thiserror::Error;
@@ -397,14 +397,14 @@ impl StartupReconciliationPatchSource for ForgeStartupReconciliationPatchSource 
     ) -> Result<StartupReconciliationPatches, PatchSourceError> {
         let turn_patch_id =
             PatchId::parse(candidate.run_id.as_str()).map_err(|_| PatchSourceError)?;
-        let item_patch_id = candidate
-            .assistant_item_id
-            .as_ref()
+        let item_patch_ids = candidate
+            .assistant_item_ids
+            .iter()
             .map(|item_id| PatchId::parse(item_id.as_str()).map_err(|_| PatchSourceError))
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(StartupReconciliationPatches::new(
             turn_patch_id,
-            item_patch_id,
+            item_patch_ids,
         ))
     }
 }
@@ -438,8 +438,12 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     } = context;
 
     if let Err(error) = reconcile_startup(&app).await {
-        let handler = RequestHandler::with_subscriptions(app.repository().clone());
-        return finish(app, handler, custody, None, None, None, Some(error)).await;
+        // The dispatcher retries recovery and fences unresolved threads.
+        // A damaged conversation must not prevent the host from serving others.
+        eprintln!(
+            "startup run recovery failed (runs left live by the previous Forge stay unsettled until the dispatcher's sweep succeeds): {}",
+            ErrorChain(&error)
+        );
     }
 
     let Ok(forge_executable) = std::env::current_exe() else {
@@ -482,7 +486,8 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
     .with_registered_engine_profiles_reader(
         crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
     )
-    .with_conversation_commit_notifier(native_run.conversation_commit_notifier());
+    .with_conversation_commit_notifier(native_run.conversation_commit_notifier())
+    .with_live_thinking_board(native_run.live_thinking_board());
     Box::pin(run_with_handler(
         ForgeRunContext {
             app,

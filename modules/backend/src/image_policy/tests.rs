@@ -1,8 +1,12 @@
 use super::{
-    IMAGE_COMPRESSION_LADDER, ImageCompressionFormat, ImageDimensions, ImageMediaType,
-    MAXIMUM_IMAGE_LONG_EDGE_PIXELS, best_image_format, image_rescale_target,
-    image_rescale_target_with_long_edge,
+    CLAUDE_IMAGE_LONG_EDGE_PIXELS, IMAGE_COMPRESSION_LADDER, ImageCompressionFormat,
+    ImageDimensions, ImageMediaType, MAXIMUM_IMAGE_LONG_EDGE_PIXELS, best_image_format,
+    image_long_edge_for, image_rescale_target_with_long_edge,
 };
+
+fn image_rescale_target(source: ImageDimensions) -> Option<ImageDimensions> {
+    image_rescale_target_with_long_edge(source, MAXIMUM_IMAGE_LONG_EDGE_PIXELS)
+}
 
 fn dimensions(width: f64, height: f64) -> ImageDimensions {
     ImageDimensions { height, width }
@@ -146,5 +150,17 @@ fn invalid_caps_return_no_target() {
 
     for cap in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(image_rescale_target_with_long_edge(source, cap), None);
+    }
+}
+
+#[test]
+fn claude_images_stay_under_the_many_image_limit() {
+    assert_eq!(
+        image_long_edge_for(Some("claude")),
+        CLAUDE_IMAGE_LONG_EDGE_PIXELS
+    );
+    assert!(CLAUDE_IMAGE_LONG_EDGE_PIXELS < 2000.0);
+    for engine in [Some("codex"), Some("grok"), Some("Claude"), None] {
+        assert_eq!(image_long_edge_for(engine), MAXIMUM_IMAGE_LONG_EDGE_PIXELS);
     }
 }

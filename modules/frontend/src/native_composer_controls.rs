@@ -512,7 +512,10 @@ impl NativeComposerControls {
             return None;
         }
 
-        if self.snapshot.run_active {
+        // A sendable draft mid-run turns the primary back into Send: the
+        // submission steers the live run, and clearing the draft restores
+        // Stop.
+        if self.snapshot.run_active && !self.snapshot.send_ready {
             if self.snapshot.cancelling || !self.snapshot.abort_available {
                 return None;
             }
@@ -1078,9 +1081,10 @@ impl NativeComposerControls {
             }
         }
 
+        let stop_face = self.snapshot.run_active && !self.snapshot.send_ready;
         let (icon, label) = (
-            SendButtonStill::control_icon(self.snapshot.run_active),
-            SendButtonStill::control_label(self.snapshot.run_active),
+            SendButtonStill::control_icon(stop_face),
+            SendButtonStill::control_label(stop_face),
         );
         let primary_disabled = primary_event.is_none();
         let primary = AccessibleLabel::new(label).ok().and_then(|label| {
@@ -1224,7 +1228,7 @@ pub fn native_composer_controls_event_is_allowed(
         // Kept (refused) because the queue-application owner still matches
         // on the variant; it owns that arm's removal.
         NativeComposerControlsEvent::RetryQueue => false,
-        NativeComposerControlsEvent::SendRequested => !snapshot.run_active && snapshot.send_ready,
+        NativeComposerControlsEvent::SendRequested => snapshot.send_ready,
         NativeComposerControlsEvent::StopRequested { run_id } => {
             snapshot.run_active
                 && !snapshot.cancelling
@@ -1422,6 +1426,44 @@ mod tests {
         assert_eq!(events.borrow().len(), 1);
     }
 
+    #[gpui::test]
+    fn sendable_draft_mid_run_turns_stop_back_into_send(cx: &mut TestAppContext) {
+        let snapshot = NativeComposerControlsSnapshot {
+            run_id: Some("run-1".to_owned()),
+            run_active: true,
+            abort_available: true,
+            send_ready: true,
+            ..NativeComposerControlsSnapshot::default()
+        };
+        let (view, cx) = cx.add_window_view(|_, cx| NativeComposerControls::new(snapshot, cx));
+        let (events, _subscription) = observe_events(cx, &view);
+        let bounds = cx
+            .debug_bounds(NATIVE_COMPOSER_PRIMARY_SELECTOR)
+            .expect("the send control paints");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        assert_eq!(
+            events.borrow().as_slice(),
+            [NativeComposerControlsEvent::SendRequested]
+        );
+
+        // Clearing the draft restores Stop for the same run.
+        cx.update(|_, app| {
+            view.update(app, |controls, controls_cx| {
+                let mut next = controls.snapshot().clone();
+                next.send_ready = false;
+                controls.set_snapshot(next, controls_cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        assert_eq!(
+            events.borrow().last(),
+            Some(&NativeComposerControlsEvent::StopRequested {
+                run_id: "run-1".to_owned()
+            })
+        );
+    }
+
     #[test]
     fn queued_rows_keep_exact_identity_until_parent_projection_withdraws_them() {
         let mut snapshot = NativeComposerControlsSnapshot::default();
@@ -1543,6 +1585,42 @@ mod tests {
             &failed_snapshot(false),
             &failed_event()
         ));
+    }
+
+    #[gpui::test]
+    fn failed_notice_dismisses_while_disabled_without_losing_the_prompt(cx: &mut TestAppContext) {
+        let mut snapshot = failed_snapshot(false);
+        snapshot.disabled = true;
+        let (view, cx) =
+            cx.add_window_view(|_, cx| NativeComposerControls::new(snapshot.clone(), cx));
+        let (events, _subscription) = observe_events(cx, &view);
+        let selector = "failed-command-9-4-dismiss";
+        let bounds = cx
+            .debug_bounds(selector)
+            .expect("dismiss remains available while disabled");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        assert!(cx.debug_bounds(selector).is_none());
+        assert!(
+            events.borrow().is_empty(),
+            "closing must not retry or discard the prompt"
+        );
+        view.update(cx, |controls, cx| {
+            assert_eq!(controls.snapshot().failed_dispatches[0].text, "hello");
+            snapshot.failed_new_chat_ready = true;
+            controls.set_snapshot(snapshot.clone(), cx);
+        });
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "refresh must not reopen the same failure"
+        );
+        view.update(cx, |controls, cx| {
+            snapshot.failed_dispatches[0].identity.generation += 1;
+            controls.set_snapshot(snapshot, cx);
+        });
+        assert!(
+            cx.debug_bounds("failed-command-9-5-dismiss").is_some(),
+            "a new failure must be visible"
+        );
     }
 
     #[gpui::test]

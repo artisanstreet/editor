@@ -1252,14 +1252,15 @@ async fn verify_fence_owner_and_replay(body: &AssistantBody) {
 }
 
 #[tokio::test]
-async fn expiry_equality_rejects_and_chronology() {
+async fn expired_lease_still_owned_commits_and_chronology() {
     let pair = seeded_pair().await;
     let before = persisted_rows(&pair.database).await;
     let body = assistant_body("x");
     let iid = ItemId::parse("assistant-exp").expect("id");
     let pt = PatchId::parse("p-act-exp").expect("p");
     let pi = PatchId::parse("p-start-exp").expect("p");
-    // expiry equality: operated_at == lease_expires_at should reject
+    // The owner token, not the clock, fences the dispatch: a lease that
+    // lapsed while its owner stalled still commits for that owner.
     let scope_eq = RunBatchScope {
         claimed: &pair.claimed,
         launched: &pair.launched,
@@ -1269,8 +1270,7 @@ async fn expiry_equality_rejects_and_chronology() {
         expected_launch_at: UnixMillis::from_millis(OPERATED_AT_MS),
         expected_updated_at: UnixMillis::from_millis(BOUND_AT_MS),
     };
-    let err = pair
-        .repository
+    pair.repository
         .commit_run_batch(CommitRunBatch {
             scope: scope_eq,
             batch_sequence: 1,
@@ -1285,12 +1285,8 @@ async fn expiry_equality_rejects_and_chronology() {
             checkpoint: CheckpointUpdate::Keep,
         })
         .await
-        .expect_err("expiry equality");
-    assert!(matches!(
-        err,
-        RunObservationError::Repository(RepositoryError::DispatchLeaseExpired { .. })
-    ));
-    assert_eq!(before, persisted_rows(&pair.database).await);
+        .expect("an expired lease its owner still holds commits");
+    assert_ne!(before, persisted_rows(&pair.database).await);
     verify_expiry_chronology_and_equal_times(&body).await;
 }
 

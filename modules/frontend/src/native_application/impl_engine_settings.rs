@@ -139,7 +139,7 @@ impl NativeApplication {
             // against the new revision before refreshing the catalog.
             if let Some((thread, choice)) = self.deferred_composer_policy.take()
                 && thread == result.thread_id
-                && self.selected_thread.as_ref() == Some(&thread)
+                && self.model_choice_thread(cx).as_ref() == Some(&thread)
             {
                 self.handle_composer_policy_selection(&choice, cx);
             }
@@ -212,8 +212,7 @@ impl NativeApplication {
         engine_id: &str,
         cx: &App,
     ) -> Option<crate::native_model_selector::SelectPolicy> {
-        if let Some((thread, choice)) = self.composer_model_choice.as_ref()
-            && thread == &self.selected_thread
+        if let Some(choice) = self.composer_model_choice(cx)
             && choice.engine_id == engine_id
         {
             return Some(choice.clone());
@@ -322,11 +321,8 @@ impl NativeApplication {
         let choice_notice = match (&displayed, &selected_thread) {
             (Some(policy), None)
                 if self
-                    .composer_model_choice
-                    .as_ref()
-                    .is_some_and(|(thread, choice)| {
-                        thread == &self.selected_thread && choice.engine_id == engine_id
-                    }) =>
+                    .composer_model_choice(cx)
+                    .is_some_and(|choice| choice.engine_id == engine_id) =>
             {
                 Some(format!(
                     "â€œ{}â€ is selected. Select a thread to save it.",
@@ -338,11 +334,8 @@ impl NativeApplication {
                     && !save_failed
                     && !displayed_authoritative
                     && self
-                        .composer_model_choice
-                        .as_ref()
-                        .is_some_and(|(thread, choice)| {
-                            thread == &self.selected_thread && choice.engine_id == engine_id
-                        })
+                        .composer_model_choice(cx)
+                        .is_some_and(|choice| choice.engine_id == engine_id)
                     && effective.admit_policy(policy).is_err() =>
             {
                 // The served catalog does not admit it; show the Forge's

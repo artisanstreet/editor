@@ -2492,3 +2492,79 @@ fn engine_label_pruned_when_turn_leaves_snapshot() {
     assert_eq!(turn_status_engine_label(&controller, TURN_A), None);
     assert_eq!(turn_status_basis(&controller, TURN_A), Some(90));
 }
+
+#[test]
+fn optimistic_cancellation_survives_updates_and_can_roll_back() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    for cursor in 1..=2 {
+        delivered_snapshot(
+            &mut controller,
+            cursor,
+            1000,
+            vec![make_turn_full(
+                TURN_A,
+                0,
+                0,
+                ConversationLifecycle::Active,
+                1000,
+                1000,
+            )],
+            vec![make_user(USER_A, TURN_A, 1, "hello")],
+        );
+        if cursor == 1 {
+            controller
+                .dispatch(ConversationStateEvent::SetOptimisticCancellation {
+                    turn_id: Some(turn_id(TURN_A)),
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            scene_status(&controller, TURN_A).0,
+            SceneTurnNarration::Cancelled
+        );
+        assert_eq!(
+            controller.snapshot().unwrap().turns()[0].lifecycle,
+            ConversationLifecycle::Active,
+            "optimism must not overwrite canonical history"
+        );
+        assert_eq!(
+            controller.view().turn_views[0].view.state,
+            conversation_turn_machine::StateKind::Cancelled
+        );
+    }
+    controller
+        .dispatch(ConversationStateEvent::SetOptimisticCancellation { turn_id: None })
+        .unwrap();
+    assert_eq!(
+        scene_status(&controller, TURN_A).0,
+        SceneTurnNarration::ProviderWait
+    );
+    controller
+        .dispatch(ConversationStateEvent::SetOptimisticCancellation {
+            turn_id: Some(turn_id(TURN_A)),
+        })
+        .unwrap();
+    delivered_snapshot(
+        &mut controller,
+        3,
+        2000,
+        vec![
+            make_turn_full(TURN_A, 0, 1, ConversationLifecycle::Completed, 1000, 2000),
+            make_turn_full(TURN_B, 2, 0, ConversationLifecycle::Active, 2000, 2000),
+        ],
+        vec![
+            make_user(USER_A, TURN_A, 1, "hello"),
+            make_user(USER_B, TURN_B, 3, "next"),
+        ],
+    );
+    assert_ne!(
+        scene_status(&controller, TURN_A).0,
+        SceneTurnNarration::Cancelled,
+        "a raced completion remains authoritative"
+    );
+    assert_eq!(
+        scene_status(&controller, TURN_B).0,
+        SceneTurnNarration::ProviderWait
+    );
+}

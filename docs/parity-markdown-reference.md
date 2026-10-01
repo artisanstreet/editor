@@ -47,7 +47,8 @@ blocks. The renderer then painted heading + prose + fence with no list.
 | task markers | engine enables exactly `Options::ENABLE_TASKLISTS` (which only affects list-item marker scanning); without it `pulldown-cmark` never emits `TaskListMarker` |
 | emphasis/strong/link labels | `Span::Emphasis/Strong/Link`; images keep flattening into alt text |
 | anchor `safe_href` guard | engine keeps every destination verbatim; only absolute `http(s)`/`mailto:` destinations become live links. Relative paths have no project base in the renderer, so they keep their plain label instead of opening an arbitrary local path; other schemes stay inert |
-| open-fence plain body | `CodeFence { closed: false, tokens: None }` + renderer plain fallback; unclosed fences still arrive balanced through the event stream |
+| open-fence plain body | `CodeFence { closed: false, tokens: None }` renders as unhighlighted code inside the fence chrome; unclosed fences still arrive balanced through the event stream. The rest of the message keeps rendering (see "Fences without tokens") |
+| GFM tables | engine enables `Options::ENABLE_TABLES`; `Block::Table(Table { alignments, header, rows, range })` with inline-only `TableCell { spans }` (see "Tables") |
 | `syntect` highlight ranges | unchanged `CodeToken` byte ranges over `CodeFence::source`, ordered/non-overlapping; unknown/open fences stay `None` |
 
 ## Renderer
@@ -101,8 +102,8 @@ blocks. The renderer then painted heading + prose + fence with no list.
 - The `selectable_text` module itself is integrated by root; this lane
   only consumes its frozen API (`retained(...).links(...)`), which is
   unchanged by root's internal import/perf fix.
-- `block_needs_plain_fallback` unchanged: open or unhighlighted fences
-  still take the plain body path.
+- Open or unhighlighted fences render as plain code in the fence card
+  (see "Fences without tokens").
 
 ## Reference prose typography (frozen shared helper)
 
@@ -123,9 +124,9 @@ blocks. The renderer then painted heading + prose + fence with no list.
     `CODE_SIZE_PX` 14 / `CODE_LINE_PX` 24;
   - blocks: paragraphs 20, fences 24, lists 20, indent 26, item pitch 8,
     item paragraphs 12, nested lists 12, fence padding 16;
-  - fence radius has deliberately NO constant: reference `rounded-3xl`
-    resolves through the workspace ramp (base 10 px × 2.2) to 22 px, so
-    renderers use `RadiusTokens::value(RadiusStep::X3l)`;
+  - fence radius has deliberately NO constant: the fence shares the
+    composer card's 18 px, the workspace ramp's `2xl` step, so renderers
+    use `RadiusTokens::value(RadiusStep::X2l)`;
   - gaps collapse top-only via `block_gaps(blocks, scope) -> Vec<f32>`
     (`BlockScope::Root/Item`): each gap renders once as top margin because
     flex columns never collapse, so two paragraphs read max(20, 20) = 20,
@@ -157,10 +158,67 @@ blocks. The renderer then painted heading + prose + fence with no list.
   action counterpart.
 - Body, headings, and strong carry their reference colors (muted body,
   foreground headings/strong) instead of inheriting the bright parent;
-  fences read the foreground pre-code token under the reference vertical
-  gradient face and the shared `card-lg` shadow recipe (four verbatim
-  outer layers, no new machinery), with copy/filename chrome having no
-  renderer action counterpart.
+  fences read the foreground pre-code token on the composer's glass card
+  (see "Fence card"), with copy/filename chrome having no renderer action
+  counterpart.
+
+## Fence card
+
+A fence paints as the composer's glass card, by product direction rather
+than reference parity (the reference snippet is an opaque vertical gradient
+at `rounded-3xl` under the `card-lg` shadow):
+
+- Material: `artisan_ui::glass`, the one recipe the composer, pickers, and
+  menus share — foreground lift, quiet diagonal material, quiet highlight,
+  and the `card-glass` edge stack — at the composer's 18 px radius.
+- No backdrop blur: a fence scrolls over the flat transcript canvas, where
+  a blur pass per fence changes no pixel.
+- Width: the full prose column, whatever the code's own width.
+- Height: exactly its lines. The engine keeps the fence body verbatim,
+  ending in the line terminator of its last line; the renderer drops that
+  one terminator for display, since a text element paints it as an extra
+  empty line. Blank lines the author wrote before it stay.
+
+## Fences without tokens
+
+A fence carries `tokens: None` while it is still open (streaming), when it
+has no info string, when it is an indented block, and when its language has
+no bundled `syntect` grammar. The renderer used to treat any such top-level
+fence as unrepresentable and drop the **whole message** to the raw-source
+fallback, so every `**`, `_`, heading, and list marker in that message
+showed literally — and a streaming reply flipped to raw source for as long
+as its fence stayed open. `render_code` always handled missing tokens, so
+the fallback was removed: the fence reads as plain code in its chrome and
+everything around it renders. Only a parse failure, or a non-empty body
+that produced no blocks, still takes the raw-source fallback.
+
+`parse_document` highlights closed fences at every depth, including fences
+inside list items, which previously never received tokens.
+
+## Tables
+
+- Engine: `modules/ui/src/markdown/table.rs` owns `Table`,
+  `TableAlignment`, `TableCell`, and the accumulator. Cells assemble in the
+  shared inline buffer, so emphasis, code, and links nest exactly as in a
+  paragraph. `pulldown-cmark` pads short rows and drops excess cells, so
+  every row carries `alignments.len()` cells.
+- A header row is a paragraph until its delimiter row arrives; a streaming
+  table therefore reads as one pipe-delimited line for a moment and then
+  settles into the grid.
+- Renderer: `modules/ui/src/markdown_renderer/table.rs` lays the cells out
+  as one grid with content-sized tracks (`grid_cols_max_content`:
+  `minmax(0, max-content)`). Short columns hug their content; when the row
+  outgrows the message width the tracks shrink and cells wrap. Column
+  alignment places the hugging cell content on the authored edge.
+- Type follows the plugin `table`: 14 px / 24 px, header 600 in the
+  foreground token, `border` hairlines under the header and between rows,
+  8 px cell padding with flush outer edges, 28 px block margins
+  (`ProseTypography::TABLE_*`).
+- Deliberate difference: the reference table fills its container
+  (`width: 100%`, automatic table layout). GPUI grids only offer uniform
+  track templates, so the native table hugs its content at the leading
+  edge instead of stretching every column equally. There is no horizontal
+  scroll; a table with more columns than the width can carry wraps tightly.
 
 ## Streaming / balanced-events contract
 
@@ -199,7 +257,17 @@ helper; renderer pixels stay root's capture):
   tests, and pixel comparison are root-owned. Two gate failures drove this
   correction (`TagEnd::List(bool)` tuple pattern, `UnderlineStyle.color`
   needing `.to_paint()` to `Hsla`); both are fixed in-tree.
-- Blockquotes, tables, strikethrough, superscript/subscript still pass
-  their inner text through without dedicated blocks (unchanged Phase 1
-  scope); only task lists join the enabled set.
+- Blockquotes, strikethrough, superscript/subscript still pass their inner
+  text through without dedicated blocks (unchanged Phase 1 scope); task
+  lists and tables are the enabled GFM set.
+- Emphasis follows `CommonMark` flanking rules, so a closing `**` that
+  follows punctuation and touches a letter (`**Note:**text`,
+  `**"quoted"**text`) stays literal. `pulldown-cmark` owns that grammar and
+  no first-party rewrite exists.
+- Text inside a raw HTML block (a line opening with a block tag such as
+  `<details>`, up to the next blank line) is inert, so Markdown markers in
+  it stay literal. The reference parses that text because `html: false`
+  disables HTML blocks outright; `pulldown-cmark` has no such switch.
+- Fences in languages outside the bundled `syntect` set (`ts`, `tsx`,
+  `svelte`, `toml`, `jsx`, `nix`, …) render unhighlighted.
 - Task markers render as `☐`/`☑` glyphs, not interactive checkboxes.

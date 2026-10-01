@@ -69,17 +69,82 @@ fn user_open_remains_open_through_terminal_changes() {
 }
 
 #[test]
-fn user_closed_remains_closed_if_work_resumes() {
+fn user_closed_reopens_when_work_resumes_and_auto_collapses_on_settle() {
+    // A section cannot hide active work: a settled section the reader
+    // collapsed opens again when its work becomes active (a resumed turn,
+    // for example after recovery), then settles closed on the auto path.
     let mut ctrl = DisclosureController::new(false);
     ctrl.handle(DisclosureEvent::UserClose);
     assert_eq!(ctrl.state(), DisclosureState::UserClosed);
     assert!(!ctrl.is_open());
 
     ctrl.handle(DisclosureEvent::WorkBecameActive);
+    assert_eq!(ctrl.state(), DisclosureState::AutoOpen);
+    assert!(ctrl.is_open());
+    assert!(ctrl.is_working());
+
     ctrl.handle(DisclosureEvent::WorkSettledSuccessfully);
+    assert_eq!(ctrl.state(), DisclosureState::AutoClosed);
+    assert!(!ctrl.is_working());
     ctrl.handle(DisclosureEvent::WorkFailedOrInterrupted);
-    assert_eq!(ctrl.state(), DisclosureState::UserClosed);
-    assert!(ctrl.is_user_controlled());
+    assert_eq!(ctrl.state(), DisclosureState::AutoClosed);
+}
+
+#[test]
+fn user_close_and_toggle_are_refused_while_work_is_active() {
+    for event in [DisclosureEvent::UserClose, DisclosureEvent::UserToggle] {
+        // Auto-open active work refuses without a state change or effect.
+        let mut ctrl = DisclosureController::new(true);
+        assert_eq!(ctrl.handle(event), DisclosureEffect::None);
+        assert_eq!(ctrl.state(), DisclosureState::AutoOpen);
+        assert!(ctrl.is_open());
+
+        // So does a reader's explicit open while the work still runs.
+        ctrl.handle(DisclosureEvent::UserOpen);
+        assert_eq!(ctrl.state(), DisclosureState::UserOpen);
+        assert_eq!(ctrl.handle(event), DisclosureEffect::None);
+        assert_eq!(ctrl.state(), DisclosureState::UserOpen);
+
+        // Settled work collapses on request again.
+        ctrl.handle(DisclosureEvent::WorkSettledSuccessfully);
+        ctrl.handle(event);
+        assert_eq!(ctrl.state(), DisclosureState::UserClosed);
+    }
+}
+
+#[test]
+fn reactivation_reopens_an_auto_closed_section_until_it_settles() {
+    let mut ctrl = DisclosureController::new(true);
+    ctrl.handle(DisclosureEvent::WorkFailedOrInterrupted);
+    assert_eq!(ctrl.state(), DisclosureState::AutoClosed);
+
+    ctrl.handle(DisclosureEvent::WorkBecameActive);
+    assert_eq!(ctrl.state(), DisclosureState::AutoOpen);
+    // Repeated lifecycle sync while working keeps it open and refuses close.
+    ctrl.handle(DisclosureEvent::WorkBecameActive);
+    ctrl.handle(DisclosureEvent::UserClose);
+    assert_eq!(ctrl.state(), DisclosureState::AutoOpen);
+
+    ctrl.handle(DisclosureEvent::WorkSettledSuccessfully);
+    assert_eq!(ctrl.state(), DisclosureState::AutoClosed);
+}
+
+#[test]
+fn seeded_and_cloned_views_keep_their_working_state() {
+    // Only the auto-open leaf implies active work; a seeded settled leaf
+    // accepts a user close immediately.
+    let mut seeded = DisclosureController::from_state(DisclosureState::UserOpen);
+    assert!(!seeded.is_working());
+    seeded.handle(DisclosureEvent::UserClose);
+    assert_eq!(seeded.state(), DisclosureState::UserClosed);
+
+    let mut active = DisclosureController::new(true);
+    active.handle(DisclosureEvent::UserOpen);
+    let mut clone = active.clone();
+    assert_eq!(clone.state(), DisclosureState::UserOpen);
+    assert!(clone.is_working());
+    clone.handle(DisclosureEvent::UserClose);
+    assert_eq!(clone.state(), DisclosureState::UserOpen);
 }
 
 #[test]

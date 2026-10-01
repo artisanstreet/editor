@@ -14,24 +14,23 @@ pub(super) struct NavigatorMarker {
     pub(super) label: String,
     /// Exact scroll target; identity only, never body text.
     pub(super) target: ConversationSurfaceTarget,
-    /// Index of the owning turn in the accepted scene order.
+    /// Index of the owning turn in the accepted scene order, or `None` for
+    /// a user message in a turn that is not loaded.
     ///
     /// Carried so painted-geometry lookups touch marker-bearing turns only
     /// instead of walking every turn and block each frame.
-    pub(super) turn_index: usize,
+    pub(super) turn_index: Option<usize>,
 }
 
-/// Window-local rail geometry for the turn navigator.
+/// Window-local viewport geometry for the turn navigator.
 ///
-/// The rail centers vertically in the card from live measurement: both
-/// windows sharing one surface converge independently, exactly like the
-/// transcript end-space height.
-#[derive(Clone, Copy, Debug, Default)]
+/// The rail and its menu center on the transcript viewport from live
+/// measurement: both windows sharing one surface converge independently,
+/// exactly like the transcript end-space height.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct TurnNavigatorMetrics {
-    /// Rail top offset in px within the surface root.
-    pub(super) top_px: f32,
-    /// Viewport height in px at the last measurement.
-    pub(super) viewport_px: f32,
+    /// Transcript viewport in window coordinates at the last measurement.
+    pub(super) viewport: gpui::Bounds<gpui::Pixels>,
 }
 
 /// Samples the reference dropdown easing for navigator motion clocks.
@@ -198,6 +197,18 @@ pub(super) fn activity_detail_text(
     }
 }
 
+/// The category one activity kind counts under in a chain header.
+///
+/// Unrecognised kinds and generic tools read identically ("used a tool"), so
+/// they share one clause and one glyph: a chain of two differently named
+/// tools reads "used 2 tools", never "used a tool, used a tool".
+fn chain_category(kind: &str) -> ActivityCategory {
+    match activity_category(kind) {
+        ActivityCategory::Other => ActivityCategory::Tool,
+        category => category,
+    }
+}
+
 /// Builds one chain header's clause sentence from its activity kinds.
 ///
 /// Composition is counted in first-appearance order so the header describes
@@ -208,7 +219,11 @@ pub(super) fn activity_detail_text(
 pub(super) fn activity_chain_clause<'a>(kinds: impl Iterator<Item = &'a str>) -> String {
     let mut composition: Vec<(ActivityCategory, usize)> = Vec::new();
     for kind in kinds {
-        let category = activity_category(kind);
+        // The stand-in for work still on the Forge is not a step of its own.
+        if kind == crate::conversation_observation_projection::HELD_BACK_ACTIVITY_KIND {
+            continue;
+        }
+        let category = chain_category(kind);
         match composition.iter_mut().find(|(known, _)| *known == category) {
             Some((_, count)) => *count += 1,
             None => composition.push((category, 1)),
@@ -255,7 +270,7 @@ pub(super) const fn activity_category_icon(category: ActivityCategory) -> AssetI
 pub(super) fn activity_chain_icon<'a>(kinds: impl Iterator<Item = &'a str>) -> AssetId {
     let mut categories: Vec<ActivityCategory> = Vec::new();
     for kind in kinds {
-        let category = activity_category(kind);
+        let category = chain_category(kind);
         if !categories.contains(&category) {
             categories.push(category);
         }
@@ -307,23 +322,31 @@ pub(super) fn navigator_target_slug(target: &ConversationSurfaceTarget) -> &str 
     }
 }
 
-/// Derives the loaded-turn navigator markers from the current scene only.
+/// Derives the navigator markers from the current scene and the user
+/// messages of the turns that are not loaded.
 ///
 /// The existing `conversation_turn_markers` policy supplies ordering,
 /// labels, and the two-marker minimum. Durable user-message identities
 /// become exact `Item` targets; anything else that survives the policy
-/// keeps its exact render-only `Scene` identity. Window markers are never
-/// supplied: this surface renders only loaded turns.
+/// keeps its exact render-only `Scene` identity. `earlier` names the user
+/// messages before the loaded turns, oldest first: they take the places in
+/// front of every loaded marker, and jumping to one reads its turn.
 #[must_use]
-pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<NavigatorMarker> {
+pub(super) fn turn_navigator_markers(
+    scene: &ConversationScene,
+    earlier: &[(ItemId, String)],
+) -> Vec<NavigatorMarker> {
     let mut turns = Vec::new();
     let mut items = Vec::new();
     let mut item_turn_indices: HashMap<&str, usize> = HashMap::new();
-    let mut ordinal: u64 = 0;
+    // Positions are relative: the earlier messages count up from zero and
+    // the loaded turns and items follow them.
+    let shift = earlier.len() as u64;
+    let mut ordinal: u64 = shift;
     for (turn_index, turn_scene) in scene.turn_scenes().iter().enumerate() {
         turns.push(ConversationTurnInput::new(
             turn_scene.turn_id.as_str(),
-            turn_scene.ordinal,
+            turn_scene.ordinal.saturating_add(shift),
         ));
         for block in turn_scene.blocks() {
             if let TurnBlock::UserMessage(message) = block {
@@ -338,7 +361,21 @@ pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<Na
             }
         }
     }
-    let snapshot = ConversationSnapshotInput::new(turns, items, None);
+    let window_markers = (!earlier.is_empty()).then(|| {
+        earlier
+            .iter()
+            .zip(0_u64..)
+            .map(|((item_id, label), position)| {
+                crate::conversation_turn_navigator::ConversationWindowMarkerInput::new(
+                    item_id.as_str(),
+                    label.as_str(),
+                    position,
+                    position,
+                )
+            })
+            .collect()
+    });
+    let snapshot = ConversationSnapshotInput::new(turns, items, window_markers);
     conversation_turn_markers(&snapshot)
         .into_iter()
         .filter_map(|marker| {
@@ -350,13 +387,8 @@ pub(super) fn loaded_turn_navigator_markers(scene: &ConversationScene) -> Vec<Na
                         .ok()
                         .map(ConversationSurfaceTarget::Scene)
                 })?;
-            // Every marker in a loaded snapshot is a loaded user message, so
-            // its owning turn index is present; an unresolvable identity keeps
-            // index zero and only affects which bound it measures against.
-            let turn_index = item_turn_indices
-                .get(marker.id.as_str())
-                .copied()
-                .unwrap_or(0);
+            // A marker without a loaded turn is one of the earlier messages.
+            let turn_index = item_turn_indices.get(marker.id.as_str()).copied();
             Some(NavigatorMarker {
                 label: marker.label,
                 target,
@@ -396,6 +428,24 @@ pub(super) fn work_group_anchor_id(turn_id: &TurnId, block: &WorkGroupBlock) -> 
         .or_else(|| SceneId::parse(turn_id.as_str()).ok())
 }
 
+/// Returns the scroll-anchor identity one painted work group attaches.
+///
+/// A session continuation carries its own segment anchor, so the first
+/// segment and every continuation of one session stay distinct measured
+/// identities; the first segment keeps the session anchor and legacy
+/// positional groups keep the first-item derivation. Rendering and
+/// scroll-target resolution share this one function.
+pub(super) fn work_group_scroll_anchor(
+    turn_id: &TurnId,
+    block: &WorkGroupBlock,
+) -> Option<SceneId> {
+    block
+        .continuation
+        .clone()
+        .or_else(|| block.session.clone())
+        .or_else(|| work_group_anchor_id(turn_id, block))
+}
+
 pub(super) fn text_block_scroll_identity(id: &SceneId) -> (Option<SceneId>, Option<ItemId>) {
     (Some(id.clone()), item_id_for_scene_id(id))
 }
@@ -413,13 +463,7 @@ pub(super) fn block_scroll_identity(
     match block {
         TurnBlock::UserMessage(block) => text_block_scroll_identity(&block.id),
         TurnBlock::AssistantMessage(block) => text_block_scroll_identity(&block.id),
-        TurnBlock::WorkGroup(block) => (
-            block
-                .session
-                .clone()
-                .or_else(|| work_group_anchor_id(turn_id, block)),
-            None,
-        ),
+        TurnBlock::WorkGroup(block) => (work_group_scroll_anchor(turn_id, block), None),
         TurnBlock::Compaction(block) => text_block_scroll_identity(&block.id),
         TurnBlock::ChangeSet(block) => text_block_scroll_identity(&block.id),
         TurnBlock::Plan(block) => text_block_scroll_identity(&block.id),

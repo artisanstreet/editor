@@ -432,7 +432,7 @@ fn sha256_vectors_hold_for_the_pinned_crate() {
 #[test]
 fn catalog_is_sorted_unique_and_totally_covered_by_constants() {
     let all = artisan_assets::ALL;
-    assert_eq!(all.len(), 103, "catalog size drifted");
+    assert_eq!(all.len(), 104, "catalog size drifted");
     for pair in all.windows(2) {
         assert!(
             pair[0].id.as_str() < pair[1].id.as_str(),
@@ -528,8 +528,8 @@ fn manifest_rows_have_exact_fields_and_unique_ids_and_paths() {
     );
     let text = std::str::from_utf8(&raw).expect("manifest utf-8");
     let (assets, uses) = parse_manifest(text);
-    assert_eq!(assets.len(), 103);
-    assert_eq!(uses.len(), 91);
+    assert_eq!(assets.len(), 104);
+    assert_eq!(uses.len(), 92);
 
     let mut asset_ids: Vec<&str> = Vec::new();
     let mut source_paths: Vec<String> = Vec::new();
@@ -690,9 +690,9 @@ fn physical_files_biject_with_build_manifest_and_api() {
         .collect();
     api_paths.sort_unstable();
 
-    assert_eq!(physical.len(), 103, "physical svg count");
-    assert_eq!(manifest_paths.len(), 103, "manifest source_path count");
-    assert_eq!(api_paths.len(), 103, "API source_path count");
+    assert_eq!(physical.len(), 104, "physical svg count");
+    assert_eq!(manifest_paths.len(), 104, "manifest source_path count");
+    assert_eq!(api_paths.len(), 104, "API source_path count");
 
     assert_eq!(
         physical, manifest_paths,
@@ -811,12 +811,12 @@ fn presentation_policy_is_independent_of_monochrome_with_exactly_two_exceptions(
         "authored-color overrides beyond the evidenced brand marks"
     );
 
-    // Exhaustive counts over all 103 ids: 12 polychrome artworks plus the two
+    // Exhaustive counts over all 104 ids: 12 polychrome artworks plus the two
     // authored-color exceptions render full-color; every other asset tints.
-    assert_eq!(artisan_assets::ALL.len(), 103);
+    assert_eq!(artisan_assets::ALL.len(), 104);
     assert_eq!(full_color, 14);
-    assert_eq!(tinted, 89);
-    assert_eq!(monochrome_tinted, 89);
+    assert_eq!(tinted, 90);
+    assert_eq!(monochrome_tinted, 90);
 
     // The exceptions really carry their authored single-hue colors in the
     // embedded bytes while their structural monochrome stays true.
@@ -866,7 +866,7 @@ fn use_sites_reference_known_assets_and_link_the_whole_catalog() {
     ];
 
     let (assets, uses) = parse_manifest(MANIFEST_TOML);
-    assert_eq!(assets.len(), 103);
+    assert_eq!(assets.len(), 104);
     let mut linked: Vec<String> = Vec::new();
     let mut shader_deferred = 0usize;
 

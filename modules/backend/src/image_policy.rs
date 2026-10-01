@@ -8,6 +8,13 @@
 /// The largest permitted image long edge in pixels.
 pub const MAXIMUM_IMAGE_LONG_EDGE_PIXELS: f64 = 2576.0;
 
+/// The long edge Claude images are fitted to. A request carrying more than
+/// about 20 images is refused when any image reaches 2000px, and the refusal
+/// repeats on every later turn because the image stays in the conversation.
+/// 1568px stays clear of that limit and is the largest size Claude's
+/// standard-tier models see without a further server-side downscale.
+pub const CLAUDE_IMAGE_LONG_EDGE_PIXELS: f64 = 1568.0;
+
 /// Media types accepted by the frontend image intake path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageMediaType {
@@ -99,6 +106,17 @@ pub fn best_image_format(engine_id: Option<&str>) -> ImageMediaType {
     ImageMediaType::Png
 }
 
+/// The long-edge cap for images sent to an engine. Claude uses
+/// [`CLAUDE_IMAGE_LONG_EDGE_PIXELS`]; every other engine uses
+/// [`MAXIMUM_IMAGE_LONG_EDGE_PIXELS`].
+#[must_use]
+pub fn image_long_edge_for(engine_id: Option<&str>) -> f64 {
+    match engine_id {
+        Some("claude") => CLAUDE_IMAGE_LONG_EDGE_PIXELS,
+        _ => MAXIMUM_IMAGE_LONG_EDGE_PIXELS,
+    }
+}
+
 /// Width and height of an image in pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageDimensions {
@@ -114,19 +132,12 @@ impl ImageDimensions {
     }
 }
 
-/// Computes a rescale target using [`MAXIMUM_IMAGE_LONG_EDGE_PIXELS`].
+/// Computes a rescale target for a long-edge cap, usually
+/// [`image_long_edge_for`].
 ///
-/// Rust has no default function arguments, so callers that need a custom cap
-/// should use [`image_rescale_target_with_long_edge`]. Invalid dimensions and
-/// invalid caps return no target. Valid positive dimensions are scaled without
-/// enlargement, and positive results use JavaScript-compatible rounding with a
-/// one-pixel minimum.
-#[must_use]
-pub fn image_rescale_target(source: ImageDimensions) -> Option<ImageDimensions> {
-    image_rescale_target_with_long_edge(source, MAXIMUM_IMAGE_LONG_EDGE_PIXELS)
-}
-
-/// Computes a rescale target using a caller-supplied long-edge cap.
+/// Invalid dimensions and invalid caps return no target. Valid positive
+/// dimensions are scaled without enlargement, and positive results use
+/// JavaScript-compatible rounding with a one-pixel minimum.
 #[must_use]
 pub fn image_rescale_target_with_long_edge(
     source: ImageDimensions,

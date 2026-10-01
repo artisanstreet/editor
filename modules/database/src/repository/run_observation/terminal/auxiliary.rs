@@ -228,7 +228,6 @@ WHERE message_id = ?
   AND lease_owner = ?
   AND lease_expires_at_ms >= ?
   AND updated_at_ms = ?
-  AND lease_expires_at_ms > ?
 RETURNING message_id
 ";
 
@@ -591,7 +590,6 @@ async fn fence_auxiliary_dispatch(
             claimed.owner.to_storage().into(),
             millis(claimed.lease_expires_at).into(),
             millis(scope.expected_updated_at).into(),
-            millis(command.operated_at()).into(),
         ],
     );
     let row = transaction
@@ -906,7 +904,6 @@ async fn classify_auxiliary_dispatch_failure(
     command: &AuxiliaryTerminal<'_>,
 ) -> AuxiliaryTerminalError {
     let claimed = command.scope().claimed;
-    let operated_at_ms = millis(command.operated_at());
     let dispatch = match entities::message_dispatch::Entity::find_by_id(claimed.message_id.as_str())
         .one(transaction)
         .await
@@ -928,15 +925,6 @@ async fn classify_auxiliary_dispatch_failure(
         return AuxiliaryTerminalError::Repository(RepositoryError::InvalidDispatchState {
             message_id: claimed.message_id.clone(),
             state: dispatch_state_label(&dispatch.state),
-        });
-    }
-    if let Some(expiry) = dispatch.lease_expires_at_ms
-        && expiry <= operated_at_ms
-    {
-        return AuxiliaryTerminalError::Repository(RepositoryError::DispatchLeaseExpired {
-            message_id: claimed.message_id.clone(),
-            lease_expires_at_ms: expiry,
-            operated_at_ms,
         });
     }
     let owner_matches = dispatch.lease_owner.as_deref().is_some_and(|owner| {

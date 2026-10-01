@@ -220,6 +220,7 @@ fn approval_command_for(
     match command {
         Command::RespondApproval(command) => command,
         Command::RespondQuestion(_)
+        | Command::AnswerQuestions(_)
         | Command::AttachProject(_)
         | Command::CreateThread(_)
         | Command::QueueFirstMessage(_)
@@ -255,6 +256,7 @@ fn question_command_for(
     match command {
         Command::RespondQuestion(command) => command,
         Command::RespondApproval(_)
+        | Command::AnswerQuestions(_)
         | Command::AttachProject(_)
         | Command::CreateThread(_)
         | Command::QueueFirstMessage(_)

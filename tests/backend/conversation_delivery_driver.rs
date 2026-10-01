@@ -1017,6 +1017,39 @@ async fn commit_activity_batch(
     item_id: &str,
     patch_id: &str,
 ) -> Result<(), Box<dyn Error>> {
+    commit_activity_batch_at_revision(
+        repository,
+        run,
+        batch_sequence,
+        expected_launch_at_ms,
+        expected_updated_at_ms,
+        operated_at_ms,
+        observation,
+        item_id,
+        patch_id,
+        Revision::new(0),
+    )
+    .await
+}
+
+/// [`commit_activity_batch`] for a run's later rows, whose content-neutral
+/// rewrite starts from the assistant item's current revision.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture commit helper mirrors the batch request fields one-for-one; a wrapper struct would only rename them"
+)]
+async fn commit_activity_batch_at_revision(
+    repository: &Repository,
+    run: &SeededRun,
+    batch_sequence: i64,
+    expected_launch_at_ms: i64,
+    expected_updated_at_ms: i64,
+    operated_at_ms: i64,
+    observation: Observation,
+    item_id: &str,
+    patch_id: &str,
+    expected_revision: Revision,
+) -> Result<(), Box<dyn Error>> {
     let base = repository
         .last_committed_observation_sequence(&run.launched.run_id)
         .await?;
@@ -1048,7 +1081,7 @@ async fn commit_activity_batch(
             activate_turn_patch_id: None,
             changes: &[AssistantChange::Replace {
                 item_id: &item_id,
-                expected_revision: Revision::new(0),
+                expected_revision,
                 body: &body,
                 phase: AssistantMessagePhase::Unspecified,
                 patch_id: &patch_id,
@@ -1263,12 +1296,26 @@ async fn receive_delivery_frame(
     Ok(tokio::time::timeout(TEST_DEADLINE, artisan_transport::receive_envelope(stream)).await??)
 }
 
-/// Consumes the message outbox every activation pushes after its patches
-/// and observation history, returning its event cursor.
+/// Consumes the end-of-history marker and then the message outbox every
+/// activation pushes after its patches and observation history, returning
+/// the outbox's event cursor.
+///
+/// The marker must come immediately after the last history page and before
+/// the outbox, so every activation test also proves that ordering.
 async fn receive_activation_outbox(
     stream: &mut quinn::RecvStream,
     thread_id: &ThreadId,
 ) -> Result<u64, Box<dyn Error>> {
+    let frame = receive_delivery_frame(stream).await?;
+    let kind = frame_kind(&frame.body);
+    let WireEnvelopeBody::Event(event) = frame.body else {
+        return Err(format!("expected the history-current marker, got {kind}").into());
+    };
+    let Event::ObservationHistoryCurrent(current) = event.event else {
+        return Err("expected the history-current marker before the outbox".into());
+    };
+    assert_eq!(&current.thread_id, thread_id);
+
     let frame = receive_delivery_frame(stream).await?;
     let kind = frame_kind(&frame.body);
     let WireEnvelopeBody::Event(event) = frame.body else {
@@ -1446,9 +1493,10 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             return Err(format!("expected the initial replay batch, got {initial_kind}").into());
         };
         let base_cursor = initial_batch.to_cursor();
+        // Cursor 1 is the history-current marker; the outbox follows it.
         assert_eq!(
             receive_activation_outbox(&mut delivery_stream, &thread_id).await?,
-            1
+            2
         );
 
         // Ordered barrier proving the initial activation drain (patches plus
@@ -1552,7 +1600,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(first.event_cursor, 2);
+        assert_eq!(first.event_cursor, 3);
         assert_eq!(first.delivery_sequence, 1);
         assert_eq!(first.run_id, "delivery-run");
         assert_eq!(first.turn_id, "delivery-turn");
@@ -1571,7 +1619,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(second.event_cursor, 3);
+        assert_eq!(second.event_cursor, 4);
         assert_eq!(second.delivery_sequence, 2);
         assert_eq!(second.run_id, "delivery-run-2");
         assert_eq!(second.turn_id, "delivery-turn-2");
@@ -1649,7 +1697,7 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(replayed_first.event_cursor, 4);
+        assert_eq!(replayed_first.event_cursor, 5);
         assert_eq!(replayed_first.delivery_sequence, 1);
         assert_eq!(replayed_first.run_id, "delivery-run");
         assert_eq!(replayed_first.committed_at_ms, 750);
@@ -1657,14 +1705,15 @@ async fn activity_history_drives_live_delivery_and_reconnect_replay() -> Result<
             receive_delivery_frame(&mut delivery_stream).await?,
             &thread_id,
         );
-        assert_eq!(replayed_second.event_cursor, 5);
+        assert_eq!(replayed_second.event_cursor, 6);
         assert_eq!(replayed_second.delivery_sequence, 2);
         assert_eq!(replayed_second.run_id, "delivery-run-2");
         assert_eq!(replayed_second.committed_at_ms, 1_400);
-        // Every activation ends with the thread's current message outbox.
+        // Every activation ends the history with its marker (cursor 7) and
+        // then the thread's current message outbox.
         assert_eq!(
             receive_activation_outbox(&mut delivery_stream, &thread_id).await?,
-            6
+            8
         );
 
         let (mut stop_send, mut stop_recv) = connection.open_bi().await?;
@@ -2097,6 +2146,515 @@ async fn live_run_usage_is_pushed_as_it_changes() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+#[tokio::test]
+async fn live_thinking_is_pushed_from_memory_and_never_stored() -> Result<(), Box<dyn Error>> {
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let run_id = seeded.run.launched.run_id.clone();
+    let turn_id = seeded.run.launched.turn_id.clone();
+    let stored_before = repository
+        .last_committed_observation_sequence(&run_id)
+        .await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let board = artisan_backend::live_thinking::LiveThinkingBoard::new();
+    let source = |at: i64| artisan_backend::live_thinking::ThinkingSource {
+        thread_id: &thread_id,
+        run_id: &run_id,
+        turn_id: &turn_id,
+        item_id: "thinking:block-1",
+        at: UnixMillis::from_millis(at),
+    };
+    // The run is already thinking when the Editor opens the thread.
+    board.append(&source(1_000), "Weighing");
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone())
+        .with_live_thinking_board(board.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let pushed = |frame: WireEnvelope| -> Result<Option<(String, i64, i64)>, Box<dyn Error>> {
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected a thinking event".into());
+        };
+        let Event::LiveThinking(thinking) = event.event else {
+            return Err("expected the live thinking block".into());
+        };
+        assert_eq!(thinking.thread_id, thread_id);
+        Ok(thinking.current.map(|block| {
+            assert_eq!(block.run_id, run_id);
+            assert_eq!(block.turn_id, turn_id);
+            assert_eq!(block.item_id, "thinking:block-1");
+            (
+                block.text,
+                block.started_at.as_millis(),
+                block.updated_at.as_millis(),
+            )
+        }))
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, thread_id.clone()).await?;
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            Some(("Weighing".to_owned(), 1_000, 1_000))
+        );
+        // The block grows in place and keeps when it started.
+        board.append(&source(1_200), " the options");
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            Some(("Weighing the options".to_owned(), 1_000, 1_200))
+        );
+        // The provider's final summary replaces the streamed text.
+        board.complete(&source(1_300), Some("Weighed the options."));
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            Some(("Weighed the options.".to_owned(), 1_000, 1_300))
+        );
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err(),
+            "an unchanged block is not pushed again"
+        );
+        // Another run cannot drop this run's block; its own run can, once.
+        let other = artisan_domain::RunId::parse("run-elsewhere").expect("run id");
+        assert!(!board.clear(&thread_id, &other));
+        assert!(board.clear(&thread_id, &run_id));
+        assert!(!board.clear(&thread_id, &run_id));
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            None
+        );
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    // Nothing of the block reached the observation ledger.
+    assert_eq!(
+        repository
+            .last_committed_observation_sequence(&run_id)
+            .await?,
+        stored_before
+    );
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery live thinking test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+#[test]
+fn a_long_thinking_block_keeps_its_newest_part() {
+    let board = artisan_backend::live_thinking::LiveThinkingBoard::new();
+    let thread_id = ThreadId::parse("thread-long-thinking").expect("thread id");
+    let run_id = artisan_domain::RunId::parse("run-long-thinking").expect("run id");
+    let turn_id = artisan_domain::TurnId::parse("turn-long-thinking").expect("turn id");
+    let source = |item_id: &'static str| artisan_backend::live_thinking::ThinkingSource {
+        thread_id: &thread_id,
+        run_id: &run_id,
+        turn_id: &turn_id,
+        item_id,
+        at: UnixMillis::from_millis(1),
+    };
+    let maximum = artisan_backend::live_thinking::LIVE_THINKING_MAX_BYTES;
+    for _ in 0..maximum {
+        board.append(&source("block-1"), "é");
+    }
+    board.append(&source("block-1"), "end");
+    let block = board.current(&thread_id).expect("block present");
+    assert!(block.text.len() <= maximum);
+    assert!(block.text.ends_with("éend"));
+    // A fragment of another block starts over rather than extending this one.
+    board.append(&source("block-2"), "next");
+    assert_eq!(
+        board.current(&thread_id).expect("block present").text,
+        "next"
+    );
+    // A completion that names no streamed block and carries no text shows
+    // nothing.
+    assert!(board.clear(&thread_id, &run_id));
+    board.complete(&source("block-3"), None);
+    assert!(board.current(&thread_id).is_none());
+}
+
+/// A windowed subscriber opens on its newest turn: it receives that turn's
+/// activity, reads the older turn on demand, and reads a settled turn's work
+/// rows only when it asks for them.
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear fixture body; extraction would duplicate the shared test wiring"
+)]
+#[tokio::test]
+async fn a_windowed_subscription_reads_older_turns_and_settled_work_on_demand()
+-> Result<(), Box<dyn Error>> {
+    use artisan_domain::{
+        ConversationHistoryPart, ConversationHistoryRequest, QueryTurnCount, TurnOrdinal,
+    };
+
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    // The first turn settles with one tool row; the second is still running
+    // with one of its own.
+    commit_assistant_start(&repository, &seeded.run).await?;
+    commit_activity_batch(
+        &repository,
+        &seeded.run,
+        2,
+        500,
+        700,
+        750,
+        activity_tool_observation("obs-activity-1", "tool-activity-1", "read", "read 42 lines"),
+        "delivery-assistant-item",
+        "delivery-obs-1-patch",
+    )
+    .await?;
+    settle_run_completed(
+        &repository,
+        &seeded.run,
+        750,
+        800,
+        "delivery-assistant-item",
+    )
+    .await?;
+    let run2 = seed_followup_run(&repository, &thread_id).await?;
+    commit_assistant_start_at(
+        &repository,
+        &run2,
+        "delivery-assistant-item-2",
+        "delivery-assistant-2-activation",
+        "delivery-assistant-2-patch",
+        1_100,
+        1_200,
+        1_300,
+    )
+    .await?;
+    commit_activity_batch(
+        &repository,
+        &run2,
+        2,
+        1_100,
+        1_300,
+        1_400,
+        activity_tool_observation("obs-activity-2", "tool-activity-2", "grep", "3 matches"),
+        "delivery-assistant-item-2",
+        "delivery-obs-2-patch",
+    )
+    .await?;
+
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(8).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let subscribe = |newest: u64| {
+        ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::fresh(thread_id.clone())
+                .with_newest_turns(QueryTurnCount::new(newest).expect("turn count")),
+        ))
+    };
+    let history = |part: ConversationHistoryPart| {
+        ClientRequest::Conversation(ConversationRequest::History(ConversationHistoryRequest {
+            thread_id: thread_id.clone(),
+            part,
+        }))
+    };
+    let held_back = |frame: WireEnvelope| -> Result<Vec<(String, u32, u64)>, Box<dyn Error>> {
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the held-back work event".into());
+        };
+        let Event::HeldBackWork(work) = event.event else {
+            return Err("expected the held-back work before the history marker".into());
+        };
+        assert_eq!(work.thread_id, thread_id);
+        Ok(work
+            .turns
+            .into_iter()
+            .map(|turn| {
+                (
+                    turn.turn_id.as_str().to_owned(),
+                    turn.row_count,
+                    turn.first_delivery_sequence,
+                )
+            })
+            .collect())
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+
+        // Opening on one turn yields the newest turn only.
+        let ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Fresh(start),
+        ) = request_once(&connection, "windowed-subscribe", subscribe(1)).await?
+        else {
+            return Err("expected a fresh windowed subscription".into());
+        };
+        let turns = start.snapshot().turns();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_id.as_str(), "delivery-turn-2");
+        let newest_ordinal = turns[0].ordinal;
+        let mut delivery_stream =
+            tokio::time::timeout(TEST_DEADLINE, connection.accept_uni()).await??;
+        // Its running turn's tool row arrives; the older turn sends nothing.
+        let row = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
+        assert_eq!(row.turn_id, "delivery-turn-2");
+        assert_eq!(row.delivery_sequence, 2);
+        assert!(held_back(receive_delivery_frame(&mut delivery_stream).await?)?.is_empty());
+        // The older turn's question is named so the navigator can list it.
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected the earlier-turn markers".into());
+        };
+        let Event::EarlierTurnMarkers(markers) = event.event else {
+            return Err("expected the earlier-turn markers after the held-back work".into());
+        };
+        assert_eq!(markers.thread_id, thread_id);
+        assert_eq!(markers.markers.len(), 1);
+        assert!(markers.markers[0].turn_ordinal < newest_ordinal);
+        assert!(!markers.markers[0].label.is_empty());
+        receive_activation_outbox(&mut delivery_stream, &thread_id).await?;
+
+        // The older turn is read on demand. It is settled, so its tool row
+        // stays behind and only a count arrives.
+        let ResponsePayload::ConversationHistory(page) = request_once(
+            &connection,
+            "windowed-earlier",
+            history(ConversationHistoryPart::EarlierTurns {
+                before_turn_ordinal: newest_ordinal,
+                minimum_turn_ordinal: None,
+                maximum_turn_count: QueryTurnCount::new(8).expect("turn count"),
+            }),
+        )
+        .await?
+        else {
+            return Err("expected a history page".into());
+        };
+        let snapshot = page.snapshot.expect("earlier turns carry a snapshot");
+        assert_eq!(snapshot.turns().len(), 1);
+        assert_eq!(snapshot.turns()[0].turn_id.as_str(), "delivery-turn");
+        assert!(
+            snapshot
+                .items()
+                .iter()
+                .all(|item| item.turn_id().as_str() == "delivery-turn")
+        );
+        assert!(page.observations.is_empty());
+        assert_eq!(page.held_back.len(), 1);
+        assert_eq!(page.held_back[0].turn_id.as_str(), "delivery-turn");
+        assert_eq!(page.held_back[0].run_id.as_str(), "delivery-run");
+        assert_eq!(page.held_back[0].row_count, 1);
+        assert_eq!(page.held_back[0].first_delivery_sequence, 1);
+        assert_eq!(page.held_back[0].first_committed_at.as_millis(), 750);
+        let oldest_ordinal = snapshot.turns()[0].ordinal;
+
+        // Opening that turn's section reads its work rows.
+        let ResponsePayload::ConversationHistory(work) = request_once(
+            &connection,
+            "windowed-turn-work",
+            history(ConversationHistoryPart::TurnWork {
+                turn_id: artisan_domain::TurnId::parse("delivery-turn")?,
+                after_sequence: 0,
+            }),
+        )
+        .await?
+        else {
+            return Err("expected the turn's work rows".into());
+        };
+        assert!(work.snapshot.is_none());
+        assert_eq!(work.next_after_sequence, None);
+        assert_eq!(work.observations.len(), 1);
+        match &work.observations[0].observation {
+            Observation::Tool(row) => assert_eq!(row.tool_name(), "read"),
+            other => return Err(format!("expected a tool row, got {}", other.tag()).into()),
+        }
+        assert_eq!(
+            work.observations[0]
+                .attribution
+                .as_ref()
+                .expect("attribution")
+                .delivery_sequence,
+            1
+        );
+
+        // Nothing lies before the first turn.
+        let ResponsePayload::ConversationHistory(empty) = request_once(
+            &connection,
+            "windowed-earliest",
+            history(ConversationHistoryPart::EarlierTurns {
+                before_turn_ordinal: oldest_ordinal,
+                minimum_turn_ordinal: None,
+                maximum_turn_count: QueryTurnCount::new(8).expect("turn count"),
+            }),
+        )
+        .await?
+        else {
+            return Err("expected an empty history page".into());
+        };
+        assert!(empty.snapshot.expect("snapshot").turns().is_empty());
+        assert!(empty.observations.is_empty() && empty.held_back.is_empty());
+
+        // A window holding both turns is told about the settled turn's
+        // held-back work instead of receiving it.
+        let ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Fresh(start),
+        ) = request_once(&connection, "windowed-resubscribe", subscribe(8)).await?
+        else {
+            return Err("expected a fresh two-turn subscription".into());
+        };
+        assert_eq!(start.snapshot().turns().len(), 2);
+        let row = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
+        assert_eq!(row.turn_id, "delivery-turn-2");
+        assert_eq!(
+            held_back(receive_delivery_frame(&mut delivery_stream).await?)?,
+            [("delivery-turn".to_owned(), 1, 1)]
+        );
+        receive_activation_outbox(&mut delivery_stream, &thread_id).await?;
+
+        // A resumed subscriber names the oldest turn it holds and gets the
+        // same split from there on.
+        let resumed = ClientRequest::Conversation(ConversationRequest::Subscribe(
+            ConversationSubscribe::resume(thread_id.clone(), start.snapshot().cursor())
+                .with_history_floor(TurnOrdinal::new(newest_ordinal.get())),
+        ));
+        let ResponsePayload::ConversationSubscriptionStarted(
+            ConversationSubscriptionStarted::Resumed { .. },
+        ) = request_once(&connection, "windowed-resume", resumed).await?
+        else {
+            return Err("expected a resumed subscription".into());
+        };
+        let row = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
+        assert_eq!(row.turn_id, "delivery-turn-2");
+        assert!(held_back(receive_delivery_frame(&mut delivery_stream).await?)?.is_empty());
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        assert!(matches!(
+            frame.body,
+            WireEnvelopeBody::Event(artisan_protocol::ServerEvent {
+                event: Event::EarlierTurnMarkers(_),
+                ..
+            })
+        ));
+        receive_activation_outbox(&mut delivery_stream, &thread_id).await?;
+
+        // What is committed from now on is delivered whole.
+        commit_activity_batch_at_revision(
+            &repository,
+            &run2,
+            3,
+            1_100,
+            1_400,
+            1_500,
+            // The run's second row: run-local sequences keep rising.
+            Observation::Tool(
+                ToolObservation::new(
+                    ObservationId::parse("obs-activity-3")?,
+                    ObservationSequence::new(2)?,
+                    ObservationId::parse("tool-activity-3")?,
+                    "edit".to_owned(),
+                    ToolAction::Completed,
+                    Some("1 file".to_owned()),
+                )
+                .map_err(|_| "fixture tool row is valid")?,
+            ),
+            "delivery-assistant-item-2",
+            "delivery-obs-3-patch",
+            Revision::new(1),
+        )
+        .await?;
+        let _ = notifier.publish(&thread_id);
+        let frame = receive_delivery_frame(&mut delivery_stream).await?;
+        assert!(matches!(frame.body, WireEnvelopeBody::PatchBatch(_)));
+        let live = decoded_activity(
+            receive_delivery_frame(&mut delivery_stream).await?,
+            &thread_id,
+        );
+        assert_eq!(live.delivery_sequence, 3);
+
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    client_result?;
+    server_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery windowed history test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
 /// Sends one request on its own stream and returns the correlated answer.
 async fn request_once(
     connection: &Connection,
@@ -2516,5 +3074,146 @@ async fn resolved_subtitles_are_pushed_after_startup_even_when_a_read_failed()
     drop(endpoint);
     drop(handler);
     app.shutdown().await?;
+    Ok(())
+}
+
+/// Measures what opening one thread costs on real data: the events the
+/// Forge sends between a fresh subscription and its end-of-history marker,
+/// the bytes on the wire, and the time taken.
+///
+/// Ignored by default. Point `ARTISAN_MEASURE_DB` at a migrated copy of a
+/// Forge database (`sqlite3 forge.sqlite3 ".backup copy.sqlite3"`) and
+/// `ARTISAN_MEASURE_THREAD` at a thread id, then run with
+/// `--ignored --nocapture`.
+#[tokio::test]
+#[ignore = "needs a copy of a real Forge database; see the doc comment"]
+async fn measure_thread_open_on_a_database_copy() -> Result<(), Box<dyn Error>> {
+    let (Ok(database), Ok(thread)) = (
+        std::env::var("ARTISAN_MEASURE_DB"),
+        std::env::var("ARTISAN_MEASURE_THREAD"),
+    ) else {
+        return Err("set ARTISAN_MEASURE_DB and ARTISAN_MEASURE_THREAD".into());
+    };
+    let app = ForgeApp::start(ForgeConfig::new(
+        SqliteConfig::file(&database).sqlx_logging(false),
+    ))
+    .await?;
+    let repository = app.repository().clone();
+    let thread_id = ThreadId::parse(thread)?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let patient = Duration::from_secs(60);
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        ListenerLimits {
+            admission: patient,
+            handshake: patient,
+            next_request: patient,
+            drain: patient,
+        },
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        if let Ok((listener, _report)) = listener.serve_one(&handler, &cancel).await {
+            let _ = listener.drain().await;
+        }
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+        let started = std::time::Instant::now();
+        let before = connection.stats().udp_rx.bytes;
+        let response = request_once(
+            &connection,
+            "measure-subscribe",
+            // The Editor's own subscribe: the newest turns only, unless
+            // `ARTISAN_MEASURE_WINDOW=0` asks for the unwindowed baseline.
+            ClientRequest::Conversation(ConversationRequest::Subscribe(
+                match std::env::var("ARTISAN_MEASURE_WINDOW")
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(8)
+                {
+                    0 => ConversationSubscribe::fresh(thread_id.clone()),
+                    window => ConversationSubscribe::fresh(thread_id.clone())
+                        .with_newest_turns(artisan_domain::QueryTurnCount::new(window)?),
+                },
+            )),
+        )
+        .await?;
+        let (turns, items) = match &response {
+            ResponsePayload::ConversationSubscriptionStarted(
+                ConversationSubscriptionStarted::Fresh(start),
+            ) => (
+                start.snapshot().turns().len(),
+                start.snapshot().items().len(),
+            ),
+            _ => return Err("expected a fresh subscription start".into()),
+        };
+        let snapshot_bytes = connection.stats().udp_rx.bytes - before;
+        let mut delivery = tokio::time::timeout(patient, connection.accept_uni()).await??;
+        let mut kinds: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        loop {
+            let frame =
+                tokio::time::timeout(patient, artisan_transport::receive_envelope(&mut delivery))
+                    .await??;
+            let WireEnvelopeBody::Event(event) = &frame.body else {
+                *kinds.entry("patch-batch".to_owned()).or_default() += 1;
+                continue;
+            };
+            let text = format!("{:?}", event.event);
+            let kind = match text.find("observation: ") {
+                Some(at) => text[at + 13..]
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric())
+                    .collect::<String>(),
+                None => text
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or("event")
+                    .to_owned(),
+            };
+            let done = matches!(event.event, Event::ObservationHistoryCurrent(_));
+            *kinds.entry(kind).or_default() += 1;
+            if done {
+                break;
+            }
+        }
+        let total: usize = kinds.values().sum();
+        println!(
+            "MEASURE thread {}: snapshot {turns} turns / {items} items ({snapshot_bytes} bytes); \
+             history {total} events, {} bytes, ready after {:?}",
+            thread_id.as_str(),
+            connection.stats().udp_rx.bytes - before - snapshot_bytes,
+            started.elapsed(),
+        );
+        println!("MEASURE by kind: {kinds:?}");
+        cancel.cancel();
+        drop(delivery);
+        drop(control_send);
+        drop(control_recv);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let ((), client_result) = tokio::join!(server, client);
+    client_result?;
+    drop(endpoint);
+    drop(handler);
+    let _ = app.shutdown().await;
     Ok(())
 }

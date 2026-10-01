@@ -11,7 +11,7 @@
 use crate::engine_config::{EngineConfigUpdatePrecondition, EngineRunConfig};
 use crate::identifiers::{DirectoryId, MessageId, ProjectId, RequestId, RunId, ThreadId};
 use crate::message::QueueMessagePayload;
-use crate::run_interaction::{RespondApproval, RespondQuestion};
+use crate::run_interaction::{AnswerQuestions, RespondApproval, RespondQuestion};
 use crate::text::{MessageBody, ThreadTitle};
 use crate::{
     ImportLegacyPreferences, ListFailedMessages, ListQueuedMessages, QueueStoredMessage,
@@ -284,6 +284,8 @@ pub enum Command {
     RespondApproval(RespondApproval),
     /// See [`RespondQuestion`].
     RespondQuestion(RespondQuestion),
+    /// See [`AnswerQuestions`].
+    AnswerQuestions(AnswerQuestions),
     /// See [`SetThreadEngineConfig`].
     SetThreadEngineConfig(Box<SetThreadEngineConfig>),
     /// See [`SaveComposerDraft`].
@@ -318,6 +320,7 @@ impl Command {
             Self::WithdrawQueuedMessage(command) => command.request_id(),
             Self::RespondApproval(command) => command.request_id(),
             Self::RespondQuestion(command) => command.request_id(),
+            Self::AnswerQuestions(command) => command.request_id(),
             Self::SetThreadEngineConfig(command) => command.request_id(),
             Self::SaveComposerDraft(command) => command.request_id(),
             Self::UploadComposerAttachment(command) => &command.request_id,

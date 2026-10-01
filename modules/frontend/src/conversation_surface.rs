@@ -19,7 +19,10 @@
 //! [`transcript_window`](self::transcript_window)), and off-window turns paint
 //! from remembered heights as placeholders. Rows are measured on the frame
 //! they enter the window, and the FIFO head of the scroll-target queue is
-//! force-built so scrolling to a far turn still resolves.
+//! force-built so scrolling to a far turn still resolves. Each built turn is
+//! its own cached child view (see [`turn_row`](self::turn_row)): an animation
+//! or change in one turn re-renders that row, and clean rows replay their
+//! previous frame.
 
 #![allow(clippy::module_name_repetitions)]
 
@@ -39,6 +42,7 @@ use artisan_ui::button::{
 };
 use artisan_ui::card::{CardStyle, compact_card, compact_card_content};
 use artisan_ui::collapsible::Collapsible;
+use artisan_ui::copy_feedback::{COPY_FEEDBACK_WINDOW, copy_feedback_icon, copy_feedback_progress};
 use artisan_ui::gradient::{hover_fill_gradient, vertical_gradient};
 use artisan_ui::inline_code_text::inline_runs;
 use artisan_ui::input_state::TextInputState;
@@ -55,7 +59,8 @@ use artisan_ui::theme::{
 use gpui::{
     Animation, AnimationExt, AnyElement, BoxShadow, Context, Div, ElementId, Entity, Filter,
     FocusHandle, FontWeight, IntoElement, Modifiers, MouseMoveEvent, Render, ScrollAnchor,
-    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Window, canvas, deferred, div, point,
+    ScrollHandle, ScrollWheelEvent, SharedString, Stateful, Window, anchored, canvas, deferred,
+    div, point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -82,18 +87,18 @@ use crate::conversation_turn_navigator::{
 };
 use crate::engine_approve_ui::{
     APPROVAL_DENY_LABEL, APPROVAL_DENYING_LABEL, AnswerFlight, AnswerKind, AnswerPairing,
-    AnswerSettlement, QUESTION_ANSWER_LABEL, QUESTION_INPUT_PLACEHOLDER, RespondApprovalAction,
-    RespondQuestionAction, approval_command, mint_answer_request_id, pair_answer_failure,
-    pair_approval_answer, pair_question_answer, pending_approval_label, question_command,
+    AnswerSettlement, RespondApprovalAction, RespondQuestionAction, approval_command,
+    mint_answer_request_id, pair_answer_failure, pair_approval_answer, pair_question_answer,
+    pending_approval_label, question_command,
 };
 use crate::engine_observation_state::EngineObservationState;
-use crate::native_composer_material::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
 use crate::native_model_selector::{HoverRect, PickerScrollState, SlidingHoverState};
 use crate::native_transport_service::{CommandSendError, NativeTransportCommand};
 use crate::rich_link_titles::RichLinkTitleTable;
+use artisan_ui::glass::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 // Phase-1 split submodules (see conversation_surface/).
 
 #[path = "conversation_surface/answer_state.rs"]
@@ -138,14 +143,18 @@ mod scroll_anchor;
 mod render_budget;
 #[path = "conversation_surface/transcript_window.rs"]
 mod transcript_window;
+#[path = "conversation_surface/turn_row.rs"]
+mod turn_row;
 
 pub use transcript_window::{TranscriptShapeLedger, TranscriptWindowReport};
 
 use disclosure::{disclosure_flight_panel, disclosure_frame};
 pub(crate) use pending_rows::PendingMessageRow;
 use pending_rows::SendEntrance;
+use render_blocks::user_message_element;
 use scroll_anchor::{RenderedScrollAnchor, ScrollAnchorRegistry, ViewportGeometry};
-use transcript_window::TranscriptWindowState;
+use transcript_window::{TranscriptShaper, TranscriptWindowState};
+use turn_row::{TurnRowHandle, TurnRowServices, TurnRowSource, TurnRowView};
 
 /// Native GPUI transcript surface over one immutable replacement scene.
 #[expect(
@@ -172,15 +181,25 @@ pub struct ConversationSurface {
     message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
     message_images_observation: Option<gpui::Subscription>,
     theme_mode: ThemeMode,
-    markdown_renderer: MarkdownRenderer,
-    /// Bounded resolved rich-link titles for this surface's markdown links.
-    rich_link_titles: RichLinkTitleTable,
-    /// Destinations observed as unresolved by the current render pass.
+    /// The budgeted Markdown shaper, its parse cache, and the rich-link
+    /// title table, shared with every turn row.
     ///
-    /// Render-local: the probe pushes here while the renderer flattens links,
-    /// and the render tail queues each new destination exactly once before
+    /// Rows probe the table while their links flatten and record misses
+    /// here; the surface queues each new destination exactly once before
     /// notifying the host.
-    rich_link_missing: RefCell<Vec<String>>,
+    shaper: Rc<TranscriptShaper>,
+    /// Bumped whenever the rich-link table changes, so rows showing a title
+    /// or favicon repaint instead of replaying a stale label.
+    rich_link_generation: u64,
+    /// Retained turn rows keyed by turn id, pruned on scene replacement.
+    ///
+    /// Each turn renders from its own cached child view (see
+    /// [`turn_row`](self::turn_row)); a row survives window changes so a
+    /// turn scrolled out and back keeps its entity and retained state.
+    turn_rows: HashMap<String, TurnRowHandle>,
+    /// Bumped by every scene replacement, so an unchanged scene never
+    /// compares turn contents.
+    scene_generation: u64,
     scroll_handle: ScrollHandle,
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,
@@ -193,7 +212,37 @@ pub struct ConversationSurface {
     pending_viewport_observation: Option<ViewportObservation>,
     pending_viewport_extent_change: bool,
     follow_bottom_pending: bool,
+    /// The transcript tail (last Forge outbox row, else last turn) the
+    /// reader was last brought to by an automatic follow.
+    ///
+    /// A follow that finds a different tail always brings it into view: the
+    /// end space reserves exactly the room that aligns a new turn at the top
+    /// of the viewport, which is where a sent message must land. A follow
+    /// for the same tail is growth of that turn, which the reserved space
+    /// absorbs until it is exhausted; only then does the follow scroll.
+    followed_tail: Option<String>,
+    /// A new tail was just followed and its end space has not been measured
+    /// yet: the follow repeats once after that measurement lands.
+    ///
+    /// The end space is measured in prepaint and sized into the next frame,
+    /// so the scroll that follows a new tail lands one measurement short of
+    /// where the reserve finally puts the transcript end. One more follow,
+    /// past the reserve gate, settles the tail exactly.
+    tail_follow_settling: bool,
     last_viewport_geometry: Option<ViewportGeometry>,
+    /// The oldest loaded turn the surface last asked for older turns above.
+    ///
+    /// The request repeats only once that turn changes (a page arrived) or
+    /// the reader leaves the start and returns, so one page in flight is
+    /// never asked for twice.
+    earlier_turns_wanted_for: Option<TurnId>,
+    /// Whether the thread has turns before the loaded ones. The host says
+    /// so from the canonical window; a surface that holds a thread's first
+    /// turn never asks for older ones.
+    earlier_turns_available: bool,
+    /// User messages of the turns before the loaded ones, oldest first: the
+    /// turn navigator lists them in front of the loaded markers.
+    earlier_turn_markers: Vec<(ItemId, String)>,
     viewport_observation_scheduled: bool,
     viewport_next_frame_scheduled: bool,
     actions: Vec<ConversationSurfaceAction>,
@@ -206,7 +255,17 @@ pub struct ConversationSurface {
     /// only write the test harness pumps. Entries are render-local: each
     /// render clears leftovers, and retirement clears them with the queue.
     executed_scroll_targets: Vec<ConversationSurfaceTarget>,
-    scroll_anchors: Vec<RenderedScrollAnchor>,
+    /// The anchor registries of this frame's built rows, in scene order.
+    ///
+    /// Each row owns its registry and rebuilds it when it renders; a cached
+    /// row keeps the one its last render produced, which is exactly what it
+    /// still paints.
+    scroll_anchors: Vec<Rc<RefCell<Vec<RenderedScrollAnchor>>>>,
+    /// The pending head target found no anchor in the latest render and is
+    /// waiting one frame for the rows to render their current anchors.
+    scroll_targets_await_rows: bool,
+    /// Anchor scrolls executed whose next-frame GPUI callback has not run.
+    anchor_scrolls_in_flight: usize,
     scroll_anchor_paint_token: Option<Rc<()>>,
     /// Focus handles for loaded-turn navigator controls, keyed by stable
     /// target identity (`item:<id>` or `scene:<id>`).
@@ -215,49 +274,37 @@ pub struct ConversationSurface {
     /// pruned on scene replacement; a focused control that disappears
     /// returns focus to the transcript.
     navigator_focus: HashMap<String, FocusHandle>,
-    /// Whether the turn-navigator rail is expanded from ticks into labels.
+    /// Whether the pointer is over the turn navigator's tick rail.
     ///
-    /// The reference hides labels until rail hover or row focus; at rest only
-    /// the tick column paints, so full message texts never float beside the
-    /// transcript.
-    navigator_expanded: bool,
-    /// Dedicated scroll handle for the navigator's own capped label list.
+    /// The reference hides labels until rail hover or tick focus; at rest
+    /// only the tick column paints, so full message texts never float beside
+    /// the transcript. The floating menu is open while the pointer is over
+    /// the rail or the menu, or while a tick holds keyboard focus.
+    navigator_rail_hovered: bool,
+    /// Whether the pointer is over the navigator's floating menu, including
+    /// the gap between the menu and the rail.
+    navigator_menu_hovered: bool,
+    /// Dedicated scroll handle for the navigator menu's capped label list.
     ///
-    /// Long threads scroll the rail independently of the transcript through
+    /// Long threads scroll the menu independently of the transcript through
     /// the same bounded tracking the thread screen uses for viewports.
     navigator_scroll: ScrollHandle,
-    /// Shared hover pill for navigator rows, reused from the model picker.
+    /// Shared hover pill for navigator menu rows, reused from the model
+    /// picker.
     ///
     /// Row probes measure into this state and the pill paints the retained
-    /// flight; hovering the rail selects, leaving it hides. Reference pill
-    /// behavior without a second motion invention.
+    /// flight; hovering a row selects, leaving the navigator hides.
+    /// Reference pill behavior without a second motion invention.
     navigator_hover: Rc<RefCell<SlidingHoverState>>,
     /// Measured navigator list bounds backing pill-relative coordinates.
     ///
     /// Window-space bounds like the picker's surface bounds, so row origins
     /// subtract to list-relative pill rects with plain pixel arithmetic.
     navigator_hover_surface: Rc<RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
-    /// Focused navigator row identity; selecting the pill only on arrival
-    /// keeps a later trigger-zone clear from being reselected every render,
-    /// even while the row retains keyboard focus.
+    /// Focused navigator tick identity; selecting the pill only on arrival
+    /// keeps a later pointer selection from being overridden every render
+    /// while the tick retains keyboard focus.
     navigator_focused_key: Option<String>,
-    /// Width-motion generation, bumped only when rail hover flips expansion.
-    ///
-    /// The open-keyed width clock replays on this generation, never on
-    /// mount: generation zero paints the static width outright.
-    navigator_width_generation: u64,
-    /// Currently painted rail width, retained across hover reversals.
-    ///
-    /// The width animator writes every painted frame (the picker's
-    /// `apply_progress` pattern), so an interrupted flight reverses from
-    /// the displayed width instead of jumping to a fixed endpoint.
-    navigator_width_px: Rc<RefCell<f32>>,
-    /// Transition start width, frozen when the width generation bumps.
-    ///
-    /// The open-keyed clock replays from this value for the whole
-    /// generation; resampling the retained width every render would bend
-    /// the interpolation path mid-flight.
-    navigator_width_from: f32,
     /// Bounded wheel-smoothing state for the transcript scroll offset.
     ///
     /// Reuses the model picker's [`PickerScrollState`] verbatim: discrete
@@ -287,7 +334,7 @@ pub struct ConversationSurface {
     /// disclosure stays scene-owned; this map is presentation-only and never mutates the
     /// scene. Entries persist while the surface owns them, exactly like the
     /// reference component state; the set is bounded by user gestures.
-    trace_groups_open: RefCell<HashMap<String, bool>>,
+    trace_groups_open: Rc<RefCell<HashMap<String, bool>>>,
     /// Host-mirrored footer view state keyed by [`footer_key`].
     footer_mirrors: HashMap<String, TurnFooterMirror>,
     /// Per-turn footer copy-button focus handles keyed by [`footer_key`].
@@ -310,19 +357,14 @@ pub struct ConversationSurface {
     /// route to the row that owns them while unrelated updates never steal
     /// focus.
     question_focus: HashMap<String, FocusHandle>,
-    /// Explicit live answer context for engine approval/question rows.
+    /// The thread that owns every engine approval/question row here.
     ///
-    /// The owning thread and live run are supplied explicitly by the
-    /// controller through [`Self::set_answer_context`]; nothing ambient is
-    /// read. Submit affordances stay disabled until both are present, so a
-    /// gesture can never synthesize a decision without its owner.
-    ///
-    /// Block identities submit as the approval/question identity: the scene
-    /// projection packet must carry engine interaction ids into these block
-    /// ids ([`SceneId`] already converts domain identities losslessly). Until
-    /// then the controller sets context only for engine-backed surfaces.
+    /// The host supplies it through [`Self::set_answer_thread`] when it
+    /// mounts the surface; nothing ambient is read. The owning run and the
+    /// engine's interaction identity ride on each block from its durable
+    /// provenance, so a gesture submits exactly the identities the engine
+    /// issued. Submit affordances stay disabled until the thread is known.
     answer_thread: Option<ThreadId>,
-    answer_run: Option<RunId>,
     /// Per-row approval submit gates keyed by block identity text.
     ///
     /// Each gate mirrors [`AnswerFlight`]: at most one answer attempt is in
@@ -416,8 +458,16 @@ impl Render for ConversationSurface {
             self.transcript_scroll.cancel_to(current, maximum);
             self.transcript_scroll
                 .push(current, -maximum - current, maximum);
-            self.smooth_bottom_active = true;
-            self.schedule_transcript_scroll_frame(window, cx);
+            // Nothing to travel (already at the end, or nothing overflows):
+            // the jump is complete now. An armed flag with no frames to
+            // clear it would report the next wheel tick as an interrupted
+            // jump and detach a reader who never left the end.
+            self.smooth_bottom_active = self.transcript_scroll.active();
+            if self.smooth_bottom_active {
+                self.schedule_transcript_scroll_frame(window, cx);
+            } else {
+                self.report_reached_end(cx);
+            }
         }
         let end_space = window.use_state(cx, |_, _| 0.0_f32);
         let end_space_px = (*end_space.read(cx)).max(
@@ -428,15 +478,28 @@ impl Render for ConversationSurface {
         );
         if self.follow_bottom_pending {
             self.follow_bottom_pending = false;
-            // Like Electron's ResizeObserver, let the sent turn's reserved
-            // space absorb growth before handing over to tail following.
+            // A new tail (a sent row, a delivered turn) is always brought
+            // into view: the reserved end space aligns it at the top. For
+            // the same tail, like Electron's ResizeObserver, let that
+            // reserved space absorb growth before handing over to tail
+            // following.
             let floor = TRANSCRIPT_END_SPACE_PX.max(
                 self.composer_clearance
                     .get(&window.window_handle().window_id())
                     .copied()
                     .unwrap_or(0.0),
             );
-            if end_space_px <= floor && !self.transcript_scroll.active() {
+            let tail = self.tail_identity();
+            let new_tail = tail != self.followed_tail;
+            if !self.transcript_scroll.active()
+                && (new_tail || self.tail_follow_settling || end_space_px <= floor)
+            {
+                // The measurement that lands after a new tail's first layout
+                // re-renders this surface; the follow stays armed for that
+                // frame so the tail settles where its reserve puts it.
+                self.follow_bottom_pending = new_tail;
+                self.tail_follow_settling = new_tail;
+                self.followed_tail = tail;
                 self.scroll_handle.scroll_to_bottom();
             }
         }
@@ -458,37 +521,14 @@ impl Render for ConversationSurface {
                     surface.handle_transcript_wheel(event, window, surface_cx);
                 });
             });
-        let previous_anchors = std::mem::take(&mut self.scroll_anchors);
-        let mut rendered_anchors = Vec::new();
         // Plan the build window before anything renders: only visible rows
         // plus bounded overscan build real subtrees, and footer focus handles
         // are ensured for exactly those rows.
         let built = self.plan_transcript_build();
         self.sync_footer_focus(&built, cx);
+        let rows = self.render_turn_rows(&built, status_motion, cx);
+        transcript = transcript.children(rows);
         {
-            let mut anchors = ScrollAnchorRegistry {
-                handle: &self.scroll_handle,
-                previous: &previous_anchors,
-                next_element_id: 0,
-                rendered: &mut rendered_anchors,
-            };
-            for (index, turn) in self.scene.turn_scenes().iter().enumerate() {
-                if built.contains(index) {
-                    transcript = transcript.child(self.render_turn(
-                        turn,
-                        &entity,
-                        &theme,
-                        &mut anchors,
-                        &mut *window,
-                        status_motion,
-                        cx,
-                    ));
-                } else {
-                    // One placeholder per off-window turn keeps the child
-                    // count and order stable for every prepaint listener.
-                    transcript = transcript.child(self.render_turn_placeholder(index));
-                }
-            }
             self.finish_transcript_window(&built);
             for (index, row) in self.pending_messages.iter().enumerate() {
                 let selector = format!("pending-send-{index}");
@@ -511,7 +551,14 @@ impl Render for ConversationSurface {
                         .flex_col()
                         .items_end()
                         .gap(px(8.0))
-                        .child(self.render_user_message(&block, selector, &theme, cx)),
+                        .child(user_message_element(
+                            &block,
+                            selector,
+                            &theme,
+                            self.message_images.as_ref(),
+                            self.pending_row_entrance(index, cx.reduce_motion()),
+                            cx,
+                        )),
                 );
             }
             // Long transcripts reserve anchoring room. Short conversations
@@ -526,8 +573,7 @@ impl Render for ConversationSurface {
             );
         }
 
-        let scroll_executed = self.drain_painted_scroll_targets(&rendered_anchors, window, cx);
-        self.scroll_anchors = rendered_anchors;
+        let scroll_executed = self.drain_painted_scroll_targets(window, cx);
         if scroll_executed {
             // `ScrollAnchor::scroll_to` defers the offset write to a
             // `window.on_next_frame` callback, which only runs when another
@@ -639,10 +685,10 @@ impl Render for ConversationSurface {
         if let Some(rail) =
             self.render_turn_navigator(&entity, &theme, window, cx, active_navigator.as_deref())
         {
-            // Deferred overlay at dropdown priority: the rail paints above
-            // the composer dock exactly like the reference `z-30`, while its
-            // layout stays in this tree so measurement and hit-testing are
-            // unaffected.
+            // Deferred overlay at dropdown priority: the rail and its
+            // floating menu paint above the composer dock exactly like the
+            // reference `z-30`. The rail's layout stays in this tree; the
+            // menu is anchored in window coordinates.
             root = root.child(deferred(rail).with_priority(2));
         }
         self.flush_rich_link_requests(cx);
@@ -698,7 +744,10 @@ impl DetailRow<'_> {
 /// Collects one group's paintable rows in exact chronological order.
 ///
 /// Session details arrive ordinal-keyed and sort stably; legacy items keep
-/// vec order. Callers paint the returned sequence verbatim.
+/// vec order. Callers paint the returned sequence verbatim. An assistant
+/// message with no text yet is not a row: the Forge opens the item ahead of
+/// its first text, and an empty row would paint a gap and split the tool
+/// chain around it.
 fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
     if block.session_details.is_empty() {
         block
@@ -739,6 +788,9 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
         let mut rows: Vec<(u64, DetailRow<'_>)> = block
             .session_details
             .iter()
+            .filter(|detail| {
+                !matches!(detail, SessionDetail::Assistant { body, .. } if body.trim().is_empty())
+            })
             .map(|detail| match detail {
                 SessionDetail::Assistant {
                     id, body, ordinal, ..

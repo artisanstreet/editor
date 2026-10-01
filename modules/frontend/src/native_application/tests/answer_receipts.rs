@@ -65,9 +65,9 @@ fn queue_approval_answer(
     let host = application.conversation_host.clone().expect("answer host");
     let surface = host.read(cx).surface().clone();
     surface.update(cx, |surface, surface_cx| {
-        surface.set_answer_context(answer_thread(), answer_run(), surface_cx);
         assert!(surface.submit_approval_gesture(
             "approval-1",
+            &answer_run(),
             &answer_approval(),
             true,
             surface_cx,
@@ -132,9 +132,8 @@ fn queue_question_answer(
     let host = application.conversation_host.clone().expect("answer host");
     let surface = host.read(cx).surface().clone();
     surface.update(cx, |surface, surface_cx| {
-        surface.set_answer_context(answer_thread(), answer_run(), surface_cx);
         surface.set_question_draft("question-1".to_owned(), "typed answer", surface_cx);
-        assert!(surface.submit_question_gesture("question-1", surface_cx));
+        assert!(surface.submit_question_gesture("question-1", &answer_run(), surface_cx));
         surface.pending_answer_dispatches()[0].request_id.clone()
     })
 }

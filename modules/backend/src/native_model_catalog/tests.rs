@@ -668,6 +668,7 @@ fn discovery_adds_claude_rows_with_1m_policy_only_when_eligible() {
         .as_ref()
         .expect("1M claude rows inherit the [1m] choice");
     assert_eq!(context.options[0].tokens, 1_000_000);
+    assert_eq!(context.options[0].label, "1M");
     assert!(context.options[0].native_suffix.is_empty());
     let haiku = catalog
         .manifest
@@ -725,7 +726,13 @@ fn hidden_discovered_rows_are_never_surfaced() {
 
 #[test]
 fn picker_rows_follow_the_engine_reported_order() {
-    let reported = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"];
+    let reported = [
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.5",
+    ];
     let catalog = from_discovery(&crate::model_discovery::DiscoveryBundle {
         models: reported
             .iter()

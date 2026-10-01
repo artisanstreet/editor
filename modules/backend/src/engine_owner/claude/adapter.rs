@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use artisan_domain::{
-    MessagePhase, Observation, ObservationId, ObservationSequence, RunId, SubagentInput,
-    SubagentObservation, SubagentState, SubagentTranscriptObservation, TranscriptAgentMessageDelta,
-    TranscriptContent,
+    MessagePhase, Observation, ObservationId, ObservationSequence, QuestionObservation, RunId,
+    SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
+    TranscriptAgentMessageDelta, TranscriptContent,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -14,11 +14,10 @@ use super::super::observation::{EngineObservation, TerminalState, TextSnapshot, 
 
 use super::content::ClaudeAssistantContent;
 use super::launch::ClaudeThinkingDisplay;
-#[cfg(test)]
-use super::protocol::{CLAUDE_MAX_ANSWERS, approval_response_line, question_response_line};
 use super::protocol::{
-    ClaudeApprovalRequest, ClaudeEvent, ClaudeQuestion, ClaudeQuestionRequest, ClaudeTurnError,
-    user_message_line, write_line,
+    CLAUDE_MAX_ANSWERS, ClaudeApprovalRequest, ClaudeEvent, ClaudeQuestion, ClaudeQuestionRequest,
+    ClaudeTurnError, approval_response_line, question_response_line, user_message_with_images,
+    write_line,
 };
 use super::text::{ClaudeTextLedger, ClaudeTextSettlement};
 use super::thinking::ClaudeThinkingTracker;
@@ -94,6 +93,94 @@ fn child_transcript_row(
     ))
 }
 
+/// Builds the requested question rows for one `AskUserQuestion` request,
+/// every question in the request's questionnaire. A question that fails the
+/// domain bounds drops fail-closed.
+fn question_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    request_id: &str,
+    questions: &[ClaudeQuestion],
+) -> Vec<Observation> {
+    let Ok(sequence) = ObservationSequence::new(frame_sequence) else {
+        return Vec::new();
+    };
+    let Ok(group) = ObservationId::parse(request_id.to_owned()) else {
+        return Vec::new();
+    };
+    questions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let id = ObservationId::parse(format!(
+                "{}:claude:{frame_sequence}:question-{index}",
+                run_id.as_str()
+            ))
+            .ok()?;
+            let input = question.to_domain_input().ok()?;
+            QuestionObservation::requested(id, sequence, input)
+                .ok()
+                .map(|row| Observation::Question(row.with_group(group.clone())))
+        })
+        .collect()
+}
+
+/// One open `AskUserQuestion` request with the answers recorded so far.
+#[derive(Debug)]
+struct PendingQuestionRequest {
+    request_id: String,
+    /// The verbatim request input the answer response amends.
+    input: serde_json::Value,
+    /// The validated questions of the request.
+    questions: Vec<ClaudeQuestion>,
+    /// Answers by provider question id; a skipped question records an
+    /// empty list.
+    answers: HashMap<String, Vec<String>>,
+}
+
+impl PendingQuestionRequest {
+    /// Whether the request holds the question and it has no answer yet.
+    fn is_open(&self, question_id: &str) -> bool {
+        self.questions
+            .iter()
+            .any(|question| question.question_id() == question_id)
+            && !self.answers.contains_key(question_id)
+    }
+
+    /// The control response that answers the request: the verbatim input
+    /// amended with every answered question keyed by its text, skipped
+    /// questions left out. A request with no answer at all (every question
+    /// skipped) is denied instead, so the tool reports that the user
+    /// disregarded the question rather than inventing answers.
+    fn reply_line(&self) -> String {
+        let joined: Vec<(String, String)> = self
+            .questions
+            .iter()
+            .filter_map(|question| {
+                let answers = self.answers.get(question.question_id())?;
+                (!answers.is_empty()).then(|| (question.text().to_owned(), answers.join(", ")))
+            })
+            .take(CLAUDE_MAX_ANSWERS)
+            .collect();
+        if joined.is_empty() {
+            serde_json::json!({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": self.request_id,
+                    "response": {
+                        "behavior": "deny",
+                        "message": "User disregarded your question",
+                    },
+                },
+            })
+            .to_string()
+        } else {
+            question_response_line(&self.request_id, &self.input, &joined)
+        }
+    }
+}
+
 /// In-memory pending interaction tracker for one live Claude turn.
 ///
 /// Permission requests land as pending approvals and `AskUserQuestion` frames
@@ -108,7 +195,9 @@ fn child_transcript_row(
 #[derive(Debug, Default)]
 pub(crate) struct ClaudePendingTracker {
     approvals: HashMap<String, ClaudeApprovalRequest>,
-    questions: HashMap<String, ClaudeQuestion>,
+    /// Open question requests by request id, each with the answers
+    /// recorded so far.
+    question_requests: HashMap<String, PendingQuestionRequest>,
     subagents: Vec<String>,
     child_frames: Vec<(String, u64)>,
     subagent_rows: Vec<Observation>,
@@ -120,6 +209,9 @@ pub(crate) struct ClaudePendingTracker {
     stream_message_id: Option<String>,
     init_seen: bool,
     result_seen: bool,
+    root_turn: RootTurn,
+    /// Background agents and workflows still running behind the root turn.
+    background_tasks: usize,
     semantic_failure: bool,
     summary_title: Option<String>,
 }
@@ -155,23 +247,76 @@ impl ClaudePendingTracker {
         true
     }
 
-    /// Notes one question request group; re-noting the same id is a no-op.
+    /// Notes one question request; re-noting the same request id is a
+    /// no-op. Returns the questions newly asked.
     ///
     /// Each question is validated through the domain constructor first, so
-    /// an out-of-bound provider frame never reaches the durable rows.
-    pub(crate) fn note_questions(&mut self, request: &ClaudeQuestionRequest) -> usize {
-        let mut added = 0;
-        for question in request.questions() {
-            if question.to_domain_input().is_err() {
-                continue;
-            }
-            if !self.questions.contains_key(question.question_id()) {
-                self.questions
-                    .insert(question.question_id().to_owned(), question.clone());
-                added += 1;
-            }
+    /// an out-of-bound provider frame never reaches the durable rows; a
+    /// request whose questions all fail validation is not tracked, since
+    /// nothing could ever answer it.
+    pub(crate) fn note_questions(
+        &mut self,
+        request: &ClaudeQuestionRequest,
+    ) -> Vec<ClaudeQuestion> {
+        if self.question_requests.contains_key(request.request_id()) {
+            return Vec::new();
         }
-        added
+        let asked: Vec<ClaudeQuestion> = request
+            .questions()
+            .iter()
+            .filter(|question| question.to_domain_input().is_ok())
+            .cloned()
+            .collect();
+        if asked.is_empty() {
+            return Vec::new();
+        }
+        self.question_requests.insert(
+            request.request_id().to_owned(),
+            PendingQuestionRequest {
+                request_id: request.request_id().to_owned(),
+                input: request.input.clone(),
+                questions: asked.clone(),
+                answers: HashMap::new(),
+            },
+        );
+        asked
+    }
+
+    /// Records the durable answer to one question of an open request.
+    ///
+    /// Returns the control response line once every question of the
+    /// request has an answer, and [`None`] while others are still open; the
+    /// request then leaves the tracker. Unknown or already answered
+    /// questions are refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClaudeTurnError::Configuration`] when no open request holds
+    /// the question.
+    pub(crate) fn record_question_answer(
+        &mut self,
+        question_id: &str,
+        answers: &[String],
+    ) -> Result<Option<String>, ClaudeTurnError> {
+        let Some((request_id, pending)) = self
+            .question_requests
+            .iter_mut()
+            .find(|(_, pending)| pending.is_open(question_id))
+        else {
+            return Err(ClaudeTurnError::Configuration);
+        };
+        pending
+            .answers
+            .insert(question_id.to_owned(), answers.to_vec());
+        if pending.answers.len() < pending.questions.len() {
+            return Ok(None);
+        }
+        let request_id = request_id.clone();
+        let pending = self
+            .question_requests
+            .remove(&request_id)
+            .ok_or(ClaudeTurnError::Configuration)?;
+        Ok(Some(pending.reply_line()))
     }
 
     /// Notes one subagent lifecycle identity and emits its `Discovered` row.
@@ -266,25 +411,27 @@ impl ClaudePendingTracker {
         self.result_seen
     }
 
+    /// Notes root turn activity: the session is inside a turn again.
+    pub(crate) fn note_turn_opened(&mut self) {
+        self.root_turn = RootTurn::Open;
+    }
+
+    /// Returns whether the session has nothing left to say (pump-only): its
+    /// last root turn reported a `result`, none opened since, and no
+    /// background agent or workflow still runs. Only then may stdin close;
+    /// until then a follow-up message can still be written.
+    pub(crate) fn input_settled(&self) -> bool {
+        self.root_turn == RootTurn::Reported && self.background_tasks == 0
+    }
+
     /// Returns whether a semantic failure was classified (pump-only).
     pub(crate) fn semantic_failure(&self) -> bool {
         self.semantic_failure
     }
 
     /// Resolves one approval; returns whether it was pending.
-    ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
     pub(crate) fn resolve_approval(&mut self, approval_id: &str) -> bool {
         self.approvals.remove(approval_id).is_some()
-    }
-
-    /// Resolves one question; returns whether it was pending.
-    ///
-    /// Test-only until dispatcher delivery wiring lands.
-    #[cfg(test)]
-    pub(crate) fn resolve_question(&mut self, question_id: &str) -> bool {
-        self.questions.remove(question_id).is_some()
     }
 
     /// Returns the number of pending approvals.
@@ -293,10 +440,20 @@ impl ClaudePendingTracker {
         self.approvals.len()
     }
 
-    /// Returns the number of pending questions.
+    /// Returns the number of questions still waiting for an answer.
     #[cfg(test)]
     pub(crate) fn pending_questions(&self) -> usize {
-        self.questions.len()
+        self.question_requests
+            .values()
+            .map(|pending| pending.questions.len() - pending.answers.len())
+            .sum()
+    }
+
+    /// Returns whether the provider is waiting on the user: an open
+    /// approval or question keeps the turn alive however long the user
+    /// takes.
+    pub(crate) fn waiting_on_user(&self) -> bool {
+        !self.approvals.is_empty() || !self.question_requests.is_empty()
     }
 
     /// Returns the number of discovered subagent lifecycle identities.
@@ -317,6 +474,11 @@ impl ClaudePendingTracker {
         self.thinking_tokens
     }
 
+    /// Returns whether a requested highlights display was silently omitted.
+    pub(crate) fn highlights_refused(&self) -> bool {
+        self.thinking.highlights_refused()
+    }
+
     /// Returns whether the init gate accepted the spawned session.
     #[cfg(test)]
     pub(crate) fn init_seen(&self) -> bool {
@@ -330,10 +492,21 @@ impl ClaudePendingTracker {
     }
 }
 
+/// Where the root session stands relative to its `result` frames.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RootTurn {
+    /// A root turn is running, or none has reported yet.
+    #[default]
+    Open,
+    /// The last root turn reported its `result` and none has opened since.
+    Reported,
+}
+
 /// How one applied event continues the pump.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClaudeApplyOutcome {
-    /// Keep pumping; `end_input` closes stdin exactly once (result seen).
+    /// Keep pumping; `end_input` closes stdin exactly once: a `result`
+    /// arrived with no background agent or workflow still running.
     Continue { end_input: bool },
     /// Settle the turn now with this terminal state.
     Terminal(TerminalState),
@@ -501,11 +674,14 @@ async fn apply_assistant_frame(
                 )
                 .await?;
             }
-            ClaudeAssistantContent::Thinking { text } => {
-                let rows =
-                    tracker
-                        .thinking
-                        .buffered(run_id, frame_sequence, message_id.as_deref(), text);
+            ClaudeAssistantContent::Thinking { text, title } => {
+                let rows = tracker.thinking.buffered(
+                    run_id,
+                    frame_sequence,
+                    message_id.as_deref(),
+                    text,
+                    title.clone(),
+                );
                 emit_rows(observations, rows).await?;
             }
             ClaudeAssistantContent::ToolUse(tool) => {
@@ -567,12 +743,14 @@ pub(crate) async fn apply_event(
             continued
         }
         ClaudeEvent::MessageStart { message_id } => {
+            tracker.note_turn_opened();
             tracker.text.message_started(&message_id);
             tracker.stream_message_id = Some(message_id);
             tracker.thinking.message_started();
             continued
         }
         ClaudeEvent::TextDelta { delta, phase } => {
+            tracker.note_turn_opened();
             if active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
             }
@@ -586,6 +764,7 @@ pub(crate) async fn apply_event(
             settle(emit_text(observations, run_id, part_id, frame_sequence, &delta, phase).await)
         }
         ClaudeEvent::Assistant(frame) => {
+            tracker.note_turn_opened();
             if frame.text().is_some() && active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
             }
@@ -598,10 +777,16 @@ pub(crate) async fn apply_event(
             tracker.note_thinking_tokens(estimated_tokens);
             continued
         }
-        ClaudeEvent::ThinkingStarted { index } => {
+        ClaudeEvent::ThinkingStarted { index, title } => {
             let message_id = tracker.stream_message_id.clone();
-            tracker.thinking.start(message_id.as_deref(), index);
-            continued
+            tracker.thinking.start(message_id.as_deref(), index, title);
+            settle(
+                emit_rows(
+                    observations,
+                    tracker.thinking.started(run_id, frame_sequence),
+                )
+                .await,
+            )
         }
         ClaudeEvent::ThinkingDelta { index, text } => {
             let rows = tracker.thinking.delta(run_id, frame_sequence, index, &text);
@@ -626,13 +811,28 @@ pub(crate) async fn apply_event(
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::QuestionRequested(request) => {
-            tracker.note_questions(&request);
-            ClaudeApplyOutcome::Continue { end_input: false }
+            // The request stays open in the tracker until the user answers
+            // every question; the questions present as one questionnaire.
+            let asked = tracker.note_questions(&request);
+            settle(
+                emit_rows(
+                    observations,
+                    question_rows(run_id, frame_sequence, request.request_id(), &asked),
+                )
+                .await,
+            )
         }
         ClaudeEvent::SubagentLifecycle { task_id } => {
             // Discovery emits its row; the root turn is never adopted and no
             // root text is emitted.
             tracker.note_subagent(run_id, expected_session, &task_id, frame_sequence);
+            ClaudeApplyOutcome::Continue { end_input: false }
+        }
+        ClaudeEvent::BackgroundTasks { waited } => {
+            // A level, not an edge: each payload replaces the count. Closing
+            // stdin stays with the `result` arm and the pump's settle grace,
+            // since the last task ending queues a follow-up turn.
+            tracker.background_tasks = waited;
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::ChildTranscript {
@@ -662,6 +862,7 @@ pub(crate) async fn apply_event(
                 return ClaudeApplyOutcome::Terminal(TerminalState::Failed);
             }
             tracker.result_seen = true;
+            tracker.root_turn = RootTurn::Reported;
             if !success {
                 tracker.semantic_failure = true;
             }
@@ -672,19 +873,25 @@ pub(crate) async fn apply_event(
             {
                 return ClaudeApplyOutcome::Terminal(state);
             }
-            ClaudeApplyOutcome::Continue { end_input: true }
+            // Background agents and workflows report back into this session:
+            // stdin stays open for them, and for steers, until they finish.
+            ClaudeApplyOutcome::Continue {
+                end_input: tracker.background_tasks == 0,
+            }
         }
         ClaudeEvent::Unknown => ClaudeApplyOutcome::Continue { end_input: false },
     }
 }
 
-/// Steers a live turn with follow-up text (stream-input fold).
+/// Steers a live turn with a follow-up message (stream-input fold).
 ///
-/// Production verb behind [`AcceptedTurn::steer_text`](super::operation::AcceptedTurn::steer_text):
+/// Production verb behind [`AcceptedTurn::steer_message`](super::operation::AcceptedTurn::steer_message):
 /// the pump writes the fold line over its owned stdin and the write outcome
 /// resolves the delivery. Proves the fold verb against the fixture stdio
 /// script without disturbing the authorize-once production flow.
-/// Experimental per the adapter: the CLI owns fold timing.
+/// Experimental per the adapter: the CLI owns fold timing. Images ride as
+/// native base64 content blocks after the text, exactly like a fresh send;
+/// an image-only steer carries no empty text block.
 ///
 /// # Errors
 ///
@@ -693,20 +900,20 @@ pub(crate) async fn steer_live_turn<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     session_id: &str,
     text: &str,
+    images: &[artisan_domain::ImageAttachment],
 ) -> Result<(), ClaudeTurnError> {
-    write_line(stdin, &user_message_line(session_id, text)).await
+    let line = user_message_with_images(session_id, (!text.is_empty()).then_some(text), images);
+    write_line(stdin, &line).await
 }
 
 /// Answers one pending approval through the durable decision.
 ///
-/// Test-only until dispatcher delivery wiring lands: deny carries no turn
-/// side effect and the run continues either way.
+/// Deny carries no turn side effect and the run continues either way.
 ///
 /// # Errors
 ///
 /// Returns [`ClaudeTurnError::Configuration`] for an unknown or resolved
 /// target and [`ClaudeTurnError::StreamFailed`] when the write fails.
-#[cfg(test)]
 pub(crate) async fn answer_approval<W: AsyncWrite + Unpin>(
     stdin: &mut W,
     tracker: &mut ClaudePendingTracker,
@@ -718,42 +925,6 @@ pub(crate) async fn answer_approval<W: AsyncWrite + Unpin>(
         return Err(ClaudeTurnError::Configuration);
     }
     write_line(stdin, &approval_response_line(request_id, approved)).await
-}
-
-/// Answers one question request group through the durable answers.
-///
-/// Test-only until dispatcher delivery wiring lands. Answers accumulate per
-/// question text; the response amends the verbatim request input.
-///
-/// # Errors
-///
-/// Returns [`ClaudeTurnError::Configuration`] for an unknown or resolved
-/// target and [`ClaudeTurnError::StreamFailed`] when the write fails.
-#[cfg(test)]
-pub(crate) async fn answer_questions<W: AsyncWrite + Unpin>(
-    stdin: &mut W,
-    tracker: &mut ClaudePendingTracker,
-    request: &ClaudeQuestionRequest,
-    answers: &[(String, Vec<String>)],
-) -> Result<(), ClaudeTurnError> {
-    for (question_id, _) in answers {
-        if !tracker.resolve_question(question_id) {
-            return Err(ClaudeTurnError::Configuration);
-        }
-    }
-    let mut joined = Vec::new();
-    for (question_id, options) in answers.iter().take(CLAUDE_MAX_ANSWERS) {
-        let Some(question) = request
-            .questions()
-            .iter()
-            .find(|known| known.question_id() == question_id)
-        else {
-            return Err(ClaudeTurnError::Configuration);
-        };
-        joined.push((question.text().to_owned(), options.join(", ")));
-    }
-    let line = question_response_line(request.request_id(), &request.input, &joined);
-    write_line(stdin, &line).await
 }
 
 /// Classifies a reaped child exit after close.

@@ -191,6 +191,9 @@ pub(crate) struct ConversationConnectionContext {
     registrar: ConversationSubscriptionRegistrar,
     identity: Arc<SubscriptionRegistrarIdentity>,
     notifier: ConversationCommitNotifier,
+    /// What each live run is thinking right now, when run dispatch shares
+    /// its board with request delivery.
+    live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     run_cancellation: Option<RunCancellationRegistry>,
     project_subtitles: Option<crate::project_subtitles::ProjectSubtitles>,
@@ -209,6 +212,14 @@ impl ConversationConnectionContext {
     /// The live run registered for `thread`, if any.
     pub(crate) fn live_run(&self, thread: &ThreadId) -> Option<artisan_domain::RunId> {
         self.run_cancellation.as_ref()?.active_run(thread).ok()?
+    }
+
+    /// What `thread`'s live run is thinking right now, if it is.
+    pub(crate) fn live_thinking(
+        &self,
+        thread: &ThreadId,
+    ) -> Option<artisan_domain::LiveThinkingBlock> {
+        self.live_thinking.as_ref()?.current(thread)
     }
 
     pub(crate) fn repository(&self) -> &Repository {
@@ -358,6 +369,7 @@ pub struct RequestHandler {
     subscriptions: Option<ConversationSubscriptionRegistrar>,
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
     conversation_commit_notifier: Option<ConversationCommitNotifier>,
+    live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
     directory_picker: Option<DirectoryPicker>,
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
     run_cancellation: Option<RunCancellationRegistry>,
@@ -493,6 +505,7 @@ impl RequestHandler {
             subscriptions: None,
             subscription_identity: None,
             conversation_commit_notifier: None,
+            live_thinking: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -521,6 +534,7 @@ impl RequestHandler {
             subscriptions: None,
             subscription_identity: None,
             conversation_commit_notifier: None,
+            live_thinking: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -550,6 +564,7 @@ impl RequestHandler {
             subscriptions: Some(registrar),
             subscription_identity: Some(subscription_identity),
             conversation_commit_notifier: None,
+            live_thinking: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -580,6 +595,17 @@ impl RequestHandler {
         notifier: ConversationCommitNotifier,
     ) -> Self {
         self.conversation_commit_notifier = Some(notifier);
+        self
+    }
+
+    /// Attaches the board run dispatch keeps each live run's current
+    /// thinking block on, so subscribers of a thinking thread receive it.
+    #[must_use]
+    pub fn with_live_thinking_board(
+        mut self,
+        board: crate::live_thinking::LiveThinkingBoard,
+    ) -> Self {
+        self.live_thinking = Some(board);
         self
     }
 
@@ -691,6 +717,7 @@ impl RequestHandler {
             registrar: ConversationSubscriptionRegistrar::new(),
             identity: Arc::new(0_u8),
             notifier: self.conversation_commit_notifier.clone()?,
+            live_thinking: self.live_thinking.clone(),
             account_usage: self.account_usage.clone(),
             run_cancellation: self.run_cancellation.clone(),
             project_subtitles: self.project_subtitles.clone(),
@@ -1047,6 +1074,9 @@ impl RequestHandler {
             Command::RespondQuestion(respond) => {
                 self.respond_question_outcome(request_id, respond).await
             }
+            Command::AnswerQuestions(answer) => {
+                self.answer_questions_outcome(request_id, answer).await
+            }
             Command::SetThreadEngineConfig(config) => {
                 let response = self
                     .set_thread_engine_config_outcome(request_id, config.as_ref())
@@ -1313,6 +1343,9 @@ impl RequestHandler {
 
 #[path = "request_handler/live_run.rs"]
 mod live_run;
+
+// Answers a thread's open questionnaires.
+mod questionnaire;
 
 #[path = "request_handler/composer_drafts.rs"]
 mod composer_drafts;

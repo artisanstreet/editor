@@ -56,6 +56,7 @@ pub mod editor_route_screen;
 mod editor_settings;
 pub mod editor_view_state_policy;
 pub mod editor_workspace_identity;
+mod dismissible_notice;
 pub mod engine_approve_ui;
 pub mod engine_observation_state;
 pub mod engine_section_indicator_policy;
@@ -95,7 +96,6 @@ pub mod native_application;
 pub mod native_command_menu;
 pub mod native_composer;
 pub mod native_composer_controls;
-mod native_composer_material;
 pub mod native_composer_visuals;
 pub mod native_context_usage;
 mod native_frame_rate;
@@ -151,6 +151,7 @@ pub mod tab_derivations;
 pub mod telemetry_bootstrap_policy;
 pub mod telemetry_preferences;
 pub mod terminal_presentation;
+pub mod thread_agents;
 pub mod thread_environment_presentation;
 pub mod thread_hover_rail_policy;
 pub mod thread_list_selection;
@@ -170,6 +171,7 @@ pub mod usage_reset_duration;
 pub mod usage_window_motion;
 pub mod vcs_diff_presentation;
 pub mod vcs_labels;
+mod view_boundary;
 pub mod workspace_header_presentation;
 pub mod workspace_tab_state;
 
@@ -178,6 +180,7 @@ pub mod workspace_tab_state;
 pub fn run() -> std::process::ExitCode {
     native_application::run()
 }
+mod native_image_preview;
 pub mod native_message_images;
 pub mod native_model_catalog;
 pub mod native_model_selector;

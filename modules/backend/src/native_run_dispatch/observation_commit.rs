@@ -3,8 +3,9 @@
 //! Rebuilds source-local provider rows onto dispatcher-assigned identities and
 //! run-local base-plus-one sequences, encodes them under the run bind, and
 //! commits them through the shared S1b checkpoint batch path with a
-//! content-neutral assistant projection. Any failure reports `false` so the
-//! caller marks the turn interrupted with uncertain progress.
+//! content-neutral assistant projection. Any failure reports the step that
+//! stopped the commit and its cause, and the caller marks the turn
+//! interrupted with uncertain progress.
 
 use artisan_database::{AssistantChange, Repository, RunBatchScope};
 use artisan_domain::{
@@ -17,6 +18,7 @@ use artisan_domain::{
 
 use crate::{CommandOrigin, SystemCommandOrigin};
 
+use super::diagnostics::StepError;
 use super::{
     CommitBatchRequest, NativeRunDispatcherConfig, at_or_after, commit_batch_with_retry,
     mint_item_id, mint_patch_id,
@@ -42,9 +44,13 @@ pub(crate) struct SubagentCommitCursor<'a> {
 ///
 /// Reads the durable base fresh for this batch and assigns base-plus-one, so
 /// rows stay strictly increasing across batches regardless of owner stream
-/// numbering. Returns whether the batch committed; the dispatch arm maps
-/// failure onto run custody. Fixture coverage drives this same commit against
-/// a real repository.
+/// numbering. The dispatch arm maps failure onto run custody. Fixture
+/// coverage drives this same commit against a real repository.
+///
+/// # Errors
+///
+/// Returns the [`StepError`] naming the first step that failed, with the
+/// failure that stopped it as its source.
 #[expect(
     clippy::too_many_lines,
     reason = "linear sequence of fallible commit steps sharing one mutable state; extraction would thread every binding"
@@ -55,56 +61,48 @@ pub(crate) async fn commit_subagent_observation(
     origin: &SystemCommandOrigin,
     cursor: &mut SubagentCommitCursor<'_>,
     observation: Observation,
-) -> bool {
-    let Ok(base) = repository
+) -> Result<(), StepError> {
+    let base = repository
         .last_committed_observation_sequence(&cursor.scope.launched.run_id)
         .await
-    else {
-        return false;
-    };
+        .map_err(|error| {
+            StepError::failed("reading the last committed observation sequence", error)
+        })?;
     let sequence_value = match base {
         None => 1,
         Some(maximum) => maximum.saturating_add(1),
     };
-    let Ok(sequence) = ObservationSequence::new(sequence_value) else {
-        return false;
-    };
-    let Ok(identity) = origin.mint_identity() else {
-        return false;
-    };
-    let Ok(observation_id) = ObservationId::parse(identity) else {
-        return false;
-    };
-    let Some(resequenced) =
-        resequence_subagent_observation(&observation, &observation_id, sequence)
-    else {
-        return false;
-    };
-    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+    let sequence = ObservationSequence::new(sequence_value)
+        .map_err(|error| StepError::failed("assigning the next observation sequence", error))?;
+    let identity = origin
+        .mint_identity()
+        .map_err(|error| StepError::failed("minting the observation identity", error))?;
+    let observation_id = ObservationId::parse(identity)
+        .map_err(|error| StepError::failed("validating the minted observation identity", error))?;
+    let resequenced = resequence_subagent_observation(&observation, &observation_id, sequence)
+        .ok_or(StepError::refused(
+            "rebuilding the subagent row: the observation is not a subagent row or its fields no longer validate",
+        ))?;
+    let checkpoint = artisan_database::encode_observation_checkpoint(
         cursor.engine,
         cursor.scope.bound.binding_version,
         base,
         &[resequenced],
-    ) else {
-        return false;
-    };
-    if artisan_database::validate_observation_bind(
+    )
+    .map_err(|error| StepError::failed("encoding the observation checkpoint", error))?;
+    artisan_database::validate_observation_bind(
         cursor.scope.bound.binding_version,
         cursor.scope.bound,
     )
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(body) = AssistantBody::parse(cursor.assistant_body.clone()) else {
-        return false;
-    };
-    let Some(patch_id) = mint_patch_id(origin) else {
-        return false;
-    };
-    let Some(operated_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
-        return false;
-    };
+    .map_err(|error| StepError::failed("validating the run's observation binding", error))?;
+    let body = AssistantBody::parse(cursor.assistant_body.clone())
+        .map_err(|error| StepError::failed("validating the assembled assistant body", error))?;
+    let patch_id = mint_patch_id(origin).ok_or(StepError::refused(
+        "minting the item patch id: entropy or identifier validation failed",
+    ))?;
+    let operated_at = at_or_after(origin, cursor.scope.expected_updated_at).ok_or(
+        StepError::refused("reading the clock for the observation batch"),
+    )?;
     if let Some(item_id) = cursor.assistant_item.clone() {
         let changes = [AssistantChange::Replace {
             item_id: &item_id,
@@ -113,7 +111,7 @@ pub(crate) async fn commit_subagent_observation(
             phase: cursor.assistant_phase,
             patch_id: &patch_id,
         }];
-        if commit_batch_with_retry(CommitBatchRequest {
+        commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -125,28 +123,30 @@ pub(crate) async fn commit_subagent_observation(
             retries: config.max_command_retries,
         })
         .await
-        .is_err()
-        {
-            return false;
-        }
-        let Ok(next_revision) = cursor.assistant_revision.checked_next() else {
-            return false;
-        };
+        .map_err(|error| {
+            StepError::failed(
+                "committing the observation beside the existing assistant item",
+                error,
+            )
+        })?;
+        let next_revision = cursor.assistant_revision.checked_next().map_err(|error| {
+            StepError::failed("advancing the assistant revision after the commit", error)
+        })?;
         cursor.assistant_revision = next_revision;
     } else {
-        let Some(item_id) = mint_item_id(origin) else {
-            return false;
-        };
-        let Some(activation_patch_id) = mint_patch_id(origin) else {
-            return false;
-        };
+        let item_id = mint_item_id(origin).ok_or(StepError::refused(
+            "minting the assistant item id: entropy or identifier validation failed",
+        ))?;
+        let activation_patch_id = mint_patch_id(origin).ok_or(StepError::refused(
+            "minting the turn activation patch id: entropy or identifier validation failed",
+        ))?;
         let changes = [AssistantChange::Start {
             item_id: &item_id,
             phase: cursor.assistant_phase,
             body: &body,
             patch_id: &patch_id,
         }];
-        if commit_batch_with_retry(CommitBatchRequest {
+        commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -158,19 +158,24 @@ pub(crate) async fn commit_subagent_observation(
             retries: config.max_command_retries,
         })
         .await
-        .is_err()
-        {
-            return false;
-        }
+        .map_err(|error| {
+            StepError::failed(
+                "committing the observation while opening the assistant item",
+                error,
+            )
+        })?;
         cursor.assistant_item = Some(item_id);
         cursor.assistant_revision = Revision::new(0);
     }
-    let Some(next_sequence) = cursor.batch_sequence.checked_add(1) else {
-        return false;
-    };
+    let next_sequence = cursor
+        .batch_sequence
+        .checked_add(1)
+        .ok_or(StepError::refused(
+            "advancing the batch sequence after the commit: the counter overflowed",
+        ))?;
     cursor.batch_sequence = next_sequence;
     cursor.scope.expected_updated_at = operated_at;
-    true
+    Ok(())
 }
 
 /// Rebuilds one subagent row onto a dispatcher-assigned identity.
@@ -219,6 +224,11 @@ fn resequence_subagent_observation(
 /// existing fencing/notifier): only the resequence vocabulary differs. The
 /// thread-scoped `delivery_sequence` is assigned atomically by the database
 /// from the launch receipt plus `operated_at`; the dispatcher never stamps it.
+///
+/// # Errors
+///
+/// Returns the [`StepError`] naming the first step that failed, with the
+/// failure that stopped it as its source.
 #[expect(
     clippy::too_many_lines,
     reason = "mirrors commit_subagent_observation: same linear fallible sequence over shared mutable state"
@@ -229,16 +239,16 @@ pub(crate) async fn commit_activity_observation(
     origin: &SystemCommandOrigin,
     cursor: &mut SubagentCommitCursor<'_>,
     observation: Observation,
-) -> bool {
+) -> Result<(), StepError> {
     // Register the decision target before publishing the approval card. The
     // response route must be able to find it as soon as the UI can answer.
     if let Observation::Approval(row) = &observation
         && row.approved().is_none()
     {
-        let Some(requested_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
-            return false;
-        };
-        if repository
+        let requested_at = at_or_after(origin, cursor.scope.expected_updated_at).ok_or(
+            StepError::refused("reading the clock to register an approval request"),
+        )?;
+        repository
             .record_approval_request(artisan_database::RecordApprovalRequest {
                 thread_id: &cursor.scope.launched.thread_id,
                 run_id: &cursor.scope.launched.run_id,
@@ -249,60 +259,69 @@ pub(crate) async fn commit_activity_observation(
                 binding_version: cursor.scope.bound.binding_version,
             })
             .await
-            .is_err()
-        {
-            return false;
-        }
+            .map_err(|error| StepError::failed("registering the approval request", error))?;
     }
-    let Ok(base) = repository
+    // Questions register the same way, so an answer given while this run is
+    // still live resolves through the run that owns its sequence.
+    if let Observation::Question(row) = &observation
+        && row.answers().is_none()
+    {
+        let requested_at = at_or_after(origin, cursor.scope.expected_updated_at).ok_or(
+            StepError::refused("reading the clock to register a question request"),
+        )?;
+        repository
+            .record_question_request(artisan_database::RecordQuestionRequest {
+                thread_id: &cursor.scope.launched.thread_id,
+                run_id: &cursor.scope.launched.run_id,
+                question_id: row.question_id(),
+                input: &row.input(),
+                requested_at,
+                binding_version: cursor.scope.bound.binding_version,
+            })
+            .await
+            .map_err(|error| StepError::failed("registering the question request", error))?;
+    }
+    let base = repository
         .last_committed_observation_sequence(&cursor.scope.launched.run_id)
         .await
-    else {
-        return false;
-    };
+        .map_err(|error| {
+            StepError::failed("reading the last committed observation sequence", error)
+        })?;
     let sequence_value = match base {
         None => 1,
         Some(maximum) => maximum.saturating_add(1),
     };
-    let Ok(sequence) = ObservationSequence::new(sequence_value) else {
-        return false;
-    };
-    let Ok(identity) = origin.mint_identity() else {
-        return false;
-    };
-    let Ok(observation_id) = ObservationId::parse(identity) else {
-        return false;
-    };
-    let Some(resequenced) =
-        resequence_activity_observation(&observation, &observation_id, sequence)
-    else {
-        return false;
-    };
-    let Ok(checkpoint) = artisan_database::encode_observation_checkpoint(
+    let sequence = ObservationSequence::new(sequence_value)
+        .map_err(|error| StepError::failed("assigning the next observation sequence", error))?;
+    let identity = origin
+        .mint_identity()
+        .map_err(|error| StepError::failed("minting the observation identity", error))?;
+    let observation_id = ObservationId::parse(identity)
+        .map_err(|error| StepError::failed("validating the minted observation identity", error))?;
+    let resequenced = resequence_activity_observation(&observation, &observation_id, sequence)
+        .ok_or(StepError::refused(
+            "rebuilding the activity row: the observation is not an activity row or its fields no longer validate",
+        ))?;
+    let checkpoint = artisan_database::encode_observation_checkpoint(
         cursor.engine,
         cursor.scope.bound.binding_version,
         base,
         &[resequenced],
-    ) else {
-        return false;
-    };
-    if artisan_database::validate_observation_bind(
+    )
+    .map_err(|error| StepError::failed("encoding the observation checkpoint", error))?;
+    artisan_database::validate_observation_bind(
         cursor.scope.bound.binding_version,
         cursor.scope.bound,
     )
-    .is_err()
-    {
-        return false;
-    }
-    let Ok(body) = AssistantBody::parse(cursor.assistant_body.clone()) else {
-        return false;
-    };
-    let Some(patch_id) = mint_patch_id(origin) else {
-        return false;
-    };
-    let Some(operated_at) = at_or_after(origin, cursor.scope.expected_updated_at) else {
-        return false;
-    };
+    .map_err(|error| StepError::failed("validating the run's observation binding", error))?;
+    let body = AssistantBody::parse(cursor.assistant_body.clone())
+        .map_err(|error| StepError::failed("validating the assembled assistant body", error))?;
+    let patch_id = mint_patch_id(origin).ok_or(StepError::refused(
+        "minting the item patch id: entropy or identifier validation failed",
+    ))?;
+    let operated_at = at_or_after(origin, cursor.scope.expected_updated_at).ok_or(
+        StepError::refused("reading the clock for the observation batch"),
+    )?;
     if let Some(item_id) = cursor.assistant_item.clone() {
         let changes = [AssistantChange::Replace {
             item_id: &item_id,
@@ -311,7 +330,7 @@ pub(crate) async fn commit_activity_observation(
             phase: cursor.assistant_phase,
             patch_id: &patch_id,
         }];
-        if commit_batch_with_retry(CommitBatchRequest {
+        commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -323,28 +342,30 @@ pub(crate) async fn commit_activity_observation(
             retries: config.max_command_retries,
         })
         .await
-        .is_err()
-        {
-            return false;
-        }
-        let Ok(next_revision) = cursor.assistant_revision.checked_next() else {
-            return false;
-        };
+        .map_err(|error| {
+            StepError::failed(
+                "committing the observation beside the existing assistant item",
+                error,
+            )
+        })?;
+        let next_revision = cursor.assistant_revision.checked_next().map_err(|error| {
+            StepError::failed("advancing the assistant revision after the commit", error)
+        })?;
         cursor.assistant_revision = next_revision;
     } else {
-        let Some(item_id) = mint_item_id(origin) else {
-            return false;
-        };
-        let Some(activation_patch_id) = mint_patch_id(origin) else {
-            return false;
-        };
+        let item_id = mint_item_id(origin).ok_or(StepError::refused(
+            "minting the assistant item id: entropy or identifier validation failed",
+        ))?;
+        let activation_patch_id = mint_patch_id(origin).ok_or(StepError::refused(
+            "minting the turn activation patch id: entropy or identifier validation failed",
+        ))?;
         let changes = [AssistantChange::Start {
             item_id: &item_id,
             phase: cursor.assistant_phase,
             body: &body,
             patch_id: &patch_id,
         }];
-        if commit_batch_with_retry(CommitBatchRequest {
+        commit_batch_with_retry(CommitBatchRequest {
             repository,
             notifier: &config.notifier,
             scope: &cursor.scope,
@@ -356,19 +377,24 @@ pub(crate) async fn commit_activity_observation(
             retries: config.max_command_retries,
         })
         .await
-        .is_err()
-        {
-            return false;
-        }
+        .map_err(|error| {
+            StepError::failed(
+                "committing the observation while opening the assistant item",
+                error,
+            )
+        })?;
         cursor.assistant_item = Some(item_id);
         cursor.assistant_revision = Revision::new(0);
     }
-    let Some(next_sequence) = cursor.batch_sequence.checked_add(1) else {
-        return false;
-    };
+    let next_sequence = cursor
+        .batch_sequence
+        .checked_add(1)
+        .ok_or(StepError::refused(
+            "advancing the batch sequence after the commit: the counter overflowed",
+        ))?;
     cursor.batch_sequence = next_sequence;
     cursor.scope.expected_updated_at = operated_at;
-    true
+    Ok(())
 }
 
 /// Rebuilds one rich activity row onto a dispatcher-assigned identity.
@@ -405,6 +431,28 @@ fn resequence_activity_observation(
                 ),
             };
             rebuilt.ok().map(Observation::Approval)
+        }
+        Observation::Question(row) => {
+            let rebuilt = match row.answers() {
+                None => artisan_domain::QuestionObservation::requested(
+                    observation_id.clone(),
+                    sequence,
+                    row.input(),
+                ),
+                Some(answers) => artisan_domain::QuestionObservation::resolved(
+                    observation_id.clone(),
+                    sequence,
+                    row.input(),
+                    answers.clone(),
+                ),
+            };
+            rebuilt
+                .ok()
+                .map(|rebuilt| match row.explicit_group_id() {
+                    Some(group) => rebuilt.with_group(group.clone()),
+                    None => rebuilt,
+                })
+                .map(Observation::Question)
         }
         Observation::ReasoningSummaryDelta(row) => ReasoningSummaryDeltaObservation::new(
             observation_id.clone(),

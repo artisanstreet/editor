@@ -17,6 +17,7 @@ import argparse
 import json
 import re
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -27,7 +28,7 @@ ARGV = ['claude', '-p', '--output-format', 'stream-json', '--input-format', 'str
 UUID = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
 PATHISH = re.compile(r'(wsl\.localhost|\\\\|[A-Za-z]:\\|/home/|/tmp/|/mnt/|pipe\\)')
 INVENTORY = {'tools', 'mcp_servers', 'slash_commands', 'terminal_slash_commands', 'agents',
-             'skills', 'plugins', 'capabilities'}
+             'skills', 'plugins', 'capabilities', 'commands'}
 PLACEHOLDERS = [('msg_', 'msg', 'msg_fixture_{:02d}'), ('toolu_', 'tool', 'toolu_fixture_{:02d}'),
                 ('req_', 'req', 'req_fixture_{:02d}')]
 
@@ -40,12 +41,17 @@ def capture(args):
     argv = [*ARGV, '--effort', args.effort]
     if args.display:
         argv += ['--thinking-display', args.display]
+    if args.debug:
+        argv += ['--debug']
     argv += ['--resume' if args.resume else '--session-id', session, '--model', args.model]
     line = json.dumps({'message': {'content': [{'type': 'text', 'text': args.prompt}], 'role': 'user'},
                        'parent_tool_use_id': None, 'session_id': session, 'type': 'user'})
     started = time.time()
     child = subprocess.Popen(argv, cwd=project, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
+    errors = []
+    drain = threading.Thread(target=lambda: errors.append(child.stderr.read()), daemon=True)
+    drain.start()
     child.stdin.write(line + '\n')
     child.stdin.flush()
     frames = []
@@ -57,7 +63,12 @@ def capture(args):
                 break
     child.stdin.close()
     child.wait(timeout=60)
+    drain.join(timeout=5)
     Path(args.out).write_text(''.join(json.dumps(record) + '\n' for record in frames))
+    Path(args.out + '.diag.json').write_text(json.dumps({
+        'exit': child.returncode,
+        'stderr': ''.join(errors),
+    }, indent=2))
     print(json.dumps({'out': args.out, 'session': session, 'frames': len(frames), 'exit': child.returncode}))
 
 
@@ -126,6 +137,7 @@ if __name__ == '__main__':
     run.add_argument('--session', help='existing session id (required with --resume)')
     run.add_argument('--resume', action='store_true')
     run.add_argument('--display', default='summarized', help="thinking display; '' omits the flag")
+    run.add_argument('--debug', action='store_true', help='append --debug; stderr lands in <out>.diag.json')
     run.add_argument('--model', default='claude-sonnet-5')
     run.add_argument('--effort', default='high')
     run.set_defaults(handler=capture)

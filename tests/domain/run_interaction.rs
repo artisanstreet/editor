@@ -187,3 +187,63 @@ fn interaction_kinds_and_outcomes_roundtrip_their_stable_spellings() {
     assert_eq!(InteractionOutcome::WrongRun.as_str(), "wrong_run");
     assert!(InteractionOutcome::parse("duplicate").is_err());
 }
+
+fn answer(question: &str, answers: &[&str]) -> artisan_domain::QuestionAnswer {
+    artisan_domain::QuestionAnswer {
+        question_id: ObservationId::parse(question).expect("fixture question id is valid"),
+        answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
+    }
+}
+
+fn answer_questions(
+    answers: Vec<artisan_domain::QuestionAnswer>,
+) -> Result<artisan_domain::AnswerQuestions, RunInteractionError> {
+    artisan_domain::AnswerQuestions::new(
+        request_id("request-answer"),
+        thread_id(),
+        ObservationId::parse("questionnaire-1").expect("fixture group id is valid"),
+        answers,
+    )
+}
+
+#[test]
+fn a_questionnaire_answer_names_each_question_once_within_bounds() {
+    let answered = answer_questions(vec![answer("q1", &["Postgres"]), answer("q2", &[])])
+        .expect("a questionnaire answer with one skipped question is valid");
+    assert_eq!(answered.answers().len(), 2);
+
+    assert_eq!(
+        answer_questions(Vec::new()),
+        Err(RunInteractionError::NoQuestions)
+    );
+    assert_eq!(
+        answer_questions(vec![answer("q1", &["a"]), answer("q1", &["b"])]),
+        Err(RunInteractionError::DuplicateQuestion { index: 1 })
+    );
+    let too_many = (0..=artisan_domain::QUESTIONNAIRE_MAX_QUESTIONS)
+        .map(|index| answer(&format!("q{index}"), &[]))
+        .collect();
+    assert_eq!(
+        answer_questions(too_many),
+        Err(RunInteractionError::TooManyQuestions {
+            count: artisan_domain::QUESTIONNAIRE_MAX_QUESTIONS + 1,
+            maximum: artisan_domain::QUESTIONNAIRE_MAX_QUESTIONS,
+        })
+    );
+    assert_eq!(
+        answer_questions(vec![answer("q1", &[""])]),
+        Err(RunInteractionError::EmptyAnswer { index: 0 })
+    );
+}
+
+#[test]
+fn skipping_every_question_is_a_valid_dismissal() {
+    let dismissed = answer_questions(vec![answer("q1", &[]), answer("q2", &[])])
+        .expect("an all-skipped questionnaire answer is valid");
+    assert!(
+        dismissed
+            .answers()
+            .iter()
+            .all(|answer| answer.answers.is_empty())
+    );
+}

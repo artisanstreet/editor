@@ -154,7 +154,7 @@ fn settings_model_choice_saves_acknowledges_and_reloads(cx: &mut TestAppContext)
                 .authoritative_config()
                 .cloned()
                 .expect("saved configuration");
-            application.composer_model_choice = None;
+            application.composer_model_choices.clear();
             application.engine_settings.select_thread(None);
             application.engine_settings.select_thread(Some(&thread_id));
             application.submit_settings_load(thread_id.clone());

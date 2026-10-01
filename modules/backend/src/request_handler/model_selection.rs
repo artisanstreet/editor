@@ -408,7 +408,10 @@ impl RequestHandler {
 
     /// The thread's live run with its status and engine, when one is
     /// registered and its lifecycle is live.
-    async fn live_run(&self, thread: &ThreadId) -> Option<(RunId, RunLiveStatus, EngineId)> {
+    pub(super) async fn live_run(
+        &self,
+        thread: &ThreadId,
+    ) -> Option<(RunId, RunLiveStatus, EngineId)> {
         let run_id = self.run_cancellation.as_ref()?.active_run(thread).ok()??;
         let (lifecycle, engine) = self
             .repository
@@ -416,6 +419,16 @@ impl RequestHandler {
             .await
             .ok()??;
         let status = super::queries::run_live_status(&lifecycle)?;
+        // A follow-up submitted after Stop belongs to the next run. Do not
+        // steer it into the process that is still draining cancellation.
+        if self
+            .run_cancellation
+            .as_ref()?
+            .cancellation_requested(thread, &run_id)
+            .ok()?
+        {
+            return None;
+        }
         Some((run_id, status, engine))
     }
 }

@@ -599,10 +599,9 @@ impl ProseTypography {
     pub const CODE_LINE_PX: f32 = 24.0;
     /// Fence body padding: 16 px (`docs-code-snippet-body` `p-4`).
     pub const CODE_PAD_PX: f32 = 16.0;
-    /// Fence corner radius: the reference `rounded-3xl`, which resolves
-    /// through the workspace ramp (`theme.css:392–399`: base 10 px × 2.2)
-    /// to 22 px — not the Tailwind default 24 px. Renderers use the shared
-    /// [`RadiusStep::X3l`] token (`RadiusTokens::value`), never a literal.
+    /// Fence corner radius: the composer card's 18 px, which is the
+    /// workspace ramp's `2xl` step. Renderers use the shared
+    /// [`RadiusStep::X2l`] token (`RadiusTokens::value`), never a literal.
     /// (No `CODE_RADIUS_PX` constant exists on purpose.)
     /// Paragraph margins: 20 px top and bottom (plugin `p`).
     pub const PARAGRAPH_MARGIN_PX: f32 = 20.0;
@@ -618,6 +617,15 @@ impl ProseTypography {
     pub const ITEM_PARAGRAPH_MARGIN_PX: f32 = 12.0;
     /// Nested list margins: 12 px (`ul ul` and siblings).
     pub const NESTED_LIST_MARGIN_PX: f32 = 12.0;
+    /// Table text size: 14 px (plugin `table` 0.875 em at 16 px).
+    pub const TABLE_SIZE_PX: f32 = 14.0;
+    /// Table line height: 24 px (plugin `table` 24/14).
+    pub const TABLE_LINE_PX: f32 = 24.0;
+    /// Table margins: 28 px top and bottom (plugin `table` 2 em at 14 px).
+    pub const TABLE_MARGIN_PX: f32 = 28.0;
+    /// Table cell padding: 8 px (plugin `th`/`td` 0.571 em at 14 px). The
+    /// outer edges of the first and last column take none.
+    pub const TABLE_CELL_PAD_PX: f32 = 8.0;
 
     /// Reference metrics for one heading level (1–6; anything else reads
     /// as 6).

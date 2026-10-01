@@ -274,12 +274,17 @@ fn opencode2_selection_config(
 }
 
 /// Product transport budgets; these never claim a model context size or provider limit.
+///
+/// The attempt budget is the whole run's deadline. An agent turn legitimately
+/// runs for hours (builds, test suites, long tool chains), so it takes the
+/// domain's full day; liveness is the stream budget, which settles a turn
+/// whose provider has been silent for an hour.
 fn default_runtime() -> Result<EngineRuntimeControls, &'static str> {
     let duration = |value| FiniteMillis::new(value).map_err(|_| "Invalid runtime budget");
     let bytes = |value| ByteLimit::new(value).map_err(|_| "Invalid runtime capacity");
     let count = |value| CountLimit::new(value).map_err(|_| "Invalid runtime capacity");
     EngineRuntimeControls::new(EngineRuntimeControlsInput {
-        attempt_budget: duration(3_660_000)?,
+        attempt_budget: duration(artisan_domain::ENGINE_RUNTIME_MAX_MILLIS)?,
         readiness_budget: duration(15_000)?,
         health_budget: duration(5_000)?,
         prompt_budget: duration(30_000)?,
