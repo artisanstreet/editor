@@ -199,6 +199,8 @@ impl NativeApplication {
     /// Reads the page of turns before the oldest loaded one, when the reader
     /// is near the start of what is loaded and more can be held.
     pub(super) fn request_earlier_turns(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "request_earlier_turns");
         // A pending jump reads its own, larger page once the one in flight
         // has landed.
         if !self.history_paging.near_start
@@ -279,6 +281,8 @@ impl NativeApplication {
     }
 
     fn request_turn_work(&mut self, thread_id: ThreadId, turn_id: TurnId, after_sequence: u64) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "request_turn_work");
         let command = NativeTransportCommand::ReadConversationHistory {
             thread_id,
             part: ConversationHistoryPart::TurnWork {

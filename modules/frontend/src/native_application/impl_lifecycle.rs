@@ -313,6 +313,8 @@ impl NativeApplication {
     /// Navigates to `route`, retaining history, and rerenders. Readiness
     /// verdicts the engine pages show arrive pushed by the Forge.
     pub(super) fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::instant!("navigation", "route.changed", "route" => super::flight_recorder::route_name(&route));
         self.route_history.navigate(route);
         self.sync_composer_availability(cx);
         cx.notify();

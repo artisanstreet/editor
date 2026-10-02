@@ -78,6 +78,8 @@ fn connection_loss_releases_navigation_waits_and_ignores_old_receipts(cx: &mut T
             let source = ThreadId::parse("source-thread").unwrap();
             let receipt = RequestId::parse("lost-switch-receipt").unwrap();
             app.thread_switch_flight = Some(ThreadSwitchFlight {
+                #[cfg(feature = "flight-recorder")]
+                trace: artisan_tracing::span!("navigation", "test.thread_switch"),
                 source_thread: source.clone(),
                 target_thread: Some(ThreadId::parse("target-thread").unwrap()),
                 generation: 1,

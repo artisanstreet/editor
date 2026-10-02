@@ -1,0 +1,17 @@
+[package]
+name = "artisan-tracing"
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[features]
+default = []
+enabled = ["dep:serde_json", "dep:artisan-build-info"]
+
+[dependencies]
+artisan-build-info = { path = "../build_info", optional = true }
+serde_json = { workspace = true, optional = true }
+
+[lints]
+workspace = true

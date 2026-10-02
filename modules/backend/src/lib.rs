@@ -118,6 +118,10 @@ pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};
 /// handle attached to the signal and process futures.
 #[must_use]
 pub fn run() -> ExitCode {
+    #[cfg(feature = "flight-recorder")]
+    let _trace_session = artisan_tracing::start("forge");
+    #[cfg(feature = "flight-recorder")]
+    artisan_tracing::name_thread("forge.event_loop");
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

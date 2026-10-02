@@ -13,6 +13,7 @@ path = "src/main.rs"
 # Debug-stage facilities (the GPUI element inspector). Never part of a
 # Production build.
 debug-tools = ["gpui/inspector"]
+flight-recorder = ["artisan-tracing/enabled"]
 visual-proof = ["gpui/test-support", "gpui_platform/test-support"]
 
 [[example]]
@@ -21,6 +22,7 @@ path = "examples/parity_visual_proof.rs"
 required-features = ["visual-proof"]
 
 [dependencies]
+artisan-tracing = { path = "../tracing" }
 artisan-assets = { path = "../assets" }
 artisan-build-info = { path = "../build_info" }
 artisan-catalog = { path = "../catalog" }

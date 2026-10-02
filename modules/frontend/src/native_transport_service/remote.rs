@@ -136,6 +136,8 @@ pub(super) async fn start(home: &Path) -> Result<(ServiceRuntime, FrameFactory),
     .map_err(|error| credential_failure("storing the next reconnect capability", &error))?;
     Ok((
         ServiceRuntime {
+            #[cfg(feature = "flight-recorder")]
+            trace_command: 0,
             session: Some(session),
             reconnect_lease: Some(lease),
             reconnect_binding: binding,

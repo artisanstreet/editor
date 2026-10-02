@@ -55,6 +55,8 @@ pub(super) async fn begin_project_intake(
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
+    #[cfg(feature = "flight-recorder")]
+    let _trace = artisan_tracing::span!("project.intake", "begin_project_intake");
     runtime.intake.reset();
     pick_directory(runtime, frames, events, None).await
 }
@@ -64,6 +66,8 @@ pub(super) async fn retry_project_intake(
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
+    #[cfg(feature = "flight-recorder")]
+    let _trace = artisan_tracing::span!("project.intake", "retry_project_intake");
     let Some(retry) = runtime.intake.retry.take() else {
         return Ok(());
     };
@@ -119,6 +123,8 @@ pub(super) async fn begin_project_intake_at(
     events: &SyncSender<NativeTransportEvent>,
     path: String,
 ) -> Result<(), ServiceFailure> {
+    #[cfg(feature = "flight-recorder")]
+    let _trace = artisan_tracing::span!("project.intake", "begin_project_intake_at");
     runtime.intake.reset();
     pick_directory(runtime, frames, events, Some(path)).await
 }

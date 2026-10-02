@@ -785,6 +785,8 @@ impl RequestHandler {
         request_id: &RequestId,
         request: &ClientRequest,
     ) -> Result<ServerResponse, ProtocolFailure> {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "request.handle", "request_id" => request_id.as_str());
         match request {
             ClientRequest::Query(query) => self.query_outcome(request_id, query).await,
             ClientRequest::Command(command) => self.command_outcome(request_id, command).await,
@@ -865,6 +867,8 @@ impl RequestHandler {
         request: &ClientRequest,
     ) -> RequestHandlerResponse {
         context.observe_usage();
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "request.with_receipt", "request_id" => request_id.as_str());
         match request {
             ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
                 self.subscribe_with_receipt_in_context(context, request_id, subscribe)

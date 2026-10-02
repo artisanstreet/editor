@@ -82,12 +82,16 @@ impl NativeTransportService {
         let join = thread::Builder::new()
             .name("artisan-native-transport".to_owned())
             .spawn(move || {
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::name_thread("editor.transport");
                 let starting_sent = event_tx.send(NativeTransportEvent::Starting).is_ok();
                 if starting_sent {
                     if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
                     {
+                        #[cfg(feature = "flight-recorder")]
+                        super::flight_recorder::monitor(&runtime);
                         runtime.block_on(service_main(command_rx, event_tx, home));
                     } else {
                         let _ = event_tx.send(NativeTransportEvent::Failed(
@@ -138,7 +142,7 @@ impl NativeTransportService {
                     Some(kind) => Some(self.holds.try_hold(kind).ok_or(CommandSendError::Busy)?),
                     None => None,
                 };
-                try_send_command(&self.commands, QueuedCommand { command, hold })
+                try_send_command(&self.commands, QueuedCommand::new(command, hold))
             }
         }
     }
@@ -162,7 +166,7 @@ impl NativeTransportService {
             return Err(CommandSendError::Stopped);
         }
         let hold = command.hold_kind().map(|_| parent.extend());
-        try_send_command(&self.commands, QueuedCommand { command, hold })
+        try_send_command(&self.commands, QueuedCommand::new(command, hold))
     }
 
     /// Requests shutdown once, retaining nonblocking admission semantics.
@@ -239,11 +243,24 @@ pub fn try_send_command(
     sender: &tokio::sync::mpsc::Sender<QueuedCommand>,
     command: impl Into<QueuedCommand>,
 ) -> Result<(), CommandSendError> {
-    match sender.try_send(command.into()) {
+    let command = command.into();
+    #[cfg(feature = "flight-recorder")]
+    artisan_tracing::counter!("transport.queue", "command.depth", "queued" => sender.max_capacity() - sender.capacity());
+    #[cfg(feature = "flight-recorder")]
+    artisan_tracing::instant!("transport.queue", "command.admission", "command" => command.command.trace_name());
+    let result = match sender.try_send(command) {
         Ok(()) => Ok(()),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Err(CommandSendError::Busy),
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(CommandSendError::Stopped),
+    };
+    #[cfg(feature = "flight-recorder")]
+    if let Err(error) = &result {
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::instant!("transport.queue", "command.rejected", "reason" => format!("{error:?}"));
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::incident!("command.rejected");
     }
+    result
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,6 +300,8 @@ impl ServiceRuntime {
         .expect("reconnect binding");
         Self {
             preserve_reconnect: false,
+            #[cfg(feature = "flight-recorder")]
+            trace_command: 0,
             session: None,
             reconnect_lease: None,
             reconnect_binding: binding,
@@ -541,6 +560,8 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     eprintln!("artisan dev forge: connected ({})", readiness.endpoint());
     Ok((
         ServiceRuntime {
+            #[cfg(feature = "flight-recorder")]
+            trace_command: 0,
             preserve_reconnect: false,
             session: Some(session),
             reconnect_lease: Some(reconnect_lease),

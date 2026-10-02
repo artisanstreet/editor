@@ -7,7 +7,17 @@
 use super::workspace::{NativeWorkspace, QUIT_DRAIN_LIMIT, close_connection};
 use super::*;
 
+#[cfg(feature = "flight-recorder")]
+gpui::actions!(flight_recorder, [SaveRecentTrace]);
+
 pub(super) fn bind_native_actions(cx: &mut App) {
+    #[cfg(feature = "flight-recorder")]
+    {
+        cx.bind_keys([KeyBinding::new("ctrl-shift-f11", SaveRecentTrace, None)]);
+        cx.on_action(|_: &SaveRecentTrace, _| {
+            let _ = artisan_tracing::save();
+        });
+    }
     NativeComposer::bind_actions(cx);
     NativeCommandMenu::bind_actions(cx);
     cx.bind_keys([
@@ -81,6 +91,8 @@ pub fn run() -> ExitCode {
     if let Some(code) = crate::native_hosts::headless() {
         return code;
     }
+    #[cfg(feature = "flight-recorder")]
+    let _trace_session = artisan_tracing::start("editor");
     // One selection for the whole launch: the connection, the title, and the
     // window all name the same host (or none, until one is added).
     let home = crate::native_hosts::selected_home();
@@ -95,6 +107,8 @@ pub fn run() -> ExitCode {
     gpui_platform::application()
         .with_assets(artisan_ui::asset_seam::CatalogAssetSource)
         .run(move |cx: &mut App| {
+            #[cfg(feature = "flight-recorder")]
+            super::flight_recorder::start(cx);
             // Register the vendored legacy typefaces before any window opens;
             // on failure keep running on system faces (typed, not swallowed).
             if let Err(error) = artisan_ui::fonts::register_bundled_fonts(cx) {

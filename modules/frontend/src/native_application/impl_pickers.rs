@@ -7,6 +7,8 @@ use super::*;
 
 impl NativeApplication {
     pub(super) fn handle_projects(&mut self, listing: &ProjectListing, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "handle_projects");
         if self.thread_switch_flight.is_some() {
             return;
         }
@@ -61,6 +63,8 @@ impl NativeApplication {
         current: Option<ProjectId>,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "install_picker");
         let picker = cx
             .new(|picker_cx| ProjectPickerView::new(options, current, ThemeMode::Dark, picker_cx));
         let subscription = cx.observe(&picker, |application, picker, cx| {
@@ -78,6 +82,8 @@ impl NativeApplication {
         selected_thread: Option<ThreadId>,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "install_thread_picker");
         let picker = cx.new(|picker_cx| {
             NativeThreadPicker::new(listing, selected_thread, ThemeMode::Dark, picker_cx)
         });
@@ -174,6 +180,8 @@ impl NativeApplication {
         listing: &ThreadListing,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "handle_threads");
         if self.selected_project.as_ref() != Some(project_id) {
             return;
         }

@@ -27,7 +27,11 @@ let
   stages = {
     debug = {
       profile = "production-debug";
-      features = [ "artisan-frontend/debug-tools" ];
+      features = [
+        "artisan-frontend/debug-tools"
+        "artisan-frontend/flight-recorder"
+        "artisan-backend/flight-recorder"
+      ];
       # mold / lld instead of GNU ld (`fastLinker` per platform).
       fastLink = true;
       payload = {

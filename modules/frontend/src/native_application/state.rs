@@ -86,6 +86,8 @@ impl NativeMessageFailure {
 /// corresponding admission receipt. The service owns request-ID minting;
 /// this flight only records the receipt that advanced its current phase.
 pub(super) struct ThreadSwitchFlight {
+    #[cfg(feature = "flight-recorder")]
+    pub(super) trace: artisan_tracing::Span,
     pub(super) source_thread: ThreadId,
     pub(super) target_thread: Option<ThreadId>,
     pub(super) generation: u64,

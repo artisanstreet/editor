@@ -657,6 +657,8 @@ pub struct NativeTransportService {
 }
 
 struct ServiceRuntime {
+    #[cfg(feature = "flight-recorder")]
+    trace_command: u64,
     preserve_reconnect: bool,
     session: Option<ClientSession>,
     reconnect_lease: Option<ReconnectSessionLease>,
@@ -685,6 +687,9 @@ fn publish(
     events: &SyncSender<NativeTransportEvent>,
     event: NativeTransportEvent,
 ) -> Result<(), ServiceFailure> {
+    #[cfg(feature = "flight-recorder")]
+    let _trace =
+        artisan_tracing::span!("transport.bridge", "event.publish", "event" => event.trace_name());
     events.send(event).map_err(|_| ServiceFailure::bridge())
 }
 
@@ -832,3 +837,7 @@ mod command_loop_tests;
 #[cfg(test)]
 #[path = "native_transport_service/push_stall_tests.rs"]
 mod push_stall_tests;
+
+#[cfg(feature = "flight-recorder")]
+#[path = "native_transport_service/flight_recorder.rs"]
+mod flight_recorder;

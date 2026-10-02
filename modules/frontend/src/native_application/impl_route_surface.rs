@@ -18,6 +18,8 @@ impl NativeApplication {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "route_surface");
         match self.route().clone() {
             NativeRoute::Onboarding => {
                 if self.onboarding_screen.is_none() {

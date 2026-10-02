@@ -7,6 +7,8 @@ use super::*;
 
 impl NativeApplication {
     pub(super) fn poll_service(&mut self, cx: &mut Context<Self>) -> bool {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "service.poll");
         self.drain_answer_dispatches(cx);
         let Some(service) = self.service.clone() else {
             return false;
@@ -24,6 +26,8 @@ impl NativeApplication {
             }
         }
         self.observation_replay_deferred = true;
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::counter!("ui", "service.event_batch", "count" => events.len());
         for event in events {
             self.handle_service_event(event, cx);
         }
@@ -50,6 +54,8 @@ impl NativeApplication {
         self.try_mount_pending_thread(cx);
         self.sync_composer_availability(cx);
         self.sync_composer_questionnaires(cx);
+        #[cfg(feature = "flight-recorder")]
+        self.trace_state();
         !self.service_stopped
     }
 
@@ -65,6 +71,8 @@ impl NativeApplication {
         if self.shutdown_prepared || self.service_stopped {
             return;
         }
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "service.event", "event" => event.trace_name());
         match event {
             NativeTransportEvent::ComposerState(event) => {
                 self.handle_composer_state_event(event, cx);
@@ -728,6 +736,8 @@ impl NativeApplication {
     }
 
     pub(super) fn handle_patch_batch(&mut self, batch: &PatchBatch, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "handle_patch_batch");
         if self.thread_switch_flight.is_some() {
             self.remember_patch_ids(batch);
             return;
@@ -862,6 +872,8 @@ impl NativeApplication {
     /// projects until the thread's history is current, so the replayed
     /// history lands as one projection rather than one per page.
     pub(super) fn replay_observation_activity(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "replay_observation_activity");
         self.observation_replay_pending = false;
         if !self.selected_history_current() {
             return;
@@ -1101,6 +1113,8 @@ impl NativeApplication {
     }
 
     pub(super) fn begin_thread_switch(&mut self, target_thread: ThreadId, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::instant!("navigation", "thread_switch.requested", "thread_id" => target_thread.as_str());
         if self.shutdown_prepared
             || self.service_stopped
             || self.intake_stage.is_some()
@@ -1167,6 +1181,9 @@ impl NativeApplication {
         self.remember_active_subscription_request();
         self.pending_thread = None;
         self.thread_switch_flight = Some(ThreadSwitchFlight {
+            #[cfg(feature = "flight-recorder")]
+            trace: artisan_tracing::span!("navigation", "thread_switch", "generation" => generation,
+                "source_thread" => source_thread.as_str(), "target_thread" => target_thread.as_ref().map(ThreadId::as_str)),
             source_thread,
             target_thread,
             generation,
@@ -1404,6 +1421,8 @@ impl NativeApplication {
     }
 
     pub(super) fn retire_host_after_switch_stop(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "retire_host_after_switch_stop");
         self.retain_message_flight(cx);
         self.clear_message_presentation();
         self.pending_snapshot = None;
@@ -1581,6 +1600,8 @@ impl NativeApplication {
         thread_id: ThreadId,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "handle_intake_ready");
         if self.thread_switch_flight.is_some() {
             return;
         }

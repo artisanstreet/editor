@@ -7,6 +7,8 @@ use super::*;
 
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "application.render");
         self.sync_composer_controls(cx);
         self.sync_profile_actions();
         // The sidebar fills its shell slot and renders only when notified,
