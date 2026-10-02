@@ -393,6 +393,7 @@ mod tests {
         RecentThread {
             thread,
             subtitle: DisplayName::parse("owner/repo").unwrap(),
+            project_icon: Default::default(),
         }
     }
 

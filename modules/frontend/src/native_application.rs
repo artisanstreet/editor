@@ -222,6 +222,7 @@ mod app_entry;
 #[cfg(feature = "flight-recorder")]
 mod flight_recorder;
 mod frame_capture;
+mod project_icon;
 
 #[path = "native_application/impl_route_surface.rs"]
 mod impl_route_surface;

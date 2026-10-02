@@ -6,7 +6,7 @@
 //! project publishes to, or the project's name). The Editor only groups the
 //! rows by age for presentation.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use crate::model::{ThreadListingError, ThreadSummary};
 use crate::text::DisplayName;
@@ -14,6 +14,18 @@ use crate::time::UnixMillis;
 
 /// Maximum number of threads in one recent-threads listing.
 pub const RECENT_THREADS_MAX: usize = 100;
+
+/// Maximum size of one normalized project icon carried with a recent row.
+pub const RECENT_PROJECT_ICON_MAX_BYTES: usize = 16_384;
+
+/// Cached project identity artwork. An absent host denotes a disk-only project.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct RecentProjectIcon {
+    /// Repository hosting family, such as `github` or `gitlab`.
+    pub host: Option<DisplayName>,
+    /// A normalized 48-pixel PNG; empty means use the hosting logo.
+    pub png: Arc<[u8]>,
+}
 
 /// Reads the recent threads across every attached project. The connection
 /// that read them receives later changes pushed as
@@ -29,6 +41,8 @@ pub struct RecentThread {
     /// The resolved repository (`owner/repo`, with the branch of a linked
     /// worktree) or the project's display name.
     pub subtitle: DisplayName,
+    /// Project icon, resolved outside the listing and UI render paths.
+    pub project_icon: RecentProjectIcon,
 }
 
 impl RecentThread {

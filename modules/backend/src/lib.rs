@@ -42,6 +42,7 @@ pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
 pub mod process_custody;
 pub mod product_telemetry_capture_policy;
+mod project_icon_service;
 pub mod project_repository_service;
 pub mod project_subtitle_policy;
 pub mod project_subtitles;

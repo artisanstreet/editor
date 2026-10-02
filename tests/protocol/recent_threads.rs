@@ -38,6 +38,7 @@ fn row(thread: &str, project: &str, subtitle: &str, last_message: Option<i64>) -
             updated_at: UnixMillis::from_millis(20),
         },
         subtitle: DisplayName::parse(subtitle).expect("subtitle"),
+        project_icon: Default::default(),
     }
 }
 
@@ -82,6 +83,22 @@ fn pushed_recent_threads_round_trip() -> Result<(), Box<dyn Error>> {
             event: Event::RecentThreads(listing()?),
         }),
         "recent-threads-push",
+    )
+}
+
+#[test]
+fn recent_project_artwork_round_trips_with_its_host() -> Result<(), Box<dyn Error>> {
+    let mut thread = row("thread-icon", "project", "owner/project", Some(900));
+    thread.project_icon = artisan_domain::RecentProjectIcon {
+        host: Some(DisplayName::parse("github")?),
+        png: vec![137, 80, 78, 71].into(),
+    };
+    round_trip(
+        WireEnvelopeBody::Response(ServerResponse {
+            request_id: RequestId::parse("read-icons")?,
+            payload: ResponsePayload::RecentThreads(RecentThreadListing::new(vec![thread])?),
+        }),
+        "project-icon",
     )
 }
 

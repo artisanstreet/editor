@@ -259,6 +259,11 @@ struct RecentThread {
 
   # At most 256 UTF-8 bytes, nonblank.
   subtitle @1 :Text;
+  # Empty for disk-only projects. Optional fields retain compatibility with
+  # peers that predate project icons.
+  repositoryHost @2 :Text;
+  # Normalized 48-pixel PNG, at most 16 KiB. Empty selects the host logo.
+  projectIconPng @3 :Data;
 }
 
 # Recently active threads across every attached project, newest activity

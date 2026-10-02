@@ -82,6 +82,7 @@ impl SidebarThreadIndicator {
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
     focus: HashMap<ThreadId, FocusHandle>,
+    project_icons: super::project_icon::ProjectIconCache,
     hover: Rc<RefCell<SlidingHoverState>>,
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     selection: SidebarSelectionFade,
@@ -253,6 +254,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let listing = self.sidebar_threads.recent.clone().unwrap_or_default();
+        self.sidebar_threads.project_icons.retain(&listing);
         let now = wall_clock();
         self.schedule_regroup(&listing, now, cx);
         let ids = listing
@@ -367,6 +369,11 @@ impl NativeApplication {
         );
         let title = SharedString::from(thread.title.as_str().to_owned());
         let subtitle = SharedString::from(row.subtitle.as_str().to_owned());
+        let project_icon = self.sidebar_threads.project_icons.render(
+            &thread.project_id,
+            &row.project_icon,
+            &self.theme,
+        );
         let open = self.sidebar_threads.selection.target.as_ref() == Some(&thread.thread_id);
         let indicator = SidebarThreadIndicator::of(thread, open);
         let description = match indicator {
@@ -435,11 +442,15 @@ impl NativeApplication {
                     .child(
                         div()
                             .w_full()
-                            .truncate()
+                            .min_w(px(0.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
                             .text_size(self.theme.typography.label_text)
                             .text_color(self.theme.colors.muted_foreground.to_paint())
                             .debug_selector(move || subtitle_selector.clone())
-                            .child(subtitle),
+                            .child(project_icon)
+                            .child(div().flex_1().min_w(px(0.0)).truncate().child(subtitle)),
                     ),
             )
             // A thread that needs the reader keeps its prominence without

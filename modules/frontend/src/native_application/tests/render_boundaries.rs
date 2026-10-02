@@ -127,6 +127,7 @@ fn a_recent_threads_push_renders_the_sidebar(cx: &mut TestAppContext) {
             let listing = RecentThreadListing::new(vec![RecentThread {
                 thread: summary,
                 subtitle: DisplayName::parse("Varde").expect("subtitle"),
+                project_icon: Default::default(),
             }])
             .expect("recent threads");
             application.handle_service_event(

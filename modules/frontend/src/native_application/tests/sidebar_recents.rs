@@ -15,6 +15,7 @@ fn recent_row(id: &str, project: &str, title: &str, subtitle: &str, age_ms: i64)
     RecentThread {
         thread: summary,
         subtitle: DisplayName::parse(subtitle).expect("subtitle"),
+        project_icon: Default::default(),
     }
 }
 
