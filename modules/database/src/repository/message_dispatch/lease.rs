@@ -25,7 +25,7 @@ use super::{DispatchLeaseOwner, TransitionedMessageDispatch};
 const RENEW_DISPATCH_LEASE_SQL: &str = r"
 UPDATE message_dispatches
 SET lease_expires_at_ms = ?,
-    updated_at_ms = CASE WHEN state = 'leased' THEN ? ELSE updated_at_ms END
+    updated_at_ms = CASE WHEN state = 'leased' THEN MAX(updated_at_ms, ?) ELSE updated_at_ms END
 WHERE message_id = ?
   AND state IN ('leased', 'running')
   AND lease_owner = ?
@@ -111,7 +111,7 @@ impl Repository {
             .await;
         };
         let transitioned =
-            match renewed_from_row(&row, message_id, operated_at_ms, lease_expires_at_ms) {
+            match renewed_from_row(&row, message_id, lease_expires_at_ms) {
                 Ok(transitioned) => transitioned,
                 Err(error) => {
                     return rollback_transition(
@@ -134,7 +134,6 @@ impl Repository {
 fn renewed_from_row(
     row: &QueryResult,
     message_id: &MessageId,
-    operated_at_ms: i64,
     lease_expires_at_ms: i64,
 ) -> Result<TransitionedMessageDispatch, RepositoryError> {
     let returned_id = row_value::<String, _>(row, 0, "message_id", "message_dispatches")?;
@@ -157,12 +156,12 @@ fn renewed_from_row(
             reason: "renewed lease returned inconsistent lease timestamps",
         });
     }
+    // The stamp may be later than this renewal's clock reading: a running
+    // dispatch keeps the stamp its last commit wrote, commits never move it
+    // backwards, and the wall clock can step back (the WSL host-time sync
+    // does). That is the clock, not corruption, so it must not fail the
+    // heartbeat; the renewal itself never moves the stamp backwards.
     let updated_at_ms = row_value::<i64, _>(row, 4, "updated_at_ms", "message_dispatches")?;
-    if updated_at_ms > operated_at_ms {
-        return Err(RepositoryError::Invariant {
-            reason: "renewed lease returned inconsistent update timestamps",
-        });
-    }
 
     Ok(TransitionedMessageDispatch {
         message_id: message_id.clone(),
