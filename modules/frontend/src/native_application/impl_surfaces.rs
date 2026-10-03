@@ -242,8 +242,8 @@ impl NativeApplication {
     pub(super) fn desktop_brand(&self, cx: &Context<Self>) -> Div {
         let brand = div()
             .flex()
-            .items_center()
-            .gap(px(8.0))
+            .flex_col()
+            .items_start()
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
@@ -271,6 +271,7 @@ impl NativeApplication {
                     .truncate()
                     .text_size(px(11.0))
                     .line_height(px(16.0))
+                    .font_family(self.theme.typography.mono.family)
                     .text_color(self.theme.colors.muted_foreground.to_paint())
                     .child(badge),
             ),
