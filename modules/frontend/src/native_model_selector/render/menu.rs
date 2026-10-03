@@ -275,17 +275,28 @@ impl NativeModelSelector {
                 "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                 harness.id
             );
+            // An engine that cannot offer a model right now (it needs
+            // sign-in, reported nothing, or reported an incomplete list) is
+            // greyed out and inert.
+            let usable = self.state.engine_usable(&harness.id);
             let mut tab = div()
                 .id(format!(
                     "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                     harness.id
                 ))
                 .debug_selector(move || selector.clone())
-                .on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
-                    view.switch_engine(engine_id.clone(), cx);
-                }))
+                .when(usable, |tab| {
+                    tab.on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
+                        view.switch_engine(engine_id.clone(), cx);
+                    }))
+                })
+                .when(!usable, |tab| tab.opacity(0.35))
                 .role(gpui::Role::Button)
-                .aria_label(harness.label.clone())
+                .aria_label(if usable {
+                    harness.label.clone()
+                } else {
+                    format!("{} (unavailable)", harness.label)
+                })
                 .flex()
                 .items_center()
                 .justify_center()

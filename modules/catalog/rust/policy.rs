@@ -612,6 +612,17 @@ impl NativeModelCatalog {
         }
     }
 
+    /// Returns whether `engine_id` reported at least one enabled model. An
+    /// engine that reported nothing, or whose listing the Forge dropped as
+    /// incomplete (a signed-out CLI's fallback list), has none.
+    #[must_use]
+    pub fn engine_has_models(&self, engine_id: &str) -> bool {
+        self.manifest
+            .models
+            .iter()
+            .any(|model| model.harness == engine_id && model.disabled.is_none())
+    }
+
     /// Returns filtered model rows for an engine, retaining unavailable rows
     /// for truthful preview while sorting favorites to the top.
     #[must_use]

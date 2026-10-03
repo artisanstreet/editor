@@ -1097,3 +1097,42 @@ fn large_catalog_groups_variants_virtualizes_rows_and_collapses(cx: &mut gpui::T
             .is_some()
     );
 }
+
+#[test]
+fn engines_without_models_or_needing_sign_in_cannot_be_chosen() {
+    let mut snapshot = NativeModelCatalog::from_manifest_json(include_str!(
+        "../../../../tests/fixtures/model_catalog.json"
+    ))
+    .expect("fixture catalog");
+    // Claude reported nothing.
+    snapshot
+        .manifest
+        .models
+        .retain(|model| model.harness != "claude");
+    let mut state = NativeModelSelectorState::new(snapshot, None);
+    let start = state.active_engine().to_owned();
+    assert_ne!(start, "claude");
+    assert!(!state.engine_usable("claude"));
+    state.set_active_engine("claude".to_owned());
+    assert_eq!(state.active_engine(), start, "an empty engine stays greyed");
+
+    // The active engine needing sign-in moves the tab to a usable engine.
+    assert!(state.set_blocked_engines(vec![start.clone()]));
+    assert!(!state.engine_usable(&start));
+    assert_ne!(state.active_engine(), start);
+    assert!(state.engine_usable(state.active_engine()));
+    assert!(
+        !state.set_blocked_engines(vec![start.clone()]),
+        "unchanged set"
+    );
+    state.set_active_engine(start.clone());
+    assert_ne!(
+        state.active_engine(),
+        start,
+        "a blocked engine stays greyed"
+    );
+
+    assert!(state.set_blocked_engines(Vec::new()));
+    state.set_active_engine(start.clone());
+    assert_eq!(state.active_engine(), start);
+}

@@ -224,6 +224,8 @@ pub struct NativeModelSelectorState {
     local_error: Option<String>,
     model_groups_cache: RefCell<Option<ModelGroupsCache>>,
     collapsed_groups: std::collections::HashSet<(String, String)>,
+    /// Engines the Forge reports as needing sign-in; their tabs are greyed.
+    blocked_engines: Vec<String>,
 }
 
 /// Catalog projections survive animation frames; their inputs change only on interaction.

@@ -1,9 +1,11 @@
 //! Grok Build model discovery (`grok models`).
 //!
-//! The CLI lists the account-visible models under a `models:` header. The
-//! command is the same bounded invocation the readiness probe already uses
-//! (`--no-auto-update models`); here its stdout is parsed into rows. Unknown
-//! columns after the id are kept as the display label.
+//! The CLI lists the account-visible models under a header ending in
+//! `models:` (`Available models:` since 1.0.4x), marking the default with
+//! `*` and a trailing `(default)`. The command is the same bounded
+//! invocation the readiness probe already uses (`--no-auto-update models`);
+//! here its stdout is parsed into rows. Unknown columns after the id are kept
+//! as the display label; the `(default)` annotation is a marker, not a label.
 
 use std::time::Duration;
 
@@ -15,10 +17,18 @@ const DEADLINE: Duration = Duration::from_secs(4);
 /// Output bound for the listing command.
 const MAX_BYTES: usize = 1024 * 1024;
 
+/// What a Grok Build model listing proved.
+#[derive(Debug)]
+pub(super) enum GrokListing {
+    /// The account's models.
+    Models(Vec<DiscoveredModel>),
+    /// The CLI is signed out. It still prints a built-in fallback list,
+    /// which is not the account's and is discarded.
+    SignedOut,
+}
+
 /// Probes Grok Build; `None` when it does not answer.
-pub(super) async fn discover_grok(
-    program: Option<&super::EngineProgram>,
-) -> Option<Vec<DiscoveredModel>> {
+pub(super) async fn discover_grok(program: Option<&super::EngineProgram>) -> Option<GrokListing> {
     let executable = program?;
     let output = Box::pin(run_bounded(
         executable,
@@ -30,16 +40,32 @@ pub(super) async fn discover_grok(
     if !output.success {
         return None;
     }
-    Some(parse_models(&output.stdout))
+    if is_signed_out(&output.stdout) {
+        return Some(GrokListing::SignedOut);
+    }
+    Some(GrokListing::Models(parse_models(&output.stdout)))
 }
 
-/// Parses the `models:` listing. Lines before the header are ignored when the
-/// header is present; ids must be single tokens.
+/// Whether the listing opens with the CLI's signed-out notice
+/// (`You are not authenticated.` in Grok Build 1.0.46).
+fn is_signed_out(output: &str) -> bool {
+    output
+        .lines()
+        .map(str::trim)
+        .take_while(|line| !line.to_ascii_lowercase().ends_with("models:"))
+        .any(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("not authenticated") || line.contains("not logged in")
+        })
+}
+
+/// Parses the model listing. Lines before a header ending in `models:` are
+/// ignored when one is present; ids must be single tokens.
 fn parse_models(output: &str) -> Vec<DiscoveredModel> {
     let lines = output.lines().collect::<Vec<_>>();
     let header = lines
         .iter()
-        .position(|line| line.trim().eq_ignore_ascii_case("models:"));
+        .position(|line| line.trim().to_ascii_lowercase().ends_with("models:"));
     let candidates = match header {
         Some(index) => &lines[index + 1..],
         None => &lines[..],
@@ -63,7 +89,15 @@ fn parse_models(output: &str) -> Vec<DiscoveredModel> {
         if !is_model_id(id) || !(indented || id_has_signal(id)) {
             continue;
         }
-        let label = parts.collect::<Vec<_>>().join(" ");
+        let mut default = trimmed.starts_with('*');
+        let label = parts
+            .filter(|part| {
+                let marker = part.eq_ignore_ascii_case("(default)");
+                default |= marker;
+                !marker
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         rows.push(DiscoveredModel {
             engine_id: "grok",
             provider: if id.to_ascii_lowercase().starts_with("composer-") {
@@ -81,7 +115,7 @@ fn parse_models(output: &str) -> Vec<DiscoveredModel> {
             },
             description: None,
             hidden: false,
-            default: trimmed.starts_with('*'),
+            default,
             thinking: DiscoveredThinking::Native {
                 description:
                     "Grok Build manages reasoning effort for this model through the harness; the catalogue does not report a separate effort control."
@@ -151,6 +185,31 @@ mod tests {
         assert!(rows[0].default);
         assert_eq!(rows[0].provider, "cursor");
         assert_eq!(rows[0].name, "Composer Fast");
+    }
+
+    #[test]
+    fn default_annotation_marks_the_default_instead_of_naming_it() {
+        // Grok Build 1.0.46 output, verbatim.
+        let rows = parse_models(
+            "Default model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n",
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].native_model_id, "grok-4.6");
+        assert_eq!(rows[0].name, "Grok 4.6");
+        assert!(rows[0].default);
+        assert_eq!(rows[1].native_model_id, "grok-4.5");
+        assert_eq!(rows[1].name, "Grok 4.5");
+        assert!(!rows[1].default);
+    }
+
+    #[test]
+    fn signed_out_listing_is_not_the_accounts() {
+        assert!(is_signed_out(
+            "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n"
+        ));
+        assert!(!is_signed_out(
+            "Default model: grok-4.7\n\nAvailable models:\n  * grok-4.7 (default)\n"
+        ));
     }
 
     #[test]

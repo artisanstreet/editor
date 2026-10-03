@@ -10,6 +10,7 @@ impl Render for NativeApplication {
         #[cfg(feature = "flight-recorder")]
         let _trace = artisan_tracing::span!("ui", "application.render");
         self.sync_composer_controls(cx);
+        self.sync_model_selector_blocked_engines(cx);
         self.sync_profile_actions();
         // The sidebar fills its shell slot and renders only when notified,
         // so a transcript or composer frame reuses its previous paint.

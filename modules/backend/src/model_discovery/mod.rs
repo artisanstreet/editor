@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use claude::discover_claude;
 use codex::discover_codex;
 use cursor::discover_cursor;
-use grok::discover_grok;
+use grok::{GrokListing, discover_grok};
 use opencode2::discover_opencode2;
 
 /// How long one discovery snapshot is served before re-probing.
@@ -128,6 +128,9 @@ pub(crate) struct DiscoveryBundle {
     /// Engines whose CLI is not installed on this machine; their harnesses
     /// are hidden from the picker until the engine appears.
     pub(crate) missing_engines: Vec<&'static str>,
+    /// Installed engines whose CLI reported it is signed out. They report no
+    /// models and are not runnable, so the picker greys their tab out.
+    pub(crate) unauthenticated_engines: Vec<&'static str>,
 }
 
 impl DiscoveryBundle {
@@ -177,6 +180,14 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
     let mut models = Vec::new();
     let mut probed_engines = Vec::new();
     let mut missing_engines = Vec::new();
+    let mut unauthenticated_engines = Vec::new();
+    let grok = grok.map(|listing| match listing {
+        GrokListing::Models(rows) => rows,
+        GrokListing::SignedOut => {
+            unauthenticated_engines.push("grok");
+            Vec::new()
+        }
+    });
     for (engine_id, installed, rows) in [
         ("codex", codex_program.is_some(), codex),
         ("claude", true, claude),
@@ -215,6 +226,7 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         models,
         probed_engines,
         missing_engines,
+        unauthenticated_engines,
     });
     let ttl = if retry_needed {
         Duration::from_secs(10)

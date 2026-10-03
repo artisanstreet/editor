@@ -124,6 +124,28 @@ impl NativeApplication {
         self.model_selector.read(cx).state().snapshot().clone()
     }
 
+    /// Hands the picker the engines whose account the Forge reports as
+    /// needing sign-in, so their tabs are greyed out. Unchanged sets do not
+    /// re-render the picker.
+    pub(super) fn sync_model_selector_blocked_engines(&mut self, cx: &mut Context<Self>) {
+        let blocked = self
+            .model_selector
+            .read(cx)
+            .state()
+            .snapshot()
+            .manifest
+            .harnesses
+            .iter()
+            .filter(|harness| {
+                crate::native_profile_usage::engine_readiness(&self.profile_usage, &harness.id)
+                    == crate::native_profile_usage::EngineReadinessVerdict::NeedsSignIn
+            })
+            .map(|harness| harness.id.clone())
+            .collect::<Vec<_>>();
+        self.model_selector
+            .update(cx, |selector, cx| selector.set_blocked_engines(blocked, cx));
+    }
+
     /// Returns why a displayed policy's engine cannot run: the Forge's
     /// readiness reason from the engine's latest usage report, or, when the
     /// Forge judged the account ready, the catalog's own unavailability.

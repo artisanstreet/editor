@@ -216,6 +216,7 @@ impl NativeModelSelectorState {
             local_error: None,
             model_groups_cache: RefCell::new(None),
             collapsed_groups: std::collections::HashSet::new(),
+            blocked_engines: Vec::new(),
         };
         state.refresh_preview_and_highlight();
         state
@@ -231,22 +232,37 @@ impl NativeModelSelectorState {
             .policy
             .as_ref()
             .and_then(|policy| rebase_selection_policy(&snapshot, policy));
-        let active_engine = if snapshot
+        // Prefer an engine that can offer a model: the current tab, then the
+        // policy's engine, then the first usable tab. Only when no engine is
+        // usable does the tab fall back to any visible one.
+        let visible = |engine: &str| {
+            snapshot
+                .manifest
+                .harness(engine)
+                .is_some_and(|harness| !harness.hidden)
+        };
+        let blocked = |engine: &str| self.blocked_engines.iter().any(|id| id == engine);
+        let usable = |engine: &str| {
+            visible(engine) && snapshot.engine_has_models(engine) && !blocked(engine)
+        };
+        let policy_engine = policy.as_ref().map(|policy| policy.engine_id.clone());
+        let first_usable = snapshot
             .manifest
-            .harness(&self.active_engine)
-            .is_some_and(|harness| !harness.hidden)
-        {
+            .harnesses
+            .iter()
+            .find(|harness| {
+                !harness.hidden && snapshot.engine_has_models(&harness.id) && !blocked(&harness.id)
+            })
+            .map(|harness| harness.id.clone());
+        let active_engine = if usable(&self.active_engine) {
             self.active_engine.clone()
         } else {
-            policy
-                .as_ref()
-                .map(|policy| policy.engine_id.clone())
-                .filter(|engine| {
-                    snapshot
-                        .manifest
-                        .harness(engine)
-                        .is_some_and(|harness| !harness.hidden)
-                })
+            policy_engine
+                .clone()
+                .filter(|engine| usable(engine))
+                .or(first_usable)
+                .or_else(|| Some(self.active_engine.clone()).filter(|engine| visible(engine)))
+                .or_else(|| policy_engine.filter(|engine| visible(engine)))
                 .or_else(|| {
                     snapshot
                         .manifest
@@ -395,10 +411,51 @@ impl NativeModelSelectorState {
         self.highlighted_model_id = None;
     }
 
-    /// Switches the active engine tab.
+    /// Whether `engine_id`'s tab can be chosen: the engine reported models
+    /// and is not known to need sign-in.
+    #[must_use]
+    pub fn engine_usable(&self, engine_id: &str) -> bool {
+        self.snapshot.engine_has_models(engine_id)
+            && !self
+                .blocked_engines
+                .iter()
+                .any(|blocked| blocked == engine_id)
+    }
+
+    /// Replaces the engines that need sign-in. Returns whether the set
+    /// changed; an active tab that became unusable moves to a usable one.
+    pub fn set_blocked_engines(&mut self, mut blocked: Vec<String>) -> bool {
+        blocked.sort();
+        blocked.dedup();
+        if blocked == self.blocked_engines {
+            return false;
+        }
+        self.blocked_engines = blocked;
+        if !self.engine_usable(&self.active_engine)
+            && let Some(usable) = self
+                .snapshot
+                .manifest
+                .harnesses
+                .iter()
+                .find(|harness| !harness.hidden && self.engine_usable(&harness.id))
+                .map(|harness| harness.id.clone())
+        {
+            self.active_engine = usable;
+            self.query.clear();
+            self.open_axis = None;
+            self.refresh_preview_and_highlight();
+        }
+        true
+    }
+
+    /// Switches the active engine tab. An engine with no selectable model
+    /// (it needs sign-in, reported nothing, or reported an incomplete list)
+    /// is greyed out and cannot be chosen.
     pub fn set_active_engine(&mut self, engine_id: impl Into<String>) {
         let engine_id = engine_id.into();
-        if self.snapshot.manifest.harness(&engine_id).is_none() {
+        if self.snapshot.manifest.harness(&engine_id).is_none()
+            || (engine_id != self.active_engine && !self.engine_usable(&engine_id))
+        {
             return;
         }
         self.active_engine = engine_id;
