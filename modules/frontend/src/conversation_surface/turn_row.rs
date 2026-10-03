@@ -31,6 +31,11 @@ use gpui::{AppContext as _, Pixels, StyleRefinement, Subscription, WeakEntity};
 use super::transcript_window::{TranscriptShapeLedger, TranscriptShaper};
 use super::work_motion::WorkMotion;
 use super::*;
+use crate::conversation_scene::AssistantPhase;
+
+/// Words a still-streaming reply must show before the work above it folds:
+/// interim narration before a tool call is usually a sentence or two.
+const FOLD_AFTER_WORDS: usize = 40;
 
 /// One approval row's gate snapshot, the only answer state a row paints.
 #[derive(Clone, Debug, PartialEq)]
@@ -437,11 +442,16 @@ impl TurnRowView {
     }
 
     /// Advances this turn's reply reveal for the frame and reports whether
-    /// the reply has visibly begun.
+    /// the reply is clearly the answer, so the work above it may fold.
     ///
-    /// A reveal starts only for a reply first seen while it streams, so
-    /// settled history never animates; the reply's own render reads the
-    /// same reveal for its prefix (see [`WorkMotion::reveal`]).
+    /// Claude's prose before a tool call counts as the reply while it
+    /// streams and moves back into the work when the call starts; folding on
+    /// its first word folded and reopened the work around every such
+    /// sentence. The work therefore folds only once the reply is marked
+    /// final, has stopped streaming, or has shown [`FOLD_AFTER_WORDS`].
+    /// A reveal starts only for prose that arrives while the row is on
+    /// screen; the reply's own render reads the same reveal for its prefix
+    /// (see [`WorkMotion::reveal`]).
     pub(super) fn advance_reply_reveal(&self, turn: &TurnScene) -> bool {
         let Some(reply) = turn.blocks().iter().find_map(|block| match block {
             TurnBlock::AssistantMessage(message) => Some(message),
@@ -456,9 +466,12 @@ impl TurnRowView {
             .is_some_and(lifecycle_is_live);
         let mut motion = self.motion.borrow_mut();
         let _ = motion.reveal(&reply.id, &reply.body, streaming);
-        motion
-            .reveal_shows(&reply.id)
-            .unwrap_or(!reply.body.is_empty())
+        motion.mark_present(reply.id.as_str());
+        let shown = motion
+            .revealed_words(&reply.id)
+            .unwrap_or_else(|| reply.body.split_whitespace().count());
+        let decided = !streaming || reply.phase == AssistantPhase::Final;
+        (decided && shown > 0) || shown >= FOLD_AFTER_WORDS
     }
 
     /// Hands every unresolved rich-link destination to the surface.

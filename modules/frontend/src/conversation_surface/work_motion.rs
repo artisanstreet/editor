@@ -203,11 +203,18 @@ impl WorkMotion {
         Some((reveal.revealed().to_owned(), reveal.fade.clone()))
     }
 
-    /// Whether the reveal of `id`, if any, shows at least one segment.
-    pub(super) fn reveal_shows(&self, id: &SceneId) -> Option<bool> {
+    /// How many words the reveal of `id` shows, if one runs.
+    pub(super) fn revealed_words(&self, id: &SceneId) -> Option<usize> {
         self.reveals
             .get(id)
-            .map(|reveal| !reveal.revealed().is_empty())
+            .map(|reveal| reveal.revealed().split_whitespace().count())
+    }
+
+    /// Records that the row keyed `key` is already on screen, so it never
+    /// enters later: prose shown as the reply keeps its place when the scene
+    /// moves it into the work.
+    pub(super) fn mark_present(&mut self, key: &str) {
+        self.entrances.entry(key.to_owned()).or_insert(None);
     }
 
     /// Records the visible length the renderer reported for `id`.

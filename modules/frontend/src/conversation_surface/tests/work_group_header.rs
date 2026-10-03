@@ -673,29 +673,32 @@ fn replying_section_scene(body: &str) -> ConversationScene {
 }
 
 #[gpui::test]
-fn a_live_section_folds_once_its_reply_shows_a_whole_word(cx: &mut TestAppContext) {
+fn a_live_section_folds_once_its_streaming_reply_is_clearly_the_answer(cx: &mut TestAppContext) {
     // Reduced motion shows every stable unit at once and folds without an
     // accordion flight, so one settled frame reads the end state.
     cx.update(|app| app.set_reduce_motion(true));
-    // A lone partial word is not on screen yet: the work stays open.
-    let (_waiting, cx_waiting) = cx.add_window_view(|_, surface_cx| {
-        ConversationSurface::new(replying_section_scene("All"), ThemeMode::Dark, surface_cx)
-    });
-    cx_waiting.simulate_resize(size(px(720.0), px(720.0)));
-    settle(cx_waiting);
-    assert!(
-        cx_waiting.debug_bounds(STEER_LEAD_CHAIN).is_some(),
-        "the work stays open until a whole word of the reply shows"
-    );
-
-    // Once a whole word shows, the work folds while the turn is still live,
-    // and the header keeps its words.
-    let (_replying, cx) = cx.add_window_view(|_, surface_cx| {
+    // A sentence or two may be narration before the next tool call, which
+    // moves back into the work: folding on it would fold and reopen the
+    // work around every such sentence.
+    let (_narrating, cx_narrating) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(
-            replying_section_scene("All tests pass."),
+            replying_section_scene("All tests pass. "),
             ThemeMode::Dark,
             surface_cx,
         )
+    });
+    cx_narrating.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx_narrating);
+    assert!(
+        cx_narrating.debug_bounds(STEER_LEAD_CHAIN).is_some(),
+        "the work stays open while the reply could still be narration"
+    );
+
+    // A long streaming reply is the answer: the work folds while the turn
+    // is still live, and the header keeps its words.
+    let answer = "word ".repeat(40);
+    let (_replying, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(replying_section_scene(&answer), ThemeMode::Dark, surface_cx)
     });
     cx.simulate_resize(size(px(720.0), px(720.0)));
     settle(cx);
@@ -705,6 +708,6 @@ fn a_live_section_folds_once_its_reply_shows_a_whole_word(cx: &mut TestAppContex
     );
     assert!(
         cx.debug_bounds(STEER_LEAD_CHAIN).is_none(),
-        "the work folds as soon as the reply shows"
+        "the work folds once the reply is clearly the answer"
     );
 }
