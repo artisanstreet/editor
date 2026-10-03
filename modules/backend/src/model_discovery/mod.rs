@@ -157,6 +157,18 @@ fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+/// The context window the catalog lists for one engine's model, from the
+/// bundle already cached; never probes, so a usage read never waits on an
+/// engine process.
+pub(crate) async fn cached_context_window(engine_id: &str, model_id: &str) -> Option<u64> {
+    let (_, _, bundle) = cache().lock().await.clone()?;
+    bundle
+        .models
+        .iter()
+        .find(|model| model.engine_id == engine_id && model.native_model_id == model_id)
+        .and_then(|model| model.context_window_tokens)
+}
+
 /// Returns the current discovery bundle.
 ///
 /// Once any probe has completed this never waits on engine processes: a

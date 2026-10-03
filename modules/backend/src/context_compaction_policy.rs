@@ -16,6 +16,21 @@ const CODEX_COMPACTION_PERCENT: u64 = 90;
 /// Claude Sonnet 5's documented default compaction capacity in tokens.
 const CLAUDE_SONNET_5_COMPACTION_TOKENS: u64 = 967_000;
 
+/// Fills a window the engine did not report (Claude reports none) from the
+/// cached model catalog, so the context meter has a denominator. Native
+/// engines report their engine id as the provider route.
+pub(crate) async fn with_catalog_window(report: RunUsageReport) -> RunUsageReport {
+    if report.context_window_tokens().is_some() {
+        return report;
+    }
+    let window = crate::model_discovery::cached_context_window(
+        report.provider_route_id().as_str(),
+        report.model_id().as_str(),
+    )
+    .await;
+    report.with_catalog_window(window)
+}
+
 /// Returns the context size, in tokens, at which the engine that reported
 /// `report` compacts, or `None` when no documented policy applies (the
 /// window boundary is then the only limit) or the report carries no window.
@@ -66,6 +81,29 @@ mod tests {
             observed_at: UnixMillis::from_millis(1),
         })
         .expect("report")
+    }
+
+    #[test]
+    fn a_catalog_window_fills_only_a_missing_one() {
+        let missing = report("claude", "claude-opus-5-5", None);
+        assert_eq!(
+            missing
+                .clone()
+                .with_catalog_window(Some(1_000_000))
+                .context_window_tokens(),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            missing.with_catalog_window(Some(0)).context_window_tokens(),
+            None
+        );
+        let reported = report("codex", "gpt-5", Some(272_000));
+        assert_eq!(
+            reported
+                .with_catalog_window(Some(1_000_000))
+                .context_window_tokens(),
+            Some(272_000)
+        );
     }
 
     #[test]
