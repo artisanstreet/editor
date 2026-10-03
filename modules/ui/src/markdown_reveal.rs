@@ -314,10 +314,17 @@ fn first_inline_opener(source: &str, range: Range<usize>) -> Option<usize> {
     let text = source.get(range.clone())?;
     let mut previous: Option<char> = source.get(..range.start)?.chars().next_back();
     for (offset, character) in text.char_indices() {
+        let after = source
+            .get(range.start + offset + character.len_utf8()..)
+            .and_then(|rest| rest.chars().next());
+        // An emphasis or tag opener needs a non-space after it ("2 * 3" and
+        // "a < b" never open), so a lone one does not hold the paragraph.
+        let can_open = after.is_none_or(|next| !next.is_whitespace());
         let opener = match character {
-            '*' | '`' | '[' | '<' => true,
-            // Intraword underscores (`snake_case`) can never open.
-            '_' => previous.is_none_or(|before| !before.is_alphanumeric()),
+            '`' | '[' => true,
+            '*' | '<' => can_open,
+            // Intraword underscores (`snake_case`) can never open either.
+            '_' => can_open && previous.is_none_or(|before| !before.is_alphanumeric()),
             _ => false,
         };
         if opener && previous != Some('\\') {

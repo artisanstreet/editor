@@ -55,8 +55,12 @@ pub(super) struct WorkMotion {
     reveals: HashMap<SceneId, ReplyReveal>,
     /// Reveals touched by the current frame; the rest are dropped.
     touched: HashSet<SceneId>,
+    /// Every prose body this row has painted, revealed or not.
+    seen_prose: HashSet<SceneId>,
     /// When each work row first painted while the turn was live.
     entrances: HashMap<String, Option<Instant>>,
+    /// Natural heights of rows mid-entrance, measured each frame.
+    entrance_heights: HashMap<String, Rc<Cell<Pixels>>>,
     /// Set after the row's first render: rows already on screen then never
     /// enter.
     primed: bool,
@@ -154,10 +158,14 @@ impl WorkMotion {
     /// Advances the streaming reveal of one prose body.
     ///
     /// Returns the prefix to paint and its fade while a reveal runs, or
-    /// `None` to paint `body` whole. A reveal starts only for prose first
-    /// seen while it streams and ends once its last segment has faded in;
-    /// the same id keeps its reveal when the scene moves the prose between
-    /// the reply slot and the work.
+    /// `None` to paint `body` whole. Prose that appears after the row first
+    /// painted streams in whether or not it is still arriving: a reply that
+    /// lands whole as the turn ends drains in segments instead of appearing
+    /// at once. Prose already mid-stream at the row's first paint shows what
+    /// arrived and streams the rest; settled history never animates. A
+    /// reveal ends once its last segment has faded in, and the same id keeps
+    /// its reveal when the scene moves the prose between the reply slot and
+    /// the work.
     pub(super) fn reveal(
         &mut self,
         id: &SceneId,
@@ -170,9 +178,13 @@ impl WorkMotion {
             MotionPolicy::Full
         };
         let now = Instant::now();
-        if !self.reveals.contains_key(id) && streaming {
-            self.reveals
-                .insert(id.clone(), ReplyReveal::begin(body, now));
+        if self.seen_prose.insert(id.clone()) {
+            if self.primed {
+                self.reveals.insert(id.clone(), ReplyReveal::begin(now));
+            } else if streaming {
+                self.reveals
+                    .insert(id.clone(), ReplyReveal::resume(body, now));
+            }
         }
         let reveal = self.reveals.get_mut(id)?;
         self.touched.insert(id.clone());

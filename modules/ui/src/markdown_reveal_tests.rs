@@ -31,6 +31,12 @@ fn intraword_underscores_and_escapes_never_hold() {
 }
 
 #[test]
+fn openers_followed_by_a_space_never_hold() {
+    let source = "Costs 2 * 3 units and a < b holds ";
+    assert_eq!(stable_reveal_end(source), source.len());
+}
+
+#[test]
 fn a_closed_paragraph_releases_its_literal_openers() {
     let source = "Costs 2 * 3 units.\n\nNext ";
     assert_eq!(stable_reveal_end(source), source.len());
