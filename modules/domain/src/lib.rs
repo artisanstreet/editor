@@ -249,7 +249,7 @@ pub use recent_threads::{
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
-    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRecordError,
-    NavigationRoute, ReadUserPreferences, RecordNavigation, UserPreferences,
-    UserPreferencesRevision,
+    ModelPreferenceSource, NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord,
+    NavigationRecordError, NavigationRoute, ReadUserPreferences, RecordNavigation,
+    SaveModelPreference, UserPreferences, UserPreferencesRevision,
 };

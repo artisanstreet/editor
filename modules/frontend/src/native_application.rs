@@ -363,6 +363,7 @@ pub struct NativeApplication {
     /// The Forge's default engine configuration, shown on threads without
     /// their own until they save one.
     default_engine_config: Option<artisan_domain::EngineRunConfig>,
+    pending_model_preference: Option<artisan_domain::SaveModelPreference>,
     /// Legacy file preferences handed to the Forge, removed once it answers.
     legacy_import: Option<crate::editor_settings::LegacyForgePreferences>,
     #[cfg(test)]

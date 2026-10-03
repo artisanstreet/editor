@@ -10,8 +10,8 @@
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, Statement, Value};
 
 use artisan_domain::{
-    EngineRunConfig, LegacyImportOutcome, NavigationProject, NavigationRecord, NavigationRoute,
-    ProjectId, ThreadId, UnixMillis,
+    EngineRunConfig, LegacyImportOutcome, ModelPreferenceSource, NavigationProject,
+    NavigationRecord, NavigationRoute, ProjectId, ThreadId, UnixMillis,
 };
 
 use super::{Repository, RepositoryError, corrupt_data, database_error};
@@ -76,9 +76,25 @@ impl Repository {
         finish(transaction, result, "navigation record").await
     }
 
-    /// Makes `config` the default engine configuration. It follows a thread
-    /// save that already took its own acceptance instant, so it records no
-    /// time of its own.
+    /// Saves a user model preference. Agent and system choices leave the
+    /// stored preference and its revision unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an encoding or database failure.
+    pub async fn save_model_preference(
+        &self,
+        config: &EngineRunConfig,
+        source: ModelPreferenceSource,
+    ) -> PreferencesResult<StoredUserPreferences> {
+        if source != ModelPreferenceSource::User {
+            return self.read_user_preferences().await;
+        }
+        self.remember_default_engine_config(config).await
+    }
+
+    /// Stores a resolved default configuration. Runtime callers should use
+    /// `save_model_preference` with an explicit source instead.
     ///
     /// # Errors
     ///

@@ -298,7 +298,9 @@ impl NativeTransportCommand {
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
             Self::Preferences(
-                PreferencesCommand::RecordNavigation(_) | PreferencesCommand::ImportLegacy(_),
+                PreferencesCommand::RecordNavigation(_)
+                | PreferencesCommand::ImportLegacy(_)
+                | PreferencesCommand::SaveModel(_),
             ) => Some(HoldKind::Preferences),
             Self::ComposerState(
                 ComposerStateCommand::ReadFooterUsage { .. }

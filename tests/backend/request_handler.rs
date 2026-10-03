@@ -5319,7 +5319,7 @@ async fn uploaded_attachments_back_drafts_and_messages_sent_by_reference() {
 }
 
 #[tokio::test]
-async fn preferences_follow_navigation_and_the_configuration_the_user_saves() {
+async fn preferences_follow_navigation_without_adopting_thread_runtime_configuration() {
     let (_temporary, storage) = opened_storage("preferences").await;
     storage
         .repository()
@@ -5399,8 +5399,8 @@ async fn preferences_follow_navigation_and_the_configuration_the_user_saves() {
             .expect("navigation should record"),
     );
     assert_eq!(
-        recorded.default_engine_config,
-        Some(engine_config("preferred"))
+        recorded.default_engine_config, None,
+        "a thread configuration save must not change the user's preference"
     );
     let route = recorded.navigation.route().expect("route recorded");
     assert_eq!(route.project_id.as_str(), "preferences-project");
@@ -5423,4 +5423,45 @@ async fn preferences_follow_navigation_and_the_configuration_the_user_saves() {
     );
     assert_eq!(unknown.code, ErrorCode::ProjectUnknown);
     storage.close().await.expect("storage should close");
+}
+
+#[tokio::test]
+async fn agent_model_preference_commands_leave_the_user_choice_intact() {
+    use artisan_domain::{
+        CatalogSelection, ModelFavoriteId, ModelPreferenceSource, SaveModelPreference,
+    };
+    let (_temporary, storage) = opened_storage("model-preference-source").await;
+    let preferred = engine_config("user-choice");
+    let saved = storage
+        .repository()
+        .save_model_preference(&preferred, ModelPreferenceSource::User)
+        .await
+        .unwrap();
+    let handler = RequestHandler::new(storage.repository().clone());
+    for source in [ModelPreferenceSource::Agent, ModelPreferenceSource::System] {
+        let request_id = request("agent-preference");
+        let response = handler
+            .respond(
+                &request_id,
+                &ClientRequest::Command(Command::SaveModelPreference(SaveModelPreference {
+                    request_id: request_id.clone(),
+                    selection: CatalogSelection {
+                        model_id: ModelFavoriteId::parse("unavailable-subagent-model").unwrap(),
+                        profile_id: None,
+                        reasoning_effort: None,
+                        speed: None,
+                        context_window: None,
+                        permission: None,
+                    },
+                    source,
+                })),
+            )
+            .await
+            .expect("non-user choices need no catalog and cannot mutate user preferences");
+        let ResponsePayload::UserPreferences(preferences) = response.payload else {
+            panic!("expected preferences");
+        };
+        assert_eq!(preferences.default_engine_config.as_ref(), Some(&preferred));
+        assert_eq!(preferences.revision, saved.revision);
+    }
 }

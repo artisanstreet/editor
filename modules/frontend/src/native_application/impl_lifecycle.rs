@@ -146,6 +146,7 @@ impl NativeApplication {
             composer_model_scope: None,
             deferred_composer_policy: None,
             default_engine_config: None,
+            pending_model_preference: None,
             legacy_import: None,
             #[cfg(test)]
             test_legacy_preferences: None,

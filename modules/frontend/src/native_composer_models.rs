@@ -25,6 +25,9 @@ impl NativeApplication {
                     if !pending.admitted {
                         self.submit_pending_model_favorite(&pending, cx);
                     }
+                } else if self.pending_model_preference.is_some() {
+                    self.submit_model_preference();
+                    self.sync_composer_controls(cx);
                 } else if self.engine_settings.can_save() {
                     self.save_engine_settings(cx);
                 } else if !self.retry_policy_save(cx) {
@@ -48,16 +51,18 @@ impl NativeApplication {
         policy: &crate::native_model_selector::SelectPolicy,
         cx: &mut Context<Self>,
     ) {
-        // The Forge makes the configuration a choice saves the default new
-        // threads start from, and pushes it.
+        self.composer_model_run_error = None;
+        self.save_model_preference(policy);
+        // The draft choice and the thread's runtime configuration are separate
+        // from the user preference saved above.
         let scope = self.composer.read(cx).draft_scope();
         self.composer_model_choices.insert(scope, policy.clone());
-        self.composer_model_run_error = None;
         self.sync_composer_controls(cx);
         // Only a thread's own draft saves the choice onto it: a choice made
         // in a new task's draft (or while its thread is being left) is sent
         // with that draft instead.
         let Some(thread) = self.model_choice_thread(cx) else {
+            self.sync_composer_model_policy(cx);
             return;
         };
         if self.engine_settings.pending_save_request_id().is_some() {
@@ -67,6 +72,36 @@ impl NativeApplication {
         self.deferred_composer_policy = None;
         self.request_selection_resolution(thread, policy);
         self.sync_composer_model_policy(cx);
+    }
+
+    /// Saves every picker change, including a new task before its first send.
+    fn save_model_preference(&mut self, policy: &crate::native_model_selector::SelectPolicy) {
+        let Some(selection) = crate::picker_selection::selection_for_policy(policy) else {
+            return;
+        };
+        let Ok(request_id) = artisan_domain::RequestId::mint("model-preference") else {
+            self.composer_model_run_error = Some(SELECTION_SAVE_FAILED.to_owned());
+            return;
+        };
+        self.pending_model_preference = Some(artisan_domain::SaveModelPreference {
+            request_id,
+            selection,
+            source: artisan_domain::ModelPreferenceSource::User,
+        });
+        self.submit_model_preference();
+    }
+
+    fn submit_model_preference(&mut self) {
+        let Some(save) = self.pending_model_preference.clone() else {
+            return;
+        };
+        self.composer_model_run_error = None;
+        let command = NativeTransportCommand::Preferences(
+            crate::native_transport_service::PreferencesCommand::SaveModel(save),
+        );
+        if self.submit_command(command).is_err() {
+            self.composer_model_run_error = Some(SELECTION_SAVE_FAILED.to_owned());
+        }
     }
 
     /// The model chosen in the draft the composer shows.
