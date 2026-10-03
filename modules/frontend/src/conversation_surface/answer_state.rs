@@ -112,6 +112,7 @@ pub struct ApprovalAnswerAttempt {
 pub struct ApprovalAnswerGate {
     pub(super) flight: AnswerFlight,
     pub(super) pending_decision: Option<bool>,
+    pub(super) answered: bool,
     pub(super) failure: Option<String>,
     pub(super) last_request_id: Option<RequestId>,
 }
@@ -133,6 +134,20 @@ impl ApprovalAnswerGate {
     #[must_use]
     pub const fn pending_decision(&self) -> Option<bool> {
         self.pending_decision
+    }
+
+    /// Returns the decision the engine recorded a receipt for, if any.
+    ///
+    /// The row renders this as settled until the resolution reaches it
+    /// through the subscription, so a recorded answer never reads as still
+    /// in flight.
+    #[must_use]
+    pub const fn answered_decision(&self) -> Option<bool> {
+        if self.answered {
+            self.pending_decision
+        } else {
+            None
+        }
     }
 
     /// Returns the surfaced retry/diagnostic message, if any.
@@ -173,6 +188,7 @@ impl ApprovalAnswerGate {
         };
         let command = approval_command(thread_id, &action, request_id.clone());
         self.pending_decision = Some(approved);
+        self.answered = false;
         self.failure = None;
         self.last_request_id = Some(request_id.clone());
         Some(ApprovalAnswerAttempt {
@@ -196,6 +212,7 @@ impl ApprovalAnswerGate {
     ) -> AnswerPairing {
         let pairing = pair_approval_answer(state, command, receipt);
         if pairing.is_settled() {
+            self.answered = true;
             self.failure = None;
         } else {
             self.flight.settle();

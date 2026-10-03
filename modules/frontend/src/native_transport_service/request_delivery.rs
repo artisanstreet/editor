@@ -194,6 +194,9 @@ pub(super) async fn request_envelope_payload(
     expected: ExpectedResponse,
     cancel: &CancelHandle,
 ) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
+    #[cfg(feature = "flight-recorder")]
+    let _trace = artisan_tracing::span!("transport.request", "request.exchange",
+        "request_id" => expected_request_id.as_str(), "expected" => expected.trace_name());
     let (session, resolved) =
         session
             .request(envelope, cancel)
@@ -268,6 +271,8 @@ impl ServiceRuntime {
         frames: &mut FrameFactory,
         force_reconnect: bool,
     ) -> Result<(), ServiceFailure> {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("transport.connection", "ensure_session");
         let needs_reconnect = match self.session.as_ref() {
             Some(session) => session_needs_reconnect(
                 session.admitted(),
@@ -286,6 +291,21 @@ impl ServiceRuntime {
         &mut self,
         attempt: Result<(ClientSession, ResponsePayload), RequestAttemptError>,
     ) -> Result<ResponsePayload, RequestFailure> {
+        #[cfg(feature = "flight-recorder")]
+        match &attempt {
+            Ok(_) => artisan_tracing::instant!("transport.request", "request.succeeded"),
+            // The Forge answered with a refusal (a link title it could not
+            // fetch, a stale catalog): the connection is fine, so the
+            // failure is recorded but saves no incident snapshot.
+            Err(RequestAttemptError::Retained { failure, .. }) => {
+                artisan_tracing::instant!("transport.request", "request.failed", "stage" => failure.stage.to_string(), "category" => failure.category.to_string());
+            }
+            // The session itself was lost: an incident worth the history.
+            Err(RequestAttemptError::Terminal { failure, .. }) => {
+                artisan_tracing::instant!("transport.request", "request.failed", "stage" => failure.stage.to_string(), "category" => failure.category.to_string());
+                artisan_tracing::incident!("request.failed");
+            }
+        }
         match attempt {
             Ok((session, payload)) => {
                 self.session = Some(session);
@@ -355,6 +375,8 @@ impl ServiceRuntime {
         expected_request_id: RequestId,
         expected: ExpectedResponse,
     ) -> Result<(ClientSession, ResponsePayload), RequestAttemptError> {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("transport.request", "request.await_response", "request_id" => expected_request_id.as_str(), "command_span" => self.trace_command);
         let request = request_envelope_payload(
             session,
             envelope,
@@ -511,12 +533,26 @@ pub(super) async fn command_loop_with_delivery(
                 // The hold travels with its command and drops when this arm
                 // ends: after the handler returns, or with its failure.
                 let Some(QueuedCommand {
+                    #[cfg(feature = "flight-recorder")]
+                    trace,
                     command,
                     hold: _hold,
                 }) = cmd
                 else {
                     return Ok(());
                 };
+                #[cfg(feature = "flight-recorder")]
+                let queue_span = trace.id();
+                #[cfg(feature = "flight-recorder")]
+                trace.handoff();
+                #[cfg(feature = "flight-recorder")]
+                drop(trace);
+                #[cfg(feature = "flight-recorder")]
+                let _trace = artisan_tracing::span!("transport.command", "command.execute", "command" => command.trace_name(), "thread_id" => command.trace_thread(), "queue_span" => queue_span);
+                #[cfg(feature = "flight-recorder")]
+                {
+                    runtime.trace_command = _trace.id();
+                }
                 match command {
                     NativeTransportCommand::Shutdown => return Ok(()),
                     NativeTransportCommand::BeginProjectIntakeAt(path) => {
@@ -692,6 +728,10 @@ pub(super) async fn command_loop_with_delivery(
                     NativeTransportCommand::AcknowledgePatch { thread_id, cursor } => {
                         handle_acknowledge_patch(runtime, &thread_id, cursor)?
                     }
+                }
+                #[cfg(feature = "flight-recorder")]
+                {
+                    runtime.trace_command = 0;
                 }
             }
             LoopStep::Delivery(delivery) => {

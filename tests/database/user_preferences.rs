@@ -262,3 +262,44 @@ async fn legacy_preferences_the_forge_cannot_use_are_refused() {
     assert_eq!(absent.project_order, LegacyImportOutcome::Absent);
     assert_eq!(absent.preferences.revision, 0);
 }
+
+#[tokio::test]
+async fn model_preference_survives_repository_recreation_and_ignores_agent_choices() {
+    use artisan_domain::ModelPreferenceSource;
+    let (database, repository) = repository().await;
+    let preferred = config("user-model");
+    let saved = repository
+        .save_model_preference(&preferred, ModelPreferenceSource::User)
+        .await
+        .unwrap();
+    assert_eq!(saved.default_engine_config.as_ref(), Some(&preferred));
+    let reopened = Repository::new(database);
+    assert_eq!(reopened.read_user_preferences().await.unwrap(), saved);
+    for source in [
+        ModelPreferenceSource::Agent,
+        ModelPreferenceSource::System,
+        ModelPreferenceSource::default(),
+    ] {
+        assert_eq!(
+            reopened
+                .save_model_preference(&config("subagent-model"), source)
+                .await
+                .unwrap(),
+            saved
+        );
+    }
+    assert_eq!(
+        reopened
+            .save_model_preference(&preferred, ModelPreferenceSource::User)
+            .await
+            .unwrap(),
+        saved,
+        "retrying the same preference does not bump its revision"
+    );
+    let next = reopened
+        .save_model_preference(&config("next-user-model"), ModelPreferenceSource::User)
+        .await
+        .unwrap();
+    assert_eq!(next.revision, saved.revision + 1);
+    assert_eq!(next.default_engine_config, Some(config("next-user-model")));
+}

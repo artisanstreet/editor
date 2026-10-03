@@ -275,17 +275,28 @@ impl NativeModelSelector {
                 "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                 harness.id
             );
+            // An engine that cannot offer a model right now (it needs
+            // sign-in, reported nothing, or reported an incomplete list) is
+            // greyed out and inert.
+            let usable = self.state.engine_usable(&harness.id);
             let mut tab = div()
                 .id(format!(
                     "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                     harness.id
                 ))
                 .debug_selector(move || selector.clone())
-                .on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
-                    view.switch_engine(engine_id.clone(), cx);
-                }))
+                .when(usable, |tab| {
+                    tab.on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
+                        view.switch_engine(engine_id.clone(), cx);
+                    }))
+                })
+                .when(!usable, |tab| tab.opacity(0.35))
                 .role(gpui::Role::Button)
-                .aria_label(harness.label.clone())
+                .aria_label(if usable {
+                    harness.label.clone()
+                } else {
+                    format!("{} (unavailable)", harness.label)
+                })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -363,6 +374,49 @@ pub(crate) fn animate_picker_menu(
     snapshot: PickerMenuMotion,
     surface: &'static str,
 ) -> AnyElement {
+    let duration = Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS);
+    animate_picker_menu_timed(
+        panel,
+        motion,
+        snapshot,
+        surface,
+        PickerMenuEntrance::Slide,
+        duration,
+        duration,
+    )
+}
+
+/// How a picker menu moves while it fades in and out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PickerMenuEntrance {
+    /// Slides 8 px toward its trigger (the picker's own recipe).
+    Slide,
+    /// The transitions-dev dropdown: grows from 97% to full size about
+    /// `origin` (a fraction of the panel's bounds) on open, and settles to
+    /// 99% on close, so the exit reads quieter than the entrance.
+    Scale {
+        /// The fixed point of the scale; the corner nearest the trigger.
+        origin: gpui::Point<f32>,
+    },
+}
+
+/// `--dropdown-pre-scale`: where an opening dropdown starts.
+const DROPDOWN_PRE_SCALE: f32 = 0.97;
+/// `--dropdown-closing-scale`: where a closing dropdown ends.
+const DROPDOWN_CLOSING_SCALE: f32 = 0.99;
+
+/// [`animate_picker_menu`] with its own entrance and separate open and close
+/// durations, for a surface that follows the transitions-dev dropdown
+/// (slower in than out) instead of the picker's shared 100 ms slide.
+pub(crate) fn animate_picker_menu_timed(
+    panel: Stateful<Div>,
+    motion: Rc<RefCell<PickerMenuMotion>>,
+    snapshot: PickerMenuMotion,
+    surface: &'static str,
+    entrance: PickerMenuEntrance,
+    open: Duration,
+    close: Duration,
+) -> AnyElement {
     let Some((from_opacity, from_offset, to_opacity, to_offset, generation)) =
         snapshot.transition()
     else {
@@ -380,18 +434,38 @@ pub(crate) fn animate_picker_menu(
         )
         .into(),
     );
-    panel
-        .top(px(from_offset))
-        .opacity(from_opacity)
+    // The motion state tracks presence as an offset from 8 (hidden) to 0
+    // (open); a scaled entrance reads the same presence as a scale.
+    let place = move |panel: Stateful<Div>, offset: f32, opacity: f32| match entrance {
+        PickerMenuEntrance::Slide => panel.top(px(offset)).opacity(opacity),
+        PickerMenuEntrance::Scale { origin } => {
+            let presence = 1.0 - (offset / 8.0).clamp(0.0, 1.0);
+            let rest = if phase == PickerMenuPhase::Closing {
+                DROPDOWN_CLOSING_SCALE
+            } else {
+                DROPDOWN_PRE_SCALE
+            };
+            panel.opacity(opacity).transform(
+                gpui::ElementTransform::scale(rest + (1.0 - rest) * presence).with_origin(origin),
+            )
+        }
+    };
+    place(panel, from_offset, from_opacity)
         .with_animation(
             animation_id,
-            Animation::new(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
-                .with_easing(engine_light_smooth_out),
+            Animation::new(if phase == PickerMenuPhase::Closing {
+                close
+            } else {
+                open
+            })
+            .with_easing(engine_light_smooth_out),
             move |panel, progress| {
                 motion.borrow_mut().apply_progress(generation, progress);
-                panel
-                    .top(px(from_offset + (to_offset - from_offset) * progress))
-                    .opacity(from_opacity + (to_opacity - from_opacity) * progress)
+                place(
+                    panel,
+                    from_offset + (to_offset - from_offset) * progress,
+                    from_opacity + (to_opacity - from_opacity) * progress,
+                )
             },
         )
         .into_any_element()

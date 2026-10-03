@@ -352,6 +352,7 @@ pub async fn run(config: ForgeLaunchConfig) -> Result<(), ForgeRuntimeError> {
             return Err(ForgeRuntimeError::ApplicationStartup(error));
         }
     };
+    crate::model_discovery::warm_in_background();
 
     Box::pin(run_with_context(ForgeRunContext {
         app,

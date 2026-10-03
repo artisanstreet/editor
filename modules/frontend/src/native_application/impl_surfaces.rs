@@ -242,8 +242,8 @@ impl NativeApplication {
     pub(super) fn desktop_brand(&self, cx: &Context<Self>) -> Div {
         let brand = div()
             .flex()
-            .items_center()
-            .gap(px(8.0))
+            .flex_col()
+            .items_start()
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
@@ -256,10 +256,10 @@ impl NativeApplication {
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
                     .text_size(px(20.0))
-                    .font_family("Artisan Neo")
-                    .font_weight(FontWeight::SEMIBOLD)
-                    // -0.05em tracking at 20px: 20 * -0.05 = -1.0px.
-                    .letter_spacing(px(-1.0))
+                    .font_family("Test Founders Grotesk")
+                    .font_weight(FontWeight::BOLD)
+                    // -0.025em tracking at 20px matches the Founders specimen.
+                    .letter_spacing(px(-0.5))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
             );
@@ -271,6 +271,7 @@ impl NativeApplication {
                     .truncate()
                     .text_size(px(11.0))
                     .line_height(px(16.0))
+                    .font_family(self.theme.typography.mono.family)
                     .text_color(self.theme.colors.muted_foreground.to_paint())
                     .child(badge),
             ),

@@ -37,12 +37,8 @@ const NEW_TASK_TITLE: &str = "New task";
 
 /// How a new task's first message is admitted.
 enum NewTaskAdmission {
-    /// Create the thread with `config`; `chosen` when the user's selection
-    /// resolved to it, so it becomes the default.
-    Admitted {
-        config: EngineRunConfig,
-        chosen: bool,
-    },
+    /// Create the thread with `config` without changing user preferences.
+    Admitted { config: EngineRunConfig },
     /// Refuse the send; nothing is created.
     Refused(SubmissionRefusal),
 }
@@ -67,8 +63,8 @@ impl RequestHandler {
                 .answer_project_submission(request_id, submit, replay)
                 .await;
         }
-        let (config, chosen) = match self.admit_new_task(project, submit).await {
-            NewTaskAdmission::Admitted { config, chosen } => (config, chosen),
+        let config = match self.admit_new_task(project, submit).await {
+            NewTaskAdmission::Admitted { config } => config,
             NewTaskAdmission::Refused(refusal) => {
                 let refused = DraftSubmissionOutcome::Refused(refusal);
                 return Ok(submitted(request_id, submit, refused));
@@ -108,15 +104,6 @@ impl RequestHandler {
                 DraftSubmissionError::Queue(error) => repository_failure(&error, request_id),
                 DraftSubmissionError::Draft(error) => draft_failure(&error, request_id),
             })?;
-        let first = matches!(
-            &submission,
-            ProjectDraftSubmission::Queued { result, .. }
-                if result.receipt.disposition == artisan_domain::ReceiptDisposition::Accepted
-        );
-        if first && chosen {
-            // The selection a send saves is the user's latest choice.
-            self.remember_default_engine_config(&config).await;
-        }
         self.answer_project_submission(request_id, submit, submission)
             .await
     }
@@ -141,10 +128,7 @@ impl RequestHandler {
                     .ok()
                     .and_then(|preferences| preferences.default_engine_config);
                 if let Some(config) = default {
-                    return NewTaskAdmission::Admitted {
-                        config,
-                        chosen: false,
-                    };
+                    return NewTaskAdmission::Admitted { config };
                 }
                 None
             }
@@ -160,10 +144,7 @@ impl RequestHandler {
             SubmissionPlan::Refuse(refusal) => NewTaskAdmission::Refused(refusal),
             SubmissionPlan::Admit {
                 save: Some(config), ..
-            } => NewTaskAdmission::Admitted {
-                config: *config,
-                chosen: true,
-            },
+            } => NewTaskAdmission::Admitted { config: *config },
             SubmissionPlan::Admit { save: None, .. } => {
                 unreachable!("an admitted selection on an unconfigured thread is always saved")
             }

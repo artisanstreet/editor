@@ -1,14 +1,14 @@
 //! The Forge user's preferences, navigation record, and account profile.
 //!
 //! The Forge owns every rule: a recorded navigation moves its project to the
-//! front and remembers its thread; a configuration the user saves on a
-//! thread becomes the default new threads start from; a legacy import only
+//! front and remembers its thread; an explicit user model preference sets
+//! the default new threads start from; a legacy import only
 //! fills what the Forge does not have yet. The account profile is the host
 //! account the Forge runs as.
 
 use artisan_domain::{
-    Command, EngineRunConfig, ImportLegacyPreferences, LegacyPreferencesImported, RecordNavigation,
-    RequestId,
+    Command, ImportLegacyPreferences, LegacyPreferencesImported, ModelPreferenceSource,
+    RecordNavigation, RequestId, SaveModelPreference,
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, ServerResponse};
 
@@ -99,27 +99,57 @@ impl RequestHandler {
         ))
     }
 
-    /// Makes a configuration the user saved on a thread the default new
-    /// threads start from. Best effort: the thread's own save already
-    /// succeeded, and a default that could not be stored leaves the previous
-    /// one.
-    /// Wakes every connection to push preferences a command may have changed
-    /// (a navigation, an import, or a saved configuration); only a changed
-    /// value crosses the wire.
+    /// Saves only explicit user choices. Runtime choices from agents or
+    /// background work never update the user's default.
+    pub(super) async fn save_model_preference_outcome(
+        &self,
+        request_id: &RequestId,
+        save: &SaveModelPreference,
+    ) -> Result<ServerResponse, ProtocolFailure> {
+        if save.source != ModelPreferenceSource::User {
+            return self.read_user_preferences_outcome(request_id).await;
+        }
+        let catalog = crate::composer_catalog_handler::host_catalog(self.account_usage.as_deref())
+            .await
+            .map_err(|_| {
+                super::failures::typed_failure(
+                    artisan_protocol::ErrorCode::Internal,
+                    "The model catalog is unavailable. Retry saving your preference.",
+                    true,
+                    request_id,
+                )
+            })?;
+        let config = super::model_selection::resolve_in_catalog(catalog, &save.selection, None)
+            .map_err(|refusal| {
+                super::failures::typed_failure(
+                    artisan_protocol::ErrorCode::InvalidInput,
+                    refusal.message(),
+                    false,
+                    request_id,
+                )
+            })?
+            .into_config();
+        let stored = self
+            .repository
+            .save_model_preference(&config, save.source)
+            .await
+            .map_err(|error| repository_failure(&error, request_id))?;
+        Ok(outcome(
+            request_id,
+            ResponsePayload::UserPreferences(crate::account_profile::user_preferences(stored)),
+        ))
+    }
+
+    /// Wakes connections after explicit preference changes.
     pub(super) fn wake_preferences(&self, command: &Command) {
         if matches!(
             command,
             Command::RecordNavigation(_)
                 | Command::ImportLegacyPreferences(_)
-                | Command::SetThreadEngineConfig(_)
-                | Command::SubmitComposerDraft(_)
+                | Command::SaveModelPreference(_)
         ) && let Some(notifier) = &self.conversation_commit_notifier
         {
             notifier.publish_host_state();
         }
-    }
-
-    pub(super) async fn remember_default_engine_config(&self, config: &EngineRunConfig) {
-        let _ = self.repository.remember_default_engine_config(config).await;
     }
 }

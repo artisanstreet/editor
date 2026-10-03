@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use claude::discover_claude;
 use codex::discover_codex;
 use cursor::discover_cursor;
-use grok::discover_grok;
+use grok::{GrokListing, discover_grok};
 use opencode2::discover_opencode2;
 
 /// How long one discovery snapshot is served before re-probing.
@@ -128,6 +128,9 @@ pub(crate) struct DiscoveryBundle {
     /// Engines whose CLI is not installed on this machine; their harnesses
     /// are hidden from the picker until the engine appears.
     pub(crate) missing_engines: Vec<&'static str>,
+    /// Installed engines whose CLI reported it is signed out. They report no
+    /// models and are not runnable, so the picker greys their tab out.
+    pub(crate) unauthenticated_engines: Vec<&'static str>,
 }
 
 impl DiscoveryBundle {
@@ -146,21 +149,80 @@ type Cache = Mutex<Option<(Instant, Duration, Arc<DiscoveryBundle>)>>;
 
 static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
 
+/// Admits one probe at a time: a cold read waits for it, a stale read only
+/// starts one when none is running.
+static PROBE: Mutex<()> = Mutex::const_new(());
+
 fn cache() -> &'static Cache {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
-/// Returns the current discovery bundle, probing all engines when the cache is
-/// cold or stale. Probes run concurrently and each adapter is independently
+/// Returns the current discovery bundle.
+///
+/// Once any probe has completed this never waits on engine processes: a
+/// stale bundle is served as is while one background probe refreshes it,
+/// so catalog reads and sends (which resolve their model against the
+/// catalog) answer immediately. Only a cold Forge waits, once, for its
+/// first probe. Probes run concurrently, each adapter independently
 /// bounded; an adapter that fails contributes nothing.
 pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
-    let mut guard = cache().lock().await;
-    if let Some((observed, ttl, bundle)) = guard.as_ref()
-        && observed.elapsed() < *ttl
-    {
-        return Arc::clone(bundle);
+    if let Some((observed, ttl, bundle)) = cache().lock().await.clone() {
+        if observed.elapsed() >= ttl {
+            refresh_in_background();
+        }
+        return bundle;
     }
+    let _probe = PROBE.lock().await;
+    // A concurrent cold read may have probed while this one waited.
+    if let Some((_, _, bundle)) = cache().lock().await.clone() {
+        return bundle;
+    }
+    probe_and_store().await
+}
 
+/// Warms discovery at Forge startup so the first catalog read rarely waits:
+/// reads that arrive meanwhile join this probe instead of starting their own.
+pub(crate) fn warm_in_background() {
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async {
+            let _ = discovery_bundle().await;
+        });
+    }
+}
+
+/// Starts a background probe unless one is already running. Outside a Tokio
+/// runtime the stale bundle simply keeps serving until the next read.
+fn refresh_in_background() {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let Ok(probe) = PROBE.try_lock() else {
+        return;
+    };
+    drop(probe);
+    runtime.spawn(async {
+        let Ok(_probe) = PROBE.try_lock() else {
+            return;
+        };
+        let stale = cache()
+            .lock()
+            .await
+            .as_ref()
+            .is_none_or(|(observed, ttl, _)| observed.elapsed() >= *ttl);
+        if stale {
+            probe_and_store().await;
+        }
+    });
+}
+
+/// Probes every engine and stores the bundle. The cache lock is never held
+/// across the probes, so readers keep answering from the previous bundle.
+async fn probe_and_store() -> Arc<DiscoveryBundle> {
+    let previous = cache()
+        .lock()
+        .await
+        .as_ref()
+        .map(|(_, _, bundle)| Arc::clone(bundle));
     let codex_program = managed_program(ManagedEngine::Codex);
     let cursor_program = managed_program(ManagedEngine::Cursor);
     let grok_program = managed_program(ManagedEngine::Grok);
@@ -177,6 +239,14 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
     let mut models = Vec::new();
     let mut probed_engines = Vec::new();
     let mut missing_engines = Vec::new();
+    let mut unauthenticated_engines = Vec::new();
+    let grok = grok.map(|listing| match listing {
+        GrokListing::Models(rows) => rows,
+        GrokListing::SignedOut => {
+            unauthenticated_engines.push("grok");
+            Vec::new()
+        }
+    });
     for (engine_id, installed, rows) in [
         ("codex", codex_program.is_some(), codex),
         ("claude", true, claude),
@@ -198,7 +268,7 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
                 retry_needed = true;
                 // Retain only previously discovered runtime rows during a
                 // transient failure. A successful probe replaces them.
-                if let Some((_, _, previous)) = guard.as_ref() {
+                if let Some(previous) = previous.as_ref() {
                     models.extend(
                         previous
                             .models
@@ -215,13 +285,14 @@ pub(crate) async fn discovery_bundle() -> Arc<DiscoveryBundle> {
         models,
         probed_engines,
         missing_engines,
+        unauthenticated_engines,
     });
     let ttl = if retry_needed {
         Duration::from_secs(10)
     } else {
         DISCOVERY_TTL
     };
-    *guard = Some((Instant::now(), ttl, Arc::clone(&bundle)));
+    *cache().lock().await = Some((Instant::now(), ttl, Arc::clone(&bundle)));
     bundle
 }
 

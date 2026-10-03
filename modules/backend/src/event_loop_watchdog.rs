@@ -93,12 +93,20 @@ fn watch(origin: Instant, stamp: &AtomicU64, running: &AtomicBool, mut report: i
         let lag = now.saturating_sub(last);
         match blocked_since {
             None if lag > millis(STALL) => {
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::instant!("watchdog", "forge.event_loop_stalled", "lag_ms" => lag);
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::incident!("forge.event_loop_stalled");
                 report(format!(
                     "Forge event loop blocked for {lag} ms: lease heartbeats, request deadlines and conversation delivery are stalled"
                 ));
                 blocked_since = Some(last);
             }
             Some(since) if lag <= millis(STALL) => {
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::instant!("watchdog", "forge.event_loop_resumed", "duration_ms" => last.saturating_sub(since));
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::incident!("forge.event_loop_resumed");
                 report(format!(
                     "Forge event loop resumed after being blocked for {} ms",
                     last.saturating_sub(since)

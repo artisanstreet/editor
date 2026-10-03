@@ -219,28 +219,8 @@ impl TranscriptShaper {
         tone: MarkdownBodyTone,
         row_ledger: Option<&Cell<TranscriptShapeLedger>>,
     ) -> AnyElement {
-        let within_budget = transcript_markdown_within_budget(body.len());
-        let mut frame = self.frame_ledger.get();
-        frame.record(body.len(), within_budget);
-        self.frame_ledger.set(frame);
-        if let Some(row_ledger) = row_ledger {
-            let mut row = row_ledger.get();
-            row.record(body.len(), within_budget);
-            row_ledger.set(row);
-        }
-        if !within_budget {
-            let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
-            return div()
-                .w_full()
-                .max_w(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX))
-                .debug_selector(|| format!("{selector}-markdown"))
-                .child(SelectableText::retained(
-                    plain_id,
-                    body.to_owned(),
-                    *theme,
-                    Vec::new(),
-                ))
-                .into_any_element();
+        if !self.record(body.len(), row_ledger) {
+            return plain_markdown(body, theme, &selector);
         }
         let titles = self.rich_link_titles.borrow();
         let probe = SurfaceRichLinkTitles {
@@ -251,6 +231,66 @@ impl TranscriptShaper {
         self.renderer
             .render_source_with_tone_and_titles(body, *theme, selector, tone, &probe)
     }
+
+    /// Shapes one revealing prefix of a streamed reply, fading freshly
+    /// revealed units by `fade` (see
+    /// [`MarkdownRenderer::render_revealing_source`]).
+    ///
+    /// Returns the element and the prefix's visible length. An over-budget
+    /// body renders plain and whole, exactly like [`Self::render`].
+    pub(super) fn render_revealing(
+        &self,
+        body: &str,
+        theme: &ArtisanTheme,
+        selector: String,
+        tone: MarkdownBodyTone,
+        row_ledger: Option<&Cell<TranscriptShapeLedger>>,
+        fade: &RevealFade,
+    ) -> (AnyElement, usize) {
+        if !self.record(body.len(), row_ledger) {
+            return (plain_markdown(body, theme, &selector), body.len());
+        }
+        let titles = self.rich_link_titles.borrow();
+        let probe = SurfaceRichLinkTitles {
+            titles: &titles,
+            missing: &self.rich_link_missing,
+            now_ms: self.now_ms(),
+        };
+        self.renderer
+            .render_revealing_source(body, *theme, selector, tone, &probe, fade)
+    }
+
+    /// Records one shaped body in the frame and row ledgers and reports
+    /// whether it is within the per-row budget.
+    fn record(&self, len: usize, row_ledger: Option<&Cell<TranscriptShapeLedger>>) -> bool {
+        let within_budget = transcript_markdown_within_budget(len);
+        let mut frame = self.frame_ledger.get();
+        frame.record(len, within_budget);
+        self.frame_ledger.set(frame);
+        if let Some(row_ledger) = row_ledger {
+            let mut row = row_ledger.get();
+            row.record(len, within_budget);
+            row_ledger.set(row);
+        }
+        within_budget
+    }
+}
+
+/// The exact full text of an over-budget body as one plain selectable leaf.
+fn plain_markdown(body: &str, theme: &ArtisanTheme, selector: &str) -> AnyElement {
+    let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
+    let selector = selector.to_owned();
+    div()
+        .w_full()
+        .max_w(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX))
+        .debug_selector(move || format!("{selector}-markdown"))
+        .child(SelectableText::retained(
+            plain_id,
+            body.to_owned(),
+            *theme,
+            Vec::new(),
+        ))
+        .into_any_element()
 }
 
 /// Measured turn heights plus cached prefix offsets for window planning.

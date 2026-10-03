@@ -400,6 +400,7 @@ pub fn project_activities(
             kind: CandidateKind::Approval {
                 prompt: truncate_bounded(row.description(), MAX_ACTIVITY_BODY_BYTES),
                 approval_id,
+                decision: row.approved(),
             },
         });
     }
@@ -544,9 +545,11 @@ pub fn project_activities(
             CandidateKind::Approval {
                 prompt,
                 approval_id,
+                decision,
             } => SceneFactKind::Approval {
                 prompt,
                 approval_id,
+                decision,
             },
             CandidateKind::Question { prompt, answer } => {
                 SceneFactKind::Question { prompt, answer }
@@ -672,6 +675,7 @@ enum CandidateKind {
     Approval {
         prompt: String,
         approval_id: ObservationId,
+        decision: Option<bool>,
     },
     Question {
         prompt: String,
@@ -702,11 +706,12 @@ mod tests {
     use crate::conversation_state_machine::SceneFactKind;
     use crate::engine_observation_state::EngineObservationState;
     use artisan_domain::{
-        ConversationCursor, ConversationLifecycle, ConversationSnapshot, ConversationTurn,
-        EngineObservationAttribution, EngineObservationEvent, FileAction, FileObservation,
-        Observation, ObservationId, ObservationSequence, Revision, RunId, TerminalActivityInput,
-        TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
-        TurnId, TurnOrdinal, UnixMillis,
+        ApprovalObservation, ApprovalRequest, ConversationCursor, ConversationLifecycle,
+        ConversationSnapshot, ConversationTurn, EngineObservationAttribution,
+        EngineObservationEvent, FileAction, FileObservation, Observation, ObservationId,
+        ObservationSequence, Revision, RunId, TerminalActivityInput, TerminalActivityObservation,
+        TerminalActivityState, ThreadId, ToolAction, ToolObservation, TurnId, TurnOrdinal,
+        UnixMillis,
     };
 
     fn observation_id(value: &str) -> ObservationId {
@@ -794,6 +799,62 @@ mod tests {
             fact.activity_lifecycle,
             Some(ConversationLifecycle::Completed)
         );
+    }
+
+    #[test]
+    fn a_replayed_resolution_carries_the_decision_into_the_approval_fact() {
+        // Reopening a thread replays its history into fresh state: the
+        // durable resolution must settle the card, not leave it answerable.
+        let thread = ThreadId::parse("thread-approval").expect("thread");
+        let turn = TurnId::parse("turn-approval").expect("turn");
+        let run = RunId::parse("run-approval").expect("run");
+        let request = || {
+            ApprovalRequest::command(String::from("npm view @sveltejs/kit"), None, None)
+                .expect("fixture approval request is valid")
+        };
+        let requested = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            1,
+            Observation::Approval(
+                ApprovalObservation::requested(
+                    observation_id("obs-approval"),
+                    sequence(5),
+                    observation_id("approval-1"),
+                    String::from("May I access the npm registry?"),
+                    request(),
+                )
+                .expect("fixture requested approval is valid"),
+            ),
+        );
+        let resolved = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            2,
+            Observation::Approval(
+                ApprovalObservation::resolved(
+                    observation_id("obs-approval-resolved"),
+                    sequence(6),
+                    observation_id("approval-1"),
+                    String::from("May I access the npm registry?"),
+                    request(),
+                    true,
+                )
+                .expect("fixture resolved approval is valid"),
+            ),
+        );
+        let mut state = EngineObservationState::new(thread.clone());
+        let _ = state.apply(1, &requested);
+        let _ = state.apply(2, &resolved);
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert_eq!(projection.facts.len(), 1, "one card per approval");
+        match &projection.facts[0].kind {
+            SceneFactKind::Approval { decision, .. } => assert_eq!(*decision, Some(true)),
+            other => panic!("expected an approval fact, got {other:?}"),
+        }
     }
 
     #[test]

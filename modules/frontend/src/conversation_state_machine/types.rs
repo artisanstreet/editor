@@ -239,10 +239,12 @@ pub enum SceneFactKind {
         /// Bounded checklist entries.
         entries: Vec<String>,
     },
-    /// Approval request card: the prompt and the engine's approval identity.
+    /// Approval request card: the prompt, the engine's approval identity,
+    /// and the recorded decision once resolved (true allowed, false denied).
     Approval {
         prompt: String,
         approval_id: ObservationId,
+        decision: Option<bool>,
     },
     /// Agent question: its prompt and, once given, the answer (empty when
     /// the user skipped it).
@@ -349,9 +351,11 @@ impl SceneFactKind {
             Self::Approval {
                 prompt,
                 approval_id,
+                decision,
             } => SceneItemKind::Approval {
                 prompt: prompt.clone(),
                 approval_id: approval_id.clone(),
+                decision: *decision,
             },
             Self::Question { prompt, answer } => SceneItemKind::Question {
                 prompt: prompt.clone(),

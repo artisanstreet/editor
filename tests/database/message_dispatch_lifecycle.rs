@@ -955,3 +955,38 @@ async fn lease_renewal_is_owner_fenced_and_rejects_terminal_rows() {
         Err(RepositoryError::InvalidDispatchState { state, .. }) if state == "completed"
     ));
 }
+
+#[tokio::test]
+async fn lease_renewal_survives_a_wall_clock_that_stepped_back() {
+    // The WSL host-time sync steps the wall clock backwards; a heartbeat read
+    // after such a step is earlier than the stamp the last write left. That
+    // renewal must still extend the lease, and must never move the stamp back.
+    let (database, repository) = memory_database().await;
+    seed_foundation(&database).await;
+    seed_dispatch(&database, "message-1", "request-1", 0, 3, 3).await;
+    assert_eq!(claim_seeded(&repository, 0x11).await, 1);
+    let message_id = MessageId::parse("message-1").expect("test message id should parse");
+    repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(19),
+            UnixMillis::from_millis(60),
+        )
+        .await
+        .expect("first renewal should succeed");
+
+    let stepped_back = repository
+        .renew_message_dispatch_lease(
+            &message_id,
+            &lease_owner(0x11),
+            UnixMillis::from_millis(15),
+            UnixMillis::from_millis(70),
+        )
+        .await
+        .expect("a renewal after a backwards clock step should succeed");
+    assert_eq!(stepped_back.updated_at, UnixMillis::from_millis(19));
+    let persisted = dispatch(&database, "message-1").await;
+    assert_eq!(persisted.lease_expires_at_ms, Some(70));
+    assert_eq!(persisted.updated_at_ms, 19, "the stamp never moves backwards");
+}

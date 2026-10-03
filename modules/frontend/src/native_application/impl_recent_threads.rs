@@ -21,6 +21,8 @@ pub(super) const RECENT_OPEN_WAIT: Duration = Duration::from_secs(10);
 
 /// A chosen recent thread that has not opened yet.
 pub(super) struct AwaitedOpen {
+    #[cfg(feature = "flight-recorder")]
+    _trace: artisan_tracing::Span,
     pub(super) project: ProjectId,
     pub(super) thread: ThreadId,
     /// Whether the projects were listed again for it.
@@ -54,6 +56,8 @@ impl NativeApplication {
         listing: RecentThreadListing,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "apply_recent_threads");
         let threads = &mut self.sidebar_threads;
         if threads.recent.as_ref() != Some(&listing) {
             threads.recent = Some(listing);
@@ -159,7 +163,11 @@ impl NativeApplication {
         thread: ThreadId,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "open_recent_thread");
         self.sidebar_threads.awaited_open = Some(AwaitedOpen {
+            #[cfg(feature = "flight-recorder")]
+            _trace: artisan_tracing::span!("navigation", "recent_thread.wait", "project_id" => project.as_str(), "thread_id" => thread.as_str()),
             project,
             thread,
             catalog_requested: false,
@@ -199,6 +207,12 @@ impl NativeApplication {
     }
 
     fn fail_recent_open(&mut self, awaited: &AwaitedOpen, reason: &str, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::instant!("navigation", "recent_thread.failed", "thread_id" => awaited.thread.as_str(), "reason" => reason);
+        #[cfg(feature = "flight-recorder")]
+        self.trace_state();
+        #[cfg(feature = "flight-recorder")]
+        artisan_tracing::incident!("recent_thread.failed");
         let title = self
             .sidebar_threads
             .recent
@@ -226,6 +240,8 @@ impl NativeApplication {
         thread: ThreadId,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "open_known_recent_thread");
         if self.selected_project.as_ref() != Some(&project) {
             self.enter_project(project, true, Some(thread), cx);
         } else if self.thread_is_listed(&thread) {
@@ -377,6 +393,7 @@ mod tests {
         RecentThread {
             thread,
             subtitle: DisplayName::parse("owner/repo").unwrap(),
+            project_icon: Default::default(),
         }
     }
 

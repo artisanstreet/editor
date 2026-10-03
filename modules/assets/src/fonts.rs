@@ -1,5 +1,5 @@
 //! Bundled Artisan Neo, Cal Sans, Spline Sans and Spline Sans Mono
-//! TrueType fonts.
+//! native OpenType fonts, plus Test Founders Grotesk Bold for evaluation.
 //!
 //! Files are embedded at compile time and registered once through
 //! `artisan_ui::fonts::register_bundled_fonts`. Family names and weight ranges
@@ -7,8 +7,8 @@
 //! weights 300–700 plus the conversation-prose weights 410 and 630 are
 //! registered because the WGPU text backend matches faces by metadata and
 //! does not apply variable weight axes. See `fonts/FONTS.md` for upstream
-//! sources, licenses and SHA-256 hashes. TrueType is required by
-//! DirectWrite's in-memory loader; WOFF2 is not supported there.
+//! sources, licenses and SHA-256 hashes. Native sfnt containers are required
+//! by DirectWrite's in-memory loader; WOFF2 is not supported there.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -26,7 +26,7 @@ pub struct BundledFont {
     pub license_path: &'static str,
     /// Embedded license or provenance note contents.
     pub license_text: &'static str,
-    /// Unmodified upstream TrueType bytes (provenance in `fonts/FONTS.md`).
+    /// Unmodified upstream font bytes (provenance in `fonts/FONTS.md`).
     pub bytes: &'static [u8],
     /// Static weight instances registered by renderers without variable-axis support.
     pub static_faces: &'static [&'static [u8]],
@@ -103,6 +103,15 @@ pub const ALL: &[BundledFont] = &[
         ],
     },
     BundledFont {
+        file_name: "test-founders-grotesk-bold.otf",
+        family: "Test Founders Grotesk",
+        weights: (700, 700),
+        license_path: "licenses/founders-grotesk-test.txt",
+        license_text: include_str!("../licenses/founders-grotesk-test.txt"),
+        bytes: include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
+        static_faces: &[include_bytes!("../fonts/test-founders-grotesk-bold.otf")],
+    },
+    BundledFont {
         file_name: "twemoji-mozilla.ttf",
         family: "Twemoji Mozilla",
         weights: (400, 400),
@@ -146,17 +155,18 @@ mod tests {
     /// Expected `(file name, byte length)` pins: any truncation or
     /// re-encode of a vendored binary fails here before it can reach a
     /// renderer and silently fall back to a system face.
-    const EXPECTED_LENGTHS: [(&str, usize); 5] = [
+    const EXPECTED_LENGTHS: [(&str, usize); 6] = [
         ("artisan-neo-600.ttf", 343_516),
         ("cal-sans-700.ttf", 219_644),
         ("spline-sans-variable.ttf", 146_896),
         ("spline-sans-mono-variable.ttf", 118_744),
+        ("test-founders-grotesk-bold.otf", 13_928),
         ("twemoji-mozilla.ttf", 1_474_284),
     ];
 
     #[test]
     fn catalog_carries_declared_text_and_emoji_faces() {
-        assert_eq!(ALL.len(), 5, "four text families plus the emoji fallback");
+        assert_eq!(ALL.len(), 6, "five text families plus the emoji fallback");
         let families: Vec<&str> = ALL.iter().map(|font| font.family).collect();
         assert_eq!(
             families,
@@ -165,6 +175,7 @@ mod tests {
                 "Cal Sans",
                 "Spline Sans",
                 "Spline Sans Mono",
+                "Test Founders Grotesk",
                 "Twemoji Mozilla"
             ],
             "catalog order is by family name for binary search"
@@ -180,22 +191,18 @@ mod tests {
     }
 
     #[test]
-    fn embedded_bytes_are_truetype_sfnt_containers() {
-        // TrueType sfnt version `00 01 00 00`: catches text-encoding damage
-        // (e.g. line-ending conversion) at compile-test time, and pins the
-        // DirectWrite-loadable container — WOFF2 (`wOF2`) is rejected by the
-        // in-memory loader on Windows (`DWRITE_E_FILEFORMAT`) and must never
-        // be vendored here again.
+    fn embedded_bytes_are_native_sfnt_containers() {
+        // Accept TrueType and CFF OpenType sfnt containers. DirectWrite
+        // rejects WOFF2 (`wOF2`) in its in-memory loader.
         for font in ALL {
             assert!(
                 font.bytes.len() > 48,
-                "{}: implausibly small for a variable font",
+                "{}: implausibly small for a font",
                 font.file_name
             );
-            assert_eq!(
-                &font.bytes[0..4],
-                b"\x00\x01\x00\x00",
-                "{}: missing TrueType sfnt magic; the binary is damaged or substituted",
+            assert!(
+                matches!(&font.bytes[0..4], b"\x00\x01\x00\x00" | b"OTTO"),
+                "{}: missing native sfnt magic; the binary is damaged or substituted",
                 font.file_name
             );
         }
@@ -204,7 +211,7 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 15);
+        assert_eq!(shaped.len(), 16);
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);

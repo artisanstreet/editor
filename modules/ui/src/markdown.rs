@@ -740,7 +740,7 @@ impl FormatFrame {
 /// markers (`- [ ]` / `- [x]`), which `pulldown-cmark` only scans when
 /// [`Options::ENABLE_TASKLISTS`] is set, and GFM tables. No other GFM
 /// extension is enabled.
-const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_TABLES);
+pub(crate) const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_TABLES);
 
 impl DocumentBuilder {
     /// Walks every offset-tagged event of `source` into blocks.

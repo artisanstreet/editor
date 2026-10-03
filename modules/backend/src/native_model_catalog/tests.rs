@@ -436,6 +436,7 @@ fn discovered_codex_rows_carry_reported_fields_and_context_policy() {
         ],
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_catalog_result_with_discovery(
         fixture_result(),
@@ -517,6 +518,7 @@ fn cli_discovered_opencode2_rows_carry_runnable_route_identity() {
         ],
         probed_engines: vec!["opencode2"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_discovery(&discovery).expect("catalog builds");
     let id = artisan_catalog::wire::opencode2_catalog_id("kimi-k3", "opencode-go", None)
@@ -566,6 +568,7 @@ fn missing_engine_harnesses_are_hidden() {
         models: Vec::new(),
         probed_engines: Vec::new(),
         missing_engines: vec!["cursor", "grok"],
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_discovery(&discovery).expect("catalog builds");
     let hidden = |id: &str| catalog.manifest.harness(id).expect("harness exists").hidden;
@@ -578,6 +581,27 @@ fn missing_engine_harnesses_are_hidden() {
     assert!(!hidden("codex"));
     assert!(!hidden("claude"));
     assert!(!hidden("opencode2"));
+}
+
+#[test]
+fn signed_out_engines_stay_visible_but_cannot_run() {
+    let discovery = crate::model_discovery::DiscoveryBundle {
+        models: Vec::new(),
+        probed_engines: vec!["grok"],
+        missing_engines: Vec::new(),
+        unauthenticated_engines: vec!["grok"],
+    };
+    let catalog = from_discovery(&discovery).expect("catalog builds");
+    assert!(
+        !catalog
+            .manifest
+            .harness("grok")
+            .expect("grok harness")
+            .hidden
+    );
+    assert!(!catalog.runnable_harness_ids.iter().any(|id| id == "grok"));
+    assert!(!catalog.engine_has_models("grok"));
+    assert!(catalog.runnable_harness_ids.iter().any(|id| id == "codex"));
 }
 
 #[test]
@@ -603,6 +627,7 @@ fn discovered_display_names_are_dehyphenated() {
         ],
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_catalog_result_with_discovery(
         fixture_result(),
@@ -648,6 +673,7 @@ fn discovery_adds_claude_rows_with_1m_policy_only_when_eligible() {
         ],
         probed_engines: vec!["claude"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_catalog_result_with_discovery(
         fixture_result(),
@@ -707,6 +733,7 @@ fn hidden_discovered_rows_are_never_surfaced() {
         ],
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_catalog_result_with_discovery(
         fixture_result(),
@@ -740,6 +767,7 @@ fn picker_rows_follow_the_engine_reported_order() {
             .collect(),
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     })
     .expect("scope-free catalog builds");
     let rows = catalog.models_for_engine("codex", "", None);
@@ -765,6 +793,7 @@ fn discovery_only_catalog_contains_exactly_the_discovered_rows() {
         )],
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     })
     .expect("scope-free catalog builds");
     assert_eq!(
@@ -800,6 +829,7 @@ fn discovery_rows_survive_wire_validation() {
         )],
         probed_engines: vec!["codex"],
         missing_engines: Vec::new(),
+        unauthenticated_engines: Vec::new(),
     };
     let catalog = from_catalog_result(fixture_result(), &ModelFavoritesSnapshot::empty())
         .expect("base catalog");

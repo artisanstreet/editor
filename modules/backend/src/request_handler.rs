@@ -785,6 +785,8 @@ impl RequestHandler {
         request_id: &RequestId,
         request: &ClientRequest,
     ) -> Result<ServerResponse, ProtocolFailure> {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "request.handle", "request_id" => request_id.as_str());
         match request {
             ClientRequest::Query(query) => self.query_outcome(request_id, query).await,
             ClientRequest::Command(command) => self.command_outcome(request_id, command).await,
@@ -865,6 +867,8 @@ impl RequestHandler {
         request: &ClientRequest,
     ) -> RequestHandlerResponse {
         context.observe_usage();
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "request.with_receipt", "request_id" => request_id.as_str());
         match request {
             ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)) => {
                 self.subscribe_with_receipt_in_context(context, request_id, subscribe)
@@ -1078,14 +1082,8 @@ impl RequestHandler {
                 self.answer_questions_outcome(request_id, answer).await
             }
             Command::SetThreadEngineConfig(config) => {
-                let response = self
-                    .set_thread_engine_config_outcome(request_id, config.as_ref())
-                    .await;
-                if response.is_ok() {
-                    // A configuration the user saves is the new default.
-                    self.remember_default_engine_config(config.config()).await;
-                }
-                response
+                self.set_thread_engine_config_outcome(request_id, config.as_ref())
+                    .await
             }
             Command::WithdrawQueuedMessage(command) => {
                 self.withdraw_composer_message(request_id, command).await
@@ -1109,6 +1107,9 @@ impl RequestHandler {
             }
             Command::SubmitComposerDraft(submit) => {
                 self.submit_composer_draft_outcome(request_id, submit).await
+            }
+            Command::SaveModelPreference(save) => {
+                self.save_model_preference_outcome(request_id, save).await
             }
             Command::RecordNavigation(record) => {
                 self.record_navigation_outcome(request_id, record).await

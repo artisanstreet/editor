@@ -28,6 +28,7 @@ fn row(id: &str, activity: i64) -> RecentThread {
             updated_at: UnixMillis::from_millis(0),
         },
         subtitle: DisplayName::parse("owner/repo").expect("subtitle"),
+        project_icon: Default::default(),
     }
 }
 

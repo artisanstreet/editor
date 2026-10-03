@@ -253,25 +253,29 @@ impl BuildIdentity {
         }
     }
 
-    /// In-app badge beside the wordmark: the title marker of installed
-    /// non-stable builds. Unstaged binaries are marked only in the OS window
-    /// title, so test and fixture renders keep the product's own chrome.
-    ///
-    /// The badge shares the narrow sidebar column with the wordmark, so it
-    /// carries a seven-character commit.
+    /// In-app badge beneath the wordmark, with a channel prefix and an
+    /// uppercase seven-character commit. Stable and beta payloads use `P`,
+    /// development payloads `D`, and nightly payloads `N`. Unstaged binaries
+    /// have no payload identity and omit the badge.
     #[must_use]
     pub fn badge(&self) -> Option<String> {
         match self {
-            Self::Installed(info) if info.channel == Channel::Stable => None,
-            Self::Installed(info) => Some(match &info.commit {
-                Some(commit) => format!(
-                    "{} {}{}",
-                    info.channel.label(),
-                    commit.get(..7).unwrap_or(commit),
-                    if info.dirty { "+" } else { "" }
-                ),
-                None => info.channel.label().to_owned(),
-            }),
+            Self::Installed(info) => {
+                let prefix = match info.channel {
+                    Channel::Stable | Channel::Beta => "P",
+                    Channel::Dev => "D",
+                    Channel::Nightly => "N",
+                };
+                Some(match &info.commit {
+                    Some(commit) => {
+                        format!(
+                            "{prefix}-{}",
+                            commit.get(..7).unwrap_or(commit).to_ascii_uppercase()
+                        )
+                    }
+                    None => prefix.to_owned(),
+                })
+            }
             Self::Unstaged(_) => None,
         }
     }

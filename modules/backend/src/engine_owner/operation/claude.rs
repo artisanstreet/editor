@@ -497,18 +497,15 @@ async fn run_claude_title(
         .take(CLAUDE_TITLE_MAX_BYTES);
     let stderr = child.stderr.take();
     let mut output = Vec::new();
-    let (read, ()) = tokio::join!(
-        stdout.read_to_end(&mut output),
-        async {
-            if let Some(stderr) = stderr {
-                let _ = tokio::io::copy(
-                    &mut stderr.take(CLAUDE_TITLE_MAX_BYTES),
-                    &mut tokio::io::sink(),
-                )
-                .await;
-            }
+    let (read, ()) = tokio::join!(stdout.read_to_end(&mut output), async {
+        if let Some(stderr) = stderr {
+            let _ = tokio::io::copy(
+                &mut stderr.take(CLAUDE_TITLE_MAX_BYTES),
+                &mut tokio::io::sink(),
+            )
+            .await;
         }
-    );
+    });
     read.map_err(|error| format!("reading the naming run's output: {error}"))?;
     let status = child
         .wait()

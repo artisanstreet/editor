@@ -1086,6 +1086,8 @@ fn every_project_action_fence_disables_the_native_rail_action(cx: &mut TestAppCo
             application.intake_stage = None;
 
             application.thread_switch_flight = Some(ThreadSwitchFlight {
+                #[cfg(feature = "flight-recorder")]
+                trace: artisan_tracing::span!("navigation", "test.thread_switch"),
                 source_thread: ThreadId::parse("rail-source").expect("thread"),
                 target_thread: Some(ThreadId::parse("rail-target").expect("thread")),
                 generation: 1,

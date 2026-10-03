@@ -141,12 +141,16 @@ fn only_stable_builds_omit_the_title_marker() {
 
     let dev = BuildIdentity::Installed(info(Channel::Dev, Some("1a2b3c4d5e6f"), true));
     assert_eq!(dev.title_marker().as_deref(), Some("Dev 1a2b3c4d5e+"));
-    assert_eq!(dev.badge().as_deref(), Some("Dev 1a2b3c4+"));
+    assert_eq!(dev.badge().as_deref(), Some("D-1A2B3C4"));
 
     let nightly = BuildIdentity::Installed(info(Channel::Nightly, None, false));
     assert_eq!(nightly.title_marker().as_deref(), Some("Nightly"));
-    assert_eq!(nightly.badge().as_deref(), Some("Nightly"));
-    assert_eq!(stable.badge(), None);
+    assert_eq!(nightly.badge().as_deref(), Some("N"));
+    assert_eq!(stable.badge().as_deref(), Some("P-1A2B3C4"));
+    let nightly = BuildIdentity::Installed(info(Channel::Nightly, Some("aaee7c012345"), false));
+    assert_eq!(nightly.badge().as_deref(), Some("N-AAEE7C0"));
+    let beta = BuildIdentity::Installed(info(Channel::Beta, Some("aaee7c012345"), false));
+    assert_eq!(beta.badge().as_deref(), Some("P-AAEE7C0"));
     assert_eq!(
         BuildIdentity::Unstaged(artisan_build_info::UnstagedBuild::this_binary()).badge(),
         None

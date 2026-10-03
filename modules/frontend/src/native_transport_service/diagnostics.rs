@@ -274,6 +274,11 @@ pub enum StartupError {
     /// A named startup stage failed without retaining its source.
     #[error("native startup stage failed")]
     Stage(ServiceFailureStage),
+    /// A startup stage could not reach what it reads, such as credential
+    /// files on a WSL host that is down or restarting: the host is
+    /// unavailable, not the credential rejected.
+    #[error("native startup stage could not reach the host")]
+    Unreachable(ServiceFailureStage),
 }
 
 impl StartupError {
@@ -301,6 +306,9 @@ impl StartupError {
                     _ => ServiceFailureCategory::Unavailable,
                 };
                 ServiceFailure::new(stage, category)
+            }
+            Self::Unreachable(stage) => {
+                ServiceFailure::new(stage, ServiceFailureCategory::Unavailable)
             }
         }
     }

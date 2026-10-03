@@ -92,6 +92,13 @@ impl NativeModelSelector {
     }
 
     /// Supplies owner-controlled save/error/authority state.
+    /// Greys out the tabs of engines the Forge reports as needing sign-in.
+    pub fn set_blocked_engines(&mut self, blocked: Vec<String>, cx: &mut Context<Self>) {
+        if self.state.set_blocked_engines(blocked) {
+            cx.notify();
+        }
+    }
+
     pub fn set_status(&mut self, status: NativeModelSelectorStatus, cx: &mut Context<Self>) {
         self.state.set_status(status);
         cx.notify();

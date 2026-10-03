@@ -234,6 +234,8 @@ impl ServiceRuntime {
         frames: &mut FrameFactory,
         restore_subscription: bool,
     ) -> Result<(), ServiceFailure> {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("transport.connection", "reconnect");
         // Custody order: cancel delivery task, await its join exactly once,
         // drop the old session, check out the fenced capability, connect,
         // publish the rotated capability, take_delivery exactly once, and

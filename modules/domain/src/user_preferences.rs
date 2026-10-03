@@ -7,7 +7,7 @@
 //! restarted or reconnected Editor resumes where the user was. The Editor
 //! renders them and reports navigation; the Forge owns every rule (the
 //! most-recently-used order, which thread is remembered, when a saved
-//! configuration becomes the default).
+//! explicit user model choices become the default).
 
 use thiserror::Error;
 
@@ -177,6 +177,31 @@ pub struct LegacyPreferencesImported {
     pub project_order: LegacyImportOutcome,
     /// Preferences after the import.
     pub preferences: UserPreferences,
+}
+
+/// Origin of a model preference mutation. This is provenance, not authentication.
+/// Only an explicit user choice may replace the user's default.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModelPreferenceSource {
+    /// An agent's runtime choice, including a subagent spawned through MCP.
+    #[default]
+    Agent,
+    /// A choice made by the user in the Editor.
+    User,
+    /// An automatic configuration or background operation.
+    System,
+}
+
+/// Saves the model and its options as the user's default, independently of
+/// a thread or a send. Non-user sources leave the existing preference intact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SaveModelPreference {
+    /// Mutation identity.
+    pub request_id: RequestId,
+    /// Catalog identities for the model, effort, permission, and other options.
+    pub selection: CatalogSelection,
+    /// Who made the choice. Callers must supply it explicitly.
+    pub source: ModelPreferenceSource,
 }
 
 #[cfg(test)]
