@@ -106,13 +106,15 @@ fn sidebar_lists_recent_threads_by_age_without_a_project_switcher(cx: &mut TestA
     );
     assert_eq!(days.top() - day.bottom(), px(12.0));
     assert_eq!(older.top() - days.bottom(), px(12.0));
-    let header = cx
-        .debug_bounds("artisan-sidebar-threads-last-24-hours-header")
-        .expect("group header");
+    assert!(
+        cx.debug_bounds("artisan-sidebar-threads-last-24-hours-header")
+            .is_none(),
+        "the last day group keeps its rows without a second header"
+    );
     let fresh = cx
         .debug_bounds("artisan-sidebar-thread-fresh")
         .expect("fresh row");
-    assert!(header.bottom() <= fresh.top());
+    assert_eq!(day.top(), fresh.top());
     assert_eq!(
         fresh.size.height,
         px(super::super::super::impl_sidebar_threads::SIDEBAR_THREAD_ROW_HEIGHT_PX)

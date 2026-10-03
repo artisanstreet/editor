@@ -566,11 +566,13 @@ impl NativeApplication {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .debug_selector(move || selector.clone())
-            .child(
+            .debug_selector(move || selector.clone());
+        if group.age != crate::recent_thread_groups::RecentThreadAge::LastDay {
+            rows = rows.child(
                 desktop_section_label(&self.theme, group.age.label())
                     .debug_selector(move || header_selector.clone()),
             );
+        }
         for thread in &group.threads {
             rows = rows.child(self.desktop_sidebar_thread(thread, cx));
         }
