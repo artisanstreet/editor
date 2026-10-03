@@ -20,7 +20,9 @@
 //! - The status line leaves by fading out while its height closes, so
 //!   nothing below it jumps.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,11 +32,15 @@ use super::reply_reveal::ReplyReveal;
 use super::*;
 
 /// Row entrance: `--duration-very-slow` (texts reveal).
-const ENTRANCE: Duration = Duration::from_millis(500);
-/// Row entrance rise: `--distance-medium` (texts reveal).
-const ENTRANCE_RISE_PX: f32 = 12.0;
-/// Row entrance blur: `--blur-medium` (texts reveal).
-const ENTRANCE_BLUR_PX: f32 = 3.0;
+const ENTRANCE: Duration = Duration::from_millis(400);
+/// The row's height opening (`--duration-fast`, accordion/card resize).
+const ENTRANCE_GROW: Duration = MotionDuration::Fast.as_duration();
+/// The content's fade waits this long, so it fades into opened space.
+const ENTRANCE_FADE_DELAY: Duration = Duration::from_millis(80);
+/// The content's fade (`--duration-fast`).
+const ENTRANCE_FADE: Duration = MotionDuration::Fast.as_duration();
+/// The content's rise into place (`--distance-micro`).
+const ENTRANCE_RISE_PX: f32 = 4.0;
 /// Odometer roll of one digit column (`--duration-very-slow`).
 const ROLL: Duration = Duration::from_millis(500);
 /// Offset between neighbouring digit columns (`--duration-stagger`).
@@ -211,19 +217,36 @@ impl WorkMotion {
         }
     }
 
-    /// The entrance progress of one work row, `None` at rest.
-    pub(super) fn entrance(&mut self, key: &str) -> Option<f32> {
+    /// The entrance of one work row this frame, `None` at rest.
+    pub(super) fn entrance(&mut self, key: &str) -> Option<Entrance> {
         let animate = self.full_motion();
         let started = *self
             .entrances
             .entry(key.to_owned())
             .or_insert_with(|| animate.then(Instant::now));
-        let elapsed = Instant::now().saturating_duration_since(started?);
-        if elapsed >= ENTRANCE || self.pace == Pace::Settled {
+        let elapsed = started.map(|started| Instant::now().saturating_duration_since(started));
+        let Some(elapsed) = elapsed.filter(|elapsed| *elapsed < ENTRANCE) else {
+            self.entrance_heights.remove(key);
+            return None;
+        };
+        if self.pace == Pace::Settled {
+            self.entrance_heights.remove(key);
             return None;
         }
         self.animating = true;
-        Some(eased(MotionCurve::SmoothOut, elapsed, ENTRANCE))
+        Some(Entrance {
+            grow: progress_of(elapsed, ENTRANCE_GROW, MotionCurve::SmoothOut),
+            reveal: progress_of(
+                elapsed.saturating_sub(ENTRANCE_FADE_DELAY),
+                ENTRANCE_FADE,
+                MotionCurve::EaseOut,
+            ),
+            measured: Rc::clone(
+                self.entrance_heights
+                    .entry(key.to_owned())
+                    .or_insert_with(|| Rc::new(Cell::new(px(0.0)))),
+            ),
+        })
     }
 
     /// The words of a changing phrase with their motion this frame.
@@ -373,21 +396,58 @@ fn eased(curve: MotionCurve, elapsed: Duration, duration: Duration) -> f32 {
     value
 }
 
-/// Wraps a work row in its entrance: fading in while it rises into place.
-/// Relative offset only, so layout never moves.
-pub(super) fn with_entrance(element: AnyElement, progress: Option<f32>) -> AnyElement {
-    match progress {
-        Some(progress) => div()
-            .w_full()
-            .min_w_0()
-            .relative()
-            .top(px(ENTRANCE_RISE_PX * (1.0 - progress)))
-            .opacity(progress)
-            .filter(vec![Filter::Blur(px(ENTRANCE_BLUR_PX * (1.0 - progress)))])
-            .child(element)
-            .into_any_element(),
-        None => element,
-    }
+/// One row's entrance this frame.
+pub(super) struct Entrance {
+    /// How far the row's height has opened, `0.0..=1.0`.
+    grow: f32,
+    /// How far its content has faded in, `0.0..=1.0`.
+    reveal: f32,
+    /// The content's natural height, measured each frame.
+    measured: Rc<Cell<Pixels>>,
+}
+
+/// Wraps a work row in its entrance: the row's height opens from nothing
+/// (clipped, so the rows below glide down instead of jumping), and the
+/// content fades in a beat later while it settles 4 px into place. `gap` is
+/// the container's gap before the row, which closes with the height so no
+/// empty band appears first. No blur: a filtered layer softened the text.
+pub(super) fn with_entrance(
+    element: AnyElement,
+    entrance: Option<Entrance>,
+    gap: Pixels,
+) -> AnyElement {
+    let Some(Entrance {
+        grow,
+        reveal,
+        measured,
+    }) = entrance
+    else {
+        return element;
+    };
+    let height = measured.get() * grow;
+    let content = div()
+        .w_full()
+        .min_w_0()
+        .flex_shrink_0()
+        .relative()
+        .top(px(ENTRANCE_RISE_PX * (1.0 - reveal)))
+        .opacity(reveal)
+        .child(element);
+    div()
+        .w_full()
+        .min_w_0()
+        .h(height)
+        .mt(-(gap * (1.0 - grow)))
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .child(content)
+        .on_children_prepainted(move |bounds, _, _| {
+            if let Some(bounds) = bounds.first() {
+                measured.set(bounds.size.height);
+            }
+        })
+        .into_any_element()
 }
 
 /// Tabular figures (`tnum`): every digit takes the same advance, so a

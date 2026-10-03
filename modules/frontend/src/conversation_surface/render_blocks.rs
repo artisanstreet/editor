@@ -98,7 +98,7 @@ impl TurnRowView {
                 }
             })
             .into_any_element();
-        Some(with_entrance(status, entrance))
+        Some(with_entrance(status, entrance, theme.spacing.steps(6.0)))
     }
 
     /// A status line that left this frame, fading out while its height and
@@ -576,7 +576,7 @@ impl TurnRowView {
                     .motion
                     .borrow_mut()
                     .entrance(&format!("chain:{}", chain_rows[0].1.scene_id().as_str()));
-                items = items.child(with_entrance(chain, entrance));
+                items = items.child(with_entrance(chain, entrance, theme.spacing.steps(2.0)));
                 // The chain's own prepaint listener resolves its row bounds;
                 // at this level the chain is opaque to row targets so a
                 // collapsed chain cannot resolve one against its header.
@@ -600,7 +600,7 @@ impl TurnRowView {
                     .motion
                     .borrow_mut()
                     .entrance(rows[row_index].1.scene_id().as_str());
-                items = items.child(with_entrance(row, entrance));
+                items = items.child(with_entrance(row, entrance, theme.spacing.steps(2.0)));
                 let id = rows[row_index].1.scene_id();
                 child_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
                 row_index += 1;
@@ -921,7 +921,8 @@ impl TurnRowView {
             let step =
                 self.render_detail_row(*row, *ordinal, group_selector, theme, anchors, mounted);
             let entrance = self.motion.borrow_mut().entrance(row.scene_id().as_str());
-            rows_column = rows_column.child(with_entrance(step, entrance));
+            rows_column =
+                rows_column.child(with_entrance(step, entrance, theme.spacing.steps(1.0)));
             let id = row.scene_id();
             row_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
         }
