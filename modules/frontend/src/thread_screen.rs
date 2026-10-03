@@ -126,6 +126,12 @@ pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspec
 pub const THREAD_SCREEN_INSPECTOR_RULE_SELECTOR: &str = "artisan-thread-screen-inspector-rule";
 /// Rule closing the inspector's Context section, edge to edge.
 pub const THREAD_SCREEN_CONTEXT_RULE_SELECTOR: &str = "artisan-thread-screen-context-rule";
+/// The rule closing the Agents section.
+pub const THREAD_SCREEN_AGENTS_RULE_SELECTOR: &str = "artisan-thread-screen-agents-rule";
+/// The rule closing the Checklist section.
+pub const THREAD_SCREEN_CHECKLIST_RULE_SELECTOR: &str = "artisan-thread-screen-checklist-rule";
+/// The rule closing the Terminals section.
+pub const THREAD_SCREEN_TERMINALS_RULE_SELECTOR: &str = "artisan-thread-screen-terminals-rule";
 
 /// Stable debug selector for the composer dock.
 pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-composer-dock";
@@ -1232,6 +1238,27 @@ mod tests {
             tops.windows(2).all(|pair| pair[0] < pair[1]),
             "sections must read Context, Agents, Checklist, Terminals: {tops:?}"
         );
+        // Every section closes with the grid rule, the column inset below it.
+        for (section, rule) in [
+            (
+                THREAD_SCREEN_AGENTS_SELECTOR,
+                THREAD_SCREEN_AGENTS_RULE_SELECTOR,
+            ),
+            (
+                THREAD_SCREEN_CHECKLIST_SELECTOR,
+                THREAD_SCREEN_CHECKLIST_RULE_SELECTOR,
+            ),
+            (
+                THREAD_SCREEN_TERMINALS_SELECTOR,
+                THREAD_SCREEN_TERMINALS_RULE_SELECTOR,
+            ),
+        ] {
+            let bounds = cx.debug_bounds(section).expect("section lays out");
+            let rule = cx
+                .debug_bounds(rule)
+                .unwrap_or_else(|| panic!("{section} closes with a rule"));
+            assert_eq!(rule.origin.y, bounds.bottom() + px(DESKTOP_COLUMN_INSET_PX));
+        }
 
         update_screen(&view, cx, |screen| {
             screen.set_terminals(Vec::new());
@@ -1252,6 +1279,11 @@ mod tests {
         assert!(cx.debug_bounds(THREAD_SCREEN_AGENTS_SELECTOR).is_none());
         assert!(cx.debug_bounds(THREAD_SCREEN_CHECKLIST_SELECTOR).is_none());
         assert!(cx.debug_bounds(THREAD_SCREEN_TERMINALS_SELECTOR).is_none());
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_AGENTS_RULE_SELECTOR)
+                .is_none(),
+            "a hidden section takes its rule with it"
+        );
     }
 
     /// The Project row appears only once a project label is published, and
