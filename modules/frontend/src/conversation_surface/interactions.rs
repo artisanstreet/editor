@@ -47,6 +47,7 @@ impl ConversationSurface {
             rich_link_generation: 0,
             turn_rows: HashMap::new(),
             scene_generation: 0,
+            unpainted_since: None,
             scroll_handle: ScrollHandle::new(),
             transcript_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             disclosure_focus: cx.focus_handle().tab_index(1).tab_stop(true),

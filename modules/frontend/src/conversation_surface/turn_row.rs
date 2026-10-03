@@ -90,6 +90,9 @@ pub(super) struct TurnRowSource<'a> {
     /// Bumped by every scene replacement, so an unchanged scene skips the
     /// turn comparison entirely.
     pub(super) scene_generation: u64,
+    /// Set when this paint comes long after the scene arrived, so a row
+    /// shows what landed meanwhile at rest instead of replaying it.
+    pub(super) caught_up: bool,
     pub(super) theme_mode: ThemeMode,
     pub(super) status_motion: MotionPolicy,
     pub(super) reduce_motion: bool,
@@ -158,6 +161,7 @@ impl TurnRowHandle {
                 answer_focus: services.answer_focus.clone(),
                 turn: turn.clone(),
                 scene_generation: None,
+                caught_up: false,
                 theme_mode: ThemeMode::Dark,
                 status_motion: MotionPolicy::Full,
                 reduce_motion: false,
@@ -242,6 +246,8 @@ pub(super) struct TurnRowView {
     pub(super) answer_focus: FocusHandle,
     pub(super) turn: TurnScene,
     scene_generation: Option<u64>,
+    /// The turn changed while nobody watched; the next render catches up.
+    caught_up: bool,
     pub(super) theme_mode: ThemeMode,
     pub(super) status_motion: MotionPolicy,
     pub(super) reduce_motion: bool,
@@ -279,6 +285,7 @@ impl TurnRowView {
             self.scene_generation = Some(source.scene_generation);
             if self.turn != *source.turn {
                 self.turn = source.turn.clone();
+                self.caught_up |= source.caught_up;
                 self.clock = ClockDigest::of(&self.turn, source.active_now_ms);
                 self.active_now_ms = source.active_now_ms;
                 changed = true;
@@ -497,9 +504,11 @@ impl Render for TurnRowView {
             .set(self.stats.renders.get().saturating_add(1));
         self.stats.ledger.set(TranscriptShapeLedger::default());
         let theme = ArtisanTheme::for_mode(self.theme_mode);
-        self.motion
-            .borrow_mut()
-            .begin_frame(turn_is_live(&self.turn), self.status_motion);
+        self.motion.borrow_mut().begin_frame(
+            turn_is_live(&self.turn),
+            self.status_motion,
+            std::mem::take(&mut self.caught_up),
+        );
         // Anchors are retained per identity across this row's renders, so a
         // painted anchor stays painted while its block stays in the turn.
         let previous = std::mem::take(&mut *self.anchors.borrow_mut());

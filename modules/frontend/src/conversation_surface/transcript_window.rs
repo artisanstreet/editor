@@ -34,12 +34,17 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use super::render_budget::{
     TRANSCRIPT_MAX_ROW_HEIGHT_PX, TRANSCRIPT_MIN_ROW_HEIGHT_PX, TRANSCRIPT_TURN_GAP_PX,
     TRANSCRIPT_UNMEASURED_ROW_HEIGHT_PX, plan_transcript_window, transcript_markdown_within_budget,
 };
 use super::*;
+
+/// How long after a scene arrives its paint stops counting as watched: a
+/// visible window paints within a frame or two.
+const UNWATCHED_AFTER: Duration = Duration::from_millis(500);
 
 /// Stable debug-selector suffix for a placeholder standing in for one turn.
 ///
@@ -668,6 +673,12 @@ impl ConversationSurface {
         let force_render =
             !self.pending_scroll_targets.is_empty() || self.anchor_scrolls_in_flight > 0;
         let reduce_motion = cx.reduce_motion();
+        // A visible window paints a replaced scene within a frame or two;
+        // a longer wait means nobody watched it arrive.
+        let caught_up = self
+            .unpainted_since
+            .take()
+            .is_some_and(|since| since.elapsed() >= UNWATCHED_AFTER);
         for index in 0..turn_count {
             if !built.contains(index) {
                 // One placeholder per off-window turn keeps the child count
@@ -684,6 +695,7 @@ impl ConversationSurface {
             let source = TurnRowSource {
                 turn,
                 scene_generation: self.scene_generation,
+                caught_up,
                 theme_mode: self.theme_mode,
                 status_motion,
                 reduce_motion,
@@ -749,6 +761,7 @@ impl ConversationSurface {
         self.turn_rows
             .retain(|id, _| live_turns.contains(id.as_str()));
         self.scene_generation = self.scene_generation.wrapping_add(1);
+        self.unpainted_since.get_or_insert_with(Instant::now);
         self.transcript_window
             .borrow_mut()
             .scene_replaced(&self.scene);

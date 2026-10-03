@@ -205,6 +205,10 @@ pub struct ConversationSurface {
     /// Bumped by every scene replacement, so an unchanged scene never
     /// compares turn contents.
     scene_generation: u64,
+    /// When the oldest scene replacement not yet painted arrived. A window
+    /// that is minimized or hidden stops painting while scenes keep
+    /// arriving; its next paint catches up instead of animating them all.
+    unpainted_since: Option<Instant>,
     scroll_handle: ScrollHandle,
     transcript_focus: FocusHandle,
     disclosure_focus: FocusHandle,

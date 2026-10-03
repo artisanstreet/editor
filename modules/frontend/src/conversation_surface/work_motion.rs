@@ -134,7 +134,22 @@ pub(super) struct PhraseWord {
 
 impl WorkMotion {
     /// Starts one render of the row.
-    pub(super) fn begin_frame(&mut self, live: bool, motion: MotionPolicy) {
+    ///
+    /// A `caught_up` frame paints what arrived while nobody watched (a
+    /// minimized or hidden window) at rest, like a first render: running
+    /// reveals end, and prose still arriving shows what landed and streams
+    /// only the rest.
+    pub(super) fn begin_frame(&mut self, live: bool, motion: MotionPolicy, caught_up: bool) {
+        if caught_up {
+            self.primed = false;
+            for id in self.reveals.keys() {
+                self.seen_prose.remove(id);
+            }
+            self.reveals.clear();
+            for phrase in self.phrases.values_mut() {
+                phrase.changed = None;
+            }
+        }
         self.pace = match (live, motion) {
             (false, _) => Pace::Settled,
             (true, MotionPolicy::Reduced) => Pace::Reduced,
@@ -662,18 +677,18 @@ mod tests {
     #[test]
     fn a_live_phrase_keeps_one_layout_and_moves_on_change() {
         let mut motion = WorkMotion::default();
-        motion.begin_frame(true, MotionPolicy::Full);
+        motion.begin_frame(true, MotionPolicy::Full, false);
         // The first frame of a row paints at rest as plain text.
         assert!(motion.phrase("chain", "Ran a command").is_none());
         motion.end_frame();
-        motion.begin_frame(true, MotionPolicy::Full);
+        motion.begin_frame(true, MotionPolicy::Full, false);
         // Once live, a phrase at rest still paints word by word.
         let still = motion
             .phrase("chain", "Ran a command")
             .expect("live phrase");
         assert!(still.iter().all(|word| word.motion == WordMotion::Still));
         assert!(!motion.end_frame(), "a phrase at rest requests no frames");
-        motion.begin_frame(true, MotionPolicy::Full);
+        motion.begin_frame(true, MotionPolicy::Full, false);
         let words = motion.phrase("chain", "Ran 2 commands").expect("changed");
         assert_eq!(words[0].motion, WordMotion::Still);
         assert!(matches!(words[1].motion, WordMotion::Roll { up: true, .. }));
@@ -683,14 +698,14 @@ mod tests {
     #[test]
     fn rows_on_screen_at_first_render_never_enter() {
         let mut motion = WorkMotion::default();
-        motion.begin_frame(true, MotionPolicy::Full);
+        motion.begin_frame(true, MotionPolicy::Full, false);
         assert!(motion.entrance("old-row").is_none());
         motion.end_frame();
-        motion.begin_frame(true, MotionPolicy::Full);
+        motion.begin_frame(true, MotionPolicy::Full, false);
         assert!(motion.entrance("old-row").is_none());
         assert!(motion.entrance("new-row").is_some());
         // Settled history paints at rest.
-        motion.begin_frame(false, MotionPolicy::Full);
+        motion.begin_frame(false, MotionPolicy::Full, false);
         assert!(motion.entrance("later-row").is_none());
     }
 }
