@@ -8,9 +8,10 @@
 //! [`EngineObservationState`]; it holds no state of its own and asks the
 //! backend for nothing.
 //!
-//! Only the run the thread is on is listed: its subagents while it works,
-//! and the same list, settled, once it finishes. A new run starts the list
-//! over, so the section never accumulates a whole thread's history.
+//! Only the run the thread is on is listed, and only while it is live: once
+//! it settles the section clears (see the inspector sync). A new run starts
+//! the list over, so the section never accumulates a whole thread's
+//! history.
 
 #![forbid(unsafe_code)]
 
