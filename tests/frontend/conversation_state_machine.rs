@@ -1617,6 +1617,34 @@ fn commentary_phase_preserved_without_collapsing_into_streaming() {
 }
 
 #[test]
+fn a_turn_with_prose_never_waits_on_the_provider() {
+    // Codex's preamble arrives as commentary, which is not a streaming
+    // reply and no tool fact: the provider has still answered, so the
+    // freshly derived status must not fall back to waiting on it.
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(snapshot(
+            1,
+            vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+            vec![
+                make_user(USER_A, TURN_A, 1, "hi"),
+                make_assistant(
+                    ASSISTANT_A,
+                    TURN_A,
+                    2,
+                    "I'll check the sources first.",
+                    AssistantMessagePhase::Commentary,
+                ),
+            ],
+        )))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    let (narration, _) = scene_status(&controller, TURN_A);
+    assert_ne!(narration, SceneTurnNarration::ProviderWait);
+}
+
+#[test]
 fn commentary_tool_final_flow_groups_folds_and_promotes() {
     let mut controller = ConversationStateController::new(thread_id());
     let _ = controller.drain_effects();

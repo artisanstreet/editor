@@ -1118,7 +1118,19 @@ fn synchronize_turns(
     }
     let mut work_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
     let mut thought_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
+    // Anything the provider produced for the turn proves it responded: an
+    // approval or question card, a plan, a native fact. Errors and model
+    // transitions do not.
+    let mut responded_by_turn: BTreeSet<&TurnId> = BTreeSet::new();
     for fact in facts.values() {
+        if !matches!(
+            fact.kind,
+            SceneFactKind::Error { .. }
+                | SceneFactKind::UsageInterruption { .. }
+                | SceneFactKind::ModelTransition { .. }
+        ) {
+            responded_by_turn.insert(&fact.turn_id);
+        }
         match &fact.kind {
             SceneFactKind::Activity { .. } | SceneFactKind::ChangedFiles { .. } => {
                 work_by_turn.insert(&fact.turn_id);
@@ -1179,6 +1191,7 @@ fn synchronize_turns(
             items,
             work,
             thought_by_turn.contains(&turn.turn_id),
+            responded_by_turn.contains(&turn.turn_id),
             controller,
         ) {
             // Best-effort: a sealed, stale, or regressed derivation only means
@@ -1220,6 +1233,7 @@ fn derive_turn_events(
     items: &[&ConversationItem],
     work_evidence: bool,
     thought_evidence: bool,
+    responded: bool,
     controller: &ConversationTurnController,
 ) -> Vec<TurnEvent> {
     // Floor against impossible input only: durable per-turn times never move
@@ -1251,8 +1265,11 @@ fn derive_turn_events(
             }
             vec![drive_active_like(
                 items,
-                work_evidence,
-                thought_evidence,
+                ActiveEvidence {
+                    work: work_evidence,
+                    thought: thought_evidence,
+                    responded,
+                },
                 activate_at,
                 first_revision,
             )]
@@ -1307,8 +1324,11 @@ fn derive_turn_events(
         | ConversationLifecycle::Waiting => {
             vec![drive_active_like(
                 items,
-                work_evidence,
-                thought_evidence,
+                ActiveEvidence {
+                    work: work_evidence,
+                    thought: thought_evidence,
+                    responded,
+                },
                 activate_at,
                 first_revision,
             )]
@@ -1316,19 +1336,43 @@ fn derive_turn_events(
     }
 }
 
+/// What a live turn's facts say the provider has done so far.
+#[derive(Clone, Copy)]
+struct ActiveEvidence {
+    /// Tool activity or changed files.
+    work: bool,
+    /// A reasoning trace.
+    thought: bool,
+    /// Any fact the provider produced (an approval, a question, a plan).
+    responded: bool,
+}
+
 /// Single active-like drive shared by launched lifecycles.
 ///
 /// Evidence of provider response outranks the wait, in reference order: a
 /// streaming non-commentary reply speaks for itself, then work evidence,
-/// then thought evidence; otherwise the request is still out and waits on
-/// the provider. Callers gate on launch evidence; this helper only ranks it.
+/// then thought evidence. Any other sign that the provider responded —
+/// prose in any phase, settled or streaming, or any other fact — reads as
+/// thinking: the status is derived afresh each delivery, and a turn that
+/// has answered must never fall back to waiting on the provider. Only a
+/// turn with no response at all waits. Callers gate on launch evidence;
+/// this helper only ranks it.
 fn drive_active_like(
     items: &[&ConversationItem],
-    work_evidence: bool,
-    thought_evidence: bool,
+    evidence: ActiveEvidence,
     activate_at: i64,
     first_revision: u64,
 ) -> TurnEvent {
+    let ActiveEvidence {
+        work: work_evidence,
+        thought: thought_evidence,
+        responded,
+    } = evidence;
+    let responded = responded
+        || items.iter().any(|item| {
+            matches!(item, ConversationItem::AssistantMessage(message)
+                if !message.body.as_str().is_empty())
+        });
     let streaming_reply = items.iter().any(|item| {
         matches!(item, ConversationItem::AssistantMessage(message)
             if message.lifecycle == ConversationLifecycle::Streaming
@@ -1345,7 +1389,7 @@ fn drive_active_like(
             at: activate_at,
             revision: first_revision,
         }
-    } else if thought_evidence {
+    } else if thought_evidence || responded {
         TurnEvent::Thinking {
             at: activate_at,
             revision: first_revision,
