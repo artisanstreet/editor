@@ -6,7 +6,7 @@
 //! builders read only the row's synced inputs and reach the surface through
 //! its weak handle.
 
-use super::work_motion::{phrase_element, with_entrance};
+use super::work_motion::{phrase_element, tabular_figures, with_entrance};
 use super::*;
 
 #[path = "render_work_group_header.rs"]
@@ -85,9 +85,12 @@ impl TurnRowView {
         let entrance = motion.entrance("status");
         drop(motion);
         let measured = Rc::clone(&self.status_height);
+        // "Thinking for 13s" ticks every second; tabular figures keep it
+        // from shifting.
         let status = div()
             .w_full()
             .min_w_0()
+            .font_features(tabular_figures())
             .child(status)
             .on_children_prepainted(move |bounds, _, _| {
                 if let Some(bounds) = bounds.first() {
@@ -112,6 +115,7 @@ impl TurnRowView {
                 .mt(-theme.spacing.steps(6.0) * progress)
                 .overflow_hidden()
                 .opacity(1.0 - progress)
+                .font_features(tabular_figures())
                 .text_size(px(ProseTypography::BODY_SIZE_PX))
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .truncate()
@@ -863,6 +867,7 @@ impl TurnRowView {
                     .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
                     .line_height(theme.spacing.steps(6.0))
                     .text_color(header_color.to_paint())
+                    .font_features(tabular_figures())
                     .child(clause),
             )
             .child(

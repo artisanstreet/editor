@@ -21,9 +21,10 @@
 //!   nothing below it jumps.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::Pixels;
+use gpui::{FontFeatures, Pixels};
 
 use super::reply_reveal::ReplyReveal;
 use super::*;
@@ -215,8 +216,11 @@ impl WorkMotion {
 
     /// The words of a changing phrase with their motion this frame.
     ///
-    /// Returns `None` when the phrase paints as plain text: outside a live
-    /// turn, under reduced motion, and once every word is at rest.
+    /// While the turn is live with full motion the phrase always paints word
+    /// by word, at rest between changes too: switching to plain text between
+    /// ticks would swap two layouts that do not measure alike, and a ticking
+    /// timer would visibly resize every second. Returns `None` (plain text)
+    /// outside a live turn and under reduced motion.
     pub(super) fn phrase(&mut self, key: &str, text: &str) -> Option<Vec<PhraseWord>> {
         let animate = self.full_motion();
         let words: Vec<String> = text.split(' ').map(str::to_owned).collect();
@@ -233,13 +237,25 @@ impl WorkMotion {
             state.previous = std::mem::replace(&mut state.current, words);
             state.changed = animate.then_some(now);
         }
-        let elapsed = now.saturating_duration_since(state.changed?);
-        let longest = ROLL + ROLL_STAGGER * 4;
-        if !animate || elapsed >= longest {
+        if !animate {
             state.changed = None;
             return None;
         }
-        self.animating = true;
+        let longest = ROLL + ROLL_STAGGER * 4;
+        let elapsed = state
+            .changed
+            .map(|changed| now.saturating_duration_since(changed))
+            .filter(|elapsed| *elapsed < longest);
+        if elapsed.is_none() {
+            state.changed = None;
+        }
+        self.animating |= elapsed.is_some();
+        let previous = if elapsed.is_some() {
+            &state.previous
+        } else {
+            &state.current
+        };
+        let elapsed = elapsed.unwrap_or(longest);
         Some(
             state
                 .current
@@ -247,7 +263,7 @@ impl WorkMotion {
                 .enumerate()
                 .map(|(index, word)| PhraseWord {
                     text: word.clone(),
-                    motion: word_motion(state.previous.get(index).map(String::as_str), word),
+                    motion: word_motion(previous.get(index).map(String::as_str), word),
                     elapsed,
                 })
                 .collect(),
@@ -362,9 +378,18 @@ pub(super) fn with_entrance(element: AnyElement, progress: Option<f32>) -> AnyEl
     }
 }
 
-/// Paints a changing phrase word by word on one line of `line_height`.
+/// Tabular figures (`tnum`): every digit takes the same advance, so a
+/// counting number never changes width as its digits change. Spline Sans
+/// digits are proportional by default ("1" is a third narrower than "8").
+pub(super) fn tabular_figures() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
+
+/// Paints a changing phrase word by word on one line of `line_height`, in
+/// tabular figures.
 pub(super) fn phrase_element(words: &[PhraseWord], line_height: Pixels) -> AnyElement {
     let mut row = div()
+        .font_features(tabular_figures())
         .flex()
         .flex_row()
         .flex_nowrap()
@@ -540,11 +565,19 @@ mod tests {
     }
 
     #[test]
-    fn a_phrase_is_still_at_first_paint_and_moves_on_change() {
+    fn a_live_phrase_keeps_one_layout_and_moves_on_change() {
         let mut motion = WorkMotion::default();
         motion.begin_frame(true, MotionPolicy::Full);
+        // The first frame of a row paints at rest as plain text.
         assert!(motion.phrase("chain", "Ran a command").is_none());
         motion.end_frame();
+        motion.begin_frame(true, MotionPolicy::Full);
+        // Once live, a phrase at rest still paints word by word.
+        let still = motion
+            .phrase("chain", "Ran a command")
+            .expect("live phrase");
+        assert!(still.iter().all(|word| word.motion == WordMotion::Still));
+        assert!(!motion.end_frame(), "a phrase at rest requests no frames");
         motion.begin_frame(true, MotionPolicy::Full);
         let words = motion.phrase("chain", "Ran 2 commands").expect("changed");
         assert_eq!(words[0].motion, WordMotion::Still);

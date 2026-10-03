@@ -91,6 +91,9 @@ impl ConversationSurface {
                 ProseTypography::BODY_SIZE_PX,
             )))
             .text_color(theme.colors.muted_foreground.to_paint())
+            // The elapsed label counts every second: tabular figures keep
+            // its width steady as digits change.
+            .font_features(super::work_motion::tabular_figures())
             .pb(theme.spacing.steps(2.0))
             .debug_selector(|| format!("{selector}-header"))
             .child(near);
