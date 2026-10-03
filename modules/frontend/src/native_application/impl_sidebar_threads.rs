@@ -10,7 +10,9 @@
 
 use super::*;
 use crate::desktop_shell::{DESKTOP_COLUMN_ROW_INSET_PX, desktop_section_label};
-use crate::recent_thread_groups::{RecentThreadGroup, next_regrouping, section_recent_threads};
+use crate::recent_thread_groups::{
+    RecentThreadGroup, SidebarSections, next_regrouping, section_recent_threads,
+};
 use artisan_domain::{
     RecentThread, RecentThreadListing, ThreadAttention, ThreadSummary, UnixMillis,
 };
@@ -323,14 +325,14 @@ impl NativeApplication {
             .collect::<Vec<_>>();
         self.animate_sidebar_selection(&ids, window, cx);
         self.sidebar_threads.focus.retain(|id, _| ids.contains(id));
-        let hover_ids = ids
-            .iter()
-            .map(|id| id.as_str().to_owned())
-            .collect::<Vec<_>>();
+        // The pill reads its target while this render builds it, so stale
+        // targets clear before the pill, against the rows that will paint.
+        let sections = section_recent_threads(&listing, now);
+        let rendered = self.sidebar_rendered_rows(&sections);
         self.sidebar_threads
             .hover
             .borrow_mut()
-            .clear_if_missing(&hover_ids);
+            .clear_if_missing(&rendered);
         let bounds_state = Rc::clone(&self.sidebar_threads.bounds);
         let probe = canvas(
             |_, _, _| {},
@@ -372,7 +374,23 @@ impl NativeApplication {
                 px(6.0),
                 cx.reduce_motion(),
             ));
-        self.desktop_sidebar_sections(container, &listing, now, window, cx)
+        self.desktop_sidebar_sections(container, &sections, window, cx)
+    }
+
+    /// The thread rows this render builds: unread rows, plus the rows of
+    /// each open group. A row hidden in a collapsed group, or moved into
+    /// one, still has its thread in the listing but no row to hover.
+    fn sidebar_rendered_rows(&self, sections: &SidebarSections<'_>) -> Vec<String> {
+        let mut rows = sections.unread.clone();
+        if self.sidebar_group_open(SidebarGroup::Working) {
+            rows.extend(&sections.working);
+        }
+        if self.sidebar_group_open(SidebarGroup::History) {
+            rows.extend(sections.history.iter().flat_map(|group| &group.threads));
+        }
+        rows.iter()
+            .map(|row| row.thread.thread_id.as_str().to_owned())
+            .collect()
     }
 
     /// Appends the unread rows, then the `Working` and `History` groups,
@@ -380,12 +398,10 @@ impl NativeApplication {
     fn desktop_sidebar_sections(
         &mut self,
         mut container: Stateful<Div>,
-        listing: &RecentThreadListing,
-        now: UnixMillis,
+        sections: &SidebarSections<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let sections = section_recent_threads(listing, now);
         if !sections.unread.is_empty() {
             let mut unread = div()
                 .w_full()
