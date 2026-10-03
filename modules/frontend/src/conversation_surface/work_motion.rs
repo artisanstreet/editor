@@ -480,6 +480,13 @@ pub(super) fn phrase_element(words: &[PhraseWord], line_height: Pixels) -> AnyEl
 
 fn word_element(word: &PhraseWord, line_height: Pixels) -> AnyElement {
     match &word.motion {
+        // A number rests in the same per-character columns it rolls in:
+        // one text run spaces its characters by the font's tracking, columns
+        // do not, so swapping between the two moved it a few pixels on
+        // every tick.
+        WordMotion::Still if word.text.chars().any(|c| c.is_ascii_digit()) => {
+            character_columns(&word.text)
+        }
         WordMotion::Still => div()
             .flex_none()
             .child(word.text.clone())
@@ -497,6 +504,15 @@ fn word_element(word: &PhraseWord, line_height: Pixels) -> AnyElement {
         }
         WordMotion::Roll { from, up } => odometer(from, &word.text, *up, word.elapsed, line_height),
     }
+}
+
+/// A word as one column per character, the layout the odometer rolls in.
+fn character_columns(text: &str) -> AnyElement {
+    let mut row = div().flex().flex_row().flex_none();
+    for character in text.chars() {
+        row = row.child(div().child(character.to_string()));
+    }
+    row.into_any_element()
 }
 
 /// A word rising 4 px into place while it fades in (text swap enter).
