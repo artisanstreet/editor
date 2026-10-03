@@ -1332,3 +1332,62 @@ fn copy_confirmation_enters_holds_and_returns_with_reduced_motion_endpoints() {
     assert_eq!(progress(0, MotionPolicy::Reduced), 1.0);
     assert_eq!(progress(1500, MotionPolicy::Reduced), 0.0);
 }
+
+#[test]
+fn prose_followed_by_a_tool_call_is_finished_even_while_its_message_is_live() {
+    // A message can stay live until its turn ends; counted as streaming, its
+    // reveal held the last word back and the sentence read cut off.
+    use crate::conversation_scene::{ProgressPhase, SessionDetail};
+    let live = || {
+        Some(ItemProvenance {
+            run_id: None,
+            lifecycle: Some(ConversationLifecycle::Streaming),
+        })
+    };
+    let prose = |id: &str, ordinal| SessionDetail::Assistant {
+        id: scene_id(id),
+        body: "Checking the renderer now".to_owned(),
+        phase: AssistantPhase::Unspecified,
+        ordinal,
+        provenance: live(),
+        disclosure: None,
+    };
+    let group = WorkGroupBlock {
+        items: Vec::new(),
+        label: None,
+        disclosure: None,
+        session: Some(scene_id("session-turn_a")),
+        session_run: None,
+        superseded: false,
+        continuation: None,
+        reasoning_summary: None,
+        progress: ProgressPhase::Work,
+        transition: None,
+        session_details: vec![
+            prose("asst-1", 1),
+            SessionDetail::Activity {
+                id: scene_id("act-2"),
+                body: "cargo test".to_owned(),
+                kind: None,
+                detail: None,
+                lifecycle: Some(ConversationLifecycle::Completed),
+                ordinal: 2,
+                disclosure: None,
+            },
+            prose("asst-3", 3),
+        ],
+    };
+    let rows = ordered_detail_rows(&group);
+    let streaming: Vec<bool> = rows
+        .iter()
+        .filter_map(|(_, row)| match row {
+            DetailRow::Assistant { streaming, .. } => Some(*streaming),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        streaming,
+        vec![false, true],
+        "only the newest prose streams"
+    );
+}

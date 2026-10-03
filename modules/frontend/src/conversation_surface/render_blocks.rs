@@ -583,8 +583,13 @@ impl TurnRowView {
                 child_identities.push((None, None));
                 chain_index += 1;
             } else {
+                // The reply after the group means its last prose is done.
+                let mut detail = rows[row_index].1;
+                if reply_follows && let DetailRow::Assistant { streaming, .. } = &mut detail {
+                    *streaming = false;
+                }
                 let row = self.render_detail_row(
-                    rows[row_index].1,
+                    detail,
                     rows[row_index].0,
                     selector,
                     theme,

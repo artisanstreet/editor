@@ -862,6 +862,15 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
             })
             .collect();
         rows.sort_by_key(|(ordinal, _)| *ordinal);
+        // Prose followed by any later row is finished, whatever its message
+        // lifecycle says: a message can stay live until its turn ends, and a
+        // body still counted as streaming keeps its last word held back.
+        let last = rows.len().saturating_sub(1);
+        for (_, row) in &mut rows[..last] {
+            if let DetailRow::Assistant { streaming, .. } = row {
+                *streaming = false;
+            }
+        }
         rows
     }
 }
