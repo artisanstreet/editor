@@ -15,6 +15,7 @@ pub mod copy_feedback;
 pub mod dialog;
 pub mod dropdown_menu;
 pub mod fade_arc;
+pub mod flame;
 pub mod fonts;
 pub mod glass;
 pub mod gradient;
