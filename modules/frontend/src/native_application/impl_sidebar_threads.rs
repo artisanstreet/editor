@@ -104,16 +104,16 @@ pub(super) enum SidebarThreadIndicator {
 impl SidebarThreadIndicator {
     /// The state a thread's row shows, if any.
     ///
-    /// Waiting on the reader outranks the work it blocks. An unread outcome
-    /// never shows on the thread the reader has open: they are looking at
-    /// it, and leaving it marks it read.
-    pub(super) fn of(thread: &ThreadSummary, open: bool) -> Option<Self> {
+    /// Waiting on the reader outranks the work it blocks. The open
+    /// thread's unread outcome keeps showing until the reader leaves it
+    /// (see [`SidebarThreadsState::held_unread`]).
+    pub(super) fn of(thread: &ThreadSummary) -> Option<Self> {
         match thread.attention {
             ThreadAttention::AwaitingAnswer => Some(Self::Awaiting),
             _ if thread.has_active_work => Some(Self::Working),
-            ThreadAttention::Failed if !open => Some(Self::Failed),
-            ThreadAttention::Finished if !open => Some(Self::Finished),
-            ThreadAttention::None | ThreadAttention::Failed | ThreadAttention::Finished => None,
+            ThreadAttention::Failed => Some(Self::Failed),
+            ThreadAttention::Finished => Some(Self::Finished),
+            ThreadAttention::None => None,
         }
     }
 
@@ -146,6 +146,11 @@ pub(super) struct SidebarThreadsState {
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     selection: SidebarSelectionFade,
     selection_frame_pending: bool,
+    /// The open thread and the unread outcome it had when opened or that
+    /// arrived while open. The Forge marks a thread read the moment it
+    /// opens; the row keeps its dot and its place among unread rows until
+    /// the reader leaves the thread, so opening never pulls it away.
+    held_unread: Option<(ThreadId, ThreadAttention)>,
     /// The recent threads the Forge served or last pushed.
     pub(super) recent: Option<RecentThreadListing>,
     /// Advances with every new recent-threads list.
@@ -324,6 +329,7 @@ impl NativeApplication {
             .map(|row| row.thread.thread_id.clone())
             .collect::<Vec<_>>();
         self.animate_sidebar_selection(&ids, window, cx);
+        let listing = self.hold_open_unread(listing);
         self.sidebar_threads.focus.retain(|id, _| ids.contains(id));
         // The pill reads its target while this render builds it, so stale
         // targets clear before the pill, against the rows that will paint.
@@ -375,6 +381,52 @@ impl NativeApplication {
                 cx.reduce_motion(),
             ));
         self.desktop_sidebar_sections(container, &sections, window, cx)
+    }
+
+    /// Presents the open thread with the unread outcome it held when the
+    /// reader opened it, until they leave it. Starting a new run there acts
+    /// on the outcome and releases it.
+    fn hold_open_unread(&mut self, listing: RecentThreadListing) -> RecentThreadListing {
+        let open = self.sidebar_threads.selection.target.clone();
+        let held = &mut self.sidebar_threads.held_unread;
+        if held.as_ref().map(|(id, _)| id) != open.as_ref() {
+            *held = open.map(|id| (id, ThreadAttention::None));
+        }
+        let Some((id, attention)) = held.as_mut() else {
+            return listing;
+        };
+        let Some(row) = listing
+            .threads()
+            .iter()
+            .find(|row| &row.thread.thread_id == id)
+        else {
+            return listing;
+        };
+        let current = &row.thread;
+        if current.has_active_work || current.attention == ThreadAttention::AwaitingAnswer {
+            *attention = ThreadAttention::None;
+            return listing;
+        }
+        if current.attention != ThreadAttention::None {
+            *attention = current.attention;
+            return listing;
+        }
+        if *attention == ThreadAttention::None {
+            return listing;
+        }
+        let held = *attention;
+        let rows = listing
+            .threads()
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if &row.thread.thread_id == id {
+                    row.thread.attention = held;
+                }
+                row
+            })
+            .collect();
+        RecentThreadListing::new(rows).unwrap_or(listing)
     }
 
     /// The thread rows this render builds: unread rows, plus the rows of
@@ -625,8 +677,7 @@ impl NativeApplication {
             &row.project_icon,
             &self.theme,
         );
-        let open = self.sidebar_threads.selection.target.as_ref() == Some(&thread.thread_id);
-        let indicator = SidebarThreadIndicator::of(thread, open);
+        let indicator = SidebarThreadIndicator::of(thread);
         let description = match indicator {
             Some(indicator) => SharedString::from(format!("{subtitle}, {}", indicator.label())),
             None => subtitle.clone(),
@@ -775,32 +826,27 @@ mod tests {
             updated_at: UnixMillis::from_millis(1),
         };
         let of = SidebarThreadIndicator::of;
-        assert_eq!(of(&thread(false, ThreadAttention::None), false), None);
+        assert_eq!(of(&thread(false, ThreadAttention::None)), None);
         assert_eq!(
-            of(&thread(true, ThreadAttention::None), false),
+            of(&thread(true, ThreadAttention::None)),
             Some(SidebarThreadIndicator::Working)
         );
-        // The reader's turn outranks the work it blocks, open or not.
-        for open in [false, true] {
-            assert_eq!(
-                of(&thread(true, ThreadAttention::AwaitingAnswer), open),
-                Some(SidebarThreadIndicator::Awaiting)
-            );
-        }
+        // The reader's turn outranks the work it blocks.
         assert_eq!(
-            of(&thread(false, ThreadAttention::Finished), false),
+            of(&thread(true, ThreadAttention::AwaitingAnswer)),
+            Some(SidebarThreadIndicator::Awaiting)
+        );
+        assert_eq!(
+            of(&thread(false, ThreadAttention::Finished)),
             Some(SidebarThreadIndicator::Finished)
         );
         assert_eq!(
-            of(&thread(false, ThreadAttention::Failed), false),
+            of(&thread(false, ThreadAttention::Failed)),
             Some(SidebarThreadIndicator::Failed)
         );
-        // The thread on screen is being read: no unread outcome on it.
-        assert_eq!(of(&thread(false, ThreadAttention::Finished), true), None);
-        assert_eq!(of(&thread(false, ThreadAttention::Failed), true), None);
         // A new run after an unread outcome reads as working.
         assert_eq!(
-            of(&thread(true, ThreadAttention::Finished), false),
+            of(&thread(true, ThreadAttention::Finished)),
             Some(SidebarThreadIndicator::Working)
         );
     }
