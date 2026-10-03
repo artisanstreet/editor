@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use artisan_database::Repository;
-use artisan_domain::{DisplayName, ProjectId, ProjectSummary, RootPath};
+use artisan_domain::{DisplayName, ProjectId, ProjectSummary, RecentProjectIcon, RootPath};
 use artisan_transport::CancelHandle;
 
 use crate::conversation_commit_notifier::ConversationCommitNotifier;
@@ -62,6 +62,10 @@ struct Observed {
     at: Instant,
     /// Consecutive failed reads, zero after a successful one.
     failures: u32,
+    icon: RecentProjectIcon,
+    icon_identity: Option<String>,
+    icon_at: Option<Instant>,
+    icon_pending: bool,
 }
 
 impl Observed {
@@ -110,6 +114,24 @@ impl ProjectSubtitles {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.shared.generation.load(Ordering::Acquire)
+    }
+
+    /// Reads only cached artwork; never waits on files, Git, or a network.
+    #[must_use]
+    pub fn icons(&self, projects: &[ProjectSummary]) -> HashMap<ProjectId, RecentProjectIcon> {
+        let state = self.lock();
+        projects
+            .iter()
+            .map(|project| {
+                (
+                    project.project_id.clone(),
+                    state
+                        .observed
+                        .get(&project.root_path)
+                        .map_or_else(RecentProjectIcon::default, |observed| observed.icon.clone()),
+                )
+            })
+            .collect()
     }
 
     /// Resolves every project's subtitle from its cached observation, and
@@ -226,7 +248,8 @@ impl ProjectSubtitles {
                 break;
             }
             let observation = self.shared.service.observe_root(&root).await.ok();
-            changed |= self.record(root, observation);
+            changed |= self.record(root.clone(), observation);
+            self.refresh_icon(root, notifier.clone());
         }
         if changed {
             self.shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -243,15 +266,72 @@ impl ProjectSubtitles {
             (Some(_), _) => 0,
             (None, previous) => previous.map_or(0, |previous| previous.failures) + 1,
         };
+        let icon_identity = crate::project_icon_service::identity(observation.as_ref());
+        let retained = previous.filter(|previous| previous.icon_identity == icon_identity);
+        let icon = retained.map_or_else(
+            || crate::project_icon_service::fallback(icon_identity.as_deref()),
+            |previous| previous.icon.clone(),
+        );
+        let icon_at = retained.and_then(|previous| previous.icon_at);
+        let icon_pending = retained.is_some_and(|previous| previous.icon_pending);
         state.observed.insert(
             root,
             Observed {
                 observation,
                 at: Instant::now(),
                 failures,
+                icon,
+                icon_identity,
+                icon_at,
+                icon_pending,
             },
         );
         changed
+    }
+
+    fn refresh_icon(&self, root: RootPath, notifier: ConversationCommitNotifier) {
+        let identity = {
+            let mut state = self.lock();
+            let Some(observed) = state.observed.get_mut(&root) else {
+                return;
+            };
+            let Some(identity) = observed.icon_identity.clone() else {
+                return;
+            };
+            let freshness = if observed.icon.png.is_empty() {
+                Duration::from_secs(300)
+            } else {
+                Duration::from_secs(3600)
+            };
+            if observed.icon_pending || observed.icon_at.is_some_and(|at| at.elapsed() < freshness)
+            {
+                return;
+            }
+            observed.icon_pending = true;
+            identity
+        };
+        let subtitles = self.clone();
+        tokio::spawn(async move {
+            let icon = crate::project_icon_service::resolve(&root, &identity).await;
+            let changed = {
+                let mut state = subtitles.lock();
+                let Some(observed) = state.observed.get_mut(&root) else {
+                    return;
+                };
+                if observed.icon_identity.as_ref() != Some(&identity) {
+                    return;
+                }
+                observed.icon_pending = false;
+                observed.icon_at = Some(Instant::now());
+                let changed = observed.icon != icon;
+                observed.icon = icon;
+                changed
+            };
+            if changed {
+                subtitles.shared.generation.fetch_add(1, Ordering::AcqRel);
+                notifier.wake_any();
+            }
+        });
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {

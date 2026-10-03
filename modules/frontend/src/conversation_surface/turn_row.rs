@@ -26,18 +26,25 @@
 //! one-child-per-turn prepaint indexing (end space, navigator geometry,
 //! scroll-target handoff, height measurement) is unchanged.
 
-use gpui::{AppContext as _, StyleRefinement, Subscription, WeakEntity};
+use gpui::{AppContext as _, Pixels, StyleRefinement, Subscription, WeakEntity};
 
 use super::transcript_window::{TranscriptShapeLedger, TranscriptShaper};
+use super::work_motion::WorkMotion;
 use super::*;
+use crate::conversation_scene::AssistantPhase;
+
+/// Words a still-streaming reply must show before the work above it folds:
+/// interim narration before a tool call is usually a sentence or two.
+const FOLD_AFTER_WORDS: usize = 40;
 
 /// One approval row's gate snapshot, the only answer state a row paints.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ApprovalRowState {
-    /// Block identity text; the gate key.
+    /// The engine's approval identity; the gate key.
     pub(super) key: String,
     pub(super) in_flight: bool,
     pub(super) pending_decision: Option<bool>,
+    pub(super) answered_decision: Option<bool>,
     pub(super) failure: Option<String>,
 }
 
@@ -83,6 +90,9 @@ pub(super) struct TurnRowSource<'a> {
     /// Bumped by every scene replacement, so an unchanged scene skips the
     /// turn comparison entirely.
     pub(super) scene_generation: u64,
+    /// Set when this paint comes long after the scene arrived, so a row
+    /// shows what landed meanwhile at rest instead of replaying it.
+    pub(super) caught_up: bool,
     pub(super) theme_mode: ThemeMode,
     pub(super) status_motion: MotionPolicy,
     pub(super) reduce_motion: bool,
@@ -151,6 +161,7 @@ impl TurnRowHandle {
                 answer_focus: services.answer_focus.clone(),
                 turn: turn.clone(),
                 scene_generation: None,
+                caught_up: false,
                 theme_mode: ThemeMode::Dark,
                 status_motion: MotionPolicy::Full,
                 reduce_motion: false,
@@ -164,6 +175,8 @@ impl TurnRowHandle {
                 send_entrance: None,
                 message_images: None,
                 rich_link_generation: 0,
+                motion: RefCell::new(WorkMotion::default()),
+                status_height: Rc::new(Cell::new(px(0.0))),
                 anchors: anchors.clone(),
                 stats: stats.clone(),
                 _self_observation: dirty,
@@ -233,6 +246,8 @@ pub(super) struct TurnRowView {
     pub(super) answer_focus: FocusHandle,
     pub(super) turn: TurnScene,
     scene_generation: Option<u64>,
+    /// The turn changed while nobody watched; the next render catches up.
+    caught_up: bool,
     pub(super) theme_mode: ThemeMode,
     pub(super) status_motion: MotionPolicy,
     pub(super) reduce_motion: bool,
@@ -247,6 +262,11 @@ pub(super) struct TurnRowView {
     pub(super) send_entrance: Option<(Instant, SceneId)>,
     pub(super) message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
     rich_link_generation: u64,
+    /// The live turn's work motion: streamed prose, entering rows,
+    /// counting phrases, and the status line's exit.
+    pub(super) motion: RefCell<WorkMotion>,
+    /// The status line's last measured height, for its exit.
+    pub(super) status_height: Rc<Cell<Pixels>>,
     anchors: Rc<RefCell<Vec<RenderedScrollAnchor>>>,
     pub(super) stats: Rc<TurnRowStats>,
     _self_observation: Subscription,
@@ -265,6 +285,7 @@ impl TurnRowView {
             self.scene_generation = Some(source.scene_generation);
             if self.turn != *source.turn {
                 self.turn = source.turn.clone();
+                self.caught_up |= source.caught_up;
                 self.clock = ClockDigest::of(&self.turn, source.active_now_ms);
                 self.active_now_ms = source.active_now_ms;
                 changed = true;
@@ -320,15 +341,17 @@ impl TurnRowView {
             let TurnBlock::Approval(approval) = block else {
                 continue;
             };
-            let key = approval.id.as_str();
+            let key = approval.approval_id.as_str();
             let gate = gates.get(key);
             let in_flight = gate.is_some_and(ApprovalAnswerGate::is_in_flight);
             let pending_decision = gate.and_then(ApprovalAnswerGate::pending_decision);
+            let answered_decision = gate.and_then(ApprovalAnswerGate::answered_decision);
             let failure = gate.and_then(ApprovalAnswerGate::failure_message);
             let same = self.approvals.get(index).is_some_and(|state| {
                 state.key == key
                     && state.in_flight == in_flight
                     && state.pending_decision == pending_decision
+                    && state.answered_decision == answered_decision
                     && state.failure.as_deref() == failure
             });
             if !same {
@@ -336,6 +359,7 @@ impl TurnRowView {
                     key: key.to_owned(),
                     in_flight,
                     pending_decision,
+                    answered_decision,
                     failure: failure.map(str::to_owned),
                 };
                 if index < self.approvals.len() {
@@ -391,6 +415,72 @@ impl TurnRowView {
             .render(body, theme, selector, tone, Some(&self.stats.ledger))
     }
 
+    /// Shapes one prose body in the reply tone, streaming it in while it
+    /// arrives: only its revealed prefix paints, fresh segments fading in
+    /// (see [`WorkMotion::reveal`]). Settled prose paints whole, under the
+    /// same budget and ledgers as [`Self::render_budgeted_markdown`].
+    pub(super) fn render_streamed_markdown(
+        &self,
+        id: &SceneId,
+        body: &str,
+        streaming: bool,
+        theme: &ArtisanTheme,
+        selector: String,
+    ) -> AnyElement {
+        let reveal = self.motion.borrow_mut().reveal(id, body, streaming);
+        let Some((revealed, fade)) = reveal else {
+            return self.render_budgeted_markdown(
+                body,
+                theme,
+                selector,
+                MarkdownBodyTone::Foreground,
+            );
+        };
+        let (element, visible_len) = self.shaper.render_revealing(
+            &revealed,
+            theme,
+            selector,
+            MarkdownBodyTone::Foreground,
+            Some(&self.stats.ledger),
+            &fade,
+        );
+        self.motion.borrow_mut().reveal_rendered(id, visible_len);
+        element
+    }
+
+    /// Advances this turn's reply reveal for the frame and reports whether
+    /// the reply is clearly the answer, so the work above it may fold.
+    ///
+    /// Claude's prose before a tool call counts as the reply while it
+    /// streams and moves back into the work when the call starts; folding on
+    /// its first word folded and reopened the work around every such
+    /// sentence. The work therefore folds only once the reply is marked
+    /// final, has stopped streaming, or has shown [`FOLD_AFTER_WORDS`].
+    /// A reveal starts only for prose that arrives while the row is on
+    /// screen; the reply's own render reads the same reveal for its prefix
+    /// (see [`WorkMotion::reveal`]).
+    pub(super) fn advance_reply_reveal(&self, turn: &TurnScene) -> bool {
+        let Some(reply) = turn.blocks().iter().find_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let streaming = reply
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.lifecycle)
+            .is_some_and(lifecycle_is_live);
+        let mut motion = self.motion.borrow_mut();
+        let _ = motion.reveal(&reply.id, &reply.body, streaming);
+        motion.mark_present(reply.id.as_str());
+        let shown = motion
+            .revealed_words(&reply.id)
+            .unwrap_or_else(|| reply.body.split_whitespace().count());
+        let decided = !streaming || reply.phase == AssistantPhase::Final;
+        (decided && shown > 0) || shown >= FOLD_AFTER_WORDS
+    }
+
     /// Hands every unresolved rich-link destination to the surface.
     ///
     /// The row renders after the surface's render tail has flushed, so the
@@ -414,6 +504,11 @@ impl Render for TurnRowView {
             .set(self.stats.renders.get().saturating_add(1));
         self.stats.ledger.set(TranscriptShapeLedger::default());
         let theme = ArtisanTheme::for_mode(self.theme_mode);
+        self.motion.borrow_mut().begin_frame(
+            turn_is_live(&self.turn),
+            self.status_motion,
+            std::mem::take(&mut self.caught_up),
+        );
         // Anchors are retained per identity across this row's renders, so a
         // painted anchor stays painted while its block stays in the turn.
         let previous = std::mem::take(&mut *self.anchors.borrow_mut());
@@ -435,6 +530,10 @@ impl Render for TurnRowView {
             )
         };
         *self.anchors.borrow_mut() = rendered;
+        if self.motion.borrow_mut().end_frame() {
+            // Only this row repaints next frame; its siblings stay cached.
+            window.request_animation_frame();
+        }
         self.schedule_rich_link_flush(window, cx);
         element
     }

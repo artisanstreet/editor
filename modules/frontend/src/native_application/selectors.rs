@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+use artisan_ui::motion::MotionDuration;
+
 /// The one shipping application title.
 pub(crate) const WINDOW_TITLE: &str = "Artisan Editor";
 
@@ -83,6 +85,12 @@ pub(super) const PROFILE_MENU_VIEWPORT_MARGIN_PX: f32 = 8.0;
 /// matching the source content `sideOffset` and the anchored offset applied
 /// when placing the panel.
 pub(super) const PROFILE_MENU_ANCHOR_GAP_PX: f32 = 4.0;
+/// The profile menu's pop-in, the transitions-dev dropdown open
+/// (`--dropdown-open-dur`, `--duration-fast`).
+pub(super) const PROFILE_MENU_OPEN: Duration = MotionDuration::Fast.as_duration();
+/// The profile menu's exit, the dropdown close (`--dropdown-close-dur`,
+/// `--duration-quick`): out faster than in.
+pub(super) const PROFILE_MENU_CLOSE: Duration = MotionDuration::Quick.as_duration();
 
 pub(super) const MAX_RETAINED_SWITCH_REQUEST_IDS: usize = 8;
 pub(super) const MAX_RETAINED_SWITCH_PATCH_IDS: usize = 256;

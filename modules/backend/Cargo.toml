@@ -9,7 +9,11 @@ version.workspace = true
 name = "forge"
 path = "src/main.rs"
 
+[features]
+flight-recorder = ["artisan-tracing/enabled"]
+
 [dependencies]
+artisan-tracing = { path = "../tracing" }
 mimalloc.workspace = true
 artisan-catalog = { path = "../catalog" }
 artisan-database = { path = "../database" }

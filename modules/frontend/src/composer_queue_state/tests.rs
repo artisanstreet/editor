@@ -357,6 +357,37 @@ fn stale_usage_is_rejected_without_reinterpreting_the_reporting_model() {
 }
 
 #[test]
+fn a_native_run_reports_under_its_own_ids_and_its_reading_outlives_the_run() {
+    let thread_id = thread("thread-a");
+    let run_id = RunId::parse("run-a").expect("run id");
+    let mut state = ComposerQueueState::new();
+    state.set_scope(Some(thread_id.clone()), 3);
+    assert!(state.begin_native_usage_scope(thread_id.clone(), 3, run_id.clone()));
+    // Claude reports under its engine route and the model it ran.
+    let pushed = RunUsageResult {
+        thread_id: thread_id.clone(),
+        run_id: run_id.clone(),
+        report: Some(report(&thread_id, &run_id, 1, "claude-opus-5-5", "claude")),
+        compaction_at_tokens: None,
+    };
+    assert_eq!(
+        state.accept_pushed_usage(pushed, "claude-opus-5-5".to_owned()),
+        Ok(UsageResultDisposition::Updated)
+    );
+    assert!(state.reporting_usage_for(Some(run_id.as_str())).is_some());
+    // The run settled: the idle thread keeps its last reading.
+    assert_eq!(
+        state
+            .reporting_usage_for(None)
+            .expect("the reading outlives its run")
+            .run_id,
+        "run-a"
+    );
+    // Another live run has not reported into this scope.
+    assert!(state.reporting_usage_for(Some("run-b")).is_none());
+}
+
+#[test]
 fn absent_usage_fields_remain_absent_and_scope_mismatch_is_rejected() {
     let thread_id = thread("thread-a");
     let run_id = RunId::parse("run-a").expect("run id");

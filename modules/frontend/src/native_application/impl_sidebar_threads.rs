@@ -1,14 +1,18 @@
-//! The sidebar's recent threads across every project, grouped by age.
+//! The sidebar's recent threads across every project, as an inbox.
 //!
 //! Rows are the Forge's recent-threads listing (`impl_recent_threads.rs`):
 //! the title, and beneath it the repository or project the thread works
-//! in. The Editor only sorts them into age groups
-//! ([`crate::recent_thread_groups`]) and regroups them when a row crosses an
-//! age boundary. Choosing a row opens the thread in its own project.
+//! in. Only threads with something unseen show outright; running threads
+//! collapse into `Working` and read idle ones into `History`, which keeps
+//! its age groups inside ([`crate::recent_thread_groups`]). Rows regroup
+//! when one crosses an age boundary. Choosing a row opens the thread in its
+//! own project.
 
 use super::*;
-use crate::desktop_shell::desktop_section_label;
-use crate::recent_thread_groups::{RecentThreadGroup, group_recent_threads, next_regrouping};
+use crate::desktop_shell::{DESKTOP_COLUMN_ROW_INSET_PX, desktop_section_label};
+use crate::recent_thread_groups::{
+    RecentThreadGroup, SidebarSections, next_regrouping, section_recent_threads,
+};
 use artisan_domain::{
     RecentThread, RecentThreadListing, ThreadAttention, ThreadSummary, UnixMillis,
 };
@@ -28,6 +32,61 @@ const SIDEBAR_WORKING_PULSE: Duration = Duration::from_millis(1_600);
 /// The dimmest the working dot gets mid-pulse.
 const SIDEBAR_WORKING_PULSE_FLOOR: f32 = 0.4;
 
+/// A collapsible sidebar group.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum SidebarGroup {
+    /// Threads the Forge is running with nothing waiting on the reader.
+    Working,
+    /// Read, idle threads, in age groups.
+    History,
+}
+
+impl SidebarGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::History => "History",
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::History => "history",
+        }
+    }
+}
+
+/// One collapsible group's disclosure: collapsed until the reader opens it.
+#[derive(Default)]
+struct SidebarGroupDisclosure {
+    open: bool,
+    /// When the reader last toggled it, for the chevron flip and reveal.
+    toggled: Option<Instant>,
+    focus: Option<FocusHandle>,
+}
+
+impl SidebarGroupDisclosure {
+    /// Eased progress of the latest toggle, `None` once settled.
+    fn progress(&self, now: Instant, reduced: bool) -> Option<f32> {
+        if reduced {
+            return None;
+        }
+        let elapsed = now.saturating_duration_since(self.toggled?);
+        let duration = MotionDuration::Fast.as_duration();
+        (elapsed < duration).then(|| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the shared easing curve samples in f64 and feeds f32 rotation and opacity; the narrowing is the intended precision"
+            )]
+            let eased = MotionCurve::SmoothOut
+                .sample(elapsed.as_secs_f64() / duration.as_secs_f64())
+                as f32;
+            eased
+        })
+    }
+}
+
 /// What a row's trailing dot says about its thread: whether it needs the
 /// reader, never decoration. At most one state shows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,16 +104,16 @@ pub(super) enum SidebarThreadIndicator {
 impl SidebarThreadIndicator {
     /// The state a thread's row shows, if any.
     ///
-    /// Waiting on the reader outranks the work it blocks. An unread outcome
-    /// never shows on the thread the reader has open: they are looking at
-    /// it, and leaving it marks it read.
-    pub(super) fn of(thread: &ThreadSummary, open: bool) -> Option<Self> {
+    /// Waiting on the reader outranks the work it blocks. The open
+    /// thread's unread outcome keeps showing until the reader leaves it
+    /// (see [`SidebarThreadsState::held_unread`]).
+    pub(super) fn of(thread: &ThreadSummary) -> Option<Self> {
         match thread.attention {
             ThreadAttention::AwaitingAnswer => Some(Self::Awaiting),
             _ if thread.has_active_work => Some(Self::Working),
-            ThreadAttention::Failed if !open => Some(Self::Failed),
-            ThreadAttention::Finished if !open => Some(Self::Finished),
-            ThreadAttention::None | ThreadAttention::Failed | ThreadAttention::Finished => None,
+            ThreadAttention::Failed => Some(Self::Failed),
+            ThreadAttention::Finished => Some(Self::Finished),
+            ThreadAttention::None => None,
         }
     }
 
@@ -82,10 +141,16 @@ impl SidebarThreadIndicator {
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
     focus: HashMap<ThreadId, FocusHandle>,
+    project_icons: super::project_icon::ProjectIconCache,
     hover: Rc<RefCell<SlidingHoverState>>,
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     selection: SidebarSelectionFade,
     selection_frame_pending: bool,
+    /// The open thread and the unread outcome it had when opened or that
+    /// arrived while open. The Forge marks a thread read the moment it
+    /// opens; the row keeps its dot and its place among unread rows until
+    /// the reader leaves the thread, so opening never pulls it away.
+    held_unread: Option<(ThreadId, ThreadAttention)>,
     /// The recent threads the Forge served or last pushed.
     pub(super) recent: Option<RecentThreadListing>,
     /// Advances with every new recent-threads list.
@@ -103,6 +168,8 @@ pub(super) struct SidebarThreadsState {
     pub(super) open_after_refresh: Option<ThreadId>,
     /// A chosen recent thread waiting for its project or a settled view.
     pub(super) awaited_open: Option<super::impl_recent_threads::AwaitedOpen>,
+    /// The `Working` and `History` disclosures.
+    groups: HashMap<SidebarGroup, SidebarGroupDisclosure>,
 }
 
 /// Two sequential halves of the transitions-dev icon-swap duration.
@@ -253,6 +320,7 @@ impl NativeApplication {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let listing = self.sidebar_threads.recent.clone().unwrap_or_default();
+        self.sidebar_threads.project_icons.retain(&listing);
         let now = wall_clock();
         self.schedule_regroup(&listing, now, cx);
         let ids = listing
@@ -261,15 +329,16 @@ impl NativeApplication {
             .map(|row| row.thread.thread_id.clone())
             .collect::<Vec<_>>();
         self.animate_sidebar_selection(&ids, window, cx);
+        let listing = self.hold_open_unread(listing);
         self.sidebar_threads.focus.retain(|id, _| ids.contains(id));
-        let hover_ids = ids
-            .iter()
-            .map(|id| id.as_str().to_owned())
-            .collect::<Vec<_>>();
+        // The pill reads its target while this render builds it, so stale
+        // targets clear before the pill, against the rows that will paint.
+        let sections = section_recent_threads(&listing, now);
+        let rendered = self.sidebar_rendered_rows(&sections);
         self.sidebar_threads
             .hover
             .borrow_mut()
-            .clear_if_missing(&hover_ids);
+            .clear_if_missing(&rendered);
         let bounds_state = Rc::clone(&self.sidebar_threads.bounds);
         let probe = canvas(
             |_, _, _| {},
@@ -284,7 +353,7 @@ impl NativeApplication {
         .top_0()
         .left_0()
         .size_full();
-        let mut container = div()
+        let container = div()
             .id("artisan-sidebar-threads")
             .relative()
             .flex_1()
@@ -311,10 +380,244 @@ impl NativeApplication {
                 px(6.0),
                 cx.reduce_motion(),
             ));
-        for group in &group_recent_threads(&listing, now) {
-            container = container.child(self.desktop_sidebar_thread_group(group, cx));
+        self.desktop_sidebar_sections(container, &sections, window, cx)
+    }
+
+    /// Presents the open thread with the unread outcome it held when the
+    /// reader opened it, until they leave it. Starting a new run there acts
+    /// on the outcome and releases it.
+    fn hold_open_unread(&mut self, listing: RecentThreadListing) -> RecentThreadListing {
+        let open = self.sidebar_threads.selection.target.clone();
+        let held = &mut self.sidebar_threads.held_unread;
+        if held.as_ref().map(|(id, _)| id) != open.as_ref() {
+            *held = open.map(|id| (id, ThreadAttention::None));
+        }
+        let Some((id, attention)) = held.as_mut() else {
+            return listing;
+        };
+        let Some(row) = listing
+            .threads()
+            .iter()
+            .find(|row| &row.thread.thread_id == id)
+        else {
+            return listing;
+        };
+        let current = &row.thread;
+        if current.has_active_work || current.attention == ThreadAttention::AwaitingAnswer {
+            *attention = ThreadAttention::None;
+            return listing;
+        }
+        if current.attention != ThreadAttention::None {
+            *attention = current.attention;
+            return listing;
+        }
+        if *attention == ThreadAttention::None {
+            return listing;
+        }
+        let held = *attention;
+        let rows = listing
+            .threads()
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if &row.thread.thread_id == id {
+                    row.thread.attention = held;
+                }
+                row
+            })
+            .collect();
+        RecentThreadListing::new(rows).unwrap_or(listing)
+    }
+
+    /// The thread rows this render builds: unread rows, plus the rows of
+    /// each open group. A row hidden in a collapsed group, or moved into
+    /// one, still has its thread in the listing but no row to hover.
+    fn sidebar_rendered_rows(&self, sections: &SidebarSections<'_>) -> Vec<String> {
+        let mut rows = sections.unread.clone();
+        if self.sidebar_group_open(SidebarGroup::Working) {
+            rows.extend(&sections.working);
+        }
+        if self.sidebar_group_open(SidebarGroup::History) {
+            rows.extend(sections.history.iter().flat_map(|group| &group.threads));
+        }
+        rows.iter()
+            .map(|row| row.thread.thread_id.as_str().to_owned())
+            .collect()
+    }
+
+    /// Appends the unread rows, then the `Working` and `History` groups,
+    /// each only when it holds a row.
+    fn desktop_sidebar_sections(
+        &mut self,
+        mut container: Stateful<Div>,
+        sections: &SidebarSections<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        if !sections.unread.is_empty() {
+            let mut unread = div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .debug_selector(|| "artisan-sidebar-threads-unread".to_owned());
+            for thread in &sections.unread {
+                unread = unread.child(self.desktop_sidebar_thread(thread, cx));
+            }
+            container = container.child(unread);
+        }
+        if !sections.working.is_empty() {
+            let rows = if self.sidebar_group_open(SidebarGroup::Working) {
+                sections
+                    .working
+                    .iter()
+                    .map(|thread| self.desktop_sidebar_thread(thread, cx).into_any_element())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            container = container.child(self.desktop_sidebar_collapsible(
+                SidebarGroup::Working,
+                sections.working.len(),
+                rows,
+                window,
+                cx,
+            ));
+        }
+        if !sections.history.is_empty() {
+            let groups = if self.sidebar_group_open(SidebarGroup::History) {
+                sections
+                    .history
+                    .iter()
+                    .map(|group| {
+                        self.desktop_sidebar_thread_group(group, cx)
+                            .into_any_element()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            container = container.child(self.desktop_sidebar_collapsible(
+                SidebarGroup::History,
+                sections.history_len(),
+                groups,
+                window,
+                cx,
+            ));
         }
         container
+    }
+
+    fn sidebar_group_open(&self, group: SidebarGroup) -> bool {
+        self.sidebar_threads
+            .groups
+            .get(&group)
+            .is_some_and(|disclosure| disclosure.open)
+    }
+
+    fn toggle_sidebar_group(&mut self, group: SidebarGroup, cx: &mut Context<Self>) {
+        let disclosure = self.sidebar_threads.groups.entry(group).or_default();
+        disclosure.open = !disclosure.open;
+        disclosure.toggled = Some(Instant::now());
+        cx.notify();
+    }
+
+    /// One collapsible group: a header in the age-group label style with a
+    /// count and a chevron that turns down when open, then its content.
+    ///
+    /// Opening flips the chevron and fades the content in over the fast
+    /// motion token; closing flips the chevron and removes the content.
+    fn desktop_sidebar_collapsible(
+        &mut self,
+        group: SidebarGroup,
+        count: usize,
+        content: Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let reduced = cx.reduce_motion();
+        let disclosure = self.sidebar_threads.groups.entry(group).or_default();
+        let open = disclosure.open;
+        let progress = disclosure.progress(Instant::now(), reduced);
+        let focus = disclosure
+            .focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        if progress.is_some() {
+            window.request_animation_frame();
+        }
+        let settled = if open { 1.0 } else { 0.0 };
+        let turn = progress.map_or(settled, |eased| if open { eased } else { 1.0 - eased });
+        let selector = format!("artisan-sidebar-threads-{}", group.id());
+        let header_selector = format!("{selector}-header");
+        let chevron_selector = format!("{selector}-chevron");
+        let muted = self.theme.colors.muted_foreground.to_paint();
+        let focus_fill = self.theme.colors.muted.to_paint();
+        let label = SharedString::from(format!("{}, {count} threads", group.label()));
+        let header = div()
+            .id(SharedString::from(header_selector.clone()))
+            .track_focus(&focus)
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_expanded(open)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(DESKTOP_COLUMN_ROW_INSET_PX))
+            .pb(self.theme.spacing.steps(1.0))
+            .rounded(px(6.0))
+            .text_size(self.theme.typography.label_text)
+            .text_color(muted)
+            .cursor_pointer()
+            .focus_visible(move |style| style.bg(focus_fill))
+            .debug_selector(move || header_selector.clone())
+            .child(div().flex_none().child(group.label()))
+            .child(div().flex_none().opacity(0.7).child(count.to_string()))
+            .child(
+                gpui::svg()
+                    .path(AssetId::TABLER_CHEVRON_RIGHT.as_str())
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(muted)
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        turn * std::f32::consts::FRAC_PI_2,
+                    )))
+                    .debug_selector(move || chevron_selector.clone()),
+            )
+            .on_click(cx.listener(move |app, _, window, cx| {
+                window.focus(&focus, cx);
+                app.toggle_sidebar_group(group, cx);
+            }))
+            .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    app.toggle_sidebar_group(group, cx);
+                }
+            }));
+        let mut section = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(move || selector.clone())
+            .child(header);
+        if open && !content.is_empty() {
+            let body = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(self.theme.spacing.steps(3.0))
+                .children(content);
+            section = section.child(match progress {
+                Some(eased) => body.opacity(eased),
+                None => body,
+            });
+        }
+        section
     }
 
     fn desktop_sidebar_thread_group(
@@ -331,11 +634,13 @@ impl NativeApplication {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .debug_selector(move || selector.clone())
-            .child(
+            .debug_selector(move || selector.clone());
+        if group.age != crate::recent_thread_groups::RecentThreadAge::LastDay {
+            rows = rows.child(
                 desktop_section_label(&self.theme, group.age.label())
                     .debug_selector(move || header_selector.clone()),
             );
+        }
         for thread in &group.threads {
             rows = rows.child(self.desktop_sidebar_thread(thread, cx));
         }
@@ -367,8 +672,12 @@ impl NativeApplication {
         );
         let title = SharedString::from(thread.title.as_str().to_owned());
         let subtitle = SharedString::from(row.subtitle.as_str().to_owned());
-        let open = self.sidebar_threads.selection.target.as_ref() == Some(&thread.thread_id);
-        let indicator = SidebarThreadIndicator::of(thread, open);
+        let project_icon = self.sidebar_threads.project_icons.render(
+            &thread.project_id,
+            &row.project_icon,
+            &self.theme,
+        );
+        let indicator = SidebarThreadIndicator::of(thread);
         let description = match indicator {
             Some(indicator) => SharedString::from(format!("{subtitle}, {}", indicator.label())),
             None => subtitle.clone(),
@@ -435,11 +744,15 @@ impl NativeApplication {
                     .child(
                         div()
                             .w_full()
-                            .truncate()
+                            .min_w(px(0.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.0))
                             .text_size(self.theme.typography.label_text)
                             .text_color(self.theme.colors.muted_foreground.to_paint())
                             .debug_selector(move || subtitle_selector.clone())
-                            .child(subtitle),
+                            .child(project_icon)
+                            .child(div().flex_1().min_w(px(0.0)).truncate().child(subtitle)),
                     ),
             )
             // A thread that needs the reader keeps its prominence without
@@ -513,32 +826,27 @@ mod tests {
             updated_at: UnixMillis::from_millis(1),
         };
         let of = SidebarThreadIndicator::of;
-        assert_eq!(of(&thread(false, ThreadAttention::None), false), None);
+        assert_eq!(of(&thread(false, ThreadAttention::None)), None);
         assert_eq!(
-            of(&thread(true, ThreadAttention::None), false),
+            of(&thread(true, ThreadAttention::None)),
             Some(SidebarThreadIndicator::Working)
         );
-        // The reader's turn outranks the work it blocks, open or not.
-        for open in [false, true] {
-            assert_eq!(
-                of(&thread(true, ThreadAttention::AwaitingAnswer), open),
-                Some(SidebarThreadIndicator::Awaiting)
-            );
-        }
+        // The reader's turn outranks the work it blocks.
         assert_eq!(
-            of(&thread(false, ThreadAttention::Finished), false),
+            of(&thread(true, ThreadAttention::AwaitingAnswer)),
+            Some(SidebarThreadIndicator::Awaiting)
+        );
+        assert_eq!(
+            of(&thread(false, ThreadAttention::Finished)),
             Some(SidebarThreadIndicator::Finished)
         );
         assert_eq!(
-            of(&thread(false, ThreadAttention::Failed), false),
+            of(&thread(false, ThreadAttention::Failed)),
             Some(SidebarThreadIndicator::Failed)
         );
-        // The thread on screen is being read: no unread outcome on it.
-        assert_eq!(of(&thread(false, ThreadAttention::Finished), true), None);
-        assert_eq!(of(&thread(false, ThreadAttention::Failed), true), None);
         // A new run after an unread outcome reads as working.
         assert_eq!(
-            of(&thread(true, ThreadAttention::Finished), false),
+            of(&thread(true, ThreadAttention::Finished)),
             Some(SidebarThreadIndicator::Working)
         );
     }

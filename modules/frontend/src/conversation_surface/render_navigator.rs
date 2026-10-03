@@ -463,6 +463,11 @@ impl ConversationSurface {
             });
         // Shared hover pill behind the rows plus the probe capturing list
         // bounds for pill-relative coordinates, mirroring the model picker.
+        let rows: Vec<String> = markers
+            .iter()
+            .map(|marker| navigator_target_slug(&marker.target).to_owned())
+            .collect();
+        self.navigator_hover.borrow_mut().clear_if_missing(&rows);
         list = list.child(self.render_navigator_hover_pill(theme, reduce_motion));
         let hover_surface_bounds = Rc::clone(&self.navigator_hover_surface);
         list = list.child(

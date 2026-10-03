@@ -1,5 +1,5 @@
 //! Transport-thread child for the Forge user's preferences: the read the
-//! Editor makes as it connects, the navigation it reports, and the one-time
+//! Editor makes as it connects, explicit model choices, navigation, and the one-time
 //! import of preferences an older Editor kept in files.
 //!
 //! Every command is answered by exactly one [`PreferencesEvent`]; later
@@ -11,7 +11,7 @@
 
 use artisan_domain::{
     ImportLegacyPreferences, LegacyPreferencesImported, ReadUserPreferences, RecordNavigation,
-    UserPreferences,
+    SaveModelPreference, UserPreferences,
 };
 
 use super::*;
@@ -21,6 +21,8 @@ use super::*;
 pub enum PreferencesCommand {
     /// Read the user's preferences.
     Read,
+    /// Save an explicit model preference, including its source.
+    SaveModel(SaveModelPreference),
     /// Report that the user opened a project (and a thread in it).
     RecordNavigation(RecordNavigation),
     /// Hand an older Editor's file preferences to the Forge once.
@@ -32,6 +34,13 @@ pub enum PreferencesCommand {
 pub enum PreferencesEvent {
     /// The preferences as read or as a recorded navigation left them.
     Loaded(Result<Box<UserPreferences>, ServiceFailure>),
+    /// Preference save acknowledgement.
+    ModelSaved {
+        /// Choice this acknowledgement belongs to.
+        request_id: RequestId,
+        /// Updated preferences or the save failure.
+        result: Result<Box<UserPreferences>, ServiceFailure>,
+    },
     /// The Forge's answer to a legacy import.
     LegacyImported(Result<Box<LegacyPreferencesImported>, ServiceFailure>),
 }
@@ -104,6 +113,22 @@ pub(super) async fn handle_preferences_command(
                     _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
                 }),
             )
+        }
+        PreferencesCommand::SaveModel(save) => {
+            let request_id = save.request_id.clone();
+            let result = mutate(
+                runtime,
+                frames,
+                &request_id,
+                Command::SaveModelPreference(save),
+                PreferencesExpectation::Preferences,
+            )
+            .await
+            .and_then(|payload| match payload {
+                ResponsePayload::UserPreferences(preferences) => Ok(Box::new(preferences)),
+                _ => Err(ServiceFailure::invalid(ServiceFailureStage::Request)),
+            });
+            PreferencesEvent::ModelSaved { request_id, result }
         }
         PreferencesCommand::ImportLegacy(import) => {
             let request_id = import.request_id.clone();

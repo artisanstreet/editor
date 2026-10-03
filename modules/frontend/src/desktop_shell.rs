@@ -15,6 +15,7 @@ use gpui::prelude::{
 };
 use gpui::{AnyElement, Div, FontWeight, Pixels, SharedString, WindowControlArea, div, px};
 
+use crate::native_context_usage::{CONTEXT_METER_HEIGHT_PX, CONTEXT_METER_WIDTH_PX};
 use crate::shell::title_bar_caption_button;
 
 /// Root selector for the mounted native workspace.
@@ -46,6 +47,13 @@ pub const DESKTOP_COLLAPSE_SELECTOR: &str = "artisan-desktop-collapse";
 /// Junction crosshair where the right inspector column's left rule meets the
 /// titlebar's bottom rule.
 pub const DESKTOP_INSPECTOR_JUNCTION_SELECTOR: &str = "artisan-desktop-inspector-junction";
+/// Stable selector for the inspector rule's titlebar continuation.
+pub const DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR: &str =
+    "artisan-desktop-inspector-titlebar-divider";
+/// Stable selector for the titlebar slot holding the context meter.
+pub const DESKTOP_CONTEXT_METER_SLOT_SELECTOR: &str = "artisan-desktop-context-meter-slot";
+/// Gap between the context meter and the rule or controls to its right.
+pub const DESKTOP_CONTEXT_METER_GAP_PX: f32 = 16.0;
 
 /// Native workspace titlebar height.
 pub const DESKTOP_TITLEBAR_HEIGHT_PX: f32 = 48.0;
@@ -194,9 +202,12 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// column while it is on screen (`None` when the route shows none). The
 /// shell owns every junction of its rules, so it paints a second
 /// [`junction_crosshair`] where that column's one-device-pixel left rule
-/// meets the titlebar's bottom rule, mirroring the sidebar junction. Unlike
-/// the sidebar rule, the inspector rule does not continue up through the
-/// titlebar: the header and drag surface run unbroken above the column.
+/// meets the titlebar's bottom rule, mirroring the sidebar junction. Like
+/// the sidebar rule, the inspector rule continues up through the titlebar.
+///
+/// `context_meter` is the thread's context-window meter. It sits at the
+/// titlebar's right end of the conversation side: just left of the
+/// inspector rule, or of the caption controls when no inspector shows.
 ///
 /// `brand` owns the leading sidebar section: the `Artisan Editor` wordmark,
 /// seated above the sidebar at exactly its width. `header` owns the titlebar's
@@ -225,6 +236,7 @@ pub fn desktop_shell(
     sidebar: AnyElement,
     body: AnyElement,
     inspector_width: Option<Pixels>,
+    context_meter: Option<AnyElement>,
     maximized: bool,
 ) -> Div {
     let legacy_theme = ArtisanTheme::for_mode(ThemeMode::Dark);
@@ -277,6 +289,18 @@ pub fn desktop_shell(
     // the elastic thread name from truncating flush against the controls, and
     // the header itself is not a drag area, so its repository link keeps its
     // click.
+    // The meter is anchored from the window's right edge: past the inspector
+    // column when it shows, else past the caption controls. The content
+    // section ends at the controls, so its right inset grows by however far
+    // the meter reaches past them, keeping a long title clear of it.
+    let controls_width = px(DESKTOP_TITLEBAR_CONTROL_WIDTH_PX * 3.0);
+    let meter_right =
+        inspector_width.unwrap_or(px(0.0)).max(controls_width) + px(DESKTOP_CONTEXT_METER_GAP_PX);
+    let content_inset = if context_meter.is_some() {
+        (meter_right + px(CONTEXT_METER_WIDTH_PX + 24.0) - controls_width).max(px(24.0))
+    } else {
+        px(24.0)
+    };
     let content = div()
         .flex_1()
         .min_w(px(0.0))
@@ -292,7 +316,7 @@ pub fn desktop_shell(
                 .flex()
                 .items_center()
                 .pl(px(DESKTOP_TITLEBAR_CONTENT_INSET_PX))
-                .pr(px(24.0))
+                .pr(content_inset)
                 .overflow_hidden()
                 .child(header)
                 .child(
@@ -338,6 +362,31 @@ pub fn desktop_shell(
                 .h(style.titlebar_height)
                 .bg(theme.line)
                 .debug_selector(|| "artisan-desktop-titlebar-divider".to_owned())
+        }))
+        .children(inspector_width.map(|inspector_width| {
+            // One-physical-pixel continuation of the inspector's left rule
+            // above its junction. That rule paints [w-iw, w-iw+1dp] from the
+            // window's right edge, so anchoring from the right at iw-1dp
+            // lines the two up. Plain and absolute, like the sidebar divider.
+            div()
+                .absolute()
+                .right(inspector_width - style.one_device_pixel)
+                .top(px(0.0))
+                .w(style.one_device_pixel)
+                .h(style.titlebar_height)
+                .bg(theme.line)
+                .debug_selector(|| DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR.to_owned())
+        }))
+        .children(context_meter.map(|meter| {
+            div()
+                .absolute()
+                .right(meter_right)
+                .top(px(0.0))
+                .h(style.titlebar_height)
+                .flex()
+                .items_center()
+                .debug_selector(|| DESKTOP_CONTEXT_METER_SLOT_SELECTOR.to_owned())
+                .child(meter)
         }));
 
     let main = div()
@@ -557,6 +606,7 @@ mod tests {
     struct ShellJunctionProbe {
         inspector_width: Option<Pixels>,
         collapsed: bool,
+        meter: bool,
     }
 
     impl gpui::Render for ShellJunctionProbe {
@@ -575,6 +625,13 @@ mod tests {
                 empty(),
                 empty(),
                 self.inspector_width,
+                self.meter.then(|| {
+                    div()
+                        .w(px(CONTEXT_METER_WIDTH_PX))
+                        .h(px(CONTEXT_METER_HEIGHT_PX))
+                        .debug_selector(|| "probe-meter".to_owned())
+                        .into_any_element()
+                }),
                 false,
             )
         }
@@ -590,6 +647,7 @@ mod tests {
             let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
                 inspector_width: Some(px(DESKTOP_SIDEBAR_WIDTH_PX)),
                 collapsed,
+                meter: false,
             });
             cx.simulate_resize(gpui::size(px(1800.0), px(900.0)));
             cx.run_until_parked();
@@ -623,6 +681,7 @@ mod tests {
         let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
             inspector_width: None,
             collapsed: false,
+            meter: false,
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds(DESKTOP_ROOT_SELECTOR).is_some());
@@ -630,6 +689,61 @@ mod tests {
             cx.debug_bounds(DESKTOP_INSPECTOR_JUNCTION_SELECTOR)
                 .is_none(),
             "a hidden inspector must not leave its junction mark behind"
+        );
+    }
+
+    /// The inspector's left rule continues up through the titlebar, and the
+    /// context meter sits just left of it, vertically centred in the bar.
+    #[gpui::test]
+    fn inspector_rule_runs_through_the_titlebar_with_the_meter_beside_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
+            inspector_width: Some(px(DESKTOP_SIDEBAR_WIDTH_PX)),
+            collapsed: false,
+            meter: true,
+        });
+        cx.simulate_resize(gpui::size(px(1800.0), px(900.0)));
+        cx.run_until_parked();
+        let root = cx.debug_bounds(DESKTOP_ROOT_SELECTOR).expect("root");
+        let rule_x = root.right() - px(DESKTOP_SIDEBAR_WIDTH_PX);
+        let divider = cx
+            .debug_bounds(DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR)
+            .expect("the inspector rule continues through the titlebar");
+        assert!((divider.left() - rule_x).abs() < px(0.01), "{divider:?}");
+        assert_eq!(divider.top(), root.top());
+        assert_eq!(divider.size.height, px(DESKTOP_TITLEBAR_HEIGHT_PX));
+
+        let meter = cx.debug_bounds("probe-meter").expect("meter mounts");
+        assert!(
+            (meter.right() - (rule_x - px(DESKTOP_CONTEXT_METER_GAP_PX))).abs() < px(0.01),
+            "meter {meter:?} must end one gap left of the rule at {rule_x:?}"
+        );
+        let centre = root.top() + px(DESKTOP_TITLEBAR_HEIGHT_PX / 2.0);
+        assert!((meter.center().y - centre).abs() < px(0.01), "{meter:?}");
+    }
+
+    /// Without an inspector the meter clears the caption controls, and no
+    /// titlebar divider is left behind.
+    #[gpui::test]
+    fn meter_clears_the_controls_without_an_inspector(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
+            inspector_width: None,
+            collapsed: false,
+            meter: true,
+        });
+        cx.simulate_resize(gpui::size(px(1800.0), px(900.0)));
+        cx.run_until_parked();
+        let root = cx.debug_bounds(DESKTOP_ROOT_SELECTOR).expect("root");
+        assert!(
+            cx.debug_bounds(DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR)
+                .is_none()
+        );
+        let meter = cx.debug_bounds("probe-meter").expect("meter mounts");
+        let controls_left = root.right() - px(DESKTOP_TITLEBAR_CONTROL_WIDTH_PX * 3.0);
+        assert!(
+            (meter.right() - (controls_left - px(DESKTOP_CONTEXT_METER_GAP_PX))).abs() < px(0.01),
+            "meter {meter:?} must end one gap left of the controls at {controls_left:?}"
         );
     }
 

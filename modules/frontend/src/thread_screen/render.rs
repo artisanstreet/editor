@@ -489,22 +489,48 @@ impl ThreadScreen {
     /// plain absolute element with no pointer listener, so it cannot
     /// intercept input. The titlebar end of that rule is the shell's
     /// junction crosshair, fed by [`ThreadScreen::visible_inspector_width`].
+    ///
+    /// A rule closes every section across the column's full width, so the
+    /// inspector reads as a grid with the titlebar rule above it; each
+    /// junction with the left rule carries the shell's crosshair.
     fn render_inspector(&self, theme: &ArtisanTheme, width: f32, rule: Pixels) -> impl IntoElement {
+        let section_gap = theme.spacing.steps(3.0);
         let mut sections = div()
             .flex()
             .min_h_0()
             .flex_1()
             .flex_col()
-            .gap(theme.spacing.steps(3.0))
-            .child(self.render_context_section(theme));
-        if let Some(agents) = self.render_agents_section(theme) {
-            sections = sections.child(agents);
-        }
-        if let Some(checklist) = self.render_checklist_section(theme) {
-            sections = sections.child(checklist);
-        }
-        if let Some(terminals) = self.render_terminals_section(theme) {
-            sections = sections.child(terminals);
+            .gap(section_gap)
+            .child(self.render_context_section(theme))
+            .child(Self::render_section_rule(
+                width,
+                rule,
+                section_gap,
+                THREAD_SCREEN_CONTEXT_RULE_SELECTOR,
+            ));
+        let closed = [
+            (
+                self.render_agents_section(theme),
+                THREAD_SCREEN_AGENTS_RULE_SELECTOR,
+            ),
+            (
+                self.render_checklist_section(theme),
+                THREAD_SCREEN_CHECKLIST_RULE_SELECTOR,
+            ),
+            (
+                self.render_terminals_section(theme),
+                THREAD_SCREEN_TERMINALS_RULE_SELECTOR,
+            ),
+        ];
+        for (section, rule_selector) in closed {
+            if let Some(section) = section {
+                sections = sections.child(section).child(Self::render_section_rule(
+                    width,
+                    rule,
+                    section_gap,
+                    rule_selector,
+                ));
+            }
         }
         div()
             .relative()
@@ -527,6 +553,41 @@ impl ThreadScreen {
                     .debug_selector(|| THREAD_SCREEN_INSPECTOR_RULE_SELECTOR.to_owned()),
             )
             .child(sections)
+    }
+
+    /// The full-width rule closing one inspector section.
+    ///
+    /// It escapes the column padding to run edge to edge, and sits the
+    /// column inset away from the rows on both sides (the section gap plus
+    /// a signed margin), the spacing the titlebar rule keeps above the
+    /// first row.
+    /// The crosshair centres both arms on the junction with the left rule;
+    /// like that rule it is a plain element that cannot intercept input.
+    fn render_section_rule(
+        width: f32,
+        rule: Pixels,
+        section_gap: Pixels,
+        selector: &'static str,
+    ) -> impl IntoElement {
+        let line = DesktopTheme::neutral_dark();
+        // Negative when the gap exceeds the inset: the rule then pulls both
+        // neighbours in so it still sits exactly the inset from each.
+        let breathing = px(DESKTOP_COLUMN_INSET_PX) - section_gap;
+        let arm_offset = (px(DESKTOP_CROSSHAIR_SIZE_PX) - rule) / 2.0;
+        div()
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h(rule)
+            .ml(px(-DESKTOP_COLUMN_INSET_PX))
+            .my(breathing)
+            .bg(line.line)
+            .debug_selector(move || selector.to_owned())
+            .child(
+                junction_crosshair(line, rule)
+                    .left(-arm_offset)
+                    .top(-arm_offset),
+            )
     }
 
     /// Renders the composer overlay frame around the packet-2 composer surface.

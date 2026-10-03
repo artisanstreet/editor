@@ -18,14 +18,20 @@
 #![allow(clippy::module_name_repetitions)]
 
 use artisan_ui::{
-    popover::{Popover, PopoverAlign, PopoverChangeReason, PopoverSide, PopoverVariant},
+    flame::{MaterialFace, material_face},
+    popover::{
+        Popover, PopoverAlign, PopoverChangeReason, PopoverSide, PopoverStyle, PopoverVariant,
+        popover_content,
+    },
     progress::{ProgressFraction, progress},
     theme::{ArtisanTheme, RadiusStep, RadiusTokens},
 };
-use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
+use gpui::prelude::{
+    InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+};
 use gpui::{
-    App, Bounds, ElementId, FocusHandle, Hsla, Path, PathBuilder, Pixels, Stateful, Window, canvas,
-    div, point, px,
+    App, AppContext as _, Bounds, Context, ElementId, FocusHandle, Hsla, IntoElement, Path,
+    PathBuilder, Pixels, Render, Stateful, Window, canvas, div, point, px,
 };
 
 use crate::context_usage_description::{
@@ -42,6 +48,12 @@ pub const CONTEXT_USAGE_SELECTOR: &str = "artisan-native-context-usage";
 pub const CONTEXT_USAGE_RING_SELECTOR: &str = "artisan-native-context-usage-ring";
 /// Stable selector for the details card.
 pub const CONTEXT_USAGE_DETAILS_SELECTOR: &str = "artisan-native-context-usage-details";
+/// Stable selector for the titlebar context meter.
+pub const CONTEXT_METER_SELECTOR: &str = "artisan-native-context-meter";
+/// Titlebar context meter width.
+pub const CONTEXT_METER_WIDTH_PX: f32 = 92.0;
+/// Titlebar context meter height.
+pub const CONTEXT_METER_HEIGHT_PX: f32 = 20.0;
 const RING_EDGE_PX: f32 = 16.0;
 const RING_STROKE_PX: f32 = 2.5;
 const RING_RADIUS_PX: f32 = 5.75;
@@ -336,6 +348,84 @@ pub fn render_details(
         )
 }
 
+/// Renders the titlebar context meter: a borderless rounded track whose fill
+/// grows from the right edge leftward as the context window fills. The fill
+/// wears Varde's button material, running green → flame → red as the thread
+/// nears the point where the engine compacts. Hovering it shows the same
+/// details card as the composer's ring.
+#[must_use]
+pub fn render_context_meter(
+    presentation: &NativeContextUsagePresentation,
+    theme: ArtisanTheme,
+) -> Stateful<gpui::Div> {
+    let radius = RadiusTokens::value(RadiusStep::Xs);
+    let inner_width = CONTEXT_METER_WIDTH_PX;
+    let fraction = finite_percent(presentation.percent);
+    let face = MaterialFace::green_to_red(compaction_level(presentation));
+    // A sliver keeps both rounded ends visible instead of a smeared dot.
+    let min_fill = f32::from(radius) * 2.0;
+    let fill_width = if fraction > 0.0 {
+        (inner_width * fraction).clamp(min_fill.min(inner_width), inner_width)
+    } else {
+        0.0
+    };
+    let card = presentation.clone();
+    div()
+        .id(ElementId::Name(CONTEXT_METER_SELECTOR.into()))
+        .debug_selector(|| CONTEXT_METER_SELECTOR.to_owned())
+        .relative()
+        .flex_shrink_0()
+        .w(px(CONTEXT_METER_WIDTH_PX))
+        .h(px(CONTEXT_METER_HEIGHT_PX))
+        .rounded(radius)
+        .bg(theme.colors.foreground.with_alpha(0.08).to_paint())
+        .children((fill_width > 0.0).then(|| {
+            material_face(face, radius)
+                .absolute()
+                .right(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(px(fill_width))
+        }))
+        .tooltip(move |_window, cx| {
+            let card = card.clone();
+            cx.new(|_| ContextUsageHoverCard {
+                presentation: card,
+                theme,
+            })
+            .into()
+        })
+}
+
+/// How close the context is to compaction, `0.0` empty to `1.0` at the
+/// Forge-reported compaction point (the full window when none is reported).
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a clamped 0..=1 ratio narrowed to the f32 the colour blend uses"
+)]
+fn compaction_level(presentation: &NativeContextUsagePresentation) -> f32 {
+    let limit = presentation.compaction_percent.unwrap_or(100.0);
+    if !(limit.is_finite() && limit > 0.0 && presentation.percent.is_finite()) {
+        return 0.0;
+    }
+    (presentation.percent / limit).clamp(0.0, 1.0) as f32
+}
+
+/// The hover card behind the titlebar context meter.
+struct ContextUsageHoverCard {
+    presentation: NativeContextUsagePresentation,
+    theme: ArtisanTheme,
+}
+
+impl Render for ContextUsageHoverCard {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        popover_content(
+            PopoverStyle::default_card(self.theme),
+            render_details(&self.presentation, &self.theme),
+        )
+    }
+}
+
 fn render_ring_trigger(
     presentation: &NativeContextUsagePresentation,
     theme: &ArtisanTheme,
@@ -522,6 +612,17 @@ mod tests {
         assert_eq!(cloned.reporting_run_id, "run-1");
         assert_eq!(cloned.reporting_engine_id, "codex");
         assert_eq!(cloned.reporting_model_id, "gpt-5.6-luna");
+    }
+
+    #[test]
+    fn meter_colour_tracks_the_distance_to_compaction() {
+        // 90 000 of 200 000 tokens with compaction at 180 000: halfway there.
+        let presentation = usage().presentation(Some("run-1")).expect("valid report");
+        assert!((super::compaction_level(&presentation) - 0.5).abs() < 1e-6);
+        let mut at_limit = usage();
+        at_limit.context_tokens = Some(190_000);
+        let at_limit = at_limit.presentation(Some("run-1")).expect("valid report");
+        assert!((super::compaction_level(&at_limit) - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

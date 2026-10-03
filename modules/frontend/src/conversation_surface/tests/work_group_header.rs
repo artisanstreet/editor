@@ -82,6 +82,7 @@ impl Render for HeaderProbe {
             .child(ConversationSurface::work_group_header_row(
                 Some(self.label.clone()),
                 None,
+                None,
                 0.0,
                 self.controlled,
                 "probe",
@@ -524,5 +525,189 @@ fn a_live_continuation_chain_toggles_without_disturbing_the_header(cx: &mut Test
         cx.debug_bounds(STEER_LEAD_HEADER),
         Some(header),
         "the section header stays put"
+    );
+}
+
+#[test]
+fn an_approval_pauses_the_section_without_splitting_it() {
+    // The approval card waits for the reader mid-run; the work it unblocks
+    // continues the same section, whose one header keeps the live line
+    // instead of a second `Working for` row painting below the card.
+    let scene = ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![
+            item(
+                "prompt",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "migrate the app".to_owned(),
+                },
+                None,
+            ),
+            run_prose("plan", 2, "Checking the workspace"),
+            run_command("cmd-a", 3),
+            run_item(
+                "approval-run_a-provider-7",
+                4,
+                SceneItemKind::Approval {
+                    prompt: "May I access the npm registry?".to_owned(),
+                    approval_id: artisan_domain::ObservationId::parse("provider-7")
+                        .expect("observation id is valid"),
+                    decision: Some(true),
+                },
+            ),
+            run_command("cmd-b", 5),
+        ],
+        vec![TurnNarrationEntry::new(
+            turn_id("turn_a"),
+            TurnNarration::Working,
+        )],
+        Vec::new(),
+    )
+    .expect("approval section scene is valid");
+    let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+    let groups: Vec<_> = turn
+        .blocks()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            TurnBlock::WorkGroup(group) => Some((index, group)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(groups.len(), 1, "one section for the whole run");
+    let (index, group) = groups[0];
+    assert!(!group.superseded, "the approval does not supersede the run");
+    assert_eq!(owning_group_index(turn), Some(index));
+}
+
+#[test]
+fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
+    // A live reply suppresses the turn's status block, which used to carry
+    // the only clock basis, so the header fell back to a bare `Working`
+    // while the summary streamed. The basis lives on the turn now.
+    let streaming_reply = item(
+        "reply-a",
+        2,
+        SceneItemKind::AssistantMessage {
+            body: "All tests pass.".to_owned(),
+            phase: AssistantPhase::Unspecified,
+        },
+        None,
+    )
+    .with_provenance(ItemProvenance {
+        run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+        lifecycle: Some(ConversationLifecycle::Streaming),
+    });
+    let scene = ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![run_command("work-a", 1), streaming_reply],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::StreamingSuppression)
+                .with_active_started_at_ms(1_000),
+        ],
+        Vec::new(),
+    )
+    .expect("scene is valid");
+    let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+    assert!(
+        !turn
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, TurnBlock::TurnStatus(_))),
+        "the streaming reply suppresses the status block"
+    );
+    assert_eq!(turn_section_title(turn, Some(89_000)), "Working for 1m 28s");
+}
+
+/// The steered live section plus a streaming reply with `body`.
+fn replying_section_scene(body: &str) -> ConversationScene {
+    let reply = item(
+        "reply",
+        8,
+        SceneItemKind::AssistantMessage {
+            body: body.to_owned(),
+            phase: AssistantPhase::Unspecified,
+        },
+        None,
+    )
+    .with_provenance(ItemProvenance {
+        run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+        lifecycle: Some(ConversationLifecycle::Streaming),
+    });
+    ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![
+            item(
+                "prompt",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "why is the footer wrong".to_owned(),
+                },
+                None,
+            ),
+            run_prose("likely", 2, "Likely cause found"),
+            run_command("cmd-a", 3),
+            reply,
+        ],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::StreamingSuppression)
+                .with_active_started_at_ms(1_000)
+                .with_session_disclosure(SceneDisclosure::Open),
+        ],
+        Vec::new(),
+    )
+    .expect("replying section scene is valid")
+}
+
+#[gpui::test]
+fn a_live_section_folds_once_its_streaming_reply_is_clearly_the_answer(cx: &mut TestAppContext) {
+    // Reduced motion shows every stable unit at once and folds without an
+    // accordion flight, so one settled frame reads the end state.
+    cx.update(|app| app.set_reduce_motion(true));
+    // A sentence or two may be narration before the next tool call, which
+    // moves back into the work: folding on it would fold and reopen the
+    // work around every such sentence.
+    let (_narrating, cx_narrating) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            replying_section_scene("All tests pass. "),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx_narrating.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx_narrating);
+    assert!(
+        cx_narrating.debug_bounds(STEER_LEAD_CHAIN).is_some(),
+        "the work stays open while the reply could still be narration"
+    );
+
+    // A long streaming reply is the answer: the work folds while the turn
+    // is still live, and the header keeps its words.
+    let answer = "word ".repeat(40);
+    let (_replying, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(replying_section_scene(&answer), ThemeMode::Dark, surface_cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx);
+    assert!(
+        cx.debug_bounds(STEER_LEAD_HEADER).is_some(),
+        "the folded section keeps its header"
+    );
+    assert!(
+        cx.debug_bounds(STEER_LEAD_CHAIN).is_none(),
+        "the work folds once the reply is clearly the answer"
     );
 }

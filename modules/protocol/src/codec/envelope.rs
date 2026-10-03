@@ -278,7 +278,9 @@ pub(crate) fn encode_request(
         }
         ClientRequest::Query(Query::ReadUserPreferences(_))
         | ClientRequest::Command(
-            Command::RecordNavigation(_) | Command::ImportLegacyPreferences(_),
+            Command::RecordNavigation(_)
+            | Command::ImportLegacyPreferences(_)
+            | Command::SaveModelPreference(_),
         ) => encode_user_preferences_request(builder, value)?,
         ClientRequest::Query(Query::ReadRecentThreads(_)) => {
             encode_recent_threads_request(builder);
@@ -825,7 +827,8 @@ pub(crate) fn decode_request(
         | request::Which::ResolveEngineConfiguration(_) => decode_forge_decision_request(value),
         request::Which::ReadUserPreferences(())
         | request::Which::RecordNavigation(_)
-        | request::Which::ImportLegacyPreferences(_) => {
+        | request::Which::ImportLegacyPreferences(_)
+        | request::Which::SaveModelPreference(_) => {
             decode_user_preferences_request(value, &request_id)
         }
         request::Which::ReadRecentThreads(()) => Ok(decode_recent_threads_request()),

@@ -7,7 +7,10 @@ use super::*;
 
 impl Render for NativeApplication {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "application.render");
         self.sync_composer_controls(cx);
+        self.sync_model_selector_blocked_engines(cx);
         self.sync_profile_actions();
         // The sidebar fills its shell slot and renders only when notified,
         // so a transcript or composer frame reuses its previous paint.
@@ -27,6 +30,25 @@ impl Render for NativeApplication {
                 .and_then(|screen| screen.read(cx).visible_inspector_width()),
             _ => None,
         };
+        // The meter shows the same validated reading as the composer's ring:
+        // the controls snapshot was synced at the top of this render.
+        let context_meter = match self.route() {
+            NativeRoute::Thread { .. } => {
+                let snapshot = self.composer_controls.read(cx).snapshot();
+                snapshot
+                    .context_usage
+                    .as_ref()
+                    .and_then(|usage| usage.presentation(snapshot.run_id.as_deref()))
+                    .map(|presentation| {
+                        crate::native_context_usage::render_context_meter(
+                            &presentation,
+                            ArtisanTheme::for_mode(ThemeMode::Dark),
+                        )
+                        .into_any_element()
+                    })
+            }
+            _ => None,
+        };
         let brand = self.desktop_brand(cx).into_any_element();
         let header = self
             .desktop_header_cluster()
@@ -42,6 +64,7 @@ impl Render for NativeApplication {
             sidebar,
             body,
             inspector_width,
+            context_meter,
             window.is_maximized(),
         );
         div()

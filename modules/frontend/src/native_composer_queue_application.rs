@@ -103,19 +103,27 @@ impl NativeApplication {
         let Some(config) = self.engine_settings.authoritative_config() else {
             return;
         };
-        // Usage scope is OpenCode2-shaped; another engine starts no usage
-        // scope instead of attributing usage as OpenCode2.
-        let artisan_domain::EngineSelection::OpenCode2(selection) = config.selection() else {
-            return;
-        };
-        self.composer_queue.state.begin_usage_scope(
-            thread,
-            self.composer_queue.generation,
-            run,
-            selection.model_id().clone(),
-            selection.route_id().clone(),
-            selection.variant_id().cloned(),
-        );
+        // OpenCode2 reports under the selected model, route and variant; a
+        // native engine reports under its own ids, attributed by run.
+        match config.selection() {
+            artisan_domain::EngineSelection::OpenCode2(selection) => {
+                self.composer_queue.state.begin_usage_scope(
+                    thread,
+                    self.composer_queue.generation,
+                    run,
+                    selection.model_id().clone(),
+                    selection.route_id().clone(),
+                    selection.variant_id().cloned(),
+                );
+            }
+            _ => {
+                self.composer_queue.state.begin_native_usage_scope(
+                    thread,
+                    self.composer_queue.generation,
+                    run,
+                );
+            }
+        }
         self.composer_queue.usage = None;
         self.request_composer_usage(cx);
     }

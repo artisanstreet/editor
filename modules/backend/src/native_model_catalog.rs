@@ -257,7 +257,10 @@ pub(crate) fn from_catalog_result_with_discovery(
     favorites: &ModelFavoritesSnapshot,
 ) -> Result<NativeModelCatalog, NativeModelCatalogBridgeError> {
     let catalog = from_catalog_result(result, favorites)?;
-    if discovery.models.is_empty() && discovery.missing_engines.is_empty() {
+    if discovery.models.is_empty()
+        && discovery.missing_engines.is_empty()
+        && discovery.unauthenticated_engines.is_empty()
+    {
         return Ok(catalog);
     }
     let mut runtime = catalog.runtime();
@@ -274,6 +277,7 @@ pub(crate) fn from_catalog_result_with_discovery(
             runtime.routes.push(route);
         }
     }
+    drop_unauthenticated(&mut runtime.runnable_harness_ids, discovery);
     runtime.catalog_revision = Some(format!(
         "{base_revision}+discovery-{:016x}",
         discovery_revision_hash(discovery)
@@ -292,15 +296,17 @@ pub(crate) fn from_discovery(
         .map_err(|_| NativeModelCatalogBridgeError::HarnessManifest)?
         .manifest;
     let routes = apply_discovery(&mut manifest, discovery, true);
+    let mut runnable_harness_ids = RUNNABLE_ENGINE_IDS
+        .iter()
+        .map(|harness| (*harness).to_owned())
+        .collect();
+    drop_unauthenticated(&mut runnable_harness_ids, discovery);
     let runtime = NativeCatalogRuntime {
         catalog_revision: Some(format!(
             "discovery-{:016x}",
             discovery_revision_hash(discovery)
         )),
-        runnable_harness_ids: RUNNABLE_ENGINE_IDS
-            .iter()
-            .map(|harness| (*harness).to_owned())
-            .collect(),
+        runnable_harness_ids,
         routes,
         ..NativeCatalogRuntime::default()
     };
@@ -308,6 +314,20 @@ pub(crate) fn from_discovery(
     artisan_catalog::wire::encode_catalog(&catalog)
         .map_err(|_| NativeModelCatalogBridgeError::InvalidCatalog)?;
     Ok(catalog)
+}
+
+/// Removes engines whose CLI reported it is signed out from the runnable
+/// harnesses: none of their models can run until the account signs in.
+fn drop_unauthenticated(
+    runnable_harness_ids: &mut Vec<String>,
+    discovery: &crate::model_discovery::DiscoveryBundle,
+) {
+    runnable_harness_ids.retain(|engine_id| {
+        !discovery
+            .unauthenticated_engines
+            .iter()
+            .any(|unauthenticated| *unauthenticated == engine_id)
+    });
 }
 
 /// Stable revision contribution for one discovery bundle.

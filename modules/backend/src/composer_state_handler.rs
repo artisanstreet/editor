@@ -104,6 +104,12 @@ impl RequestHandler {
             .read_latest_run_usage(&query.run_id, &query.thread_id)
             .await
             .map_err(|error| usage_failure(&error, request_id))?;
+        let report = match report {
+            Some(report) => {
+                Some(crate::context_compaction_policy::with_catalog_window(report).await)
+            }
+            None => None,
+        };
         let compaction_at = report
             .as_ref()
             .and_then(crate::context_compaction_policy::compaction_at_tokens);

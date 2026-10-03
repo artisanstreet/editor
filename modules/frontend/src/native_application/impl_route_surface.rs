@@ -18,6 +18,8 @@ impl NativeApplication {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "route_surface");
         match self.route().clone() {
             NativeRoute::Onboarding => {
                 if self.onboarding_screen.is_none() {
@@ -250,8 +252,9 @@ impl NativeApplication {
     ///   project's `QueryProjectRepository` reply.
     /// - Checklist is the thread's latest plan update from its engine
     ///   observations.
-    /// - Agents are the subagents the thread's current run has started, read
-    ///   from the same observations ([`thread_agent_rows`]).
+    /// - Agents are the subagents the thread's live run has started, read
+    ///   from the same observations ([`thread_agent_rows`]); a settled run
+    ///   lists none.
     ///
     /// Every fact is fenced to the route's own `project` and `thread`:
     /// repository facts retained (or requested) for another project, and
@@ -303,7 +306,12 @@ impl NativeApplication {
         let plan = observations
             .and_then(EngineObservationState::latest_plan)
             .map_or(&[][..], |plan| plan.entries().as_slice());
-        let agents = observations.map(thread_agent_rows).unwrap_or_default();
+        // Agents belong to a live run: once it settles they are done and the
+        // section clears instead of listing finished work indefinitely.
+        let agents = observations
+            .filter(|_| self.run_controls.is_live_for(thread))
+            .map(thread_agent_rows)
+            .unwrap_or_default();
         screen.update(cx, |screen, screen_cx| {
             let mut changed = screen.set_project_label(project_label);
             changed |= screen.set_environment(environment);

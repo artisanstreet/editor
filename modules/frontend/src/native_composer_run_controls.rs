@@ -18,6 +18,18 @@ pub(super) struct RunControlsState {
 }
 
 impl RunControlsState {
+    /// Marks `run` live on `thread`, as an active-run answer would.
+    #[cfg(test)]
+    pub(super) fn set_live_for_test(&mut self, thread: ThreadId, run: RunId) {
+        self.thread = Some(thread);
+        self.active = Some(run);
+    }
+
+    /// Whether `thread` has a run the Forge reports as live.
+    pub(super) fn is_live_for(&self, thread: &ThreadId) -> bool {
+        self.thread.as_ref() == Some(thread) && self.active.is_some()
+    }
+
     pub(super) fn optimistically_stopped(&self) -> Option<&RunId> {
         self.optimistic_stopped.as_ref()
     }

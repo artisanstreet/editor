@@ -256,6 +256,12 @@ fn a_model_chosen_in_the_new_task_draft_stays_with_it_and_is_what_send_carries(
             let chosen = catalog.selection_policy_for_model("codex-luna").unwrap();
             let later = catalog.selection_policy_for_model("codex-sol").unwrap();
             application.handle_composer_policy_selection(&chosen, cx);
+            let saved = commands.borrow().iter().find_map(|command| match command {
+                NativeTransportCommand::Preferences(crate::native_transport_service::PreferencesCommand::SaveModel(save)) => Some(save.clone()),
+                _ => None,
+            }).expect("a picker choice saves preferences before a new task is sent");
+            assert_eq!(saved.source, artisan_domain::ModelPreferenceSource::User);
+            assert_eq!(saved.selection, crate::picker_selection::selection_for_policy(&chosen).unwrap());
             assert!(
                 !commands.borrow().iter().any(|command| matches!(
                     command,
@@ -297,4 +303,92 @@ fn a_model_chosen_in_the_new_task_draft_stays_with_it_and_is_what_send_carries(
         Some("codex-luna"),
         "the send carries the model shown when Send was pressed"
     );
+}
+
+#[gpui::test]
+fn preference_failures_match_the_latest_choice_and_retry_without_a_thread(cx: &mut TestAppContext) {
+    use crate::native_transport_service::{
+        PreferencesCommand, PreferencesEvent, ServiceFailure, ServiceFailureCategory,
+        ServiceFailureStage,
+    };
+    let (view, cx) = cx.add_window_view(signed_in_test_application);
+    let (sink, commands) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            new_thread_screen(application, cx, "keep this draft", sink);
+            let catalog = application.served_catalog(cx);
+            let first = catalog.selection_policy_for_model("codex-luna").unwrap();
+            let latest = catalog.selection_policy_for_model("codex-sol").unwrap();
+            application.handle_composer_policy_selection(&first, cx);
+            let old_id = application
+                .pending_model_preference
+                .as_ref()
+                .unwrap()
+                .request_id
+                .clone();
+            application.handle_composer_policy_selection(&latest, cx);
+            let pending = application.pending_model_preference.clone().unwrap();
+            let failure = ServiceFailure {
+                stage: ServiceFailureStage::Request,
+                category: ServiceFailureCategory::Unavailable,
+            };
+            application.handle_preferences_event(
+                PreferencesEvent::ModelSaved {
+                    request_id: old_id,
+                    result: Err(failure),
+                },
+                cx,
+            );
+            assert!(
+                application.composer_model_run_error.is_none(),
+                "an old choice's failure must not affect the latest choice"
+            );
+            application.handle_preferences_event(
+                PreferencesEvent::ModelSaved {
+                    request_id: pending.request_id.clone(),
+                    result: Err(failure),
+                },
+                cx,
+            );
+            assert!(application.composer_model_run_error.is_some());
+            assert!(
+                application
+                    .composer_controls
+                    .read(cx)
+                    .snapshot()
+                    .failure
+                    .is_some()
+            );
+            application.handle_composer_model_event(
+                &crate::native_model_selector::NativeModelSelectorEvent::Retry,
+                cx,
+            );
+            assert_eq!(application.composer_model_choice(cx), Some(&latest));
+            assert!(
+                application
+                    .composer_controls
+                    .read(cx)
+                    .snapshot()
+                    .failure
+                    .is_none()
+            );
+            assert_eq!(application.composer.read(cx).draft(), "keep this draft");
+            let saves = commands
+                .borrow()
+                .iter()
+                .filter_map(|command| match command {
+                    NativeTransportCommand::Preferences(PreferencesCommand::SaveModel(save)) => {
+                        Some(save.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(saves.len(), 3);
+            assert_eq!(saves[1], pending);
+            assert_eq!(
+                saves[2], pending,
+                "retry uses the same choice, source and request identity"
+            );
+        });
+    });
 }

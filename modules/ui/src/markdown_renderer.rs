@@ -56,7 +56,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -78,6 +78,7 @@ use crate::markdown::{
     Block, CodeToken, CodeTokenKind, ListItem, MarkdownDocument, MarkdownEngine, Span, Table,
 };
 use crate::markdown_cache::{MarkdownParseCache, MarkdownParseReport, MarkdownWorkCounters};
+use crate::markdown_reveal::{RevealFade, apply_reveal_fade};
 use crate::selectable_text::SelectableText;
 use crate::theme::{ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens};
 
@@ -207,7 +208,39 @@ impl MarkdownRenderer {
         titles: &dyn RichLinkTitleSource,
     ) -> AnyElement {
         let prepared = self.cache.borrow_mut().prepared(&self.engine, source);
-        self.render_prepared(prepared, source, theme, selector.into(), tone, titles)
+        self.render_prepared(prepared, source, theme, selector.into(), tone, titles, None)
+            .0
+    }
+
+    /// Renders one revealing prefix of a streamed body, fading freshly
+    /// revealed units by `fade`.
+    ///
+    /// Returns the element and the body's visible length in the fade's
+    /// coordinates: leaf text bytes in document order, with each fence,
+    /// table, and raw HTML block counted as one unit. A caller marks the
+    /// next revealed segment at the length this returned for the previous
+    /// prefix. Fading recolors glyphs and blocks only; layout is exactly
+    /// that of [`Self::render_source_with_tone_and_titles`].
+    #[must_use]
+    pub fn render_revealing_source(
+        &self,
+        source: &str,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+        titles: &dyn RichLinkTitleSource,
+        fade: &RevealFade,
+    ) -> (AnyElement, usize) {
+        let prepared = self.cache.borrow_mut().prepared(&self.engine, source);
+        self.render_prepared(
+            prepared,
+            source,
+            theme,
+            selector.into(),
+            tone,
+            titles,
+            Some(fade),
+        )
     }
 
     /// Renders like [`Self::render_source_with_tone_and_titles`] from a body
@@ -229,9 +262,14 @@ impl MarkdownRenderer {
             .cache
             .borrow_mut()
             .prepared_shared(&self.engine, source);
-        self.render_prepared(prepared, source, theme, selector.into(), tone, titles)
+        self.render_prepared(prepared, source, theme, selector.into(), tone, titles, None)
+            .0
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the one render seam threads the prepared body, its theme and identity, the tone, title lookup, and optional reveal fade"
+    )]
     fn render_prepared(
         &self,
         prepared: Option<Rc<PreparedMarkdown>>,
@@ -240,13 +278,14 @@ impl MarkdownRenderer {
         selector: SharedString,
         tone: MarkdownBodyTone,
         titles: &dyn RichLinkTitleSource,
-    ) -> AnyElement {
+        fade: Option<&RevealFade>,
+    ) -> (AnyElement, usize) {
         let Some(prepared) = prepared else {
-            return plain_source(source, &theme, &selector, tone, self.prose_measure);
+            return plain_source(source, &theme, &selector, tone, self.prose_measure, fade);
         };
         let blocks = prepared.document().blocks();
         if !source.is_empty() && blocks.is_empty() {
-            return plain_source(source, &theme, &selector, tone, self.prose_measure);
+            return plain_source(source, &theme, &selector, tone, self.prose_measure, fade);
         }
 
         let ids = prepared.ids(&selector);
@@ -256,6 +295,8 @@ impl MarkdownRenderer {
             titles,
             ids: &ids,
             counters: prepared.counters(),
+            fade,
+            cursor: Cell::new(0),
         };
         let mut root = markdown_root(render.id(ROOT_SLOT), &theme, tone);
         let root_blocks = prepared.root();
@@ -270,7 +311,7 @@ impl MarkdownRenderer {
                 measure,
             ));
         }
-        root.into_any_element()
+        (root.into_any_element(), render.cursor.get())
     }
 }
 
@@ -282,6 +323,11 @@ struct RenderContext<'a> {
     /// This document's element ids under the caller's selector.
     ids: &'a [SharedString],
     counters: &'a MarkdownWorkCounters,
+    /// The reveal fade of a streaming body, if any.
+    fade: Option<&'a RevealFade>,
+    /// Visible units rendered so far, in document order (see
+    /// [`MarkdownRenderer::render_revealing_source`]).
+    cursor: Cell<usize>,
 }
 
 impl RenderContext<'_> {
@@ -289,6 +335,52 @@ impl RenderContext<'_> {
     /// document the table was formatted from, so every slot is in range.
     fn id(&self, slot: Slot) -> SharedString {
         self.ids.get(slot).cloned().unwrap_or_default()
+    }
+
+    /// Claims the next `len` visible units and returns their translucent
+    /// leaf-local spans.
+    fn claim_leaf(&self, len: usize) -> Vec<(Range<usize>, f32)> {
+        let base = self.cursor.get();
+        self.cursor.set(base + len);
+        self.fade
+            .map(|fade| fade.leaf_spans(base, len))
+            .unwrap_or_default()
+    }
+
+    /// Claims one atomic unit and returns its opacity.
+    fn claim_block(&self) -> f32 {
+        let at = self.cursor.get();
+        self.cursor.set(at + 1);
+        self.fade.map_or(1.0, |fade| fade.alpha_at(at))
+    }
+
+    /// A context for the inside of an atomic block: same theme and ids, no
+    /// fade, and a private cursor.
+    fn without_fade(&self) -> RenderContext<'_> {
+        RenderContext {
+            theme: self.theme,
+            tone: self.tone,
+            titles: self.titles,
+            ids: self.ids,
+            counters: self.counters,
+            fade: None,
+            cursor: Cell::new(0),
+        }
+    }
+
+    /// The opacity of whatever renders next, without claiming it.
+    fn alpha_next(&self) -> f32 {
+        self.fade
+            .map_or(1.0, |fade| fade.alpha_at(self.cursor.get()))
+    }
+}
+
+/// Fades one whole block by `alpha`, untouched at full opacity.
+fn faded(element: AnyElement, alpha: f32) -> AnyElement {
+    if alpha >= 1.0 {
+        element
+    } else {
+        div().opacity(alpha).child(element).into_any_element()
     }
 }
 
@@ -338,7 +430,11 @@ fn plain_source(
     selector: &str,
     tone: MarkdownBodyTone,
     measure: Option<Pixels>,
-) -> AnyElement {
+    fade: Option<&RevealFade>,
+) -> (AnyElement, usize) {
+    let spans = fade
+        .map(|fade| fade.leaf_spans(0, source.len()))
+        .unwrap_or_default();
     let selector = format!("{selector}-markdown");
     let id = SharedString::from(format!("{selector}-plain"));
     let mut root = body_container(theme, tone);
@@ -346,13 +442,15 @@ fn plain_source(
         root = root.max_w(measure);
     }
     root = root.debug_selector(move || selector);
-    root.child(SelectableText::retained(
-        id,
-        source.to_owned(),
-        *theme,
-        Vec::new(),
-    ))
-    .into_any_element()
+    let element = root
+        .child(SelectableText::retained(
+            id,
+            source.to_owned(),
+            *theme,
+            apply_reveal_fade(&[], &spans),
+        ))
+        .into_any_element();
+    (element, source.len())
 }
 
 /// Which body text tone a rendered message carries.
@@ -527,23 +625,32 @@ fn render_block(
             ));
         }
         PreparedKind::Code(code) => {
-            element = element.child(render_code(code, render));
+            // Fences, tables, and raw HTML reveal whole, so they fade whole.
+            let alpha = render.claim_block();
+            element = element.child(faded(render_code(code, render), alpha));
         }
         PreparedKind::Html { id, source } => {
             // Carried verbatim as inert data, exactly as before, but
             // selectable like every other transcript leaf.
-            element = element.child(SelectableText::retained(
-                render.id(*id),
-                source.clone(),
-                *theme,
-                Vec::new(),
+            let alpha = render.claim_block();
+            element = element.child(faded(
+                SelectableText::retained(render.id(*id), source.clone(), *theme, Vec::new())
+                    .into_any_element(),
+                alpha,
             ));
         }
         PreparedKind::List(list) => {
             element = element.child(render_list(block_items(block), list, render, depth));
         }
         PreparedKind::Table(table) => {
-            element = element.child(table::render_table(block_table(block), table, render));
+            // The table fades as one block; its cells render without their
+            // own fade and claim no units of their own.
+            let alpha = render.claim_block();
+            let cells = render.without_fade();
+            element = element.child(faded(
+                table::render_table(block_table(block), table, &cells),
+                alpha,
+            ));
         }
     }
     element = element.debug_selector(move || selector.to_string());
@@ -601,6 +708,8 @@ fn render_list(
             .get(position)
             .map_or(&[][..], |item| item.blocks.as_slice());
         let item_selector = render.id(item.selector);
+        // The marker reveals with its item's first word, so it fades with it.
+        let marker_alpha = render.alpha_next();
         let mut content = div().flex().flex_1().min_w_0().flex_col();
         if let Some(empty) = &item.empty {
             content = content.child(render_leaf(&[], empty, item_selector.clone(), render));
@@ -631,6 +740,9 @@ fn render_list(
             .text_color(theme.colors.muted_foreground.to_paint());
         if prepared.ordered {
             marker_element = marker_element.font_weight(FontWeight::NORMAL);
+        }
+        if marker_alpha < 1.0 {
+            marker_element = marker_element.opacity(marker_alpha);
         }
         row = row.child(marker_element.child(item.marker.clone()));
         row = row.child(content);
@@ -665,8 +777,9 @@ fn render_leaf(
 ) -> AnyElement {
     let theme = render.theme;
     let (presentation, icons) = leaf.presentation(spans, render.titles, render.counters);
+    let fade = render.claim_leaf(presentation.text.len());
     if presentation.citations.is_empty() {
-        return selectable_leaf(selector, &presentation, icons, theme);
+        return selectable_leaf(selector, &presentation, icons, theme, &fade);
     }
     // One nowrap row: the prose hugs its content and the pills trail the
     // sentence on its line, bottom-aligned with the last line, instead of
@@ -696,6 +809,7 @@ fn render_leaf(
                     &presentation,
                     icons,
                     theme,
+                    &fade,
                 )),
         );
     }
@@ -713,14 +827,21 @@ fn render_leaf(
 /// The selection element owns link clicks and suppresses drag activation,
 /// so no separate click handler lives beside it: one element, one behavior.
 /// Text, resolved runs, overrides, and link data are shared with the cached
-/// presentation, so nothing here copies the leaf's content.
+/// presentation, so nothing here copies the leaf's content. Only a leaf
+/// with translucent reveal spans copies its highlights to overlay them.
 fn selectable_leaf(
     id: SharedString,
     presentation: &LeafPresentation,
     icons: Vec<(usize, Arc<RenderImage>)>,
     theme: &ArtisanTheme,
+    fade: &[(Range<usize>, f32)],
 ) -> AnyElement {
     let (highlights, overrides) = presentation.resolved(theme);
+    let highlights = if fade.is_empty() {
+        highlights
+    } else {
+        Rc::from(apply_reveal_fade(&highlights, fade))
+    };
     let element = SelectableText::retained(id, presentation.text.clone(), *theme, Vec::new())
         .with_shared_highlights(highlights)
         .with_shared_text_run_overrides(overrides)

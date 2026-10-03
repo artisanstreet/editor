@@ -70,9 +70,9 @@ use crate::native_composer_controls::{
 use crate::native_message_images::{NativeMessageImages, NativeMessageImagesEvent};
 use crate::native_model_catalog::NativeModelCatalog;
 use crate::native_model_selector::{
-    HoverRect, NativeModelSelector, NativeModelSelectorStatus, PICKER_MENU_MOTION_DURATION_MS,
-    PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState, animate_picker_menu,
-    engine_accent, engine_asset, render_picker_hover_pill,
+    HoverRect, NativeModelSelector, NativeModelSelectorStatus, PickerMenuEntrance,
+    PickerMenuMotion, PickerMenuPhase, PickerScrollState, SlidingHoverState,
+    animate_picker_menu_timed, engine_accent, engine_asset, render_picker_hover_pill,
 };
 use crate::native_profile_usage::{
     NativeProfileUsageState, NativeUsageEntry, NativeUsageWindow, ProfileUsageGeneration,
@@ -219,7 +219,10 @@ mod impl_engine_installs;
 
 #[path = "native_application/app_entry.rs"]
 mod app_entry;
+#[cfg(feature = "flight-recorder")]
+mod flight_recorder;
 mod frame_capture;
+mod project_icon;
 
 #[path = "native_application/impl_route_surface.rs"]
 mod impl_route_surface;
@@ -234,23 +237,23 @@ mod impl_failure;
 use app_entry::bind_native_actions;
 pub use app_entry::run;
 
-#[cfg(test)]
-use selectors::{SURFACE_HEIGHT, SURFACE_WIDTH};
 use selectors::{
-    MAX_RETAINED_SWITCH_LISTINGS, MAX_RETAINED_SWITCH_PATCH_IDS, MAX_RETAINED_SWITCH_REQUEST_IDS,
-    LAUNCH_WINDOW_HEIGHT, MIN_WINDOW_HEIGHT, NATIVE_KEY_CONTEXT, NATIVE_ROOT_SELECTOR, POLL_INTERVAL, PROFILE_MENU_ANCHOR_GAP_PX,
+    LAUNCH_WINDOW_HEIGHT, MAX_RETAINED_SWITCH_LISTINGS, MAX_RETAINED_SWITCH_PATCH_IDS,
+    MAX_RETAINED_SWITCH_REQUEST_IDS, MIN_WINDOW_HEIGHT, NATIVE_KEY_CONTEXT, NATIVE_ROOT_SELECTOR,
+    POLL_INTERVAL, PROFILE_MENU_ANCHOR_GAP_PX, PROFILE_MENU_CLOSE, PROFILE_MENU_OPEN,
     PROFILE_MENU_VIEWPORT_MARGIN_PX, PROFILE_SETTINGS_HOVER_ID, PROFILE_USAGE_HOVER_ID,
     PROFILE_USAGE_TITLE_GAP_PX, SIDEBAR_MARKETPLACE_HOVER_ID, SIDEBAR_NEW_THREAD_HOVER_ID,
-    SIDEBAR_PROFILE_HOVER_ID, TITLEBAR_HEADER_SELECTOR,
-    TITLEBAR_PROJECT_FOLDER_SELECTOR, TITLEBAR_REPOSITORY_LABEL_SELECTOR,
-    TITLEBAR_REPOSITORY_MARK_SELECTOR, TITLEBAR_ROUTE_TITLE_SELECTOR,
-    TITLEBAR_THREAD_SEPARATOR_SELECTOR,
+    SIDEBAR_PROFILE_HOVER_ID, TITLEBAR_HEADER_SELECTOR, TITLEBAR_PROJECT_FOLDER_SELECTOR,
+    TITLEBAR_REPOSITORY_LABEL_SELECTOR, TITLEBAR_REPOSITORY_MARK_SELECTOR,
+    TITLEBAR_ROUTE_TITLE_SELECTOR, TITLEBAR_THREAD_SEPARATOR_SELECTOR,
 };
 #[cfg(test)]
 use selectors::{
     NATIVE_RAIL_ADD_PROJECT_LABEL, NATIVE_RAIL_ADD_PROJECT_SELECTOR, NATIVE_STATUS_SELECTOR,
     WINDOW_TITLE,
 };
+#[cfg(test)]
+use selectors::{SURFACE_HEIGHT, SURFACE_WIDTH};
 
 use profile_motion::{
     PROFILE_MENU_FIXED_CHROME_PX, PROFILE_METER_TICK_PX, ProfileTipTween, RefreshSwap,
@@ -360,6 +363,7 @@ pub struct NativeApplication {
     /// The Forge's default engine configuration, shown on threads without
     /// their own until they save one.
     default_engine_config: Option<artisan_domain::EngineRunConfig>,
+    pending_model_preference: Option<artisan_domain::SaveModelPreference>,
     /// Legacy file preferences handed to the Forge, removed once it answers.
     legacy_import: Option<crate::editor_settings::LegacyForgePreferences>,
     #[cfg(test)]

@@ -128,11 +128,15 @@ life, and work and non-promoted prose after the steer stay session details.
   session: `superseded = true` iff some other block follows the first
   segment. A superseded session never narrates (renderer hides its live
   line); the turn-level status row at turn end narrates current work.
-- Disclosure. A section cannot be collapsed before its turn settles: while
-  the turn lifecycle is live the panel is forced open and the header has no
-  chevron or toggle; the disclosure machine refuses a close for active work
-  and reopens on re-activation. Once settled, one toggle hides the rows of
-  every segment while the steer bubbles stay visible.
+- Disclosure. A section cannot be collapsed by hand before its turn
+  settles: while the turn lifecycle is live the panel is forced open and the
+  header has no chevron or toggle; the disclosure machine refuses a close
+  for active work and reopens on re-activation. The one exception is the
+  reply: the moment the promoted reply's first whole word or block is
+  visibly revealed, the renderer folds the live section (still without a
+  toggle), and it reopens if that prose is demoted back into the work.
+  Once settled, one toggle hides the rows of every segment while the steer
+  bubbles stay visible.
 - Backend ordering. The Forge opens an assistant item ahead of its first
   text; a steer projected while that item is still empty retires it, so the
   acknowledging prose opens a new item after the steer and the seam rule

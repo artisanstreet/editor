@@ -125,6 +125,18 @@ impl RunUsageReport {
         self
     }
 
+    /// Fills the context window the provider did not report, from the
+    /// model catalog: a reported window is never replaced, and zero is no
+    /// window.
+    #[must_use]
+    pub fn with_catalog_window(mut self, window: Option<u64>) -> Self {
+        if self.context_window_tokens.is_none() {
+            self.context_window_tokens =
+                window.filter(|window| (1..=RUN_USAGE_MAX_TOKEN_COUNT).contains(window));
+        }
+        self
+    }
+
     /// Observed reference tokens per second, multiplied by 1000.
     #[must_use]
     pub const fn streaming_millitokens_per_second(&self) -> Option<u32> {

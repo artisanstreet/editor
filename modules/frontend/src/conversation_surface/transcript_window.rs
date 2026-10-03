@@ -34,12 +34,17 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::time::{Duration, Instant};
 
 use super::render_budget::{
     TRANSCRIPT_MAX_ROW_HEIGHT_PX, TRANSCRIPT_MIN_ROW_HEIGHT_PX, TRANSCRIPT_TURN_GAP_PX,
     TRANSCRIPT_UNMEASURED_ROW_HEIGHT_PX, plan_transcript_window, transcript_markdown_within_budget,
 };
 use super::*;
+
+/// How long after a scene arrives its paint stops counting as watched: a
+/// visible window paints within a frame or two.
+const UNWATCHED_AFTER: Duration = Duration::from_millis(500);
 
 /// Stable debug-selector suffix for a placeholder standing in for one turn.
 ///
@@ -219,28 +224,8 @@ impl TranscriptShaper {
         tone: MarkdownBodyTone,
         row_ledger: Option<&Cell<TranscriptShapeLedger>>,
     ) -> AnyElement {
-        let within_budget = transcript_markdown_within_budget(body.len());
-        let mut frame = self.frame_ledger.get();
-        frame.record(body.len(), within_budget);
-        self.frame_ledger.set(frame);
-        if let Some(row_ledger) = row_ledger {
-            let mut row = row_ledger.get();
-            row.record(body.len(), within_budget);
-            row_ledger.set(row);
-        }
-        if !within_budget {
-            let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
-            return div()
-                .w_full()
-                .max_w(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX))
-                .debug_selector(|| format!("{selector}-markdown"))
-                .child(SelectableText::retained(
-                    plain_id,
-                    body.to_owned(),
-                    *theme,
-                    Vec::new(),
-                ))
-                .into_any_element();
+        if !self.record(body.len(), row_ledger) {
+            return plain_markdown(body, theme, &selector);
         }
         let titles = self.rich_link_titles.borrow();
         let probe = SurfaceRichLinkTitles {
@@ -251,6 +236,66 @@ impl TranscriptShaper {
         self.renderer
             .render_source_with_tone_and_titles(body, *theme, selector, tone, &probe)
     }
+
+    /// Shapes one revealing prefix of a streamed reply, fading freshly
+    /// revealed units by `fade` (see
+    /// [`MarkdownRenderer::render_revealing_source`]).
+    ///
+    /// Returns the element and the prefix's visible length. An over-budget
+    /// body renders plain and whole, exactly like [`Self::render`].
+    pub(super) fn render_revealing(
+        &self,
+        body: &str,
+        theme: &ArtisanTheme,
+        selector: String,
+        tone: MarkdownBodyTone,
+        row_ledger: Option<&Cell<TranscriptShapeLedger>>,
+        fade: &RevealFade,
+    ) -> (AnyElement, usize) {
+        if !self.record(body.len(), row_ledger) {
+            return (plain_markdown(body, theme, &selector), body.len());
+        }
+        let titles = self.rich_link_titles.borrow();
+        let probe = SurfaceRichLinkTitles {
+            titles: &titles,
+            missing: &self.rich_link_missing,
+            now_ms: self.now_ms(),
+        };
+        self.renderer
+            .render_revealing_source(body, *theme, selector, tone, &probe, fade)
+    }
+
+    /// Records one shaped body in the frame and row ledgers and reports
+    /// whether it is within the per-row budget.
+    fn record(&self, len: usize, row_ledger: Option<&Cell<TranscriptShapeLedger>>) -> bool {
+        let within_budget = transcript_markdown_within_budget(len);
+        let mut frame = self.frame_ledger.get();
+        frame.record(len, within_budget);
+        self.frame_ledger.set(frame);
+        if let Some(row_ledger) = row_ledger {
+            let mut row = row_ledger.get();
+            row.record(len, within_budget);
+            row_ledger.set(row);
+        }
+        within_budget
+    }
+}
+
+/// The exact full text of an over-budget body as one plain selectable leaf.
+fn plain_markdown(body: &str, theme: &ArtisanTheme, selector: &str) -> AnyElement {
+    let plain_id = SharedString::from(format!("{selector}-markdown-plain"));
+    let selector = selector.to_owned();
+    div()
+        .w_full()
+        .max_w(px(TRANSCRIPT_PROSE_BODY_WIDTH_PX))
+        .debug_selector(move || format!("{selector}-markdown"))
+        .child(SelectableText::retained(
+            plain_id,
+            body.to_owned(),
+            *theme,
+            Vec::new(),
+        ))
+        .into_any_element()
 }
 
 /// Measured turn heights plus cached prefix offsets for window planning.
@@ -628,6 +673,12 @@ impl ConversationSurface {
         let force_render =
             !self.pending_scroll_targets.is_empty() || self.anchor_scrolls_in_flight > 0;
         let reduce_motion = cx.reduce_motion();
+        // A visible window paints a replaced scene within a frame or two;
+        // a longer wait means nobody watched it arrive.
+        let caught_up = self
+            .unpainted_since
+            .take()
+            .is_some_and(|since| since.elapsed() >= UNWATCHED_AFTER);
         for index in 0..turn_count {
             if !built.contains(index) {
                 // One placeholder per off-window turn keeps the child count
@@ -644,6 +695,7 @@ impl ConversationSurface {
             let source = TurnRowSource {
                 turn,
                 scene_generation: self.scene_generation,
+                caught_up,
                 theme_mode: self.theme_mode,
                 status_motion,
                 reduce_motion,
@@ -709,6 +761,7 @@ impl ConversationSurface {
         self.turn_rows
             .retain(|id, _| live_turns.contains(id.as_str()));
         self.scene_generation = self.scene_generation.wrapping_add(1);
+        self.unpainted_since.get_or_insert_with(Instant::now);
         self.transcript_window
             .borrow_mut()
             .scene_replaced(&self.scene);

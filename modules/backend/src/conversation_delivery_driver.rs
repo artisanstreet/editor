@@ -304,6 +304,7 @@ impl ConversationDeliveryDriver {
         let Some(report) = report else {
             return Ok(());
         };
+        let report = crate::context_compaction_policy::with_catalog_window(report).await;
         let compaction_at = crate::context_compaction_policy::compaction_at_tokens(&report);
         let Ok(usage) = RunUsageResult::new(thread_id.clone(), run_id, Some(report))
             .map(|usage| usage.with_compaction_at(compaction_at))

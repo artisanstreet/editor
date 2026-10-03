@@ -11,6 +11,8 @@ impl NativeApplication {
         snapshot: ConversationSnapshot,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "handle_snapshot");
         let thread_id = snapshot.thread_id().clone();
         // A standalone snapshot cannot identify the subscription generation.
         // During a switch only the matching fresh-start payload may advance
@@ -49,6 +51,8 @@ impl NativeApplication {
         snapshot: ConversationSnapshot,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "dispatch_snapshot");
         // Collect echo candidates before the snapshot moves into the host:
         // matching needs only watched source ids, so a small owned
         // (message, turn) list suffices and no transcript data is cloned.
@@ -117,6 +121,8 @@ impl NativeApplication {
         reason = "one mount transaction keeps the pending-thread checks and state handoff together"
     )]
     pub(super) fn try_mount_pending_thread(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "try_mount_pending_thread");
         if self.shutdown_prepared {
             self.pending_thread = None;
             return;
@@ -284,6 +290,8 @@ impl NativeApplication {
     }
 
     pub(super) fn retire_host(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "retire_host");
         self.remember_switch_listing();
         if let Some(thread_id) = self.selected_thread.clone() {
             self.remember_switch_snapshot_thread(thread_id.clone());
@@ -372,6 +380,8 @@ impl NativeApplication {
         host: &Entity<ConversationHost>,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("ui", "pump_host_boundary");
         let mut retried_surface = false;
         for _ in 0..=CONVERSATION_HOST_MAX_EFFECTS {
             self.collect_host_effects(host, cx);

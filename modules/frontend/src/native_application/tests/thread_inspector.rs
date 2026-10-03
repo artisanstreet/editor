@@ -411,7 +411,7 @@ fn agent(id: &str, name: &str, state: ThreadAgentState) -> ThreadAgentEntry {
 
 /// The Agents section lists the subagents the thread's current run started,
 /// named by their task and settled as their tool reports settle. Other tools
-/// never appear, and a new run starts the list over.
+/// never appear, a settled run lists none, and a new run starts over.
 #[gpui::test]
 fn inspector_agents_follow_the_current_runs_subagents(cx: &mut TestAppContext) {
     let (view, cx) = mount_open_thread(cx);
@@ -429,6 +429,22 @@ fn inspector_agents_follow_the_current_runs_subagents(cx: &mut TestAppContext) {
         });
         cx.run_until_parked();
     };
+    let live = |cx: &mut gpui::VisualTestContext, run: Option<&str>| {
+        cx.update(|_, app| {
+            view.update(app, |application, cx| {
+                match run {
+                    Some(run) => application.run_controls.set_live_for_test(
+                        thread_a.clone(),
+                        artisan_domain::RunId::parse(run).expect("run"),
+                    ),
+                    None => application.run_controls.clear_transient_observation(),
+                }
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+    };
+    live(cx, Some("run-1"));
     send(
         cx,
         vec![
@@ -508,7 +524,13 @@ fn inspector_agents_follow_the_current_runs_subagents(cx: &mut TestAppContext) {
         vec![ThreadAgentState::Completed, ThreadAgentState::Failed]
     );
 
-    // A new run without subagents clears the list.
+    // Once the run settles its agents are done: the section clears.
+    live(cx, None);
+    assert!(inspector_agents(&view, cx).is_empty());
+    assert!(cx.debug_bounds(THREAD_SCREEN_AGENTS_SELECTOR).is_none());
+
+    // A new run without subagents lists none.
+    live(cx, Some("run-2"));
     send(
         cx,
         vec![tool_event(

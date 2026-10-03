@@ -225,3 +225,32 @@ fn pushed_host_state_events_round_trip() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+#[test]
+fn model_preferences_round_trip_with_every_source() -> Result<(), Box<dyn Error>> {
+    use artisan_domain::{ModelPreferenceSource, SaveModelPreference};
+    for source in [
+        ModelPreferenceSource::User,
+        ModelPreferenceSource::Agent,
+        ModelPreferenceSource::System,
+    ] {
+        round_trip(
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::SaveModelPreference(
+                SaveModelPreference {
+                    request_id: RequestId::parse("model-preference")?,
+                    selection: CatalogSelection {
+                        model_id: ModelFavoriteId::parse("codex-sol")?,
+                        profile_id: None,
+                        reasoning_effort: Some(CatalogOptionId::parse("medium")?),
+                        speed: None,
+                        context_window: None,
+                        permission: Some(CatalogOptionId::parse("unrestricted")?),
+                    },
+                    source,
+                },
+            ))),
+            "model-preference",
+        )?;
+    }
+    Ok(())
+}

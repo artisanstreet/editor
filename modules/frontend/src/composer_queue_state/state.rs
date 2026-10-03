@@ -32,6 +32,15 @@ struct UsageScope {
     thread_id: ThreadId,
     run_id: RunId,
     generation: u64,
+    /// The launch policy reports must match, when the Editor knows the ids
+    /// the engine reports under (`OpenCode` 2). A native engine reports
+    /// under its own ids; its thread and run are the attribution.
+    policy: Option<UsagePolicy>,
+}
+
+/// The model, route and variant an `OpenCode` 2 run reports under.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UsagePolicy {
     model_id: EngineModelId,
     route_id: EngineRouteId,
     variant_id: Option<EngineVariantId>,
@@ -509,18 +518,41 @@ impl ComposerQueueState {
         route_id: EngineRouteId,
         variant_id: Option<EngineVariantId>,
     ) -> bool {
-        if self.current_thread.as_ref() != Some(&thread_id) || self.current_generation != generation
-        {
-            return false;
-        }
-        let next = UsageScope {
+        self.replace_usage_scope(UsageScope {
             thread_id,
             run_id,
             generation,
-            model_id,
-            route_id,
-            variant_id,
-        };
+            policy: Some(UsagePolicy {
+                model_id,
+                route_id,
+                variant_id,
+            }),
+        })
+    }
+
+    /// Starts or retains a reporting scope for one native engine run, which
+    /// accepts the run's reports under whatever model and route the engine
+    /// names.
+    pub(crate) fn begin_native_usage_scope(
+        &mut self,
+        thread_id: ThreadId,
+        generation: u64,
+        run_id: RunId,
+    ) -> bool {
+        self.replace_usage_scope(UsageScope {
+            thread_id,
+            run_id,
+            generation,
+            policy: None,
+        })
+    }
+
+    fn replace_usage_scope(&mut self, next: UsageScope) -> bool {
+        if self.current_thread.as_ref() != Some(&next.thread_id)
+            || self.current_generation != next.generation
+        {
+            return false;
+        }
         if self.usage_scope.as_ref() != Some(&next) {
             self.usage_scope = Some(next);
             self.usage = None;
@@ -658,9 +690,11 @@ impl ComposerQueueState {
         };
         if report.thread_id() != &scope.thread_id
             || report.run_id() != &scope.run_id
-            || report.model_id() != &scope.model_id
-            || report.provider_route_id() != &scope.route_id
-            || report.variant_id() != scope.variant_id.as_ref()
+            || scope.policy.as_ref().is_some_and(|policy| {
+                report.model_id() != &policy.model_id
+                    || report.provider_route_id() != &policy.route_id
+                    || report.variant_id() != policy.variant_id.as_ref()
+            })
         {
             return Err(UsageResultError {
                 result: RunUsageResult {
@@ -707,7 +741,9 @@ impl ComposerQueueState {
     ) -> Option<ReportingUsage> {
         let scope = self.usage_scope.as_ref()?;
         let usage = self.usage.as_ref()?;
-        if current_run_id != Some(scope.run_id.as_str()) {
+        // An idle thread keeps showing its last run's reading; a different
+        // live run has not reported into this scope yet.
+        if current_run_id.is_some_and(|run| run != scope.run_id.as_str()) {
             return None;
         }
         let report = &usage.report;

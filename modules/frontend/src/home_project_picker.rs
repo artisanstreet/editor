@@ -570,9 +570,12 @@ impl HomeProjectPickerView {
             .track_scroll(&self.menu_scroll)
             .max_h(menu_max_height_for_viewport(viewport))
             .p(px(8.0));
+        let mut rows = vec![self.menu_hover_id(PickerRow::NewProject)];
         for catalog_index in self.state.visible_indexes() {
+            rows.push(self.menu_hover_id(PickerRow::Project(catalog_index)));
             list = list.child(self.render_project_row(catalog_index, cx));
         }
+        self.menu_hover.borrow_mut().clear_if_missing(&rows);
         list = list.child(
             div()
                 .flex()

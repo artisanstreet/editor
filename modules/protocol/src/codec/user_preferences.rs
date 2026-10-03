@@ -6,8 +6,8 @@ use super::*;
 
 use artisan_domain::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
-    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRoute,
-    ReadUserPreferences, RecordNavigation, UserPreferences,
+    ModelPreferenceSource, NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord,
+    NavigationRoute, ReadUserPreferences, RecordNavigation, SaveModelPreference, UserPreferences,
 };
 
 use crate::composer_state_codec as leaf;
@@ -25,6 +25,15 @@ pub(crate) fn encode_user_preferences_request(
             let mut encoded = builder.init_record_navigation();
             encoded.set_project_id(record.project_id.as_str());
             encoded.set_thread_id(record.thread_id.as_ref().map_or("", ThreadId::as_str));
+        }
+        ClientRequest::Command(Command::SaveModelPreference(save)) => {
+            let mut encoded = builder.init_save_model_preference();
+            encoded.set_source(match save.source {
+                ModelPreferenceSource::Agent => artisan_capnp::ModelPreferenceSource::Agent,
+                ModelPreferenceSource::User => artisan_capnp::ModelPreferenceSource::User,
+                ModelPreferenceSource::System => artisan_capnp::ModelPreferenceSource::System,
+            });
+            leaf::encode_catalog_selection(encoded.init_selection(), &save.selection);
         }
         ClientRequest::Command(Command::ImportLegacyPreferences(import)) => {
             let mut encoded = builder.init_import_legacy_preferences();
@@ -75,6 +84,24 @@ pub(crate) fn decode_user_preferences_request(
                         record.get_thread_id(),
                         "request.recordNavigation.threadId",
                     )?,
+                },
+            )))
+        }
+        request::Which::SaveModelPreference(save) => {
+            let save = save?;
+            let source = match save.get_source()? {
+                artisan_capnp::ModelPreferenceSource::Agent => ModelPreferenceSource::Agent,
+                artisan_capnp::ModelPreferenceSource::User => ModelPreferenceSource::User,
+                artisan_capnp::ModelPreferenceSource::System => ModelPreferenceSource::System,
+            };
+            Ok(ClientRequest::Command(Command::SaveModelPreference(
+                SaveModelPreference {
+                    request_id: request_id.clone(),
+                    selection: leaf::decode_catalog_selection(
+                        save.get_selection()?,
+                        "request.saveModelPreference.selection",
+                    )?,
+                    source,
                 },
             )))
         }

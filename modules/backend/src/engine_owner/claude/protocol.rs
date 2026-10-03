@@ -10,7 +10,10 @@ use super::content::{
     ClaudeAssistantFrame, assistant_content, decode_block_start, decode_block_stop,
     decode_thinking_delta,
 };
-use super::usage::{ClaudeUsageSample, parse_claude_assistant_usage, parse_claude_result_usage};
+use super::usage::{
+    ClaudeUsageSample, parse_claude_assistant_usage, parse_claude_context_window,
+    parse_claude_result_usage,
+};
 
 pub(crate) const CLAUDE_MAX_FRAME_BYTES: usize = 1_048_576;
 
@@ -409,7 +412,11 @@ pub(crate) fn parse_frame(
                     Ok(sample) => sample,
                     Err(_) => return Ok(ClaudeEvent::Unknown),
                 },
-            };
+            }
+            .map(|sample| ClaudeUsageSample {
+                window: parse_claude_context_window(&Value::Object(object.clone())),
+                ..sample
+            });
             return Ok(ClaudeEvent::TurnResult {
                 success: !is_error,
                 session_id: object
@@ -605,7 +612,11 @@ fn decode_result(envelope: &Value) -> ClaudeEvent {
             Ok(sample) => sample,
             Err(_) => return ClaudeEvent::Unknown,
         },
-    };
+    }
+    .map(|sample| ClaudeUsageSample {
+        window: parse_claude_context_window(envelope),
+        ..sample
+    });
     ClaudeEvent::TurnResult {
         success: subtype == "success" && !is_error,
         session_id: envelope

@@ -731,6 +731,10 @@ impl ConversationScene {
                 });
             }
 
+            // A reasoning trace still arriving rewrites itself as it streams
+            // (Claude's do); it feeds the summary line only once it is whole:
+            // no longer live, or followed by anything later.
+            let last_ordinal = turn_items.iter().map(|item| item.ordinal).max();
             for item in turn_items {
                 // Session-owned content never reaches the positional arms.
                 // The group emits at the anchor position first; later members
@@ -782,7 +786,13 @@ impl ConversationScene {
                         SceneItemKind::ReasoningSummary { body } => {
                             // Reasoning feeds the one live summary line only;
                             // it never becomes a visible row (R2).
-                            if !body.is_empty() {
+                            let arriving = item
+                                .provenance
+                                .as_ref()
+                                .and_then(|provenance| provenance.lifecycle)
+                                .is_some_and(super::validation::is_live_lifecycle)
+                                && last_ordinal == Some(item.ordinal);
+                            if !body.is_empty() && !arriving {
                                 let run_matches = match (
                                     &session_run,
                                     item.provenance
@@ -1023,6 +1033,7 @@ impl ConversationScene {
                     SceneItemKind::Approval {
                         prompt,
                         approval_id,
+                        decision,
                     } => {
                         blocks.push(TurnBlock::Approval(ApprovalBlock {
                             id: item.id,
@@ -1032,6 +1043,7 @@ impl ConversationScene {
                                 .and_then(|provenance| provenance.run_id.clone()),
                             approval_id,
                             prompt,
+                            decision,
                             disclosure: item.disclosure,
                         }));
                     }
@@ -1119,6 +1131,9 @@ impl ConversationScene {
                         !steer_keys.contains_key(label.anchor.as_str())
                     }
                     TurnBlock::WorkGroup(group) => group.continuation.is_none(),
+                    // An approval or question pauses the session; the work
+                    // it unblocks continues the same section.
+                    TurnBlock::Approval(_) | TurnBlock::Question(_) => false,
                     _ => true,
                 });
                 let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {
@@ -1207,6 +1222,7 @@ impl ConversationScene {
                 turn_id: turn.turn_id.clone(),
                 ordinal: turn.ordinal,
                 lifecycle: turn.lifecycle,
+                active_started_at_ms,
                 blocks,
             });
         }

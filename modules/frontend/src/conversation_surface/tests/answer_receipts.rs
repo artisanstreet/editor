@@ -1,5 +1,6 @@
 //! Surface-level answer settlement: correlation by command identity, the
-//! mismatched-receipt diagnostic, and unmatched outcomes settling nothing.
+//! mismatched-receipt diagnostic, unmatched outcomes settling nothing, and a
+//! recorded receipt settling a projected card.
 
 use super::super::{
     AnswerSettlement, ApprovalAnswerGate, ConversationSurface, RespondApprovalAction,
@@ -37,6 +38,22 @@ fn approval_scene() -> crate::conversation_scene::ConversationScene {
         SceneItemKind::Approval {
             prompt: String::from("Run the test suite?"),
             approval_id: observation_id("approval-1"),
+            decision: None,
+        },
+        None,
+    )])
+}
+
+/// A scene whose card id is run-scoped like a projected fact, so it differs
+/// from the engine's approval identity the receipt carries.
+fn projected_approval_scene() -> crate::conversation_scene::ConversationScene {
+    scene(vec![item(
+        "approval-run-answer-provider-7",
+        1,
+        SceneItemKind::Approval {
+            prompt: String::from("May I access the npm registry?"),
+            approval_id: observation_id("provider-7"),
+            decision: None,
         },
         None,
     )])
@@ -178,4 +195,41 @@ fn unmatched_outcome_settles_nothing(cx: &mut TestAppContext) {
             assert!(surface.approval_failure_message("approval-1").is_none());
         });
     });
+}
+
+#[gpui::test]
+fn recorded_receipt_settles_a_projected_card(cx: &mut TestAppContext) {
+    const STATUS: &str = "artisan-conversation-surface-turn-turn_a-block-approval-approval-run-answer-provider-7-status";
+    const APPROVE: &str = "artisan-conversation-surface-turn-turn_a-block-approval-approval-run-answer-provider-7-approve-submit";
+    let (surface, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(projected_approval_scene(), ThemeMode::Dark, surface_cx)
+    });
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.set_answer_thread(thread_id(), cx);
+            // The renderer keys the gesture by the engine's approval id.
+            assert!(surface.submit_approval_gesture(
+                "provider-7",
+                &run_id(),
+                &observation_id("provider-7"),
+                true,
+                cx,
+            ));
+            let command = dispatched_approval(surface);
+            let state = EngineObservationState::new(thread_id());
+            let pairing = surface
+                .settle_approval_answered(&state, &command, &receipt_for(&command, true), cx)
+                .expect("the receipt finds the gesture's gate");
+            assert!(pairing.is_settled());
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(STATUS).is_some(),
+        "the settled card records the decision"
+    );
+    assert!(
+        cx.debug_bounds(APPROVE).is_none(),
+        "a settled card offers no further gesture"
+    );
 }

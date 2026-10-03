@@ -259,6 +259,11 @@ struct RecentThread {
 
   # At most 256 UTF-8 bytes, nonblank.
   subtitle @1 :Text;
+  # Empty for disk-only projects. Optional fields retain compatibility with
+  # peers that predate project icons.
+  repositoryHost @2 :Text;
+  # Normalized 48-pixel PNG, at most 16 KiB. Empty selects the host logo.
+  projectIconPng @3 :Data;
 }
 
 # Recently active threads across every attached project, newest activity
@@ -922,6 +927,9 @@ struct Request {
     # scrolls toward them, or a settled turn's held-back work rows when its
     # section opens. Fresh ordinal; existing ordinals frozen.
     conversationHistory @51 :ConversationHistoryRequest;
+
+    # Explicit model preference, answered with UserPreferences.
+    saveModelPreference @52 :SaveModelPreferenceRequest;
   }
 }
 
@@ -3021,4 +3029,16 @@ struct EarlierTurnMarker {
   itemId @0 :Text;
   turnOrdinal @1 :UInt64;
   label @2 :Text;
+}
+
+# Agent is the wire default so omitted provenance cannot change user choices.
+enum ModelPreferenceSource {
+  agent @0;
+  user @1;
+  system @2;
+}
+
+struct SaveModelPreferenceRequest {
+  selection @0 :ComposerState.CatalogSelection;
+  source @1 :ModelPreferenceSource;
 }

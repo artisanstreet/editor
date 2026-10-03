@@ -242,13 +242,14 @@ pub use manual_engine_configuration::{
 
 pub mod recent_threads;
 pub use recent_threads::{
-    RECENT_THREADS_MAX, ReadRecentThreads, RecentThread, RecentThreadListing,
+    RECENT_PROJECT_ICON_MAX_BYTES, RECENT_THREADS_MAX, ReadRecentThreads, RecentProjectIcon,
+    RecentThread, RecentThreadListing,
 };
 
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
-    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRecordError,
-    NavigationRoute, ReadUserPreferences, RecordNavigation, UserPreferences,
-    UserPreferencesRevision,
+    ModelPreferenceSource, NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord,
+    NavigationRecordError, NavigationRoute, ReadUserPreferences, RecordNavigation,
+    SaveModelPreference, UserPreferences, UserPreferencesRevision,
 };

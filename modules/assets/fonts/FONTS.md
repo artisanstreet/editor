@@ -1,8 +1,8 @@
 # Bundled native fonts
 
 Spline Sans serves UI, headings and body. Spline Sans Mono serves code.
-Artisan Neo serves the native titlebar wordmark at its single SemiBold
-weight. Cal Sans remains vendored but is not currently requested by any
+Test Founders Grotesk serves the native titlebar wordmark at Bold weight.
+Artisan Neo remains vendored at its single SemiBold weight. Cal Sans remains vendored but is not currently requested by any
 native surface. Spline faces are licensed under SIL OFL 1.1; Cal Sans is
 licensed under SIL OFL 1.1; the Artisan Neo license record is the verbatim
 in-repo frontend OFL file (see provenance below).
@@ -59,3 +59,11 @@ Registration therefore uses static instances at 300, 400, 500, 600 and 700 for e
 | `spline-sans-mono-700.ttf` | 700 | `74189c4811dbf9abd88f2ad83950d7afcc9d230e7ecc092d36097efffa67090c` |
 
 Twemoji Mozilla is registered as a color emoji fallback through the same catalog. Body and code family selections remain Spline. See [TWEMOJI.md](TWEMOJI.md) for the unmodified Mozilla v0.7.0 font, SHA-256, measured coverage, and licenses. Platform precedence is verified in the shared text backend tests.
+
+## Founders Grotesk header evaluation
+
+`test-founders-grotesk-bold.otf` is the user-supplied Klim desktop test font,
+family `Test Founders Grotesk`, style Bold, weight 700. The native loader accepts
+its OpenType CFF container directly. Size: 13928 bytes.
+SHA-256: `d5b49fe5e53634e63f22d727f4a2d6bf09d399696eb2a4827e3e0838225e2c7b`.
+See `../licenses/founders-grotesk-test.txt` for provenance.

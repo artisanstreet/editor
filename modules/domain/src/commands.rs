@@ -17,7 +17,8 @@ use crate::{
     ImportLegacyPreferences, ListFailedMessages, ListQueuedMessages, QueueStoredMessage,
     ReadAccountUsage, ReadComposerAttachment, ReadComposerDraft, ReadRecalledMessage, ReadRunUsage,
     ReadUserPreferences, RecordNavigation, RecoverFailedMessage, RetryFailedMessage,
-    SaveComposerDraft, SubmitComposerDraft, UploadComposerAttachment, WithdrawQueuedMessageCommand,
+    SaveComposerDraft, SaveModelPreference, SubmitComposerDraft, UploadComposerAttachment,
+    WithdrawQueuedMessageCommand,
 };
 
 pub use crate::catalog_selection::ResolveModelSelection;
@@ -302,6 +303,8 @@ pub enum Command {
     SubmitComposerDraft(SubmitComposerDraft),
     /// See [`RecordNavigation`].
     RecordNavigation(RecordNavigation),
+    /// Saves an explicit user model preference without changing a thread.
+    SaveModelPreference(SaveModelPreference),
     /// See [`ImportLegacyPreferences`].
     ImportLegacyPreferences(ImportLegacyPreferences),
 }
@@ -329,6 +332,7 @@ impl Command {
             Self::RecoverFailedMessage(command) => &command.request_id,
             Self::SubmitComposerDraft(command) => &command.request_id,
             Self::RecordNavigation(command) => &command.request_id,
+            Self::SaveModelPreference(command) => &command.request_id,
             Self::ImportLegacyPreferences(command) => &command.request_id,
         }
     }

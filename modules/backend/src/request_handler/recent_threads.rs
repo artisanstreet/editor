@@ -75,6 +75,7 @@ async fn read_recent_threads(
         let unobserved = ConversationCommitNotifier::new();
         subtitles.subtitles(projects.projects(), notifier.unwrap_or(&unobserved))
     });
+    let icons = subtitles.map(|subtitles| subtitles.icons(projects.projects()));
     let subtitle = |thread: &ThreadSummary| -> Option<DisplayName> {
         resolved
             .as_ref()
@@ -92,6 +93,11 @@ async fn read_recent_threads(
         .filter_map(|thread| {
             Some(RecentThread {
                 subtitle: subtitle(&thread)?,
+                project_icon: icons
+                    .as_ref()
+                    .and_then(|icons| icons.get(&thread.project_id))
+                    .cloned()
+                    .unwrap_or_default(),
                 thread,
             })
         })

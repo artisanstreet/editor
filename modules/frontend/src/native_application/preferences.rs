@@ -74,6 +74,31 @@ impl NativeApplication {
             // Without the Forge's record the catalog order stands; later
             // navigation is still reported.
             PreferencesEvent::Loaded(Err(_)) => {}
+            PreferencesEvent::ModelSaved { request_id, result } => {
+                if self
+                    .pending_model_preference
+                    .as_ref()
+                    .map(|save| &save.request_id)
+                    != Some(&request_id)
+                {
+                    return;
+                }
+                match result {
+                    Ok(preferences) => {
+                        self.pending_model_preference = None;
+                        self.apply_forge_preferences(&preferences, cx);
+                    }
+                    Err(_) => {
+                        self.composer_model_run_error = Some(
+                            "Your model preference could not be saved. Retry the model selection."
+                                .to_owned(),
+                        );
+                        self.sync_composer_model_policy(cx);
+                        self.sync_composer_controls(cx);
+                        cx.notify();
+                    }
+                }
+            }
             PreferencesEvent::LegacyImported(Ok(imported)) => {
                 if let Some(legacy) = self.legacy_import.take() {
                     legacy.retire();

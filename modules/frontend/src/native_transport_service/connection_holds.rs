@@ -238,20 +238,27 @@ impl Drop for Hold {
 /// keeps the connection open until its handler has returned.
 #[derive(Debug)]
 pub struct QueuedCommand {
+    #[cfg(feature = "flight-recorder")]
+    pub(super) trace: artisan_tracing::Span,
     pub(super) command: NativeTransportCommand,
     pub(super) hold: Option<Hold>,
 }
 
 impl From<NativeTransportCommand> for QueuedCommand {
     fn from(command: NativeTransportCommand) -> Self {
-        Self {
-            command,
-            hold: None,
-        }
+        Self::new(command, None)
     }
 }
 
 impl QueuedCommand {
+    pub(super) fn new(command: NativeTransportCommand, hold: Option<Hold>) -> Self {
+        Self {
+            #[cfg(feature = "flight-recorder")]
+            trace: artisan_tracing::span!("transport.queue", "command.wait", "command" => command.trace_name(), "thread_id" => command.trace_thread()),
+            command,
+            hold,
+        }
+    }
     /// The admitted command.
     #[must_use]
     pub const fn command(&self) -> &NativeTransportCommand {
@@ -291,7 +298,9 @@ impl NativeTransportCommand {
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
             Self::Preferences(
-                PreferencesCommand::RecordNavigation(_) | PreferencesCommand::ImportLegacy(_),
+                PreferencesCommand::RecordNavigation(_)
+                | PreferencesCommand::ImportLegacy(_)
+                | PreferencesCommand::SaveModel(_),
             ) => Some(HoldKind::Preferences),
             Self::ComposerState(
                 ComposerStateCommand::ReadFooterUsage { .. }

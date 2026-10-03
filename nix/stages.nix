@@ -27,7 +27,11 @@ let
   stages = {
     debug = {
       profile = "production-debug";
-      features = [ "artisan-frontend/debug-tools" ];
+      features = [
+        "artisan-frontend/debug-tools"
+        "artisan-frontend/flight-recorder"
+        "artisan-backend/flight-recorder"
+      ];
       # mold / lld instead of GNU ld (`fastLinker` per platform).
       fastLink = true;
       payload = {
@@ -229,7 +233,15 @@ let
           cargoExtraArgs = "--locked --offline ${selection} ${featureArgs settings.features}";
           doCheck = false;
         };
-      dependencies = host.deps (common // { pname = "artisan-${platform}-${stage}-dependencies"; });
+      # The dependency cache only feeds `cargo build`: crane's default
+      # `cargo check` pass beforehand costs minutes and nothing reads it.
+      dependencies = host.deps (
+        common
+        // {
+          pname = "artisan-${platform}-${stage}-dependencies";
+          cargoCheckCommand = "true";
+        }
+      );
       profileDirectory = "target/${
         lib.optionalString (platform == "windows") "${host.target}/"
       }${settings.profile}";
@@ -239,6 +251,9 @@ let
       // {
         pname = "artisan-${platform}-${stage}";
         cargoArtifacts = dependencies;
+        # `installPhaseCommand` moves the binaries itself; crane's own pass
+        # would first copy a GB of Debug binaries nothing uses.
+        doNotPostBuildInstallCargoBinaries = true;
         # One Cargo invocation builds all four binaries, so shared crates
         # compile once; the payload holds exactly those four and the identity.
         # Moving rather than copying them saves copying a GB of Debug
@@ -285,7 +300,14 @@ let
       common
       // {
         pname = "artisan-${platform}-runner";
-        cargoArtifacts = host.deps (common // { pname = "artisan-${platform}-runner-dependencies"; });
+        cargoArtifacts = host.deps (
+          common
+          // {
+            pname = "artisan-${platform}-runner-dependencies";
+            cargoCheckCommand = "true";
+          }
+        );
+        doNotPostBuildInstallCargoBinaries = true;
         installPhaseCommand = ''
           mkdir -p "$out/bin"
           install -m755 "${profileDirectory}/${host.exe "dev"}" "$out/bin/${host.exe "dev"}"

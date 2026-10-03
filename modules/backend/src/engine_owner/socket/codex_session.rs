@@ -328,9 +328,14 @@ async fn await_preflight_result(
 ) -> CodexPreflightWait {
     let deadline = phase_deadline(context.limits.prompt, context.attempt_deadline);
     loop {
-        if let Err(read) =
-            codex_runtime::read_codex_line(reader, line, deadline, context.shutdown, context.control)
-                .await
+        if let Err(read) = codex_runtime::read_codex_line(
+            reader,
+            line,
+            deadline,
+            context.shutdown,
+            context.control,
+        )
+        .await
         {
             // An oversized reply is the adapter's bound, not the engine's
             // failure: its stderr holds no reason for it.

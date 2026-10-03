@@ -394,11 +394,7 @@ impl RequestHandler {
             })
             .await
         {
-            Ok(_) => {
-                // The selection a send saved is the user's latest choice.
-                self.remember_default_engine_config(config).await;
-                Ok(true)
-            }
+            Ok(_) => Ok(true),
             Err(artisan_database::RepositoryError::EngineConfigRevisionConflict { .. }) => {
                 Ok(false)
             }
