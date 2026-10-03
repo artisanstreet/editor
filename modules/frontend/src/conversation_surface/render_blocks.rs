@@ -65,6 +65,10 @@ pub(super) struct WorkGroupPlacement {
     mounted_working: bool,
 }
 
+/// How far a new thinking summary rises into the status line
+/// (`--distance-micro`, text swap).
+const SUMMARY_SWAP_RISE_PX: f32 = 4.0;
+
 impl TurnRowView {
     /// The status line with its motion: it enters like a work row and, once
     /// gone, leaves through [`Self::status_exit`]. Its height is
@@ -80,10 +84,24 @@ impl TurnRowView {
         let copy = turn_status_block_copy(block, self.active_now_ms);
         let status = self.render_status(turn_id, block, selector, theme, status_motion)?;
         let height = self.status_height.get();
+        let summary = status_summary_copy(block.reasoning_summary.as_deref(), block.engine);
         let mut motion = self.motion.borrow_mut();
         motion.status_painted(copy.as_deref().unwrap_or_default(), height);
         let entrance = motion.entrance("status");
+        let swap = motion.summary_swap(summary.as_deref());
         drop(motion);
+        // A finished thinking trace replacing the last one swaps in.
+        let status = match swap {
+            Some(progress) => div()
+                .w_full()
+                .min_w_0()
+                .relative()
+                .top(px(SUMMARY_SWAP_RISE_PX * (1.0 - progress)))
+                .opacity(progress)
+                .child(status)
+                .into_any_element(),
+            None => status,
+        };
         let measured = Rc::clone(&self.status_height);
         // "Thinking for 13s" ticks every second; tabular figures keep it
         // from shifting.

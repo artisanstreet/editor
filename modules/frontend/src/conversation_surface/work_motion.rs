@@ -51,6 +51,8 @@ const SWAP: Duration = Duration::from_millis(150);
 const SWAP_RISE_PX: f32 = 4.0;
 /// In-place word swap blur: `--blur-small` (text swap).
 const SWAP_BLUR_PX: f32 = 2.0;
+/// A new thinking summary swapping into the status line (`--duration-fast`).
+const SUMMARY_SWAP: Duration = MotionDuration::Fast.as_duration();
 /// Status line exit: the texts-reveal quiet fade out.
 const STATUS_EXIT: Duration = Duration::from_millis(200);
 
@@ -80,6 +82,8 @@ pub(super) struct WorkMotion {
     status_painted: bool,
     /// A status line on its way out.
     status_exit: Option<StatusExit>,
+    /// The status line's thinking summary and when it last changed.
+    summary: Option<(String, Option<Instant>)>,
     /// Whether anything still moves; the row then asks for the next frame.
     animating: bool,
 }
@@ -230,6 +234,37 @@ impl WorkMotion {
     /// moves it into the work.
     pub(super) fn mark_present(&mut self, key: &str) {
         self.entrances.entry(key.to_owned()).or_insert(None);
+    }
+
+    /// How far the status line's thinking summary has swapped in, while a
+    /// new one does: it fades in and rises into place, like a text swap.
+    /// The first summary arrives with the status line's own entrance, and
+    /// the counting verb never swaps.
+    pub(super) fn summary_swap(&mut self, summary: Option<&str>) -> Option<f32> {
+        let Some(summary) = summary else {
+            self.summary = None;
+            return None;
+        };
+        let animate = self.full_motion();
+        match &mut self.summary {
+            Some((shown, changed)) if shown != summary => {
+                summary.clone_into(shown);
+                *changed = animate.then(Instant::now);
+            }
+            Some(_) => {}
+            None => self.summary = Some((summary.to_owned(), None)),
+        }
+        let changed = self.summary.as_ref().and_then(|(_, changed)| *changed)?;
+        let progress = progress_of(
+            Instant::now().saturating_duration_since(changed),
+            SUMMARY_SWAP,
+            MotionCurve::EaseOut,
+        );
+        if progress >= 1.0 {
+            return None;
+        }
+        self.animating = true;
+        Some(progress)
     }
 
     /// Records the visible length the renderer reported for `id`.
