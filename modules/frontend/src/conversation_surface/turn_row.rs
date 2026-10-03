@@ -26,9 +26,10 @@
 //! one-child-per-turn prepaint indexing (end space, navigator geometry,
 //! scroll-target handoff, height measurement) is unchanged.
 
-use gpui::{AppContext as _, StyleRefinement, Subscription, WeakEntity};
+use gpui::{AppContext as _, Pixels, StyleRefinement, Subscription, WeakEntity};
 
 use super::transcript_window::{TranscriptShapeLedger, TranscriptShaper};
+use super::work_motion::WorkMotion;
 use super::*;
 
 /// One approval row's gate snapshot, the only answer state a row paints.
@@ -165,6 +166,8 @@ impl TurnRowHandle {
                 send_entrance: None,
                 message_images: None,
                 rich_link_generation: 0,
+                motion: RefCell::new(WorkMotion::default()),
+                status_height: Rc::new(Cell::new(px(0.0))),
                 anchors: anchors.clone(),
                 stats: stats.clone(),
                 _self_observation: dirty,
@@ -248,6 +251,11 @@ pub(super) struct TurnRowView {
     pub(super) send_entrance: Option<(Instant, SceneId)>,
     pub(super) message_images: Option<Entity<crate::native_message_images::NativeMessageImages>>,
     rich_link_generation: u64,
+    /// The live turn's work motion: streamed prose, entering rows,
+    /// counting phrases, and the status line's exit.
+    pub(super) motion: RefCell<WorkMotion>,
+    /// The status line's last measured height, for its exit.
+    pub(super) status_height: Rc<Cell<Pixels>>,
     anchors: Rc<RefCell<Vec<RenderedScrollAnchor>>>,
     pub(super) stats: Rc<TurnRowStats>,
     _self_observation: Subscription,
@@ -395,6 +403,64 @@ impl TurnRowView {
             .render(body, theme, selector, tone, Some(&self.stats.ledger))
     }
 
+    /// Shapes one prose body in the reply tone, streaming it in while it
+    /// arrives: only its revealed prefix paints, fresh segments fading in
+    /// (see [`WorkMotion::reveal`]). Settled prose paints whole, under the
+    /// same budget and ledgers as [`Self::render_budgeted_markdown`].
+    pub(super) fn render_streamed_markdown(
+        &self,
+        id: &SceneId,
+        body: &str,
+        streaming: bool,
+        theme: &ArtisanTheme,
+        selector: String,
+    ) -> AnyElement {
+        let reveal = self.motion.borrow_mut().reveal(id, body, streaming);
+        let Some((revealed, fade)) = reveal else {
+            return self.render_budgeted_markdown(
+                body,
+                theme,
+                selector,
+                MarkdownBodyTone::Foreground,
+            );
+        };
+        let (element, visible_len) = self.shaper.render_revealing(
+            &revealed,
+            theme,
+            selector,
+            MarkdownBodyTone::Foreground,
+            Some(&self.stats.ledger),
+            &fade,
+        );
+        self.motion.borrow_mut().reveal_rendered(id, visible_len);
+        element
+    }
+
+    /// Advances this turn's reply reveal for the frame and reports whether
+    /// the reply has visibly begun.
+    ///
+    /// A reveal starts only for a reply first seen while it streams, so
+    /// settled history never animates; the reply's own render reads the
+    /// same reveal for its prefix (see [`WorkMotion::reveal`]).
+    pub(super) fn advance_reply_reveal(&self, turn: &TurnScene) -> bool {
+        let Some(reply) = turn.blocks().iter().find_map(|block| match block {
+            TurnBlock::AssistantMessage(message) => Some(message),
+            _ => None,
+        }) else {
+            return false;
+        };
+        let streaming = reply
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.lifecycle)
+            .is_some_and(lifecycle_is_live);
+        let mut motion = self.motion.borrow_mut();
+        let _ = motion.reveal(&reply.id, &reply.body, streaming);
+        motion
+            .reveal_shows(&reply.id)
+            .unwrap_or(!reply.body.is_empty())
+    }
+
     /// Hands every unresolved rich-link destination to the surface.
     ///
     /// The row renders after the surface's render tail has flushed, so the
@@ -418,6 +484,9 @@ impl Render for TurnRowView {
             .set(self.stats.renders.get().saturating_add(1));
         self.stats.ledger.set(TranscriptShapeLedger::default());
         let theme = ArtisanTheme::for_mode(self.theme_mode);
+        self.motion
+            .borrow_mut()
+            .begin_frame(turn_is_live(&self.turn), self.status_motion);
         // Anchors are retained per identity across this row's renders, so a
         // painted anchor stays painted while its block stays in the turn.
         let previous = std::mem::take(&mut *self.anchors.borrow_mut());
@@ -439,6 +508,10 @@ impl Render for TurnRowView {
             )
         };
         *self.anchors.borrow_mut() = rendered;
+        if self.motion.borrow_mut().end_frame() {
+            // Only this row repaints next frame; its siblings stay cached.
+            window.request_animation_frame();
+        }
         self.schedule_rich_link_flush(window, cx);
         element
     }

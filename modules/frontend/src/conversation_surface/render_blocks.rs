@@ -6,6 +6,7 @@
 //! builders read only the row's synced inputs and reach the surface through
 //! its weak handle.
 
+use super::work_motion::{phrase_element, with_entrance};
 use super::*;
 
 #[path = "render_work_group_header.rs"]
@@ -23,14 +24,38 @@ pub(super) struct TurnWorkContext {
     /// The turn's own state as a section title ([`turn_section_title`]), for
     /// a section no terminal label or live line reached.
     title: String,
+    /// Whether the promoted reply has visibly begun: its first word or
+    /// block is on screen (see `TurnRowView::advance_reply_reveal`).
+    reply_shown: bool,
+}
+
+/// Where the owning turn stands, as its work groups render it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TurnProgress {
+    /// Live ([`turn_is_live`]) with no reply on screen yet.
+    Working,
+    /// Live, and the promoted reply's first word or block is on screen.
+    Replying,
+    /// Settled: completed, failed, cancelled, or interrupted.
+    Settled,
+}
+
+impl TurnProgress {
+    fn of(work: &TurnWorkContext) -> Self {
+        match (work.live, work.reply_shown) {
+            (false, _) => Self::Settled,
+            (true, false) => Self::Working,
+            (true, true) => Self::Replying,
+        }
+    }
 }
 
 /// Render facts one work group takes from its turn.
 pub(super) struct WorkGroupPlacement {
     /// The live line, present only on the group that owns it.
     live_header: Option<String>,
-    /// Whether the owning turn is still live ([`turn_is_live`]).
-    turn_live: bool,
+    /// Where the owning turn stands.
+    progress: TurnProgress,
     /// The owning turn's state as a section title ([`turn_section_title`]).
     turn_title: String,
     /// Whether the promoted reply is the next block, which pulls itself up
@@ -41,6 +66,64 @@ pub(super) struct WorkGroupPlacement {
 }
 
 impl TurnRowView {
+    /// The status line with its motion: it enters like a work row and, once
+    /// gone, leaves through [`Self::status_exit`]. Its height is
+    /// measured each frame for that exit.
+    fn render_live_status(
+        &self,
+        turn_id: &TurnId,
+        block: &crate::conversation_scene::TurnStatusBlock,
+        selector: String,
+        theme: &ArtisanTheme,
+        status_motion: MotionPolicy,
+    ) -> Option<AnyElement> {
+        let copy = turn_status_block_copy(block, self.active_now_ms);
+        let status = self.render_status(turn_id, block, selector, theme, status_motion)?;
+        let height = self.status_height.get();
+        let mut motion = self.motion.borrow_mut();
+        motion.status_painted(copy.as_deref().unwrap_or_default(), height);
+        let entrance = motion.entrance("status");
+        drop(motion);
+        let measured = Rc::clone(&self.status_height);
+        let status = div()
+            .w_full()
+            .min_w_0()
+            .child(status)
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(bounds) = bounds.first() {
+                    measured.set(bounds.size.height);
+                }
+            })
+            .into_any_element();
+        Some(with_entrance(status, entrance))
+    }
+
+    /// A status line that left this frame, fading out while its height and
+    /// the turn gap above it close to nothing, so the rows around it settle
+    /// without a jump. It trails every scene child, so scroll identities
+    /// stay aligned.
+    fn status_exit(&self, theme: &ArtisanTheme) -> Option<AnyElement> {
+        let (copy, height, progress) = self.motion.borrow_mut().status_exit()?;
+        Some(
+            div()
+                .w_full()
+                .min_w_0()
+                .h(height * (1.0 - progress))
+                .mt(-theme.spacing.steps(6.0) * progress)
+                .overflow_hidden()
+                .opacity(1.0 - progress)
+                .text_size(px(ProseTypography::BODY_SIZE_PX))
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .truncate()
+                .child(copy)
+                .into_any_element(),
+        )
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one GPUI builder composes a turn's blocks, their scroll identities, and the leaving status line in paint order"
+    )]
     pub(super) fn render_turn(
         &self,
         turn: &TurnScene,
@@ -80,6 +163,7 @@ impl TurnRowView {
             live_owner,
             live: turn_is_live(turn),
             title: turn_section_title(turn, self.active_now_ms),
+            reply_shown: self.advance_reply_reveal(turn),
         };
         // Identities mirror the children pushed below in block order. A
         // suppressed status row and an unsettled footer paint no child, so
@@ -165,8 +249,9 @@ impl TurnRowView {
                 previous_was_work_group = matches!(block, TurnBlock::WorkGroup(_));
             }
         }
-
-        turn_element.into_any_element()
+        turn_element
+            .children(self.status_exit(theme))
+            .into_any_element()
     }
 
     #[expect(
@@ -241,7 +326,7 @@ impl TurnRowView {
                     anchors,
                     WorkGroupPlacement {
                         live_header: owned,
-                        turn_live: work.live,
+                        progress: TurnProgress::of(work),
                         turn_title: work.title.clone(),
                         reply_follows,
                         mounted_working,
@@ -278,7 +363,7 @@ impl TurnRowView {
                 Some(Self::render_steering(block, selector, theme, anchors))
             }
             TurnBlock::TurnStatus(block) => {
-                self.render_status(turn_id, block, selector, theme, status_motion)
+                self.render_live_status(turn_id, block, selector, theme, status_motion)
             }
             TurnBlock::TurnFooter(block) => {
                 self.render_footer(turn_id, block, selector, theme, window, status_motion)
@@ -299,12 +384,20 @@ impl TurnRowView {
         // span the column. The reply body reads in the foreground token,
         // including assistant prose in work history.
         // Shaping stays inside the per-row render
-        // budget so one pathological body cannot parse every frame.
-        let rendered_body = self.render_budgeted_markdown(
+        // budget so one pathological body cannot parse every frame. A
+        // streaming reply renders only its revealed prefix, fading fresh
+        // units in (see `reply_reveal`).
+        let streaming = block
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.lifecycle)
+            .is_some_and(lifecycle_is_live);
+        let rendered_body = self.render_streamed_markdown(
+            &block.id,
             &block.body,
+            streaming,
             theme,
             selector.clone(),
-            MarkdownBodyTone::Foreground,
         );
         anchors
             .attach(
@@ -368,11 +461,12 @@ impl TurnRowView {
     ) -> AnyElement {
         let WorkGroupPlacement {
             live_header,
-            turn_live,
+            progress,
             turn_title,
             reply_follows,
             mounted_working,
         } = placement;
+        let turn_live = progress != TurnProgress::Settled;
         // A session continuation paints the work after a mid-run user
         // message: same section, same disclosure, but no header, divider, or
         // trigger of its own. The first segment's header titles the section.
@@ -398,9 +492,10 @@ impl TurnRowView {
         // A group is disclosable when it has an identity, a disclosure value,
         // and actual visible trace content: an empty `Thought for …` group
         // paints its header with no chevron at all, never a blank disclosure.
-        // A section cannot be collapsed before its turn settles: while the
-        // turn is live the panel is forced open whatever value is stored,
-        // and the header carries no chevron and no toggle. Once settled,
+        // A section cannot be collapsed by hand before its turn settles:
+        // while the turn is live the panel is forced open whatever value is
+        // stored (until its reply shows, below), and the header carries no
+        // chevron and no toggle. Once settled,
         // controlled state is never overridden: Closed hides the panel in
         // every case (continuations included, so one toggle hides the work on
         // both sides of a steer bubble), and the toggle always flows through
@@ -411,6 +506,12 @@ impl TurnRowView {
             && work_group_has_visible_details(block);
         let controlled = disclosable && !turn_live;
         let toggle = controlled && !continuation;
+        // The work folds away the moment the reply's first word or block is
+        // on screen, ahead of settlement: the reply is what the reader is
+        // here for. It folds whatever is stored, because a live section
+        // carries no toggle to reopen it; once settled the stored state,
+        // auto-closed on success, takes over without a jump.
+        let folded_for_reply = disclosable && progress == TurnProgress::Replying;
         // A section is always titled with its turn's own state, live or
         // settled: when neither an outcome label nor the live line reached
         // this group (a provider wait or streaming reply, an earlier group
@@ -420,7 +521,8 @@ impl TurnRowView {
         if disclosable && !continuation && header.is_none() {
             header = Some(turn_title);
         }
-        let open = !controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed));
+        let open = !folded_for_reply
+            && (!controlled || !matches!(block.disclosure, Some(SceneDisclosure::Closed)));
         let items_mounted = open;
         let frame = disclosure_frame(selector, open, status_motion, window, cx);
         let fraction = frame.fraction;
@@ -453,7 +555,7 @@ impl TurnRowView {
                     row_index += 1;
                 }
                 let chain_rows = &rows[start..row_index];
-                items = items.child(self.render_trace_chain(
+                let chain = self.render_trace_chain(
                     selector,
                     chain_index,
                     chain_rows,
@@ -463,21 +565,33 @@ impl TurnRowView {
                     items_mounted,
                     window,
                     cx,
-                ));
+                );
+                // A chain enters once, when its first step arrives; later
+                // steps count up in its header instead.
+                let entrance = self
+                    .motion
+                    .borrow_mut()
+                    .entrance(&format!("chain:{}", chain_rows[0].1.scene_id().as_str()));
+                items = items.child(with_entrance(chain, entrance));
                 // The chain's own prepaint listener resolves its row bounds;
                 // at this level the chain is opaque to row targets so a
                 // collapsed chain cannot resolve one against its header.
                 child_identities.push((None, None));
                 chain_index += 1;
             } else {
-                items = items.child(self.render_detail_row(
+                let row = self.render_detail_row(
                     rows[row_index].1,
                     rows[row_index].0,
                     selector,
                     theme,
                     anchors,
                     items_mounted,
-                ));
+                );
+                let entrance = self
+                    .motion
+                    .borrow_mut()
+                    .entrance(rows[row_index].1.scene_id().as_str());
+                items = items.child(with_entrance(row, entrance));
                 let id = rows[row_index].1.scene_id();
                 child_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
                 row_index += 1;
@@ -525,8 +639,14 @@ impl TurnRowView {
         // divider, so plain and disclosable renders share this construction.
         // Splitting the headers would remount the row the instant the first
         // detail arrived.
+        let label_words = header.as_ref().and_then(|label| {
+            self.motion
+                .borrow_mut()
+                .phrase(&format!("{selector}-label"), label)
+        });
         let header_row = ConversationSurface::work_group_header_row(
             header,
+            label_words.as_deref(),
             transition,
             frame.fraction,
             toggle,
@@ -684,6 +804,17 @@ impl TurnRowView {
                 .unwrap_or_default();
         }
         let icon = activity_chain_icon(kinds.iter().copied());
+        // The clause counts up like an odometer as steps arrive, and new
+        // clauses rise in at its end (see `work_motion`).
+        let line = theme.spacing.steps(6.0);
+        let clause: AnyElement = match self
+            .motion
+            .borrow_mut()
+            .phrase(&format!("{selector}-clause"), &clause)
+        {
+            Some(words) => phrase_element(&words, line),
+            None => clause.into_any_element(),
+        };
 
         let header = div()
             .id(ElementId::Name(SharedString::from(format!(
@@ -777,14 +908,10 @@ impl TurnRowView {
         // identity slot and the rows line up one-to-one behind it.
         let mut row_identities: Vec<(Option<SceneId>, Option<ItemId>)> = vec![(None, None)];
         for (ordinal, row) in rows.iter().filter(|_| frame.content_mounted()) {
-            rows_column = rows_column.child(self.render_detail_row(
-                *row,
-                *ordinal,
-                group_selector,
-                theme,
-                anchors,
-                mounted,
-            ));
+            let step =
+                self.render_detail_row(*row, *ordinal, group_selector, theme, anchors, mounted);
+            let entrance = self.motion.borrow_mut().entrance(row.scene_id().as_str());
+            rows_column = rows_column.child(with_entrance(step, entrance));
             let id = row.scene_id();
             row_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
         }
@@ -868,12 +995,18 @@ impl TurnRowView {
             ),
             row => {
                 let content: AnyElement = match &row {
-                    DetailRow::Assistant { body, .. } => {
-                        let rendered = self.render_budgeted_markdown(
+                    // Prose inside the work streams in exactly like the reply.
+                    DetailRow::Assistant {
+                        id,
+                        body,
+                        streaming,
+                    } => {
+                        let rendered = self.render_streamed_markdown(
+                            id,
                             body,
+                            *streaming,
                             theme,
                             format!("{selector}-markdown"),
-                            MarkdownBodyTone::Foreground,
                         );
                         div().w_full().child(rendered).into_any_element()
                     }

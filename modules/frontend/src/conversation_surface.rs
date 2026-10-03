@@ -48,6 +48,7 @@ use artisan_ui::inline_code_text::inline_runs;
 use artisan_ui::input_state::TextInputState;
 use artisan_ui::markdown_cache::MarkdownParseReport;
 use artisan_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer, RichLinkTitleSource};
+use artisan_ui::markdown_reveal::RevealFade;
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use artisan_ui::scroll_area::ScrollArea;
 use artisan_ui::selectable_text::SelectableText;
@@ -124,6 +125,10 @@ mod render_blocks;
 mod render_navigator;
 #[path = "conversation_surface/render_sections.rs"]
 mod render_sections;
+#[path = "conversation_surface/reply_reveal.rs"]
+mod reply_reveal;
+#[path = "conversation_surface/work_motion.rs"]
+mod work_motion;
 
 // Answer outcome settlement (see conversation_surface/).
 
@@ -707,7 +712,12 @@ impl Render for ConversationSurface {
 #[derive(Clone, Copy, Debug)]
 enum DetailRow<'a> {
     /// Assistant prose that is not the promoted reply.
-    Assistant { id: &'a SceneId, body: &'a str },
+    Assistant {
+        id: &'a SceneId,
+        body: &'a str,
+        /// Whether the prose is still arriving, so it streams in.
+        streaming: bool,
+    },
     /// Activity or tool-result summary.
     Activity {
         id: &'a SceneId,
@@ -748,6 +758,10 @@ impl DetailRow<'_> {
 /// message with no text yet is not a row: the Forge opens the item ahead of
 /// its first text, and an empty row would paint a gap and split the tool
 /// chain around it.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one mapping covers every legacy and session detail kind in paint order; splitting it would separate the two orderings it keeps identical"
+)]
 fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
     if block.session_details.is_empty() {
         block
@@ -793,12 +807,17 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
             })
             .map(|detail| match detail {
                 SessionDetail::Assistant {
-                    id, body, ordinal, ..
+                    id,
+                    body,
+                    ordinal,
+                    provenance,
+                    ..
                 } => (
                     *ordinal,
                     DetailRow::Assistant {
                         id,
                         body: body.as_str(),
+                        streaming: provenance_is_live(provenance.as_ref()),
                     },
                 ),
                 SessionDetail::Activity {
@@ -850,3 +869,21 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
 #[cfg(test)]
 #[path = "conversation_surface/tests.rs"]
 mod tests;
+
+/// Whether a durable lifecycle means the item is still arriving.
+pub(super) fn lifecycle_is_live(lifecycle: ConversationLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        ConversationLifecycle::Pending
+            | ConversationLifecycle::Streaming
+            | ConversationLifecycle::Active
+            | ConversationLifecycle::Waiting
+    )
+}
+
+/// Whether an item's durable attribution says it is still arriving.
+fn provenance_is_live(provenance: Option<&crate::conversation_scene::ItemProvenance>) -> bool {
+    provenance
+        .and_then(|provenance| provenance.lifecycle)
+        .is_some_and(lifecycle_is_live)
+}

@@ -28,6 +28,7 @@ impl ConversationSurface {
     )]
     pub(in crate::conversation_surface) fn work_group_header_row(
         label: Option<String>,
+        label_words: Option<&[super::work_motion::PhraseWord]>,
         transition: Option<String>,
         fraction: f32,
         controlled: bool,
@@ -41,6 +42,15 @@ impl ConversationSurface {
         if !controlled && label.is_none() && transition.is_none() {
             return div().into_any_element();
         }
+        // A changing live label ("Working for 1m 4s") counts like an
+        // odometer while it moves (see `work_motion`); at rest it is text.
+        let line = theme.spacing.steps(6.0);
+        let label_child = |label: String| -> AnyElement {
+            match label_words {
+                Some(words) => super::work_motion::phrase_element(words, line),
+                None => label.into_any_element(),
+            }
+        };
         let near: AnyElement = match (controlled, label) {
             (true, Some(label)) => div()
                 .flex()
@@ -51,7 +61,7 @@ impl ConversationSurface {
                 .text_color(theme.colors.muted_foreground.to_paint())
                 // A long thinking chip ellipsizes on its one line; the
                 // chevron never shrinks away.
-                .child(div().min_w_0().truncate().child(label))
+                .child(div().min_w_0().truncate().child(label_child(label)))
                 .child(Self::work_group_header_chevron(fraction, selector, theme))
                 .into_any_element(),
             // A live section's words and any uncontrolled label: no chevron
@@ -61,7 +71,7 @@ impl ConversationSurface {
                 .truncate()
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .debug_selector(|| format!("{selector}-header-label"))
-                .child(label)
+                .child(label_child(label))
                 .into_any_element(),
             (_, None) => div().into_any_element(),
         };

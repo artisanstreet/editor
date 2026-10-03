@@ -82,6 +82,7 @@ impl Render for HeaderProbe {
             .child(ConversationSurface::work_group_header_row(
                 Some(self.label.clone()),
                 None,
+                None,
                 0.0,
                 self.controlled,
                 "probe",
@@ -627,3 +628,83 @@ fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
     assert_eq!(turn_section_title(turn, Some(89_000)), "Working for 1m 28s");
 }
 
+/// The steered live section plus a streaming reply with `body`.
+fn replying_section_scene(body: &str) -> ConversationScene {
+    let reply = item(
+        "reply",
+        8,
+        SceneItemKind::AssistantMessage {
+            body: body.to_owned(),
+            phase: AssistantPhase::Unspecified,
+        },
+        None,
+    )
+    .with_provenance(ItemProvenance {
+        run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+        lifecycle: Some(ConversationLifecycle::Streaming),
+    });
+    ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![
+            item(
+                "prompt",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "why is the footer wrong".to_owned(),
+                },
+                None,
+            ),
+            run_prose("likely", 2, "Likely cause found"),
+            run_command("cmd-a", 3),
+            reply,
+        ],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::StreamingSuppression)
+                .with_active_started_at_ms(1_000)
+                .with_session_disclosure(SceneDisclosure::Open),
+        ],
+        Vec::new(),
+    )
+    .expect("replying section scene is valid")
+}
+
+#[gpui::test]
+fn a_live_section_folds_once_its_reply_shows_a_whole_word(cx: &mut TestAppContext) {
+    // Reduced motion shows every stable unit at once and folds without an
+    // accordion flight, so one settled frame reads the end state.
+    cx.update(|app| app.set_reduce_motion(true));
+    // A lone partial word is not on screen yet: the work stays open.
+    let (_waiting, cx_waiting) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(replying_section_scene("All"), ThemeMode::Dark, surface_cx)
+    });
+    cx_waiting.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx_waiting);
+    assert!(
+        cx_waiting.debug_bounds(STEER_LEAD_CHAIN).is_some(),
+        "the work stays open until a whole word of the reply shows"
+    );
+
+    // Once a whole word shows, the work folds while the turn is still live,
+    // and the header keeps its words.
+    let (_replying, cx) = cx.add_window_view(|_, surface_cx| {
+        ConversationSurface::new(
+            replying_section_scene("All tests pass."),
+            ThemeMode::Dark,
+            surface_cx,
+        )
+    });
+    cx.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx);
+    assert!(
+        cx.debug_bounds(STEER_LEAD_HEADER).is_some(),
+        "the folded section keeps its header"
+    );
+    assert!(
+        cx.debug_bounds(STEER_LEAD_CHAIN).is_none(),
+        "the work folds as soon as the reply shows"
+    );
+}
