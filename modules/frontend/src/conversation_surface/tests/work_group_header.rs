@@ -526,3 +526,60 @@ fn a_live_continuation_chain_toggles_without_disturbing_the_header(cx: &mut Test
         "the section header stays put"
     );
 }
+
+#[test]
+fn an_approval_pauses_the_section_without_splitting_it() {
+    // The approval card waits for the reader mid-run; the work it unblocks
+    // continues the same section, whose one header keeps the live line
+    // instead of a second `Working for` row painting below the card.
+    let scene = ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![
+            item(
+                "prompt",
+                1,
+                SceneItemKind::UserMessage {
+                    body: "migrate the app".to_owned(),
+                },
+                None,
+            ),
+            run_prose("plan", 2, "Checking the workspace"),
+            run_command("cmd-a", 3),
+            run_item(
+                "approval-run_a-provider-7",
+                4,
+                SceneItemKind::Approval {
+                    prompt: "May I access the npm registry?".to_owned(),
+                    approval_id: artisan_domain::ObservationId::parse("provider-7")
+                        .expect("observation id is valid"),
+                    decision: Some(true),
+                },
+            ),
+            run_command("cmd-b", 5),
+        ],
+        vec![TurnNarrationEntry::new(
+            turn_id("turn_a"),
+            TurnNarration::Working,
+        )],
+        Vec::new(),
+    )
+    .expect("approval section scene is valid");
+    let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+    let groups: Vec<_> = turn
+        .blocks()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            TurnBlock::WorkGroup(group) => Some((index, group)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(groups.len(), 1, "one section for the whole run");
+    let (index, group) = groups[0];
+    assert!(!group.superseded, "the approval does not supersede the run");
+    assert_eq!(owning_group_index(turn), Some(index));
+}

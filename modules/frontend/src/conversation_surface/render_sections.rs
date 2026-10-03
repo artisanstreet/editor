@@ -127,14 +127,24 @@ impl TurnRowView {
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
         let style = CardStyle::resolve(*theme);
-        let key = block.id.as_str().to_owned();
+        // Gates are keyed by the engine's approval identity, the one name
+        // both the gesture and its receipt carry.
+        let key = block.approval_id.as_str().to_owned();
+        let gate = self.approval_state(&key);
+        // A resolution the subscription delivered wins; until it lands, a
+        // recorded receipt already settles the card.
+        if let Some(approved) = block
+            .decision
+            .or_else(|| gate.and_then(|gate| gate.answered_decision))
+        {
+            return self.render_decided_approval(block, approved, selector, theme, anchors);
+        }
         // The block carries the engine's approval identity and its owning
         // run from durable provenance; the host supplies the thread.
         let target = block
             .run_id
             .clone()
             .map(|run_id| (run_id, block.approval_id.clone()));
-        let gate = self.approval_state(&key);
         let in_flight = gate.is_some_and(|gate| gate.in_flight);
         let pending = gate.and_then(|gate| gate.pending_decision);
         let failure = gate.and_then(|gate| gate.failure.as_deref());
@@ -252,6 +262,46 @@ impl TurnRowView {
                 style,
             },
             compact_card_content(style).child(card_heading("Approval requested", theme)),
+            compact_card_content(style).child(details),
+            anchors,
+        )
+    }
+
+    /// Renders one settled approval as the transcript's record of it.
+    fn render_decided_approval(
+        &self,
+        block: &crate::conversation_scene::ApprovalBlock,
+        approved: bool,
+        selector: String,
+        theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
+    ) -> AnyElement {
+        let style = CardStyle::resolve(*theme);
+        let (heading, status) = if approved {
+            ("Approved", "You approved this request.")
+        } else {
+            ("Denied", "You denied this request.")
+        };
+        let details = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(theme.spacing.steps(2.0))
+            .child(body_text(&block.prompt, theme))
+            .child(
+                body_text(status, theme)
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .debug_selector(|| format!("{selector}-status")),
+            );
+        self.render_controlled_card(
+            ControlledCardOptions {
+                id: block.id.clone(),
+                item_id: item_id_for_scene_id(&block.id),
+                disclosure: block.disclosure,
+                selector,
+                style,
+            },
+            compact_card_content(style).child(card_heading(heading, theme)),
             compact_card_content(style).child(details),
             anchors,
         )

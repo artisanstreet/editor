@@ -1023,6 +1023,7 @@ impl ConversationScene {
                     SceneItemKind::Approval {
                         prompt,
                         approval_id,
+                        decision,
                     } => {
                         blocks.push(TurnBlock::Approval(ApprovalBlock {
                             id: item.id,
@@ -1032,6 +1033,7 @@ impl ConversationScene {
                                 .and_then(|provenance| provenance.run_id.clone()),
                             approval_id,
                             prompt,
+                            decision,
                             disclosure: item.disclosure,
                         }));
                     }
@@ -1119,6 +1121,9 @@ impl ConversationScene {
                         !steer_keys.contains_key(label.anchor.as_str())
                     }
                     TurnBlock::WorkGroup(group) => group.continuation.is_none(),
+                    // An approval or question pauses the session; the work
+                    // it unblocks continues the same section.
+                    TurnBlock::Approval(_) | TurnBlock::Question(_) => false,
                     _ => true,
                 });
                 let TurnBlock::WorkGroup(group) = &mut blocks[group_index] else {

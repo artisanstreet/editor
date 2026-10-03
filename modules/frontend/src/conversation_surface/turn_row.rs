@@ -34,10 +34,11 @@ use super::*;
 /// One approval row's gate snapshot, the only answer state a row paints.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ApprovalRowState {
-    /// Block identity text; the gate key.
+    /// The engine's approval identity; the gate key.
     pub(super) key: String,
     pub(super) in_flight: bool,
     pub(super) pending_decision: Option<bool>,
+    pub(super) answered_decision: Option<bool>,
     pub(super) failure: Option<String>,
 }
 
@@ -320,15 +321,17 @@ impl TurnRowView {
             let TurnBlock::Approval(approval) = block else {
                 continue;
             };
-            let key = approval.id.as_str();
+            let key = approval.approval_id.as_str();
             let gate = gates.get(key);
             let in_flight = gate.is_some_and(ApprovalAnswerGate::is_in_flight);
             let pending_decision = gate.and_then(ApprovalAnswerGate::pending_decision);
+            let answered_decision = gate.and_then(ApprovalAnswerGate::answered_decision);
             let failure = gate.and_then(ApprovalAnswerGate::failure_message);
             let same = self.approvals.get(index).is_some_and(|state| {
                 state.key == key
                     && state.in_flight == in_flight
                     && state.pending_decision == pending_decision
+                    && state.answered_decision == answered_decision
                     && state.failure.as_deref() == failure
             });
             if !same {
@@ -336,6 +339,7 @@ impl TurnRowView {
                     key: key.to_owned(),
                     in_flight,
                     pending_decision,
+                    answered_decision,
                     failure: failure.map(str::to_owned),
                 };
                 if index < self.approvals.len() {

@@ -68,11 +68,13 @@ pub enum SceneItemKind {
     FileChange { file: SceneFileChange },
     /// Plan/checklist card.
     Plan { title: String, entries: Vec<String> },
-    /// Approval request card: the bounded prompt and the engine's own
-    /// approval identity, which the answer submits back.
+    /// Approval request card: the bounded prompt, the engine's own
+    /// approval identity, which the answer submits back, and the recorded
+    /// decision once resolved.
     Approval {
         prompt: String,
         approval_id: ObservationId,
+        decision: Option<bool>,
     },
     /// Agent question with its answer once given.
     Question {
@@ -486,6 +488,9 @@ pub struct ApprovalBlock {
     pub approval_id: ObservationId,
     /// Bounded prompt.
     pub prompt: String,
+    /// The recorded decision once resolved: true allowed, false denied.
+    /// [`None`] while the approval is still open.
+    pub decision: Option<bool>,
     /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
