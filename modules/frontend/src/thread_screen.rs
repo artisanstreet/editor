@@ -70,7 +70,8 @@ use gpui::{
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
 use crate::desktop_shell::{
-    DESKTOP_COLUMN_INSET_PX, DESKTOP_SIDEBAR_WIDTH_PX, DesktopShellStyle, desktop_section_label,
+    DESKTOP_COLUMN_INSET_PX, DESKTOP_CROSSHAIR_SIZE_PX, DESKTOP_SIDEBAR_WIDTH_PX,
+    DesktopShellStyle, desktop_section_label, junction_crosshair,
 };
 use crate::native_composer::NativeComposer;
 use crate::shell_layout::{ProseWidth, desktop_inspector_pixels};
@@ -123,6 +124,8 @@ pub const THREAD_SCREEN_INSPECTOR_SELECTOR: &str = "artisan-thread-screen-inspec
 /// Stable debug selector for the inspector column's one-device-pixel left
 /// rule.
 pub const THREAD_SCREEN_INSPECTOR_RULE_SELECTOR: &str = "artisan-thread-screen-inspector-rule";
+/// Rule closing the inspector's Context section, edge to edge.
+pub const THREAD_SCREEN_CONTEXT_RULE_SELECTOR: &str = "artisan-thread-screen-context-rule";
 
 /// Stable debug selector for the composer dock.
 pub const THREAD_SCREEN_COMPOSER_SELECTOR: &str = "artisan-thread-screen-composer-dock";
@@ -1074,6 +1077,42 @@ mod tests {
         let hidden_width =
             cx.update(|_, app| view.read(app).screen.read(app).visible_inspector_width());
         assert_eq!(hidden_width, None, "a hidden column publishes no junction");
+    }
+
+    /// A one-device-pixel rule closes the Context section across the whole
+    /// column, the column inset below its last row, like a grid line.
+    #[gpui::test]
+    fn context_rule_spans_the_column_under_its_rows(cx: &mut gpui::TestAppContext) {
+        let (_view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-context-rule", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let inspector = cx
+            .debug_bounds(THREAD_SCREEN_INSPECTOR_SELECTOR)
+            .expect("inspector lays out");
+        let section = cx
+            .debug_bounds(THREAD_SCREEN_CONTEXT_SELECTOR)
+            .expect("context section lays out");
+        let rule = cx
+            .debug_bounds(THREAD_SCREEN_CONTEXT_RULE_SELECTOR)
+            .expect("context rule paints");
+        let one_device_pixel = cx.update(|window, _| {
+            DesktopShellStyle::resolve(false, window.scale_factor()).one_device_pixel
+        });
+        assert_eq!(
+            rule.origin.x, inspector.origin.x,
+            "the rule starts at the left rule"
+        );
+        assert_eq!(
+            rule.size.width, inspector.size.width,
+            "the rule runs edge to edge"
+        );
+        assert_eq!(rule.size.height, one_device_pixel);
+        assert_eq!(
+            rule.origin.y,
+            section.bottom() + px(DESKTOP_COLUMN_INSET_PX),
+            "the rule sits the column inset below the last row"
+        );
     }
 
     /// The mounted column crosses the 1104 px threshold in both directions:
