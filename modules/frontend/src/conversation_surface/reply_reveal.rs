@@ -9,12 +9,13 @@
 //! transport's: a word budget accrues at a rate that eases toward clearing
 //! the backlog within [`CATCH_UP_WINDOW_SECONDS`], never faster than
 //! [`MAX_WORDS_PER_MINUTE`], and segments spend it at most every
-//! [`SEGMENT_INTERVAL`]. A
-//! segment fades in mostly as one piece, but its short runs start a frame
-//! apart from left to right, so it sweeps into place instead of spawning;
-//! the sweep is capped at [`SWEEP_SPAN`], well inside the fade, so it never
-//! reads as letters streaming. A reply arriving in one piece, or its
-//! remainder when the turn ends, drains at the same capped pace.
+//! [`SEGMENT_INTERVAL`]. A segment's short runs start left to right,
+//! spread across [`SWEEP_SPAN`] (one segment interval), and each segment's
+//! sweep picks up where the previous one's front is, so the fade front
+//! glides through the text instead of arriving in bursts. Every run's long
+//! soft fade overlaps its neighbours', so it never reads as letters
+//! streaming. A reply arriving in one piece, or its remainder when the turn
+//! ends, drains at the same capped pace.
 //!
 //! Opacity is the only animated property: glyph ranges cannot rise or blur
 //! without moving layout, and layout must stay still. Reduced motion shows
@@ -25,18 +26,21 @@ use std::time::{Duration, Instant};
 use artisan_ui::markdown_reveal::{RevealFade, RevealSteps, stable_reveal_end};
 use artisan_ui::motion::{MotionCurve, MotionDuration, MotionPolicy};
 
-/// One run's fade-in (`--duration-medium`): long enough to read as a fade,
-/// short enough that at most a couple of segments are mid-fade.
-const UNIT_FADE: Duration = MotionDuration::Medium.as_duration();
+/// One run's fade-in (`--duration-very-slow`, texts reveal): long against
+/// the sweep, so a soft gradient trails the front.
+const UNIT_FADE: Duration = Duration::from_millis(400);
 
-/// Visible characters per run of a segment's sweep.
-const SWEEP_RUN: usize = 6;
+/// The fade's curve: a gentle start, so the front has no hard edge.
+const UNIT_FADE_CURVE: MotionCurve = MotionCurve::EaseOut;
 
-/// Delay between neighbouring runs: one display frame.
-const SWEEP_STAGGER: Duration = Duration::from_millis(16);
+/// Visible characters per run of a segment's sweep: fine enough that the
+/// gradient reads as one front, not as stepping blocks.
+const SWEEP_RUN: usize = 3;
 
-/// The longest a segment's sweep may take from its first run to its last.
-const SWEEP_SPAN: Duration = Duration::from_millis(160);
+/// How long a segment's sweep takes from its first run to its last: the
+/// gap until the next segment may start, so consecutive sweeps join into
+/// one continuous front.
+const SWEEP_SPAN: Duration = SEGMENT_INTERVAL;
 
 /// The fastest prose ever reveals, in words per minute. The transport's
 /// bursts and stalls never show through above this; a long reply may trail
@@ -200,10 +204,17 @@ impl ReplyReveal {
             && visible_len > start
         {
             let runs = (visible_len - start).div_ceil(SWEEP_RUN);
-            let stagger = SWEEP_STAGGER.min(SWEEP_SPAN / u32::try_from(runs).unwrap_or(u32::MAX));
+            let stagger = SWEEP_SPAN / u32::try_from(runs).unwrap_or(u32::MAX);
+            // The front carries on from the previous segment's last run, so
+            // a segment arriving mid-sweep queues behind it; starts stay in
+            // order, which the fade's prefix drain relies on.
+            let front = self
+                .marks
+                .last()
+                .map_or(began, |(_, last)| began.max(*last + stagger));
             for run in 0..runs {
                 let delay = stagger * u32::try_from(run).unwrap_or(u32::MAX);
-                self.marks.push((start + run * SWEEP_RUN, began + delay));
+                self.marks.push((start + run * SWEEP_RUN, front + delay));
             }
         }
         self.visible_len = visible_len;
@@ -225,7 +236,7 @@ impl ReplyReveal {
                 clippy::cast_possible_truncation,
                 reason = "the shared easing curve samples in f64 and feeds an f32 opacity; the narrowing is the intended precision"
             )]
-            let eased = MotionCurve::SmoothOut.sample(progress) as f32;
+            let eased = UNIT_FADE_CURVE.sample(progress) as f32;
             eased
         };
         let opaque = self
