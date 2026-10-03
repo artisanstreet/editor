@@ -1,14 +1,16 @@
-//! The sidebar's recent threads across every project, grouped by age.
+//! The sidebar's recent threads across every project, as an inbox.
 //!
 //! Rows are the Forge's recent-threads listing (`impl_recent_threads.rs`):
 //! the title, and beneath it the repository or project the thread works
-//! in. The Editor only sorts them into age groups
-//! ([`crate::recent_thread_groups`]) and regroups them when a row crosses an
-//! age boundary. Choosing a row opens the thread in its own project.
+//! in. Only threads with something unseen show outright; running threads
+//! collapse into `Working` and read idle ones into `History`, which keeps
+//! its age groups inside ([`crate::recent_thread_groups`]). Rows regroup
+//! when one crosses an age boundary. Choosing a row opens the thread in its
+//! own project.
 
 use super::*;
-use crate::desktop_shell::desktop_section_label;
-use crate::recent_thread_groups::{RecentThreadGroup, group_recent_threads, next_regrouping};
+use crate::desktop_shell::{DESKTOP_COLUMN_ROW_INSET_PX, desktop_section_label};
+use crate::recent_thread_groups::{RecentThreadGroup, next_regrouping, section_recent_threads};
 use artisan_domain::{
     RecentThread, RecentThreadListing, ThreadAttention, ThreadSummary, UnixMillis,
 };
@@ -27,6 +29,61 @@ const SIDEBAR_WORKING_PULSE: Duration = Duration::from_millis(1_600);
 
 /// The dimmest the working dot gets mid-pulse.
 const SIDEBAR_WORKING_PULSE_FLOOR: f32 = 0.4;
+
+/// A collapsible sidebar group.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) enum SidebarGroup {
+    /// Threads the Forge is running with nothing waiting on the reader.
+    Working,
+    /// Read, idle threads, in age groups.
+    History,
+}
+
+impl SidebarGroup {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::History => "History",
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::History => "history",
+        }
+    }
+}
+
+/// One collapsible group's disclosure: collapsed until the reader opens it.
+#[derive(Default)]
+struct SidebarGroupDisclosure {
+    open: bool,
+    /// When the reader last toggled it, for the chevron flip and reveal.
+    toggled: Option<Instant>,
+    focus: Option<FocusHandle>,
+}
+
+impl SidebarGroupDisclosure {
+    /// Eased progress of the latest toggle, `None` once settled.
+    fn progress(&self, now: Instant, reduced: bool) -> Option<f32> {
+        if reduced {
+            return None;
+        }
+        let elapsed = now.saturating_duration_since(self.toggled?);
+        let duration = MotionDuration::Fast.as_duration();
+        (elapsed < duration).then(|| {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the shared easing curve samples in f64 and feeds f32 rotation and opacity; the narrowing is the intended precision"
+            )]
+            let eased = MotionCurve::SmoothOut
+                .sample(elapsed.as_secs_f64() / duration.as_secs_f64())
+                as f32;
+            eased
+        })
+    }
+}
 
 /// What a row's trailing dot says about its thread: whether it needs the
 /// reader, never decoration. At most one state shows.
@@ -104,6 +161,8 @@ pub(super) struct SidebarThreadsState {
     pub(super) open_after_refresh: Option<ThreadId>,
     /// A chosen recent thread waiting for its project or a settled view.
     pub(super) awaited_open: Option<super::impl_recent_threads::AwaitedOpen>,
+    /// The `Working` and `History` disclosures.
+    groups: HashMap<SidebarGroup, SidebarGroupDisclosure>,
 }
 
 /// Two sequential halves of the transitions-dev icon-swap duration.
@@ -286,7 +345,7 @@ impl NativeApplication {
         .top_0()
         .left_0()
         .size_full();
-        let mut container = div()
+        let container = div()
             .id("artisan-sidebar-threads")
             .relative()
             .flex_1()
@@ -313,10 +372,184 @@ impl NativeApplication {
                 px(6.0),
                 cx.reduce_motion(),
             ));
-        for group in &group_recent_threads(&listing, now) {
-            container = container.child(self.desktop_sidebar_thread_group(group, cx));
+        self.desktop_sidebar_sections(container, &listing, now, window, cx)
+    }
+
+    /// Appends the unread rows, then the `Working` and `History` groups,
+    /// each only when it holds a row.
+    fn desktop_sidebar_sections(
+        &mut self,
+        mut container: Stateful<Div>,
+        listing: &RecentThreadListing,
+        now: UnixMillis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let sections = section_recent_threads(listing, now);
+        if !sections.unread.is_empty() {
+            let mut unread = div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .debug_selector(|| "artisan-sidebar-threads-unread".to_owned());
+            for thread in &sections.unread {
+                unread = unread.child(self.desktop_sidebar_thread(thread, cx));
+            }
+            container = container.child(unread);
+        }
+        if !sections.working.is_empty() {
+            let rows = if self.sidebar_group_open(SidebarGroup::Working) {
+                sections
+                    .working
+                    .iter()
+                    .map(|thread| self.desktop_sidebar_thread(thread, cx).into_any_element())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            container = container.child(self.desktop_sidebar_collapsible(
+                SidebarGroup::Working,
+                sections.working.len(),
+                rows,
+                window,
+                cx,
+            ));
+        }
+        if !sections.history.is_empty() {
+            let groups = if self.sidebar_group_open(SidebarGroup::History) {
+                sections
+                    .history
+                    .iter()
+                    .map(|group| {
+                        self.desktop_sidebar_thread_group(group, cx)
+                            .into_any_element()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            container = container.child(self.desktop_sidebar_collapsible(
+                SidebarGroup::History,
+                sections.history_len(),
+                groups,
+                window,
+                cx,
+            ));
         }
         container
+    }
+
+    fn sidebar_group_open(&self, group: SidebarGroup) -> bool {
+        self.sidebar_threads
+            .groups
+            .get(&group)
+            .is_some_and(|disclosure| disclosure.open)
+    }
+
+    fn toggle_sidebar_group(&mut self, group: SidebarGroup, cx: &mut Context<Self>) {
+        let disclosure = self.sidebar_threads.groups.entry(group).or_default();
+        disclosure.open = !disclosure.open;
+        disclosure.toggled = Some(Instant::now());
+        cx.notify();
+    }
+
+    /// One collapsible group: a header in the age-group label style with a
+    /// count and a chevron that turns down when open, then its content.
+    ///
+    /// Opening flips the chevron and fades the content in over the fast
+    /// motion token; closing flips the chevron and removes the content.
+    fn desktop_sidebar_collapsible(
+        &mut self,
+        group: SidebarGroup,
+        count: usize,
+        content: Vec<AnyElement>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let reduced = cx.reduce_motion();
+        let disclosure = self.sidebar_threads.groups.entry(group).or_default();
+        let open = disclosure.open;
+        let progress = disclosure.progress(Instant::now(), reduced);
+        let focus = disclosure
+            .focus
+            .get_or_insert_with(|| cx.focus_handle())
+            .clone();
+        if progress.is_some() {
+            window.request_animation_frame();
+        }
+        let settled = if open { 1.0 } else { 0.0 };
+        let turn = progress.map_or(settled, |eased| if open { eased } else { 1.0 - eased });
+        let selector = format!("artisan-sidebar-threads-{}", group.id());
+        let header_selector = format!("{selector}-header");
+        let chevron_selector = format!("{selector}-chevron");
+        let muted = self.theme.colors.muted_foreground.to_paint();
+        let focus_fill = self.theme.colors.muted.to_paint();
+        let label = SharedString::from(format!("{}, {count} threads", group.label()));
+        let header = div()
+            .id(SharedString::from(header_selector.clone()))
+            .track_focus(&focus)
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .aria_expanded(open)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(DESKTOP_COLUMN_ROW_INSET_PX))
+            .pb(self.theme.spacing.steps(1.0))
+            .rounded(px(6.0))
+            .text_size(self.theme.typography.label_text)
+            .text_color(muted)
+            .cursor_pointer()
+            .focus_visible(move |style| style.bg(focus_fill))
+            .debug_selector(move || header_selector.clone())
+            .child(div().flex_none().child(group.label()))
+            .child(div().flex_none().opacity(0.7).child(count.to_string()))
+            .child(
+                gpui::svg()
+                    .path(AssetId::TABLER_CHEVRON_RIGHT.as_str())
+                    .size(px(12.0))
+                    .flex_shrink_0()
+                    .text_color(muted)
+                    .with_transformation(gpui::Transformation::rotate(gpui::radians(
+                        turn * std::f32::consts::FRAC_PI_2,
+                    )))
+                    .debug_selector(move || chevron_selector.clone()),
+            )
+            .on_click(cx.listener(move |app, _, window, cx| {
+                window.focus(&focus, cx);
+                app.toggle_sidebar_group(group, cx);
+            }))
+            .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    app.toggle_sidebar_group(group, cx);
+                }
+            }));
+        let mut section = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(move || selector.clone())
+            .child(header);
+        if open && !content.is_empty() {
+            let body = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(self.theme.spacing.steps(3.0))
+                .children(content);
+            section = section.child(match progress {
+                Some(eased) => body.opacity(eased),
+                None => body,
+            });
+        }
+        section
     }
 
     fn desktop_sidebar_thread_group(

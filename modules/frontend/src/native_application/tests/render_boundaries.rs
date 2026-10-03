@@ -121,6 +121,8 @@ fn a_recent_threads_push_renders_the_sidebar(cx: &mut TestAppContext) {
     cx.update(|_, app| {
         view.update(app, |application, cx| {
             let mut summary = thread("thread-b", "message-project", "Pulse the dot");
+            // Unread rows show outright; read idle ones fold into History.
+            summary.attention = artisan_domain::ThreadAttention::Finished;
             summary.last_message_at = Some(UnixMillis::from_millis(
                 super::super::impl_sidebar_threads::wall_clock().as_millis() - 60_000,
             ));
