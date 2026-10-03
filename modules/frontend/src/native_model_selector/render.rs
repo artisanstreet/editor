@@ -19,5 +19,7 @@ mod rows;
 
 #[cfg(test)]
 pub(super) use self::menu::gradient_highlights;
-pub(crate) use self::menu::{animate_picker_menu, engine_accent, engine_asset};
+pub(crate) use self::menu::{
+    PickerMenuEntrance, animate_picker_menu_timed, engine_accent, engine_asset,
+};
 pub(crate) use self::rows::render_picker_hover_pill;

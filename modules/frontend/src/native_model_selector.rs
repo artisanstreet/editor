@@ -65,7 +65,8 @@ mod tests;
 
 // Re-exports keep the public surface identical to the pre-split module.
 pub(crate) use render::{
-    animate_picker_menu, engine_accent, engine_asset, render_picker_hover_pill,
+    PickerMenuEntrance, animate_picker_menu_timed, engine_accent, engine_asset,
+    render_picker_hover_pill,
 };
 pub use state::model_display_label;
 

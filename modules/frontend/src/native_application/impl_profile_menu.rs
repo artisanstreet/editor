@@ -208,10 +208,13 @@ impl NativeApplication {
         opening: bool,
         cx: &mut Context<Self>,
     ) {
+        let duration = if opening {
+            PROFILE_MENU_OPEN
+        } else {
+            PROFILE_MENU_CLOSE
+        };
         self.profile_menu_motion_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(PICKER_MENU_MOTION_DURATION_MS))
-                .await;
+            cx.background_executor().timer(duration).await;
             let _ = this.update(cx, |application, cx| {
                 let settled = if opening {
                     application
@@ -1262,8 +1265,7 @@ impl NativeApplication {
                         }),
                 );
         // The retained exit presentation stays mounted through Closing so
-        // the shared 100ms fade/slide-out can complete, exactly like the
-        // model picker popover.
+        // the fade/slide-out can complete, like the model picker popover.
         let menu_phase = self.profile_menu_motion.borrow().phase();
         if self.profile_menu.is_open() || menu_phase == PickerMenuPhase::Closing {
             // The dropdown paints from the shared Artisan text tokens rather
@@ -1324,11 +1326,13 @@ impl NativeApplication {
                 .left_0()
                 .size_full()
             };
+            // The menu takes exactly its trigger's width, so the two read as
+            // one column; the minimum only covers a trigger not yet measured.
+            let menu_width = self.profile_origin.get().size.width.max(px(256.0));
             let mut panel = div()
                 .id("artisan-desktop-profile-menu")
                 .debug_selector(|| "artisan-desktop-profile-menu".to_string())
-                .min_w(px(256.0))
-                .max_w(px(352.0))
+                .w(menu_width)
                 .rounded(RadiusTokens::value(RadiusStep::X2l))
                 .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                 .bg(glass_foreground_base(&self.theme))
@@ -1571,11 +1575,18 @@ impl NativeApplication {
                     .anchor(gpui::Anchor::BottomLeft)
                     .position(self.profile_origin.get().origin)
                     .offset(gpui::point(px(0.0), px(-4.0)))
-                    .child(animate_picker_menu(
+                    .child(animate_picker_menu_timed(
                         panel,
                         Rc::clone(&self.profile_menu_motion),
                         motion,
                         "profile",
+                        // The panel sits above the selector, aligned to its
+                        // left edge: it grows from that bottom-left corner.
+                        PickerMenuEntrance::Scale {
+                            origin: gpui::point(0.0, 1.0),
+                        },
+                        PROFILE_MENU_OPEN,
+                        PROFILE_MENU_CLOSE,
                     )),
             ));
         }
