@@ -28,6 +28,23 @@ pub(crate) struct ClaudeUsageSample {
     /// taken from terminal totals, which re-count the context on every model
     /// call. Absent stays absent rather than becoming a wrong zero.
     pub context: Option<u64>,
+    /// The context window the turn ran in, from the result frame's
+    /// `modelUsage` (see [`parse_claude_context_window`]).
+    pub window: Option<u64>,
+}
+
+/// Reads the context window from a `result` frame's `modelUsage`: one entry
+/// per model the turn used, each with its `contextWindow`. The largest is
+/// the root model's; subagents on smaller models report smaller windows.
+/// Absent or non-positive values report no window.
+pub(crate) fn parse_claude_context_window(envelope: &Value) -> Option<u64> {
+    envelope
+        .get("modelUsage")?
+        .as_object()?
+        .values()
+        .filter_map(|model| model.get("contextWindow").and_then(Value::as_u64))
+        .filter(|window| *window > 0)
+        .max()
 }
 
 fn claude_token_field(
@@ -73,6 +90,7 @@ pub(crate) fn parse_claude_result_usage(
         cached_input: claude_token_field(object, "cache_read_input_tokens")?,
         output: claude_token_field(object, "output_tokens")?,
         context: None,
+        window: None,
     };
     Ok(
         if sample.input.is_none() && sample.cached_input.is_none() && sample.output.is_none() {
@@ -112,6 +130,7 @@ pub(crate) fn parse_claude_assistant_usage(
         cached_input: read,
         output: claude_token_field(object, "output_tokens")?,
         context,
+        window: None,
     };
     Ok(
         if sample.input.is_none()
@@ -188,7 +207,7 @@ pub(crate) fn claude_usage_report(
         cached_input_tokens: sample.cached_input,
         output_tokens: sample.output,
         context_tokens: sample.context,
-        context_window_tokens: None,
+        context_window_tokens: sample.window,
         observed_at: context.observed_at,
     })
     .ok()

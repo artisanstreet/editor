@@ -22,7 +22,7 @@ use super::protocol::{
 use super::text::{ClaudeTextLedger, ClaudeTextSettlement};
 use super::thinking::ClaudeThinkingTracker;
 use super::tools::ClaudeToolTracker;
-use super::usage::{ClaudeUsageScope, project_usage_sample};
+use super::usage::{ClaudeUsageSample, ClaudeUsageScope, project_usage_sample};
 
 /// Builds one validated subagent discovery row.
 ///
@@ -214,6 +214,9 @@ pub(crate) struct ClaudePendingTracker {
     background_tasks: usize,
     semantic_failure: bool,
     summary_title: Option<String>,
+    /// The latest per-response context gauge, kept for the result frame:
+    /// its totals carry no gauge, and its report must not drop the reading.
+    usage_context: Option<u64>,
 }
 
 impl ClaudePendingTracker {
@@ -691,6 +694,9 @@ async fn apply_assistant_frame(
             }
         }
     }
+    if let Some(context) = frame.usage.and_then(|sample| sample.context) {
+        tracker.usage_context = Some(context);
+    }
     match frame.usage.as_ref() {
         Some(sample) => {
             match project_usage_sample(observations, run_id, usage, frame_sequence, sample).await {
@@ -867,6 +873,12 @@ pub(crate) async fn apply_event(
                 tracker.semantic_failure = true;
             }
             tracker.note_permission_denials(permission_denials);
+            // The result's totals carry the turn's window but no gauge; the
+            // last response's gauge rides along so the reading stays whole.
+            let sample = sample.map(|sample| ClaudeUsageSample {
+                context: sample.context.or(tracker.usage_context),
+                ..sample
+            });
             if let Some(sample) = sample.as_ref()
                 && let Some(state) =
                     project_usage_sample(observations, run_id, usage, frame_sequence, sample).await

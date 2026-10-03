@@ -2207,6 +2207,20 @@ fn assistant_and_result_usage_decode_with_honest_shapes() {
         _ => panic!("expected turn result with usage"),
     }
 
+    // The result names the window the turn ran in: the root model's, the
+    // largest across the models it used.
+    let windowed = parse_frame(
+        r#"{"type":"result","subtype":"success","session_id":"session-1","is_error":false,"usage":{"output_tokens":50},"modelUsage":{"claude-opus-5-5":{"inputTokens":9,"contextWindow":1000000},"claude-haiku-4-5":{"inputTokens":2,"contextWindow":200000}}}"#,
+        3,
+    )
+    .expect("result with model usage decodes");
+    match windowed {
+        ClaudeEvent::TurnResult { usage, .. } => {
+            assert_eq!(usage.expect("totals").window, Some(1_000_000));
+        }
+        _ => panic!("expected turn result with usage"),
+    }
+
     // The typeless terminal summary carries totals the same way.
     let typeless = parse_frame(
         r#"{"is_error":false,"session_id":"session-1","usage":{"output_tokens":7}}"#,
