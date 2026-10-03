@@ -660,6 +660,12 @@ pub struct TurnScene {
     pub ordinal: u64,
     /// Authoritative lifecycle.
     pub lifecycle: ConversationLifecycle,
+    /// The turn's active-work clock basis in Unix millis, if any.
+    ///
+    /// Kept on the turn as well as on its status block: a streaming reply
+    /// suppresses the status block, and the section header must keep
+    /// counting `Working for …` from the same basis until the turn ends.
+    pub active_started_at_ms: Option<i64>,
     /// Ordered blocks.
     pub blocks: Vec<TurnBlock>,
 }

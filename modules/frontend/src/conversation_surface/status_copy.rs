@@ -191,7 +191,9 @@ pub fn turn_is_live(turn: &TurnScene) -> bool {
 /// never a generic title. A live turn counts on the turn's one elapsed basis
 /// whatever its narration (a provider wait, a streaming reply, compaction, a
 /// background wait), so the header keeps counting while the status row says
-/// what is happening; without a basis it reads the bare verb. A settled turn
+/// what is happening. The basis lives on the turn, not its status block,
+/// because a streaming reply suppresses that block; without a basis it reads
+/// the bare verb. A settled turn
 /// reads its lifecycle outcome: the duration belongs to the terminal label,
 /// so a completed turn that lost its narration reads plain `Worked`.
 #[must_use]
@@ -204,14 +206,12 @@ pub fn turn_section_title(turn: &TurnScene, frame_now_ms: Option<i64>) -> String
         ConversationLifecycle::Pending
         | ConversationLifecycle::Streaming
         | ConversationLifecycle::Active
-        | ConversationLifecycle::Waiting => {
-            let basis = turn.blocks().iter().find_map(|block| match block {
-                TurnBlock::TurnStatus(status) => status.active_started_at_ms,
-                _ => None,
-            });
-            live_status_copy(TurnNarration::Working, basis, frame_now_ms)
-                .unwrap_or_else(|| "Working".to_owned())
-        }
+        | ConversationLifecycle::Waiting => live_status_copy(
+            TurnNarration::Working,
+            turn.active_started_at_ms,
+            frame_now_ms,
+        )
+        .unwrap_or_else(|| "Working".to_owned()),
     }
 }
 

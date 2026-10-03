@@ -1212,6 +1212,7 @@ impl ConversationScene {
                 turn_id: turn.turn_id.clone(),
                 ordinal: turn.ordinal,
                 lifecycle: turn.lifecycle,
+                active_started_at_ms,
                 blocks,
             });
         }

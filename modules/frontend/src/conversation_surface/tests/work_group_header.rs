@@ -583,3 +583,47 @@ fn an_approval_pauses_the_section_without_splitting_it() {
     assert!(!group.superseded, "the approval does not supersede the run");
     assert_eq!(owning_group_index(turn), Some(index));
 }
+
+#[test]
+fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
+    // A live reply suppresses the turn's status block, which used to carry
+    // the only clock basis, so the header fell back to a bare `Working`
+    // while the summary streamed. The basis lives on the turn now.
+    let streaming_reply = item(
+        "reply-a",
+        2,
+        SceneItemKind::AssistantMessage {
+            body: "All tests pass.".to_owned(),
+            phase: AssistantPhase::Unspecified,
+        },
+        None,
+    )
+    .with_provenance(ItemProvenance {
+        run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+        lifecycle: Some(ConversationLifecycle::Streaming),
+    });
+    let scene = ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        vec![run_command("work-a", 1), streaming_reply],
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::StreamingSuppression)
+                .with_active_started_at_ms(1_000),
+        ],
+        Vec::new(),
+    )
+    .expect("scene is valid");
+    let turn = scene.turn_scene(&turn_id("turn_a")).expect("turn present");
+    assert!(
+        !turn
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, TurnBlock::TurnStatus(_))),
+        "the streaming reply suppresses the status block"
+    );
+    assert_eq!(turn_section_title(turn, Some(89_000)), "Working for 1m 28s");
+}
+
