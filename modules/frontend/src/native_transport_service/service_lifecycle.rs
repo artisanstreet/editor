@@ -446,11 +446,22 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
     // files the manually started backend needs; the readiness wait below
     // then fails honestly until that backend is up.
     let credentials = load_client_credentials(home).map_err(|error| {
-        dev_startup_failure(
+        let failure = dev_startup_failure(
             ServiceFailureStage::Credentials,
             "loading the client credentials",
             &error,
-        )
+        );
+        // Unreadable files mean the host is down or restarting (the dev home
+        // lives inside WSL), not that the credential was rejected: report
+        // Forge as offline instead of asking for a fresh invitation.
+        if matches!(
+            error,
+            artisan_editor_cli::credentials::ForgeCredentialError::Io { .. }
+        ) {
+            StartupError::Unreachable(ServiceFailureStage::Credentials)
+        } else {
+            failure
+        }
     })?;
     let ready_path =
         dev_endpoint::dev_ready_path(home, dev_endpoint::dev_ready_override_from_env().as_deref());
