@@ -18,6 +18,10 @@ const OPEN_CAPACITY: usize = 2048;
 const SLOW_OPERATION_US: u64 = 5_000_000;
 const POST_INCIDENT_US: u64 = 2_000_000;
 const COOLDOWN_US: u64 = 10_000_000;
+/// A reason that repeats within this window saves no further snapshot: the
+/// first one of a burst already holds the history leading into it, and a
+/// storm of repeats would rotate older, distinct incidents out of the folder.
+const REPEAT_COOLDOWN_US: u64 = 300_000_000;
 
 static RECORDER: OnceLock<Arc<Recorder>> = OnceLock::new();
 static NEXT_SPAN: AtomicU64 = AtomicU64::new(1);
@@ -67,17 +71,36 @@ impl Drop for Session {
 }
 
 /// Start once per process. Debug builds record by default; set
-/// `ARTISAN_TRACE=0` to disable, or `ARTISAN_TRACE_DIR` to choose the directory.
+/// `ARTISAN_TRACE=0` to disable, or `ARTISAN_TRACE_DIR` to choose the directory
+/// (see [`default_directory`] otherwise).
 /// Production builds do not compile this function at all.
 pub fn start(role: &'static str) -> Option<Session> {
     if RECORDER.get().is_some() || std::env::var("ARTISAN_TRACE").as_deref() == Ok("0") {
         return None;
     }
-    let directory = std::env::var_os("ARTISAN_TRACE_DIR").map_or_else(
-        || std::env::temp_dir().join("artisan-traces"),
-        PathBuf::from,
-    );
+    let directory =
+        std::env::var_os("ARTISAN_TRACE_DIR").map_or_else(default_directory, PathBuf::from);
     start_at(role, directory)
+}
+
+/// Where traces go without `ARTISAN_TRACE_DIR`. On Linux that is the XDG
+/// state directory, not `/tmp`: a WSL restart empties `/tmp`, and the traces
+/// a hang left behind are exactly what explains the restart. Elsewhere the
+/// temporary directory persists across restarts already.
+fn default_directory() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            });
+        if let Some(state) = state {
+            return state.join("artisan").join("traces");
+        }
+    }
+    std::env::temp_dir().join("artisan-traces")
 }
 
 fn start_at(role: &'static str, directory: PathBuf) -> Option<Session> {
@@ -366,6 +389,7 @@ fn collect(
     let mut history = History::new();
     let mut pending: Option<(u64, &'static str)> = None;
     let mut last_incident: Option<u64> = None;
+    let mut last_by_reason: Vec<(&'static str, u64)> = Vec::new();
     while recorder.running.load(Ordering::Relaxed) {
         if let Ok(event) = events.recv_timeout(Duration::from_millis(100)) {
             history.push(event);
@@ -379,11 +403,13 @@ fn collect(
         for control in controls.try_iter().take(16) {
             match control {
                 Control::Save => send_snapshot(&snapshots, &history, recorder, "manual"),
-                Control::Incident(reason) => schedule(&mut pending, last_incident, now, reason),
+                Control::Incident(reason) => {
+                    schedule(&mut pending, last_incident, &last_by_reason, now, reason);
+                }
             }
         }
         if let Some(reason) = history.slow_operation(now) {
-            schedule(&mut pending, last_incident, now, reason);
+            schedule(&mut pending, last_incident, &last_by_reason, now, reason);
         }
         if let Some((due, reason)) = pending
             && now >= due
@@ -391,6 +417,8 @@ fn collect(
             send_snapshot(&snapshots, &history, recorder, reason);
             pending = None;
             last_incident = Some(now);
+            last_by_reason.retain(|(known, _)| *known != reason);
+            last_by_reason.push((reason, now));
         }
     }
     for event in events.try_iter() {
@@ -414,10 +442,17 @@ mod tests;
 fn schedule(
     pending: &mut Option<(u64, &'static str)>,
     last: Option<u64>,
+    last_by_reason: &[(&'static str, u64)],
     now: u64,
     reason: &'static str,
 ) {
-    if pending.is_none() && last.is_none_or(|last| now.saturating_sub(last) >= COOLDOWN_US) {
+    let repeated = last_by_reason
+        .iter()
+        .any(|(known, at)| *known == reason && now.saturating_sub(*at) < REPEAT_COOLDOWN_US);
+    if pending.is_none()
+        && !repeated
+        && last.is_none_or(|last| now.saturating_sub(last) >= COOLDOWN_US)
+    {
         *pending = Some((now.saturating_add(POST_INCIDENT_US), reason));
     }
 }

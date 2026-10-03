@@ -151,3 +151,42 @@ fn idle_history_expires_and_stalls_only_report_once_per_operation() {
     assert!(history.events.is_empty());
     assert_eq!(history.open.len(), 1);
 }
+
+#[test]
+fn a_repeating_incident_saves_once_while_new_reasons_still_save() {
+    // A failure that repeats every few seconds must not rotate earlier,
+    // distinct incidents out of the snapshot folder.
+    let mut pending = None;
+    let burst_start = 1_000_000;
+    let history = [("application.failure", burst_start)];
+    let later = burst_start + COOLDOWN_US + 1;
+    schedule(
+        &mut pending,
+        Some(burst_start),
+        &history,
+        later,
+        "application.failure",
+    );
+    assert_eq!(pending, None, "the repeat is suppressed");
+    schedule(
+        &mut pending,
+        Some(burst_start),
+        &history,
+        later,
+        "heartbeat.stalled",
+    );
+    assert_eq!(pending.map(|(_, reason)| reason), Some("heartbeat.stalled"));
+    let mut pending = None;
+    let much_later = burst_start + REPEAT_COOLDOWN_US;
+    schedule(
+        &mut pending,
+        Some(burst_start),
+        &history,
+        much_later,
+        "application.failure",
+    );
+    assert!(
+        pending.is_some(),
+        "the reason saves again after its cooldown"
+    );
+}

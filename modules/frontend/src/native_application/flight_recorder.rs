@@ -10,6 +10,12 @@ use gpui::{
 
 use super::*;
 
+thread_local! {
+    /// The navigation gates last written to the recorder on this thread.
+    static LAST_GATES: std::cell::RefCell<Option<serde_json::Value>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 pub(super) fn start(cx: &mut App) {
     if !artisan_tracing::is_recording() {
         return;
@@ -75,20 +81,38 @@ impl NativeApplication {
             "count" => self.service.as_ref().map_or(0, |s| s.holds().status().count),
             "sealed" => self.service.as_ref().is_some_and(|s| s.holds().status().sealed) as u8
         );
-        artisan_tracing::instant!("state", "navigation.gates",
-            "route" => route_name(self.route()),
-            "shutdown" => self.shutdown_prepared,
-            "service_stopped" => self.service_stopped,
-            "intake" => self.intake_stage.map(|s| format!("{s:?}")),
-            "switch_phase" => self.thread_switch_flight.as_ref().map(|f| format!("{:?}", f.phase)),
-            "switch_span" => self.thread_switch_flight.as_ref().map(|f| f.trace.id()),
-            "switch_generation" => self.thread_switch_flight.as_ref().map(|f| f.generation),
-            "unsubscribe_pending" => self.ordinary_unsubscribe_thread.as_ref().map(ThreadId::as_str),
-            "pending_thread" => self.pending_thread.as_ref().map(ThreadId::as_str),
-            "selected_thread" => self.selected_thread.as_ref().map(ThreadId::as_str),
-            "awaiting_threads" => self.project_navigation.awaiting_threads,
-            "window_error_present" => self.window_error.is_some(),
-            "navigation_admissible" => self.project_picker_action_is_admissible()
-        );
+        if !artisan_tracing::is_recording() {
+            return;
+        }
+        // Service events arrive many times a second; the gates change rarely.
+        // Emitting only changes keeps them from crowding real history out of
+        // the bounded recorder window.
+        let gates = artisan_tracing::json!({
+            "route": route_name(self.route()),
+            "shutdown": self.shutdown_prepared,
+            "service_stopped": self.service_stopped,
+            "intake": self.intake_stage.map(|s| format!("{s:?}")),
+            "switch_phase": self.thread_switch_flight.as_ref().map(|f| format!("{:?}", f.phase)),
+            "switch_span": self.thread_switch_flight.as_ref().map(|f| f.trace.id()),
+            "switch_generation": self.thread_switch_flight.as_ref().map(|f| f.generation),
+            "unsubscribe_pending": self.ordinary_unsubscribe_thread.as_ref().map(ThreadId::as_str),
+            "pending_thread": self.pending_thread.as_ref().map(ThreadId::as_str),
+            "selected_thread": self.selected_thread.as_ref().map(ThreadId::as_str),
+            "awaiting_threads": self.project_navigation.awaiting_threads,
+            "window_error_present": self.window_error.is_some(),
+            "navigation_admissible": self.project_picker_action_is_admissible()
+        });
+        let changed = LAST_GATES.with(|last| {
+            let mut last = last.borrow_mut();
+            if last.as_ref() == Some(&gates) {
+                false
+            } else {
+                *last = Some(gates.clone());
+                true
+            }
+        });
+        if changed {
+            artisan_tracing::instant("state", "navigation.gates", gates);
+        }
     }
 }

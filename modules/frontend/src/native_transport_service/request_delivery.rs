@@ -294,10 +294,14 @@ impl ServiceRuntime {
         #[cfg(feature = "flight-recorder")]
         match &attempt {
             Ok(_) => artisan_tracing::instant!("transport.request", "request.succeeded"),
-            Err(
-                RequestAttemptError::Retained { failure, .. }
-                | RequestAttemptError::Terminal { failure, .. },
-            ) => {
+            // The Forge answered with a refusal (a link title it could not
+            // fetch, a stale catalog): the connection is fine, so the
+            // failure is recorded but saves no incident snapshot.
+            Err(RequestAttemptError::Retained { failure, .. }) => {
+                artisan_tracing::instant!("transport.request", "request.failed", "stage" => failure.stage.to_string(), "category" => failure.category.to_string());
+            }
+            // The session itself was lost: an incident worth the history.
+            Err(RequestAttemptError::Terminal { failure, .. }) => {
                 artisan_tracing::instant!("transport.request", "request.failed", "stage" => failure.stage.to_string(), "category" => failure.category.to_string());
                 artisan_tracing::incident!("request.failed");
             }
