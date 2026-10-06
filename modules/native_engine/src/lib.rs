@@ -34,6 +34,7 @@ mod codex_authority;
 pub mod cursor;
 #[path = "install.rs"]
 mod engine_core;
+pub mod extensions;
 pub mod grok;
 #[path = "files.rs"]
 mod io;
