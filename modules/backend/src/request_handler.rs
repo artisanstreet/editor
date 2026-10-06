@@ -195,6 +195,7 @@ pub(crate) struct ConversationConnectionContext {
     /// its board with request delivery.
     live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
+    extension_sync: Option<Arc<crate::extension_sync::ExtensionSync>>,
     run_cancellation: Option<RunCancellationRegistry>,
     project_subtitles: Option<crate::project_subtitles::ProjectSubtitles>,
     /// Held from this connection's first handled request: an Editor
@@ -230,6 +231,10 @@ impl ConversationConnectionContext {
         &self,
     ) -> Option<&crate::account_usage_service::AccountUsageService> {
         self.account_usage.as_deref()
+    }
+
+    pub(crate) fn extension_sync(&self) -> Option<&crate::extension_sync::ExtensionSync> {
+        self.extension_sync.as_deref()
     }
 
     pub(crate) fn registrar(&self) -> &ConversationSubscriptionRegistrar {
@@ -376,6 +381,7 @@ pub struct RequestHandler {
     run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
+    extension_sync: Option<Arc<crate::extension_sync::ExtensionSync>>,
     rich_link_resolver: Option<crate::rich_link_service::RichLinkResolver>,
     project_repository: Option<crate::project_repository_service::ProjectRepositoryService>,
     project_subtitles: Option<crate::project_subtitles::ProjectSubtitles>,
@@ -512,6 +518,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            extension_sync: None,
             rich_link_resolver: None,
             project_repository: None,
             project_subtitles: None,
@@ -541,6 +548,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            extension_sync: None,
             rich_link_resolver: None,
             project_repository: None,
             project_subtitles: None,
@@ -571,6 +579,7 @@ impl RequestHandler {
             run_interaction: None,
             composer_catalog: None,
             account_usage: None,
+            extension_sync: None,
             rich_link_resolver: None,
             project_repository: None,
             project_subtitles: None,
@@ -643,6 +652,22 @@ impl RequestHandler {
         service: Arc<crate::account_usage_service::AccountUsageService>,
     ) -> Self {
         self.account_usage = Some(service);
+        self
+    }
+
+    /// The repository every request reads and writes.
+    pub(crate) const fn repository(&self) -> &Repository {
+        &self.repository
+    }
+
+    /// Attaches the extension sync that keeps every engine's skills and
+    /// global prompt in line with the user's choices.
+    #[must_use]
+    pub(crate) fn with_extension_sync(
+        mut self,
+        sync: Arc<crate::extension_sync::ExtensionSync>,
+    ) -> Self {
+        self.extension_sync = Some(sync);
         self
     }
 
@@ -719,6 +744,7 @@ impl RequestHandler {
             notifier: self.conversation_commit_notifier.clone()?,
             live_thinking: self.live_thinking.clone(),
             account_usage: self.account_usage.clone(),
+            extension_sync: self.extension_sync.clone(),
             run_cancellation: self.run_cancellation.clone(),
             project_subtitles: self.project_subtitles.clone(),
             usage_observer: std::sync::OnceLock::new(),
@@ -1118,6 +1144,12 @@ impl RequestHandler {
                 self.import_legacy_preferences_outcome(request_id, import)
                     .await
             }
+            Command::SetExtensionEnabled(_)
+            | Command::AdoptExtension(_)
+            | Command::SaveGlobalPrompt(_)
+            | Command::ResolveGlobalPrompt(_) => {
+                self.extension_command_outcome(request_id, command).await
+            }
         };
         if response.is_ok() {
             self.wake_message_outbox(command);
@@ -1368,6 +1400,9 @@ mod model_selection;
 
 #[path = "request_handler/user_preferences.rs"]
 mod user_preferences;
+
+#[path = "request_handler/extensions.rs"]
+mod extensions;
 
 #[path = "request_handler/attach_project.rs"]
 mod attach_project;

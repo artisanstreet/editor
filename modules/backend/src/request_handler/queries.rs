@@ -352,6 +352,9 @@ impl RequestHandler {
                 .await
             }
             Query::ReadUserPreferences(_) => self.read_user_preferences_outcome(request_id).await,
+            Query::ReadExtensions(_) | Query::ReadGlobalPrompt(_) => {
+                self.extension_query_outcome(request_id, query)
+            }
             Query::ReadRecentThreads(_) => self.recent_threads_outcome(request_id).await,
             Query::ReadEngineInstalls(_)
             | Query::ListEngineVersions(_)

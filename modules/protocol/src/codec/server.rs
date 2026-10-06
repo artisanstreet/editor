@@ -229,6 +229,12 @@ pub(crate) fn encode_event(
         Event::EngineInstalls(snapshot) => {
             encode_engine_install_snapshot(builder.reborrow().init_engine_installs(), snapshot)?;
         }
+        Event::Extensions(catalog) => {
+            encode_extension_catalog(builder.reborrow().init_extensions(), catalog)?;
+        }
+        Event::GlobalPrompt(prompt) => {
+            encode_global_prompt(builder.reborrow().init_global_prompt(), prompt)?;
+        }
     }
     Ok(())
 }
@@ -395,6 +401,10 @@ pub(crate) const fn encode_error_code(value: ErrorCode) -> artisan_capnp::ErrorC
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "central server-event union dispatcher mirroring `encode_event`; one arm per event kind"
+)]
 pub(crate) fn decode_event(
     value: artisan_capnp::event::Reader<'_>,
 ) -> Result<ServerEvent, ProtocolDecodeError> {
@@ -504,6 +514,8 @@ pub(crate) fn decode_event(
         event::Which::EngineInstalls(snapshot) => {
             Event::EngineInstalls(decode_engine_install_snapshot(snapshot?)?)
         }
+        event::Which::Extensions(catalog) => Event::Extensions(decode_extension_catalog(catalog?)?),
+        event::Which::GlobalPrompt(prompt) => Event::GlobalPrompt(decode_global_prompt(prompt?)?),
     };
     Ok(ServerEvent { cursor, event })
 }

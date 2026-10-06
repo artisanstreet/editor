@@ -301,6 +301,20 @@ pub enum ProtocolDecodeError {
         #[source]
         source: artisan_domain::EngineInstallError,
     },
+    /// An extension field failed its domain bound or shape policy.
+    #[error("invalid extension data: {source}")]
+    Extension {
+        /// Domain-owned extension validation failure.
+        #[source]
+        source: artisan_domain::ExtensionError,
+    },
+    /// A global prompt field failed its domain bound or shape policy.
+    #[error("invalid global prompt data: {source}")]
+    GlobalPrompt {
+        /// Domain-owned global prompt validation failure.
+        #[source]
+        source: artisan_domain::GlobalPromptError,
+    },
     /// An account-usage field failed its domain bound or shape policy.
     #[error("invalid account usage: {source}")]
     EngineUsage {

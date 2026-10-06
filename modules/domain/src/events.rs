@@ -108,6 +108,11 @@ pub enum Event {
     /// The user messages of a subscribed thread's turns before the loaded
     /// ones, pushed with the held-back work.
     EarlierTurnMarkers(crate::EarlierTurnMarkers),
+    /// The extension catalog changed; pushed to a connection that read it.
+    Extensions(crate::ExtensionCatalog),
+    /// The global prompt or its state in an engine changed; pushed to a
+    /// connection that read it.
+    GlobalPrompt(crate::GlobalPrompt),
 }
 
 /// A subscribed thread's display title changed: the generated title was

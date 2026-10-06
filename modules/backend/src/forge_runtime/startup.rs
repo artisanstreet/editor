@@ -28,6 +28,7 @@ use crate::{
     directory_controller::{
         ControllerStartError, DirectoryController, DirectoryControllerConfig, ShutdownReport,
     },
+    extension_sync::ExtensionSync,
     lifecycle_control::{ActivityGateImpl, LifecycleController},
     listener::ServeUntilCancelError,
     native_run_dispatch::{
@@ -700,6 +701,7 @@ async fn run_with_handler(
         Arc::clone(&cancel),
     ));
     let handler = handler.with_shared_account_usage_service(usage);
+    let (handler, extension_keeper) = ExtensionSync::start(handler, &database, &notifier, &cancel);
     // Subtitles resolve from startup on and follow repository changes; each
     // change is pushed to the Editors that read the recent threads.
     let subtitle_keeper = handler.project_subtitles().cloned().map(|subtitles| {
@@ -723,6 +725,7 @@ async fn run_with_handler(
     if let Some(keeper) = subtitle_keeper {
         keeper.abort();
     }
+    extension_keeper.abort();
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
     finish(

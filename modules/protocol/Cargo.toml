@@ -87,6 +87,10 @@ name = "user_preferences"
 path = "../../tests/protocol/user_preferences.rs"
 
 [[test]]
+name = "extensions"
+path = "../../tests/protocol/extensions.rs"
+
+[[test]]
 name = "recent_threads"
 path = "../../tests/protocol/recent_threads.rs"
 

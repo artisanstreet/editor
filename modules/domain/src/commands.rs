@@ -307,6 +307,14 @@ pub enum Command {
     SaveModelPreference(SaveModelPreference),
     /// See [`ImportLegacyPreferences`].
     ImportLegacyPreferences(ImportLegacyPreferences),
+    /// See [`SetExtensionEnabled`](crate::SetExtensionEnabled).
+    SetExtensionEnabled(crate::SetExtensionEnabled),
+    /// See [`AdoptExtension`](crate::AdoptExtension).
+    AdoptExtension(crate::AdoptExtension),
+    /// See [`SaveGlobalPrompt`](crate::SaveGlobalPrompt).
+    SaveGlobalPrompt(crate::SaveGlobalPrompt),
+    /// See [`ResolveGlobalPrompt`](crate::ResolveGlobalPrompt).
+    ResolveGlobalPrompt(crate::ResolveGlobalPrompt),
 }
 
 impl Command {
@@ -334,6 +342,10 @@ impl Command {
             Self::RecordNavigation(command) => &command.request_id,
             Self::SaveModelPreference(command) => &command.request_id,
             Self::ImportLegacyPreferences(command) => &command.request_id,
+            Self::SetExtensionEnabled(command) => &command.request_id,
+            Self::AdoptExtension(command) => &command.request_id,
+            Self::SaveGlobalPrompt(command) => &command.request_id,
+            Self::ResolveGlobalPrompt(command) => &command.request_id,
         }
     }
 }
@@ -503,4 +515,8 @@ pub enum Query {
     ListEngineVersions(crate::ListEngineVersions),
     /// See [`ChangeEngineVersion`](crate::ChangeEngineVersion).
     ChangeEngineVersion(crate::ChangeEngineVersion),
+    /// See [`ReadExtensions`](crate::ReadExtensions).
+    ReadExtensions(crate::ReadExtensions),
+    /// See [`ReadGlobalPrompt`](crate::ReadGlobalPrompt).
+    ReadGlobalPrompt(crate::ReadGlobalPrompt),
 }

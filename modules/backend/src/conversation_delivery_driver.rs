@@ -47,6 +47,8 @@ use crate::request_handler::{ActivatedConversationSubscription, ConversationConn
 
 #[path = "conversation_delivery_driver/engine_installs.rs"]
 mod engine_installs;
+#[path = "conversation_delivery_driver/extensions.rs"]
+mod extensions;
 #[path = "conversation_delivery_driver/recent_threads.rs"]
 mod recent_threads;
 use recent_threads::DeliveredRecentThreads;
@@ -80,6 +82,11 @@ pub(crate) struct ConversationDeliveryDriver {
     /// The engine installs last served or pushed, once the connection read
     /// them.
     engines: Option<artisan_domain::EngineInstallSnapshot>,
+    /// The extension catalog last served or pushed, once the connection read
+    /// it.
+    extensions: Option<artisan_domain::ExtensionCatalog>,
+    /// The global prompt last served or pushed, once the connection read it.
+    global_prompt: Option<artisan_domain::GlobalPrompt>,
 }
 
 /// The host state last pushed to this connection and the host-state
@@ -126,6 +133,8 @@ impl ConversationDeliveryDriver {
             recent: None,
             projects: None,
             engines: None,
+            extensions: None,
+            global_prompt: None,
         }
     }
 
@@ -180,6 +189,12 @@ impl ConversationDeliveryDriver {
         if let Some(snapshot) = outcome.follow_up.engine_installs {
             self.engines = Some(snapshot);
         }
+        if let Some(catalog) = outcome.follow_up.extensions {
+            self.extensions = Some(catalog);
+        }
+        if let Some(prompt) = outcome.follow_up.global_prompt {
+            self.global_prompt = Some(prompt);
+        }
 
         if let Some(subscription) = outcome.activation {
             let thread_id = subscription.lease().thread_id().clone();
@@ -223,6 +238,7 @@ impl ConversationDeliveryDriver {
         self.deliver_host_state(stamp, limit, cancel).await?;
         self.deliver_project_catalog(stamp, limit, cancel).await?;
         self.deliver_engine_installs(stamp, limit, cancel).await?;
+        self.deliver_extensions(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 
@@ -272,6 +288,7 @@ impl ConversationDeliveryDriver {
         self.deliver_host_state(stamp, limit, cancel).await?;
         self.deliver_project_catalog(stamp, limit, cancel).await?;
         self.deliver_engine_installs(stamp, limit, cancel).await?;
+        self.deliver_extensions(stamp, limit, cancel).await?;
         self.deliver_recent_threads(stamp, limit, cancel).await
     }
 

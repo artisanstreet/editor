@@ -130,6 +130,10 @@ pub enum ResponsePayload {
     RecentThreads(artisan_domain::RecentThreadListing),
     /// Every managed engine's install status, answering a read or change.
     EngineInstalls(artisan_domain::EngineInstallSnapshot),
+    /// Answer to the extension reads and changes.
+    Extensions(artisan_domain::ExtensionCatalog),
+    /// Answer to the global prompt read, save, and resolution.
+    GlobalPrompt(artisan_domain::GlobalPrompt),
     /// The vendor's versions of one engine, answering a listing.
     EngineVersions(artisan_domain::EngineVersionList),
 }

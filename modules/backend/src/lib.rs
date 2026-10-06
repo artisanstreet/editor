@@ -25,6 +25,7 @@ pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
 pub mod engine_owner;
+pub(crate) mod extension_sync;
 pub use artisan_domain::error_chain;
 pub mod file_identity_policy;
 pub mod forge_runtime;

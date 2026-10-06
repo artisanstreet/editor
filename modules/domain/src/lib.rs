@@ -246,6 +246,24 @@ pub use recent_threads::{
     RecentThread, RecentThreadListing,
 };
 
+pub mod extensions;
+pub use extensions::{
+    AdoptExtension, EXTENSION_CATALOG_MAX, EXTENSION_DESCRIPTION_MAX_BYTES, EXTENSION_DIGEST_BYTES,
+    EXTENSION_ENGINES_MAX, EXTENSION_ID_MAX_BYTES, EXTENSION_NAME_MAX_BYTES,
+    EXTENSION_REASON_MAX_BYTES, Extension, ExtensionCatalog, ExtensionEngineState,
+    ExtensionEngineStatus, ExtensionError, ExtensionKind, ExtensionLinkSupport, ExtensionOrigin,
+    ReadExtensions, SetExtensionEnabled, valid_skill_name, validate_extension_id,
+};
+
+pub mod global_prompt;
+pub use global_prompt::{
+    GLOBAL_PROMPT_CANDIDATES_MAX, GLOBAL_PROMPT_DETAIL_MAX_BYTES, GLOBAL_PROMPT_DIGEST_BYTES,
+    GLOBAL_PROMPT_ENGINES_MAX, GLOBAL_PROMPT_MAX_BYTES, GlobalPrompt, GlobalPromptCandidate,
+    GlobalPromptEngineState, GlobalPromptEngineStatus, GlobalPromptError, GlobalPromptResolution,
+    GlobalPromptRevision, GlobalPromptSetup, ReadGlobalPrompt, ResolveGlobalPrompt,
+    SaveGlobalPrompt, validate_prompt_text,
+};
+
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,

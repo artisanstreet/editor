@@ -27,6 +27,12 @@ pub(crate) struct RequestFollowUp {
     /// The engine installs a read or version change served: the connection
     /// now receives their changes.
     pub(crate) engine_installs: Option<artisan_domain::EngineInstallSnapshot>,
+    /// The extension catalog a read or change served: the connection now
+    /// receives its changes.
+    pub(crate) extensions: Option<artisan_domain::ExtensionCatalog>,
+    /// The global prompt a read or change served: the connection now
+    /// receives its changes.
+    pub(crate) global_prompt: Option<artisan_domain::GlobalPrompt>,
     /// The oldest turn a windowed subscriber holds, by ordinal: its thread's
     /// activity replay covers the turns from there on and leaves the work
     /// rows of settled turns on the Forge. `None` for a subscriber that did
@@ -59,6 +65,14 @@ impl RequestFollowUp {
             Some(ResponsePayload::EngineInstalls(snapshot)) => Some(snapshot.clone()),
             _ => None,
         };
+        let extensions = match payload {
+            Some(ResponsePayload::Extensions(catalog)) => Some(catalog.clone()),
+            _ => None,
+        };
+        let global_prompt = match payload {
+            Some(ResponsePayload::GlobalPrompt(prompt)) => Some(prompt.clone()),
+            _ => None,
+        };
         let history_floor = match (request, payload) {
             (
                 ClientRequest::Conversation(ConversationRequest::Subscribe(subscribe)),
@@ -84,6 +98,8 @@ impl RequestFollowUp {
             recent_threads,
             project_catalog,
             engine_installs,
+            extensions,
+            global_prompt,
             history_floor,
         }
     }

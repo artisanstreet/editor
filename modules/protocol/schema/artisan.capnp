@@ -930,6 +930,30 @@ struct Request {
 
     # Explicit model preference, answered with UserPreferences.
     saveModelPreference @52 :SaveModelPreferenceRequest;
+
+    # The extension catalog; the connection then receives its changes as
+    # extensions events. Fresh ordinal; existing ordinals frozen.
+    readExtensions @53 :Void;
+
+    # Turns a managed extension on or off in every engine, answered with
+    # the catalog. Fresh ordinal.
+    setExtensionEnabled @54 :SetExtensionEnabledRequest;
+
+    # Adopts a discovered skill (extension id), answered with the catalog.
+    # Fresh ordinal.
+    adoptExtension @55 :Text;
+
+    # The global prompt; the connection then receives its changes as
+    # globalPrompt events. Fresh ordinal.
+    readGlobalPrompt @56 :Void;
+
+    # Saves a new version of the global prompt, answered with it. Fresh
+    # ordinal.
+    saveGlobalPrompt @57 :SaveGlobalPromptRequest;
+
+    # Settles global prompt setup or a drifted engine, answered with the
+    # global prompt. Fresh ordinal.
+    resolveGlobalPrompt @58 :GlobalPromptResolution;
   }
 }
 
@@ -1049,6 +1073,14 @@ struct Response {
 
     # Answers conversationHistory. Fresh ordinal; existing ordinals frozen.
     conversationHistory @48 :ConversationHistoryPage;
+
+    # Answer to readExtensions, setExtensionEnabled, and adoptExtension.
+    # Fresh ordinal.
+    extensions @49 :ExtensionCatalog;
+
+    # Answer to readGlobalPrompt, saveGlobalPrompt, and resolveGlobalPrompt.
+    # Fresh ordinal.
+    globalPrompt @50 :GlobalPrompt;
   }
 }
 
@@ -1191,6 +1223,14 @@ struct Event {
     # ones, so the turn navigator lists them. Pushed with heldBackWork.
     # Fresh member @16.
     earlierTurnMarkers @16 :EarlierTurnMarkers;
+
+    # The extension catalog, pushed whenever it changes to a connection that
+    # read it. Fresh member @17.
+    extensions @17 :ExtensionCatalog;
+
+    # The global prompt and its state per engine, pushed whenever it changes
+    # to a connection that read it. Fresh member @18.
+    globalPrompt @18 :GlobalPrompt;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -3041,4 +3081,119 @@ enum ModelPreferenceSource {
 struct SaveModelPreferenceRequest {
   selection @0 :ComposerState.CatalogSelection;
   source @1 :ModelPreferenceSource;
+}
+
+# ---------------------------------------------------------------------------
+# Agent extensions and the global prompt (2026-10-07), appended so every
+# pre-existing node identity stays stable.
+# ---------------------------------------------------------------------------
+
+enum ExtensionKind {
+  skill @0;
+}
+
+enum ExtensionOrigin {
+  firstParty @0;
+  adopted @1;
+  discovered @2;
+}
+
+enum ExtensionEngineStatus {
+  synced @0;
+  off @1;
+  engineAbsent @2;
+  unavailable @3;
+  conflict @4;
+  native @5;
+  notPresent @6;
+  linksUnavailable @7;
+  failed @8;
+}
+
+# One extension's state in one engine. `reason` is presentation-ready, empty
+# when there is none.
+struct ExtensionEngineState {
+  engineId @0 :Text;
+  status @1 :ExtensionEngineStatus;
+  reason @2 :Text;
+}
+
+# One managed or discovered extension. `digest` is the lowercase
+# hexadecimal SHA-256 of its files.
+struct Extension {
+  id @0 :Text;
+  kind @1 :ExtensionKind;
+  origin @2 :ExtensionOrigin;
+  name @3 :Text;
+  description @4 :Text;
+  digest @5 :Text;
+  fileCount @6 :UInt32;
+  byteCount @7 :UInt64;
+  enabled @8 :Bool;
+  engines @9 :List(ExtensionEngineState);
+}
+
+enum ExtensionLinkSupport {
+  available @0;
+  developerModeRequired @1;
+}
+
+# Every extension, at most 512, and whether skills can be linked.
+struct ExtensionCatalog {
+  extensions @0 :List(Extension);
+  links @1 :ExtensionLinkSupport;
+}
+
+struct SetExtensionEnabledRequest {
+  extensionId @0 :Text;
+  enabled @1 :Bool;
+}
+
+enum GlobalPromptEngineStatus {
+  synced @0;
+  drifted @1;
+  awaitingChoice @2;
+  engineAbsent @3;
+  unavailable @4;
+  failed @5;
+}
+
+# The global prompt's state in one engine. `file` and `reason` are empty
+# when absent; `externalText` is what a drifted engine's file says now.
+struct GlobalPromptEngineState {
+  engineId @0 :Text;
+  status @1 :GlobalPromptEngineStatus;
+  file @2 :Text;
+  hasExternalText @3 :Bool;
+  externalText @4 :Text;
+  reason @5 :Text;
+}
+
+# One distinct prompt found in the engines during setup.
+struct GlobalPromptCandidate {
+  candidateId @0 :Text;
+  engineIds @1 :List(Text);
+  text @2 :Text;
+}
+
+# The global prompt. A non-empty `candidates` list means setup waits for the
+# user to choose one; it holds at least two.
+struct GlobalPrompt {
+  revision @0 :UInt64;
+  text @1 :Text;
+  candidates @2 :List(GlobalPromptCandidate);
+  engines @3 :List(GlobalPromptEngineState);
+}
+
+struct SaveGlobalPromptRequest {
+  baseRevision @0 :UInt64;
+  text @1 :Text;
+}
+
+struct GlobalPromptResolution {
+  union {
+    chooseCandidate @0 :Text;
+    importEngine @1 :Text;
+    overwriteEngine @2 :Text;
+  }
 }

@@ -292,6 +292,20 @@ pub(crate) fn encode_request(
         ClientRequest::Query(Query::ChangeEngineVersion(request)) => {
             encode_change_engine_version(builder, request);
         }
+        ClientRequest::Query(Query::ReadExtensions(_)) => encode_read_extensions(builder),
+        ClientRequest::Query(Query::ReadGlobalPrompt(_)) => encode_read_global_prompt(builder),
+        ClientRequest::Command(Command::SetExtensionEnabled(command)) => {
+            encode_set_extension_enabled(builder, command);
+        }
+        ClientRequest::Command(Command::AdoptExtension(command)) => {
+            encode_adopt_extension(builder, command);
+        }
+        ClientRequest::Command(Command::SaveGlobalPrompt(command)) => {
+            encode_save_global_prompt(builder, command);
+        }
+        ClientRequest::Command(Command::ResolveGlobalPrompt(command)) => {
+            encode_resolve_global_prompt(builder, command);
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -387,6 +401,12 @@ pub(crate) fn encode_response_payload(
         }
         ResponsePayload::EngineVersions(list) => {
             encode_engine_version_list(builder.reborrow().init_engine_versions(), list)?;
+        }
+        ResponsePayload::Extensions(catalog) => {
+            encode_extension_catalog(builder.reborrow().init_extensions(), catalog)?;
+        }
+        ResponsePayload::GlobalPrompt(prompt) => {
+            encode_global_prompt(builder.reborrow().init_global_prompt(), prompt)?;
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -835,6 +855,20 @@ pub(crate) fn decode_request(
         request::Which::ReadEngineInstalls(()) => Ok(decode_read_engine_installs()),
         request::Which::ListEngineVersions(engine_id) => decode_list_engine_versions(engine_id),
         request::Which::ChangeEngineVersion(change) => decode_change_engine_version(change?),
+        request::Which::ReadExtensions(()) => Ok(decode_read_extensions()),
+        request::Which::ReadGlobalPrompt(()) => Ok(decode_read_global_prompt()),
+        request::Which::SetExtensionEnabled(command) => {
+            decode_set_extension_enabled(request_id, command?)
+        }
+        request::Which::AdoptExtension(extension_id) => {
+            decode_adopt_extension(request_id, extension_id)
+        }
+        request::Which::SaveGlobalPrompt(command) => {
+            decode_save_global_prompt(request_id, command?)
+        }
+        request::Which::ResolveGlobalPrompt(command) => {
+            decode_resolve_global_prompt(request_id, command?)
+        }
     }
 }
 
@@ -990,6 +1024,12 @@ pub(crate) fn decode_response(
         }
         response::Which::EngineVersions(list) => {
             ResponsePayload::EngineVersions(decode_engine_version_list(list?)?)
+        }
+        response::Which::Extensions(catalog) => {
+            ResponsePayload::Extensions(decode_extension_catalog(catalog?)?)
+        }
+        response::Which::GlobalPrompt(prompt) => {
+            ResponsePayload::GlobalPrompt(decode_global_prompt(prompt?)?)
         }
     };
     Ok(ServerResponse {
