@@ -44,6 +44,7 @@ const PROJECT_DRAFT_SUBMISSIONS_MIGRATION: &str = "m20261002_000022_project_draf
 const THREAD_READS_MIGRATION: &str = "m20261003_000023_thread_reads";
 const DROP_STORED_THINKING_MIGRATION: &str = "m20261004_000024_drop_stored_thinking";
 const LEDGER_TAG_MIGRATION: &str = "m20261005_000025_observation_ledger_tag";
+const EXTENSIONS_MIGRATION: &str = "m20261007_000026_extensions_and_global_prompt";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -130,7 +131,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        25
+        26
     );
     first
         .execute_unprepared(
@@ -164,7 +165,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        25
+        26
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -243,7 +244,8 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             PROJECT_DRAFT_SUBMISSIONS_MIGRATION.to_string(),
             THREAD_READS_MIGRATION.to_string(),
             DROP_STORED_THINKING_MIGRATION.to_string(),
-            LEDGER_TAG_MIGRATION.to_string()
+            LEDGER_TAG_MIGRATION.to_string(),
+            EXTENSIONS_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -1006,7 +1008,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        25
+        26
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1121,7 +1123,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        25,
+        26,
         "migration must record every version exactly once"
     );
     assert_eq!(
@@ -1222,6 +1224,58 @@ async fn user_preferences_start_empty_and_follow_their_projects() -> Result<(), 
         )
         .await?,
         1
+    );
+    database.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn extensions_and_the_global_prompt_start_empty_and_keep_their_invariants()
+-> Result<(), Box<dyn Error>> {
+    let database = connect(SqliteConfig::in_memory().sqlx_logging(false)).await?;
+    migrate_to_current(&database).await?;
+    assert_eq!(
+        scalar_i64(
+            &database,
+            "SELECT count(*) FROM global_prompt WHERE state_id = 1 AND revision = 0 AND established = 0 AND text = ''"
+        )
+        .await?,
+        1
+    );
+    let digest = "a".repeat(64);
+    database
+        .execute_unprepared(&format!(
+            "INSERT INTO extension_installations (extension_id, origin, name, digest, enabled, updated_at_ms) VALUES ('local.demo', 'adopted', 'demo', '{digest}', 1, 1)"
+        ))
+        .await?;
+    for refused in [
+        // One managed skill per name: engines key skills by name.
+        format!(
+            "INSERT INTO extension_installations (extension_id, origin, name, digest, enabled, updated_at_ms) VALUES ('artisan.demo', 'first_party', 'demo', '{digest}', 1, 1)"
+        ),
+        format!(
+            "INSERT INTO extension_installations (extension_id, origin, name, digest, enabled, updated_at_ms) VALUES ('x.y', 'discovered', 'y', '{digest}', 0, 1)"
+        ),
+        "INSERT INTO extension_installations (extension_id, origin, name, digest, enabled, updated_at_ms) VALUES ('x.z', 'adopted', 'z', 'short', 0, 1)".to_owned(),
+        format!(
+            "UPDATE global_prompt SET text = '{}' WHERE state_id = 1",
+            "a".repeat(64 * 1024 + 1)
+        ),
+        "INSERT INTO global_prompt_versions (revision, text, saved_at_ms) VALUES (0, '', 1)".to_owned(),
+    ] {
+        assert!(
+            database.execute_unprepared(&refused).await.is_err(),
+            "{refused:.80}"
+        );
+    }
+    database
+        .execute_unprepared("UPDATE global_prompt SET revision = 2 WHERE state_id = 1")
+        .await?;
+    assert!(
+        database
+            .execute_unprepared("UPDATE global_prompt SET revision = 1 WHERE state_id = 1")
+            .await
+            .is_err()
     );
     database.close().await?;
     Ok(())

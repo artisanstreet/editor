@@ -311,6 +311,14 @@ pub use queued_message::{
 mod user_preferences;
 pub use user_preferences::{LegacyImport, StoredUserPreferences};
 
+mod extensions;
+pub use extensions::{StoredExtension, StoredExtensionOrigin};
+
+mod global_prompt;
+pub use global_prompt::{
+    GLOBAL_PROMPT_VERSIONS_KEPT, GlobalPromptSave, StoredGlobalPrompt, StoredPromptFile,
+};
+
 mod session_continuation;
 pub use session_continuation::{
     PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,

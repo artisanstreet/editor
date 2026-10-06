@@ -74,6 +74,10 @@ pub use repository::{
 };
 
 pub use repository::ComposerAttachmentChunkOutcome;
+pub use repository::{
+    GLOBAL_PROMPT_VERSIONS_KEPT, GlobalPromptSave, StoredExtension, StoredExtensionOrigin,
+    StoredGlobalPrompt, StoredPromptFile,
+};
 pub use repository::{LegacyImport, StoredUserPreferences};
 
 pub use repository::{
