@@ -628,14 +628,57 @@ async fn mark_commentary(
     tracker: &mut ClaudePendingTracker,
     frame_sequence: u64,
 ) -> Result<(), TerminalState> {
-    let Some(body) = tracker.text.mark_commentary().map(str::to_owned) else {
+    let body = tracker.text.mark_commentary().map(str::to_owned);
+    rephase_current(
+        observations,
+        run_id,
+        tracker,
+        frame_sequence,
+        body,
+        artisan_domain::AssistantMessagePhase::Commentary,
+    )
+    .await
+}
+
+/// Re-phases the current message as the answer when it ends the turn with
+/// no background agent or workflow left to report back: nothing else can
+/// follow it, so the work above it may fold before the run settles.
+async fn mark_final(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    tracker: &mut ClaudePendingTracker,
+    frame_sequence: u64,
+) -> Result<(), TerminalState> {
+    if tracker.background_tasks > 0 {
+        return Ok(());
+    }
+    let body = tracker.text.mark_final().map(str::to_owned);
+    rephase_current(
+        observations,
+        run_id,
+        tracker,
+        frame_sequence,
+        body,
+        artisan_domain::AssistantMessagePhase::Final,
+    )
+    .await
+}
+
+/// Replaces the current message part with `body` under `phase`; no body
+/// means the message needs no re-phase.
+async fn rephase_current(
+    observations: &mpsc::Sender<EngineObservation>,
+    run_id: &RunId,
+    tracker: &ClaudePendingTracker,
+    frame_sequence: u64,
+    body: Option<String>,
+    phase: artisan_domain::AssistantMessagePhase,
+) -> Result<(), TerminalState> {
+    let (Some(body), Some(part_id)) = (body, tracker.stream_message_id.clone()) else {
         return Ok(());
     };
-    let Some(part_id) = tracker.stream_message_id.clone() else {
-        return Ok(());
-    };
-    let snapshot = TextSnapshot::new(run_id.clone(), frame_sequence, part_id, body)
-        .with_phase(artisan_domain::AssistantMessagePhase::Commentary);
+    let snapshot =
+        TextSnapshot::new(run_id.clone(), frame_sequence, part_id, body).with_phase(phase);
     observations
         .send(EngineObservation::TextSnapshot(snapshot))
         .await
@@ -750,10 +793,28 @@ pub(crate) async fn apply_event(
         }
         ClaudeEvent::MessageStart { message_id } => {
             tracker.note_turn_opened();
+            // The run went on after a message marked final (a steer or a
+            // goal check): it was not the answer after all.
+            let superseded = tracker.text.superseded_final().map(str::to_owned);
+            let demoted = rephase_current(
+                observations,
+                run_id,
+                tracker,
+                frame_sequence,
+                superseded,
+                artisan_domain::AssistantMessagePhase::Commentary,
+            )
+            .await;
             tracker.text.message_started(&message_id);
             tracker.stream_message_id = Some(message_id);
             tracker.thinking.message_started();
-            continued
+            settle(demoted)
+        }
+        ClaudeEvent::MessageDelta { end_turn } => {
+            if !end_turn {
+                return continued;
+            }
+            settle(mark_final(observations, run_id, tracker, frame_sequence).await)
         }
         ClaudeEvent::TextDelta { delta, phase } => {
             tracker.note_turn_opened();
@@ -963,4 +1024,107 @@ pub(crate) fn terminal_observation(
     state: TerminalState,
 ) -> TerminalObservation {
     TerminalObservation::new(run_id.clone(), sequence, state, None, None)
+}
+
+#[cfg(test)]
+mod answer_phase_tests {
+    use super::*;
+    use artisan_domain::AssistantMessagePhase;
+
+    /// Applies `events` in order and returns the phase of every re-phasing
+    /// snapshot they sent, with its part and body.
+    async fn rephases(events: Vec<ClaudeEvent>) -> Vec<(String, String, AssistantMessagePhase)> {
+        let (tx, mut rx) = mpsc::channel(64);
+        let run = RunId::parse("answer-run").unwrap();
+        let mut tracker = ClaudePendingTracker::new();
+        let mut active = None;
+        for (sequence, event) in (1..).zip(events) {
+            let outcome = apply_event(
+                event,
+                &run,
+                "session",
+                &mut tracker,
+                &mut active,
+                &tx,
+                sequence,
+                None,
+            )
+            .await;
+            assert!(matches!(outcome, ClaudeApplyOutcome::Continue { .. }));
+        }
+        drop(tx);
+        let mut phases = Vec::new();
+        while let Some(observation) = rx.recv().await {
+            if let EngineObservation::TextSnapshot(snapshot) = observation
+                && let Some(phase) = snapshot.phase()
+            {
+                phases.push((
+                    snapshot.part_id().to_owned(),
+                    snapshot.text().to_owned(),
+                    phase,
+                ));
+            }
+        }
+        phases
+    }
+
+    fn message(id: &str, text: &str) -> [ClaudeEvent; 2] {
+        [
+            ClaudeEvent::MessageStart {
+                message_id: id.to_owned(),
+            },
+            ClaudeEvent::TextDelta {
+                delta: text.to_owned(),
+                phase: "unspecified",
+            },
+        ]
+    }
+
+    fn end_turn() -> ClaudeEvent {
+        ClaudeEvent::MessageDelta { end_turn: true }
+    }
+
+    #[tokio::test]
+    async fn a_message_ending_the_turn_is_the_answer() {
+        let mut events = message("msg-1", "All done.").to_vec();
+        events.push(end_turn());
+        assert_eq!(
+            rephases(events).await,
+            [(
+                "msg-1".to_owned(),
+                "All done.".to_owned(),
+                AssistantMessagePhase::Final
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_ending_while_background_work_runs_has_no_answer_yet() {
+        let mut events = vec![ClaudeEvent::BackgroundTasks { waited: 2 }];
+        events.extend(message("msg-1", "Codex research is still running."));
+        events.push(end_turn());
+        assert!(rephases(events).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_run_goes_on_after_turns_back_into_narration() {
+        let mut events = message("msg-1", "All done.").to_vec();
+        events.push(end_turn());
+        events.extend(message("msg-2", "One more thing."));
+        assert_eq!(
+            rephases(events).await,
+            [
+                (
+                    "msg-1".to_owned(),
+                    "All done.".to_owned(),
+                    AssistantMessagePhase::Final
+                ),
+                (
+                    "msg-1".to_owned(),
+                    "All done.".to_owned(),
+                    AssistantMessagePhase::Commentary
+                ),
+            ]
+        );
+    }
 }

@@ -14,7 +14,10 @@
 //! A message that goes on to call a tool is interim narration, not the
 //! answer: Claude streams its text before the `tool_use` block, so the text
 //! starts `unspecified` and the first tool-use block of the message re-phases
-//! everything the message said (and says after) as `commentary`. Child frames
+//! everything the message said (and says after) as `commentary`. A message
+//! that ends the turn with no background work left is the answer: it
+//! re-phases as `final`, and back to `commentary` if the run goes on after
+//! all (a steer or a goal check opens another message). Child frames
 //! (`parent_tool_use_id`) route before root decoding and never reach this
 //! ledger.
 
@@ -39,6 +42,8 @@ pub(crate) struct ClaudeTextLedger {
     settled: usize,
     /// Set once the current message called a tool.
     commentary: bool,
+    /// Set once the current message ended the turn as the answer.
+    finale: bool,
 }
 
 impl ClaudeTextLedger {
@@ -48,6 +53,7 @@ impl ClaudeTextLedger {
         self.body.clear();
         self.settled = 0;
         self.commentary = false;
+        self.finale = false;
     }
 
     /// Marks the current message as commentary because it called a tool.
@@ -61,10 +67,30 @@ impl ClaudeTextLedger {
         Some(&self.body)
     }
 
+    /// Marks the current message as the answer because it ended the turn.
+    ///
+    /// Returns the body to re-phase when this is the first mark and the
+    /// message said something without calling a tool; otherwise nothing.
+    pub(crate) fn mark_final(&mut self) -> Option<&str> {
+        if self.commentary || self.body.is_empty() || std::mem::replace(&mut self.finale, true) {
+            return None;
+        }
+        Some(&self.body)
+    }
+
+    /// Returns the body of a message marked final that another message now
+    /// follows, so it re-phases as commentary; call before
+    /// [`Self::message_started`].
+    pub(crate) fn superseded_final(&self) -> Option<&str> {
+        self.finale.then_some(self.body.as_str())
+    }
+
     /// Returns the verbatim phase of the current message's text.
     pub(crate) fn phase(&self) -> &'static str {
         if self.commentary {
             "commentary"
+        } else if self.finale {
+            "final"
         } else {
             "unspecified"
         }
@@ -150,5 +176,29 @@ mod ledger_tests {
         assert_eq!(ledger.body(), "Hello world final!");
         ledger.message_started("msg-2");
         assert_eq!(ledger.body(), "");
+    }
+
+    #[test]
+    fn only_a_message_without_tools_ends_the_turn_as_the_answer() {
+        let mut ledger = ClaudeTextLedger::default();
+        ledger.message_started("msg-1");
+        ledger.streamed("Checking");
+        assert_eq!(ledger.mark_commentary(), Some("Checking"));
+        assert_eq!(ledger.mark_final(), None);
+        assert_eq!(ledger.superseded_final(), None);
+
+        ledger.message_started("msg-2");
+        assert_eq!(ledger.mark_final(), None, "an empty message is no answer");
+
+        ledger.message_started("msg-3");
+        ledger.streamed("Done.");
+        assert_eq!(ledger.mark_final(), Some("Done."));
+        assert_eq!(ledger.phase(), "final");
+        assert_eq!(ledger.mark_final(), None, "marks once");
+        assert_eq!(ledger.superseded_final(), Some("Done."));
+
+        ledger.message_started("msg-4");
+        assert_eq!(ledger.phase(), "unspecified");
+        assert_eq!(ledger.superseded_final(), None);
     }
 }

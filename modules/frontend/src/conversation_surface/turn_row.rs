@@ -33,10 +33,6 @@ use super::work_motion::WorkMotion;
 use super::*;
 use crate::conversation_scene::AssistantPhase;
 
-/// Words a still-streaming reply must show before the work above it folds:
-/// interim narration before a tool call is usually a sentence or two.
-const FOLD_AFTER_WORDS: usize = 40;
-
 /// One approval row's gate snapshot, the only answer state a row paints.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ApprovalRowState {
@@ -449,13 +445,14 @@ impl TurnRowView {
     }
 
     /// Advances this turn's reply reveal for the frame and reports whether
-    /// the reply is clearly the answer, so the work above it may fold.
+    /// the reply is the answer, so the work above it may fold.
     ///
-    /// Claude's prose before a tool call counts as the reply while it
-    /// streams and moves back into the work when the call starts; folding on
-    /// its first word folded and reopened the work around every such
-    /// sentence. The work therefore folds only once the reply is marked
-    /// final, has stopped streaming, or has shown [`FOLD_AFTER_WORDS`].
+    /// Only the engine knows: Codex marks its answer final as it starts, and
+    /// Claude's adapter marks the message that ends the turn with no
+    /// background work left. Any other prose of a live turn may be narration
+    /// (before a tool call, or while subagents still run), and a live
+    /// section carries no toggle to reopen work folded under it, so the work
+    /// stays open until the reply is final or the turn settles.
     /// A reveal starts only for prose that arrives while the row is on
     /// screen; the reply's own render reads the same reveal for its prefix
     /// (see [`WorkMotion::reveal`]).
@@ -477,8 +474,7 @@ impl TurnRowView {
         let shown = motion
             .revealed_words(&reply.id)
             .unwrap_or_else(|| reply.body.split_whitespace().count());
-        let decided = !streaming || reply.phase == AssistantPhase::Final;
-        (decided && shown > 0) || shown >= FOLD_AFTER_WORDS
+        reply.phase == AssistantPhase::Final && shown > 0
     }
 
     /// Hands every unresolved rich-link destination to the surface.

@@ -628,14 +628,14 @@ fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
     assert_eq!(turn_section_title(turn, Some(89_000)), "Working for 1m 28s");
 }
 
-/// The steered live section plus a streaming reply with `body`.
-fn replying_section_scene(body: &str) -> ConversationScene {
+/// The steered live section plus a streaming reply with `body` in `phase`.
+fn replying_section_scene(body: &str, phase: AssistantPhase) -> ConversationScene {
     let reply = item(
         "reply",
         8,
         SceneItemKind::AssistantMessage {
             body: body.to_owned(),
-            phase: AssistantPhase::Unspecified,
+            phase,
         },
         None,
     )
@@ -673,16 +673,17 @@ fn replying_section_scene(body: &str) -> ConversationScene {
 }
 
 #[gpui::test]
-fn a_live_section_folds_once_its_streaming_reply_is_clearly_the_answer(cx: &mut TestAppContext) {
+fn a_live_section_folds_only_once_its_reply_is_final(cx: &mut TestAppContext) {
     // Reduced motion shows every stable unit at once and folds without an
     // accordion flight, so one settled frame reads the end state.
     cx.update(|app| app.set_reduce_motion(true));
-    // A sentence or two may be narration before the next tool call, which
-    // moves back into the work: folding on it would fold and reopen the
-    // work around every such sentence.
+    // Prose the engine has not marked final may be narration, however long:
+    // a progress report while subagents run, or a lead-in to a tool call.
+    // A live section carries no toggle, so folding it would hide the work.
+    let narration = "word ".repeat(80);
     let (_narrating, cx_narrating) = cx.add_window_view(|_, surface_cx| {
         ConversationSurface::new(
-            replying_section_scene("All tests pass. "),
+            replying_section_scene(&narration, AssistantPhase::Unspecified),
             ThemeMode::Dark,
             surface_cx,
         )
@@ -694,11 +695,14 @@ fn a_live_section_folds_once_its_streaming_reply_is_clearly_the_answer(cx: &mut 
         "the work stays open while the reply could still be narration"
     );
 
-    // A long streaming reply is the answer: the work folds while the turn
-    // is still live, and the header keeps its words.
-    let answer = "word ".repeat(40);
+    // A final reply is the answer: the work folds while the turn is still
+    // live, and the header keeps its words.
     let (_replying, cx) = cx.add_window_view(|_, surface_cx| {
-        ConversationSurface::new(replying_section_scene(&answer), ThemeMode::Dark, surface_cx)
+        ConversationSurface::new(
+            replying_section_scene("All tests pass. ", AssistantPhase::Final),
+            ThemeMode::Dark,
+            surface_cx,
+        )
     });
     cx.simulate_resize(size(px(720.0), px(720.0)));
     settle(cx);
@@ -708,6 +712,6 @@ fn a_live_section_folds_once_its_streaming_reply_is_clearly_the_answer(cx: &mut 
     );
     assert!(
         cx.debug_bounds(STEER_LEAD_CHAIN).is_none(),
-        "the work folds once the reply is clearly the answer"
+        "the work folds once the reply is final"
     );
 }

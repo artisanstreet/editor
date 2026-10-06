@@ -284,6 +284,11 @@ pub(crate) enum ClaudeEvent {
     MessageStart {
         message_id: String,
     },
+    /// The current message's closing delta (`message_delta`): whether it
+    /// ended the turn (`end_turn`) rather than stopping to call a tool.
+    MessageDelta {
+        end_turn: bool,
+    },
     /// Streamed assistant text.
     TextDelta {
         delta: String,
@@ -536,6 +541,13 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
         }
         "content_block_start" => decode_block_start(event),
         "content_block_stop" => decode_block_stop(event),
+        "message_delta" => ClaudeEvent::MessageDelta {
+            end_turn: event
+                .get("delta")
+                .and_then(|delta| delta.get("stop_reason"))
+                .and_then(Value::as_str)
+                == Some("end_turn"),
+        },
         "message_start" => match event
             .get("message")
             .and_then(|message| message.get("id"))
