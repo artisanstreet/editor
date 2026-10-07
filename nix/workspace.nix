@@ -9,7 +9,8 @@ let
   version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
   rust = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
   craneLib = (crane.mkLib pkgs).overrideToolchain rust;
-  # Keep embedded fonts, licenses, schemas, JSON and external tests. Never copy
+  # Keep embedded fonts, licenses, schemas, JSON, external tests and the
+  # first-party skills the Forge embeds. Never copy
   # local build products, captures, databases or the private handoff ledger.
   src = lib.cleanSourceWith {
     src = ../.;
@@ -31,6 +32,7 @@ let
         "tests"
         "scripts"
         "packaging"
+        "skills"
       ])
       && !(builtins.any (
         part:
