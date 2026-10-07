@@ -44,7 +44,7 @@ const PROJECT_DRAFT_SUBMISSIONS_MIGRATION: &str = "m20261002_000022_project_draf
 const THREAD_READS_MIGRATION: &str = "m20261003_000023_thread_reads";
 const DROP_STORED_THINKING_MIGRATION: &str = "m20261004_000024_drop_stored_thinking";
 const LEDGER_TAG_MIGRATION: &str = "m20261005_000025_observation_ledger_tag";
-const EXTENSIONS_MIGRATION: &str = "m20261007_000026_extensions_and_global_prompt";
+const EXTENSIONS_MIGRATION: &str = "m20261007_000028_extensions_and_global_prompt";
 
 struct TempDatabase {
     directory: PathBuf,

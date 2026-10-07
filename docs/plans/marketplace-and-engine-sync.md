@@ -424,7 +424,7 @@ pipeline existed:
 - `native_engine::extensions`: bounded skill reading and digests, the read-only content store,
   engine locations (Claude, Codex, Grok, `OpenCode2` profile homes; Cursor unavailable), owned
   links, prompt files, backups, and the symbolic-link probe.
-- Migration `m20261007_000026_extensions_and_global_prompt` and repository slices.
+- Migration `m20261007_000028_extensions_and_global_prompt` and repository slices.
 - `backend::extension_sync`: the Forge-side reconciler (startup, every change, every 30 s),
   first-party `artisan-editor` (embedded in release, linked from the repository in debug),
   discovery grouped by content, adoption with backups, the global prompt with setup import,

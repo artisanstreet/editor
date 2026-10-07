@@ -35,7 +35,7 @@ mod m20261002_000022_project_draft_submissions;
 mod m20261003_000023_thread_reads;
 mod m20261004_000024_drop_stored_thinking;
 mod m20261005_000025_observation_ledger_tag;
-mod m20261007_000026_extensions_and_global_prompt;
+mod m20261007_000028_extensions_and_global_prompt;
 
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::sea_orm::{DatabaseConnection, TransactionTrait};
@@ -73,7 +73,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261003_000023_thread_reads::Migration),
             Box::new(m20261004_000024_drop_stored_thinking::Migration),
             Box::new(m20261005_000025_observation_ledger_tag::Migration),
-            Box::new(m20261007_000026_extensions_and_global_prompt::Migration),
+            Box::new(m20261007_000028_extensions_and_global_prompt::Migration),
         ]
     }
 }
