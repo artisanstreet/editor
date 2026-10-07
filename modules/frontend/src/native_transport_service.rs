@@ -108,6 +108,8 @@ pub enum NativeTransportCommand {
     Preferences(PreferencesCommand),
     /// The Forge-managed engine installs and versions.
     EngineInstalls(EngineInstallsCommand),
+    /// Agent extensions and the global prompt.
+    Extensions(ExtensionsCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -272,6 +274,7 @@ pub enum NativeTransportEvent {
     ForgeDecision(ForgeDecisionEvent),
     Preferences(PreferencesEvent),
     EngineInstalls(EngineInstallsEvent),
+    Extensions(ExtensionsEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -716,6 +719,10 @@ pub(crate) use forge_decision_operations::{ForgeDecisionCommand, ForgeDecisionEv
 #[path = "native_engine_installs_transport.rs"]
 mod engine_installs_operations;
 pub(crate) use engine_installs_operations::{EngineInstallsCommand, EngineInstallsEvent};
+
+#[path = "native_extensions_transport.rs"]
+mod extensions_operations;
+pub(crate) use extensions_operations::{ExtensionsCommand, ExtensionsEvent};
 
 #[path = "native_preferences_transport.rs"]
 mod preferences_operations;

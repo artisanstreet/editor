@@ -71,6 +71,8 @@ impl SettingsPrimitive {
 pub enum SettingsSection {
     /// `/settings/models`.
     Models,
+    /// `/settings/global-prompt`.
+    GlobalPrompt,
     /// `/settings/appearance`.
     Appearance,
     /// `/settings/engines/[engine]` (fixture engine).
@@ -88,6 +90,11 @@ pub enum SettingsSection {
 const MODELS_ANCHORS: [SettingsAnchor; 2] = [
     SettingsAnchor::new("compaction", "Compaction"),
     SettingsAnchor::new("favorites", "Favorites"),
+];
+
+const GLOBAL_PROMPT_ANCHORS: [SettingsAnchor; 2] = [
+    SettingsAnchor::new("prompt", "Prompt"),
+    SettingsAnchor::new("engines", "Engines"),
 ];
 
 const APPEARANCE_ANCHORS: [SettingsAnchor; 4] = [
@@ -124,6 +131,9 @@ const MODELS_PRIMITIVES: [SettingsPrimitive; 3] = [
     SettingsPrimitive::Card,
     SettingsPrimitive::Tooltip,
 ];
+
+const GLOBAL_PROMPT_PRIMITIVES: [SettingsPrimitive; 2] =
+    [SettingsPrimitive::Card, SettingsPrimitive::Tooltip];
 
 const APPEARANCE_PRIMITIVES: [SettingsPrimitive; 4] = [
     SettingsPrimitive::Tabs,
@@ -162,8 +172,9 @@ const ABOUT_PRIMITIVES: [SettingsPrimitive; 1] = [SettingsPrimitive::Card];
 
 impl SettingsSection {
     /// Every section in legacy sticky-nav order (`nav.svelte`).
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Models,
+        Self::GlobalPrompt,
         Self::Threads,
         Self::Appearance,
         Self::Notifications,
@@ -177,6 +188,7 @@ impl SettingsSection {
     pub const fn href(self) -> &'static str {
         match self {
             Self::Models => "/settings/models",
+            Self::GlobalPrompt => "/settings/global-prompt",
             Self::Appearance => "/settings/appearance",
             Self::Engines => "/settings/engines/fixture-engine",
             Self::Notifications => "/settings/notifications",
@@ -191,6 +203,7 @@ impl SettingsSection {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Models => "Models",
+            Self::GlobalPrompt => "Global prompt",
             Self::Appearance => "Appearance",
             Self::Engines => "Engines",
             Self::Notifications => "Notifications",
@@ -205,6 +218,7 @@ impl SettingsSection {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Models => "Models",
+            Self::GlobalPrompt => "Global prompt",
             Self::Appearance => "Appearance",
             Self::Engines => "Fixture Engine",
             Self::Notifications => "Notifications",
@@ -219,6 +233,9 @@ impl SettingsSection {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Models => "Forge-owned model defaults shared by every paired client.",
+            Self::GlobalPrompt => {
+                "Standing instructions Artisan keeps in every engine. Edit them once here; each engine reads them from its own global file."
+            }
             Self::Appearance => "How Artisan's surfaces are drawn.",
             Self::Engines => {
                 "Choose where Fixture Engine appears, manage its installation, and inspect its account and models."
@@ -237,6 +254,7 @@ impl SettingsSection {
     pub const fn anchors(self) -> &'static [SettingsAnchor] {
         match self {
             Self::Models => &MODELS_ANCHORS,
+            Self::GlobalPrompt => &GLOBAL_PROMPT_ANCHORS,
             Self::Appearance => &APPEARANCE_ANCHORS,
             Self::Engines => &ENGINES_ANCHORS,
             Self::Notifications => &NOTIFICATIONS_ANCHORS,
@@ -251,6 +269,7 @@ impl SettingsSection {
     pub const fn primitives(self) -> &'static [SettingsPrimitive] {
         match self {
             Self::Models => &MODELS_PRIMITIVES,
+            Self::GlobalPrompt => &GLOBAL_PROMPT_PRIMITIVES,
             Self::Appearance => &APPEARANCE_PRIMITIVES,
             Self::Engines => &ENGINES_PRIMITIVES,
             Self::Notifications => &NOTIFICATIONS_PRIMITIVES,
@@ -272,6 +291,7 @@ pub fn section_for_href(href: &str) -> Option<SettingsSection> {
     let without_hash = trimmed.split('#').next().unwrap_or(trimmed);
     match without_hash {
         "/settings/models" => Some(SettingsSection::Models),
+        "/settings/global-prompt" => Some(SettingsSection::GlobalPrompt),
         "/settings/appearance" => Some(SettingsSection::Appearance),
         "/settings/notifications" => Some(SettingsSection::Notifications),
         "/settings/privacy" => Some(SettingsSection::Privacy),
@@ -688,6 +708,7 @@ impl AppearancePathSeparator {
 pub const fn settings_section_for_route(route: SettingsRoute) -> SettingsSection {
     match route {
         SettingsRoute::Models => SettingsSection::Models,
+        SettingsRoute::GlobalPrompt => SettingsSection::GlobalPrompt,
         SettingsRoute::Appearance => SettingsSection::Appearance,
         SettingsRoute::Engines => SettingsSection::Engines,
         SettingsRoute::Notifications => SettingsSection::Notifications,
@@ -705,6 +726,7 @@ pub const fn settings_section_for_route(route: SettingsRoute) -> SettingsSection
 pub const fn section_route(section: SettingsSection) -> SettingsRoute {
     match section {
         SettingsSection::Models => SettingsRoute::Models,
+        SettingsSection::GlobalPrompt => SettingsRoute::GlobalPrompt,
         SettingsSection::Appearance => SettingsRoute::Appearance,
         SettingsSection::Engines => SettingsRoute::Engines,
         SettingsSection::Notifications => SettingsRoute::Notifications,

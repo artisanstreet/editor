@@ -18,6 +18,9 @@ mod about;
 #[path = "render/engine_install.rs"]
 mod engine_install;
 
+#[path = "render/global_prompt.rs"]
+mod global_prompt;
+
 pub use self::chrome::{notification_gap_notice, telemetry_choice_caption};
 
 #[cfg(test)]

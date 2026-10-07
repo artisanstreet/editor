@@ -90,6 +90,7 @@ pub(super) enum ExpectedResponse {
     ComposerDraft(super::composer_draft_operations::ComposerDraftExpectation),
     ForgeDecision(super::forge_decision_operations::ForgeDecisionExpectation),
     EngineInstalls(super::engine_installs_operations::EngineInstallsExpectation),
+    Extensions(super::extensions_operations::ExtensionsExpectation),
     Preferences(super::preferences_operations::PreferencesExpectation),
 }
 
@@ -167,6 +168,9 @@ pub(super) fn validate_response_family(
             Ok(payload)
         }
         (ExpectedResponse::Preferences(expected), payload) if expected.accepts(&payload) => {
+            Ok(payload)
+        }
+        (ExpectedResponse::Extensions(expected), payload) if expected.accepts(&payload) => {
             Ok(payload)
         }
         (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
@@ -430,6 +434,10 @@ pub enum HostStateEvent {
     ProjectCatalog(ProjectListing),
     /// Every Forge-managed engine's install status.
     EngineInstalls(artisan_domain::EngineInstallSnapshot),
+    /// Every managed and discovered agent extension.
+    Extensions(artisan_domain::ExtensionCatalog),
+    /// The global prompt and its state per engine.
+    GlobalPrompt(artisan_domain::GlobalPrompt),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -487,6 +495,12 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::EngineInstalls(snapshot) => Ok(UniDelivery::HostState(
                 HostStateEvent::EngineInstalls(snapshot.clone()),
+            )),
+            artisan_domain::Event::Extensions(catalog) => Ok(UniDelivery::HostState(
+                HostStateEvent::Extensions(catalog.clone()),
+            )),
+            artisan_domain::Event::GlobalPrompt(prompt) => Ok(UniDelivery::HostState(
+                HostStateEvent::GlobalPrompt(prompt.clone()),
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)

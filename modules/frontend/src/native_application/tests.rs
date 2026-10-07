@@ -1096,5 +1096,8 @@ mod thread_inspector;
 #[path = "tests/settings_profile.rs"]
 mod settings_profile;
 
+#[path = "tests/marketplace.rs"]
+mod marketplace;
+
 #[path = "tests/profile_usage_refresh.rs"]
 mod profile_usage_refresh;

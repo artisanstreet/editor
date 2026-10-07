@@ -215,6 +215,9 @@ mod impl_profile_usage;
 #[path = "native_application/impl_engine_installs.rs"]
 mod impl_engine_installs;
 
+#[path = "native_application/impl_extensions.rs"]
+mod impl_extensions;
+
 // Phase-5 split submodules (see native_application/).
 
 #[path = "native_application/app_entry.rs"]
@@ -388,6 +391,7 @@ pub struct NativeApplication {
     profile_hostname: Option<String>,
     profile_usage: NativeProfileUsageState,
     engine_installs: impl_engine_installs::EngineInstallsState,
+    extensions: impl_extensions::ExtensionsState,
     profile_usage_generation: ProfileUsageGeneration,
     profile_usage_next_seq: u64,
     profile_hover: Rc<RefCell<SlidingHoverState>>,
@@ -424,6 +428,8 @@ pub struct NativeApplication {
     sidebar: Entity<sidebar_view::SidebarView>,
     sidebar_collapsed: bool,
     sidebar_navigation_focus: FocusHandle,
+    /// Keyboard focus of the sidebar Marketplace row.
+    sidebar_marketplace_focus: FocusHandle,
     sidebar_hover: Rc<RefCell<SlidingHoverState>>,
     sidebar_hover_surface_bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
     message_flight: Option<NativeMessageFlight>,
@@ -524,6 +530,8 @@ pub struct NativeApplication {
     settings_screen: Option<Entity<SettingsScreen>>,
     settings_screen_key: Option<(SettingsRoute, Option<String>)>,
     settings_screen_subscription: Option<Subscription>,
+    marketplace_screen: Option<Entity<crate::marketplace_screen::MarketplaceScreen>>,
+    marketplace_screen_subscription: Option<Subscription>,
     intake_stage: Option<NativeProjectIntakeStage>,
     intake_failure_operation: Option<NativeProjectIntakeOperation>,
     intake_retry_available: bool,

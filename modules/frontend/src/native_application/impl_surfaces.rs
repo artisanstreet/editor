@@ -483,8 +483,12 @@ impl NativeApplication {
                     app.begin_new_task(cx);
                 }
             }));
+        let marketplace_open = matches!(self.route(), NativeRoute::Marketplace);
         let marketplace = div()
             .id("artisan-marketplace-navigation")
+            .track_focus(&self.sidebar_marketplace_focus)
+            .tab_index(0)
+            .cursor_pointer()
             .w_full()
             .h(px(34.0))
             .flex()
@@ -515,9 +519,25 @@ impl NativeApplication {
             .child(
                 div()
                     .text_size(px(14.0))
-                    .text_color(theme.foreground)
+                    // The open Marketplace is marked like the open thread:
+                    // a link-coloured title, never the hover fill.
+                    .text_color(if marketplace_open {
+                        self.theme.colors.banner_info.to_paint()
+                    } else {
+                        theme.foreground
+                    })
                     .child("Marketplace"),
-            );
+            )
+            .on_click(cx.listener(|app, _, window, cx| {
+                window.focus(&app.sidebar_marketplace_focus, cx);
+                app.navigate(NativeRoute::Marketplace, cx);
+            }))
+            .on_key_down(cx.listener(|app, event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    cx.stop_propagation();
+                    app.navigate(NativeRoute::Marketplace, cx);
+                }
+            }));
         // One shared hover surface for the whole sidebar column: the same
         // sliding pill travels among New thread, Marketplace, and the
         // profile footer, measured against these bounds. Rows hide the pill
@@ -615,6 +635,7 @@ impl NativeApplication {
             NativeRoute::Editor { .. } => String::from("Files"),
             NativeRoute::Settings { section, .. } => format!("Settings / {}", section.as_str()),
             NativeRoute::Onboarding => String::from("Welcome"),
+            NativeRoute::Marketplace => String::from("Marketplace"),
         }
     }
 

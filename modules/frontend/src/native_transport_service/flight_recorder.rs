@@ -40,6 +40,7 @@ impl NativeTransportCommand {
             Self::ForgeDecision(..) => "ForgeDecision",
             Self::Preferences(..) => "Preferences",
             Self::EngineInstalls(..) => "EngineInstalls",
+            Self::Extensions(..) => "Extensions",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(..) => "StopRun",
             Self::RespondApproval(..) => "RespondApproval",
@@ -83,6 +84,7 @@ impl NativeTransportEvent {
             Self::ForgeDecision(..) => "ForgeDecision",
             Self::Preferences(..) => "Preferences",
             Self::EngineInstalls(..) => "EngineInstalls",
+            Self::Extensions(..) => "Extensions",
             Self::ActiveRun { .. } => "ActiveRun",
             Self::ActiveRunFailed { .. } => "ActiveRunFailed",
             Self::RunStopped(..) => "RunStopped",
@@ -184,6 +186,7 @@ impl ExpectedResponse {
             Self::ComposerDraft(..) => "ComposerDraft",
             Self::ForgeDecision(..) => "ForgeDecision",
             Self::EngineInstalls(..) => "EngineInstalls",
+            Self::Extensions(..) => "Extensions",
             Self::Preferences(..) => "Preferences",
         }
     }

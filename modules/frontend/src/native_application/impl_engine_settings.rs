@@ -491,6 +491,15 @@ impl NativeApplication {
             | SettingsScreenEvent::RollbackEngine { .. } => {
                 self.handle_engine_install_event(event, cx);
             }
+            SettingsScreenEvent::SaveGlobalPrompt {
+                base_revision,
+                text,
+            } => {
+                self.save_global_prompt(*base_revision, text.clone(), cx);
+            }
+            SettingsScreenEvent::ResolveGlobalPrompt(resolution) => {
+                self.resolve_global_prompt(resolution.clone(), cx);
+            }
         }
     }
 

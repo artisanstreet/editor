@@ -72,6 +72,7 @@ pub(super) const fn route_name(route: &NativeRoute) -> &'static str {
         NativeRoute::Editor { .. } => "editor",
         NativeRoute::Settings { .. } => "settings",
         NativeRoute::Onboarding => "onboarding",
+        NativeRoute::Marketplace => "marketplace",
     }
 }
 

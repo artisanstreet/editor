@@ -15,8 +15,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{
-    ComposerDraftCommand, ComposerStateCommand, EngineInstallsCommand, ForgeDecisionCommand,
-    NativeTransportCommand, PreferencesCommand,
+    ComposerDraftCommand, ComposerStateCommand, EngineInstallsCommand, ExtensionsCommand,
+    ForgeDecisionCommand, NativeTransportCommand, PreferencesCommand,
 };
 
 /// What an in-flight hold is keeping open, for progress copy only.
@@ -44,11 +44,13 @@ pub enum HoldKind {
     Preferences,
     /// An engine version selection or rollback.
     EngineVersion,
+    /// An extension switch, adoption, or global prompt change.
+    Extension,
 }
 
 impl HoldKind {
     /// Every kind in presentation order.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Message,
         Self::QueueChange,
         Self::StopRequest,
@@ -60,6 +62,7 @@ impl HoldKind {
         Self::Draft,
         Self::Preferences,
         Self::EngineVersion,
+        Self::Extension,
     ];
 
     const fn index(self) -> usize {
@@ -81,6 +84,7 @@ impl HoldKind {
             Self::Draft => ("draft", "drafts"),
             Self::Preferences => ("preference", "preferences"),
             Self::EngineVersion => ("engine version change", "engine version changes"),
+            Self::Extension => ("extension change", "extension changes"),
         };
         if count == 1 { one } else { many }
     }
@@ -294,6 +298,12 @@ impl NativeTransportCommand {
             Self::SetThreadEngineConfig(_) => Some(HoldKind::EngineSettings),
             Self::SetModelFavorite(_) => Some(HoldKind::ModelFavorite),
             Self::EngineInstalls(EngineInstallsCommand::Change(_)) => Some(HoldKind::EngineVersion),
+            Self::Extensions(
+                ExtensionsCommand::SetEnabled(_)
+                | ExtensionsCommand::Adopt(_)
+                | ExtensionsCommand::SavePrompt(_)
+                | ExtensionsCommand::ResolvePrompt(_),
+            ) => Some(HoldKind::Extension),
             Self::ComposerDraft(
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
@@ -315,6 +325,7 @@ impl NativeTransportCommand {
                 | ForgeDecisionCommand::ResolveEngineConfiguration(_),
             )
             | Self::Preferences(PreferencesCommand::Read)
+            | Self::Extensions(ExtensionsCommand::ReadCatalog | ExtensionsCommand::ReadPrompt)
             | Self::EngineInstalls(
                 EngineInstallsCommand::Read | EngineInstallsCommand::ListVersions(_),
             )

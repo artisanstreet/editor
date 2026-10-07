@@ -61,6 +61,7 @@ pub mod engine_approve_ui;
 pub mod engine_observation_state;
 pub mod engine_section_indicator_policy;
 pub mod engine_settings;
+pub mod engine_status_chips;
 pub mod engine_usage_cache;
 pub mod file_icon;
 #[cfg(test)]
@@ -84,6 +85,8 @@ pub mod markdown_streaming_words;
 pub mod markdown_test_parser_policy;
 pub mod markdown_warmup_policy;
 pub mod marketplace_fixture_policy;
+pub mod marketplace_presentation;
+pub mod marketplace_screen;
 pub mod math_rendering_policy;
 pub mod mobile_breakpoint_policy;
 pub mod model_favorites_presentation;

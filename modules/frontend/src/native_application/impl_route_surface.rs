@@ -221,6 +221,10 @@ impl NativeApplication {
                     self.settings_screen_subscription = Some(subscription);
                     self.settings_screen = Some(screen);
                     self.settings_screen_key = key;
+                    if section == SettingsRoute::GlobalPrompt {
+                        self.ensure_extensions_read();
+                        self.refresh_settings_global_prompt(cx);
+                    }
                 }
                 self.settings_screen
                     .clone()
@@ -230,6 +234,23 @@ impl NativeApplication {
             NativeRoute::NewThread { .. } => self
                 .new_thread_surface_section(window, cx)
                 .into_any_element(),
+            NativeRoute::Marketplace => {
+                if self.marketplace_screen.is_none() {
+                    let theme = self.theme;
+                    let screen = cx.new(|screen_cx| {
+                        crate::marketplace_screen::MarketplaceScreen::new(theme, screen_cx)
+                    });
+                    self.marketplace_screen_subscription =
+                        Some(cx.subscribe(&screen, Self::handle_marketplace_event));
+                    self.marketplace_screen = Some(screen);
+                    self.ensure_extensions_read();
+                    self.refresh_marketplace_screen(cx);
+                }
+                self.marketplace_screen
+                    .clone()
+                    .expect("marketplace screen mounted")
+                    .into_any_element()
+            }
         }
     }
 

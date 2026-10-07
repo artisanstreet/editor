@@ -617,6 +617,12 @@ pub(super) async fn command_loop_with_delivery(
                         ))
                         .await?;
                     }
+                    NativeTransportCommand::Extensions(command) => {
+                        Box::pin(extensions_operations::handle_extensions_command(
+                            runtime, frames, events, command,
+                        ))
+                        .await?;
+                    }
                     NativeTransportCommand::ForgeDecision(command) => {
                         forge_decision_operations::handle_forge_decision_command(
                             runtime, frames, events, command,

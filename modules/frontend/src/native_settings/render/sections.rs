@@ -98,6 +98,7 @@ impl SettingsScreen {
         rail = rail.child(nav_group_label(theme, "ARTISAN"));
         for section in [
             SettingsSection::Models,
+            SettingsSection::GlobalPrompt,
             SettingsSection::Threads,
             SettingsSection::Appearance,
             SettingsSection::Notifications,
@@ -1636,6 +1637,7 @@ impl SettingsScreen {
     fn render_main(&self, theme: &artisan_ui::theme::ArtisanTheme, cx: &mut Context<Self>) -> Div {
         let section = match self.section {
             SettingsRoute::Models => self.render_models(theme),
+            SettingsRoute::GlobalPrompt => self.render_global_prompt(theme, cx),
             SettingsRoute::Appearance => self.render_appearance(theme, cx),
             SettingsRoute::Engines => self.render_engine(theme, cx),
             SettingsRoute::Notifications => self.render_notifications(theme),

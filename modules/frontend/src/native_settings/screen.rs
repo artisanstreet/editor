@@ -263,6 +263,15 @@ pub enum SettingsScreenEvent {
         /// Engine id to roll back.
         engine_id: String,
     },
+    /// Save a new version of the global prompt.
+    SaveGlobalPrompt {
+        /// The revision the edit started from.
+        base_revision: artisan_domain::GlobalPromptRevision,
+        /// The edited text.
+        text: String,
+    },
+    /// Settle global prompt setup or a drifted engine.
+    ResolveGlobalPrompt(artisan_domain::GlobalPromptResolution),
 }
 
 impl EventEmitter<SettingsScreenEvent> for SettingsScreen {}
@@ -334,6 +343,8 @@ impl SettingsScreen {
             agent_dataset: AGENT_NAME_DATASET_DEFAULT.to_owned(),
             engine_snapshot: None,
             engines: Vec::new(),
+            global_prompt: (section == SettingsRoute::GlobalPrompt)
+                .then(|| super::global_prompt::GlobalPromptPage::new(cx)),
         }
     }
 

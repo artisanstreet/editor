@@ -66,6 +66,9 @@ mod screen;
 
 #[path = "native_settings/engine_install.rs"]
 mod engine_install;
+
+#[path = "native_settings/global_prompt.rs"]
+pub(crate) mod global_prompt;
 pub use engine_install::{SettingsEngineInstall, SettingsEngineVersions};
 
 #[path = "native_settings/render.rs"]
@@ -198,6 +201,8 @@ pub struct SettingsScreen {
     agent_dataset: String,
     engine_snapshot: Option<SettingsEngineSnapshot>,
     engines: Vec<SettingsEngineNavEntry>,
+    /// The global prompt page, mounted only on that route.
+    global_prompt: Option<global_prompt::GlobalPromptPage>,
 }
 
 #[derive(Default)]

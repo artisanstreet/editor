@@ -39,7 +39,11 @@ fn section_hrefs_match_legacy_settings_routes() {
     assert_eq!(SettingsSection::Privacy.href(), "/settings/privacy");
     assert_eq!(SettingsSection::Threads.href(), "/settings/threads");
     assert_eq!(SettingsSection::About.href(), "/settings/about");
-    assert_eq!(SettingsSection::ALL.len(), 7);
+    assert_eq!(
+        SettingsSection::GlobalPrompt.href(),
+        "/settings/global-prompt"
+    );
+    assert_eq!(SettingsSection::ALL.len(), 8);
 }
 
 #[test]
@@ -135,16 +139,17 @@ fn fixture_policies_resolve_through_existing_helpers() {
 
 #[test]
 fn primitive_recipes_resolve_for_fixture_theme() {
-    assert_eq!(nav_tab_specs().len(), 7);
+    assert_eq!(nav_tab_specs().len(), 8);
     assert_eq!(nav_tab_specs()[0].label(), "Models");
-    // Legacy sticky-nav order (nav.svelte): Models, Threads,
-    // Appearance, Notifications, Privacy, then About, Engines group last.
+    // Legacy sticky-nav order (nav.svelte): Models, the global prompt,
+    // Threads, Appearance, Notifications, Privacy, then About, Engines last.
     let specs = nav_tab_specs();
     let labels: Vec<&str> = specs.iter().map(TabSpec::label).collect();
     assert_eq!(
         labels,
         [
             "Models",
+            "Global prompt",
             "Threads",
             "Appearance",
             "Notifications",

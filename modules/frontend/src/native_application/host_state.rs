@@ -31,6 +31,8 @@ impl NativeApplication {
             HostStateEvent::RecentThreads(listing) => self.apply_recent_threads(listing, cx),
             HostStateEvent::ProjectCatalog(listing) => self.apply_project_catalog(&listing, cx),
             HostStateEvent::EngineInstalls(snapshot) => self.apply_engine_installs(snapshot, cx),
+            HostStateEvent::Extensions(catalog) => self.apply_extension_catalog(catalog, cx),
+            HostStateEvent::GlobalPrompt(prompt) => self.apply_global_prompt(prompt, cx),
         }
         cx.notify();
     }

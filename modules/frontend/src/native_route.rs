@@ -38,6 +38,9 @@ pub enum NativeRoute {
     },
     /// Onboarding wizard (`/onboarding`).
     Onboarding,
+    /// The Marketplace (`/marketplace`): skills and the global prompt
+    /// Artisan keeps in every engine.
+    Marketplace,
 }
 
 impl Default for NativeRoute {
@@ -52,6 +55,8 @@ pub enum SettingsRoute {
     /// `/settings/models` (also the `/settings` alias target).
     #[default]
     Models,
+    /// `/settings/global-prompt`.
+    GlobalPrompt,
     /// `/settings/appearance`.
     Appearance,
     /// `/settings/engines`.
@@ -82,6 +87,7 @@ impl NativeRoute {
             Self::Editor { .. } => "route-editor".to_owned(),
             Self::Settings { section, .. } => format!("route-settings-{}", section.as_str()),
             Self::Onboarding => "route-onboarding".to_owned(),
+            Self::Marketplace => crate::marketplace_screen::MARKETPLACE_SCREEN_SELECTOR.to_owned(),
         }
     }
 }
@@ -92,6 +98,7 @@ impl SettingsRoute {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Models => "models",
+            Self::GlobalPrompt => "global-prompt",
             Self::Appearance => "appearance",
             Self::Engines => "engines",
             Self::Notifications => "notifications",
