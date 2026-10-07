@@ -20,6 +20,7 @@ pub(super) fn bind_native_actions(cx: &mut App) {
     }
     NativeComposer::bind_actions(cx);
     NativeCommandMenu::bind_actions(cx);
+    crate::native_text_editor::NativeTextEditor::bind_actions(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, None),
