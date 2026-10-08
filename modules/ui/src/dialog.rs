@@ -420,6 +420,7 @@ pub struct Dialog {
     on_dismiss: Option<DismissHandler>,
     debug_selector: Option<SharedString>,
     root_style: StyleRefinement,
+    max_width: Option<Pixels>,
 }
 
 impl Dialog {
@@ -478,7 +479,16 @@ impl Dialog {
             on_dismiss: None,
             debug_selector: None,
             root_style: StyleRefinement::default(),
+            max_width: None,
         }
+    }
+
+    /// Widens or narrows the content surface past the default
+    /// [`DEFAULT_MAX_WIDTH`]; the viewport margin still applies.
+    #[must_use]
+    pub const fn max_width(mut self, max_width: Pixels) -> Self {
+        self.max_width = Some(max_width);
+        self
     }
 
     /// Replaces the controlled state captured by this render value.
@@ -607,10 +617,14 @@ impl RenderOnce for Dialog {
             on_dismiss,
             debug_selector,
             root_style,
+            max_width,
             ..
         } = self;
 
-        let style = DialogStyle::resolve(theme, motion);
+        let mut style = DialogStyle::resolve(theme, motion);
+        if let Some(max_width) = max_width {
+            style.max_width = max_width;
+        }
         let viewport = window.viewport_size();
         let max_content = DialogGeometry::centered(
             viewport,
