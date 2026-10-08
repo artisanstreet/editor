@@ -45,7 +45,7 @@ use super::codex::{
     notification_line, parse_frame, parse_thread_token_usage, read_codex_line, request_line,
     steer_live_turn, terminal_observation, thread_resume_params, write_line,
 };
-use super::observation::{EngineObservation, TerminalState};
+use super::observation::{EngineObservation, ShellJobChange, ShellJobEnd, TerminalState};
 use super::operation::{
     AcceptedTurn, EngineOperationError, SteerDelivery, SteerError, ack_codex_steer_response,
     codex_response_id_matches, codex_resumed_thread_id, codex_thread_id, codex_turn_id,
@@ -3001,7 +3001,9 @@ async fn codex_live_owner_completes_real_turn_within_budget() {
 /// Applies one event and drains exactly the emitted activity rows.
 ///
 /// Panics when the activity path emits anything but `Activity` rows: the
-/// plain delta, usage, and terminal shapes keep their own channels.
+/// plain delta, usage, and terminal shapes keep their own channels. Shell
+/// job rows travel to the terminal board and are read by
+/// [`apply_with_shell`].
 async fn apply_activity(
     event: CodexEvent,
     run: &RunId,
@@ -3009,17 +3011,35 @@ async fn apply_activity(
     active: &mut Option<String>,
     sequence: u64,
 ) -> (Option<TerminalState>, Vec<artisan_domain::Observation>) {
+    let (terminal, rows, _) = apply_with_shell(event, run, tracker, active, sequence).await;
+    (terminal, rows)
+}
+
+/// Like [`apply_activity`], also draining the shell job changes.
+async fn apply_with_shell(
+    event: CodexEvent,
+    run: &RunId,
+    tracker: &mut CodexPendingTracker,
+    active: &mut Option<String>,
+    sequence: u64,
+) -> (
+    Option<TerminalState>,
+    Vec<artisan_domain::Observation>,
+    Vec<ShellJobChange>,
+) {
     let (sender, mut receiver) = mpsc::channel(64);
     let terminal = apply_event(event, run, tracker, active, &sender, sequence, None).await;
     drop(sender);
     let mut rows = Vec::new();
+    let mut shell = Vec::new();
     while let Ok(observation) = receiver.try_recv() {
-        let EngineObservation::Activity(row) = observation else {
-            panic!("activity path must emit only Activity rows");
-        };
-        rows.push(row);
+        match observation {
+            EngineObservation::Activity(row) => rows.push(row),
+            EngineObservation::Shell(row) => shell.push(row.change),
+            _ => panic!("activity path must emit only Activity and Shell rows"),
+        }
     }
-    (terminal, rows)
+    (terminal, rows, shell)
 }
 
 /// One tracker bound to the fixture root thread used across activity tests.
@@ -3399,7 +3419,7 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
     let (_, replayed) = apply_activity(replay, &run, &mut tracker, &mut active, 40).await;
     assert_eq!(replayed, rows, "replay reproduces identical observations");
 
-    // Multi-byte text fragments on UTF-8 boundaries without corruption.
+    // Command output goes whole to the terminal board, never the ledger.
     let wide = "é".repeat(5_000);
     let event = parse_frame(
         &format!(
@@ -3408,34 +3428,9 @@ async fn activity_ids_are_stable_and_fragments_are_bounded() {
         41,
     )
     .expect("wide output parses");
-    let (_, rows) = apply_activity(event, &run, &mut tracker, &mut active, 41).await;
-    assert_eq!(
-        rows.len(),
-        2,
-        "10000 bytes split at the 8192-byte output ceiling"
-    );
-    let mut joined = String::new();
-    for (index, row) in rows.iter().enumerate() {
-        let artisan_domain::Observation::TerminalActivity(activity) = row else {
-            panic!("expected terminal output rows");
-        };
-        assert_eq!(
-            activity.state(),
-            artisan_domain::TerminalActivityState::Output
-        );
-        let output = activity.output().expect("output chunk present");
-        assert!(
-            output.len() <= artisan_domain::OBSERVATION_OUTPUT_MAX_BYTES,
-            "each fragment respects the domain output ceiling"
-        );
-        assert_eq!(
-            activity.id().as_str(),
-            format!("codex-run-1:codex:41:term:cmd-1:out:{index}"),
-            "fragment suffix disambiguates without collision"
-        );
-        joined.push_str(output);
-    }
-    assert_eq!(joined, wide, "wide fragments reassemble exactly");
+    let (_, rows, shell) = apply_with_shell(event, &run, &mut tracker, &mut active, 41).await;
+    assert!(rows.is_empty(), "output is no activity row");
+    assert_eq!(shell, vec![ShellJobChange::Output(wide.into_bytes())]);
 
     // An oversize authoritative summary still settles its phase, textless.
     let huge = "s".repeat(70_000);
@@ -3470,7 +3465,14 @@ async fn command_search_plan_and_file_frames_normalize() {
         50,
     )
     .expect("command start decodes");
-    let (_, rows) = apply_activity(started, &run, &mut tracker, &mut active, 50).await;
+    let (_, rows, shell) = apply_with_shell(started, &run, &mut tracker, &mut active, 50).await;
+    assert_eq!(
+        shell,
+        vec![ShellJobChange::Opened {
+            command: Some("echo hi".to_owned()),
+            background: false,
+        }]
+    );
     assert_eq!(rows.len(), 1);
     let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
         panic!("expected terminal activity");
@@ -3484,19 +3486,20 @@ async fn command_search_plan_and_file_frames_normalize() {
         51,
     )
     .expect("command output decodes");
-    let (_, rows) = apply_activity(output, &run, &mut tracker, &mut active, 51).await;
-    assert_eq!(rows.len(), 1);
-    let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
-        panic!("expected terminal output");
-    };
-    assert_eq!(row.output(), Some("hi\n"));
+    let (_, rows, shell) = apply_with_shell(output, &run, &mut tracker, &mut active, 51).await;
+    assert!(rows.is_empty(), "output streams to the terminal board only");
+    assert_eq!(shell, vec![ShellJobChange::Output(b"hi\n".to_vec())]);
 
     let completed = parse_frame(
         r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"aggregatedOutput":"hi\n","command":"echo hi","exitCode":3,"id":"cmd-1","status":"completed","type":"commandExecution"}}}"#,
         52,
     )
     .expect("command completion decodes");
-    let (_, rows) = apply_activity(completed, &run, &mut tracker, &mut active, 52).await;
+    let (_, rows, shell) = apply_with_shell(completed, &run, &mut tracker, &mut active, 52).await;
+    assert_eq!(
+        shell,
+        vec![ShellJobChange::Settled(ShellJobEnd::Exited(Some(3)))]
+    );
     assert_eq!(rows.len(), 1);
     let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
         panic!("expected terminal completion");
@@ -3514,7 +3517,8 @@ async fn command_search_plan_and_file_frames_normalize() {
         53,
     )
     .expect("declined command decodes");
-    let (_, rows) = apply_activity(declined, &run, &mut tracker, &mut active, 53).await;
+    let (_, rows, shell) = apply_with_shell(declined, &run, &mut tracker, &mut active, 53).await;
+    assert_eq!(shell, vec![ShellJobChange::Settled(ShellJobEnd::Failed)]);
     assert_eq!(rows.len(), 1);
     let artisan_domain::Observation::TerminalActivity(row) = &rows[0] else {
         panic!("expected terminal failure");

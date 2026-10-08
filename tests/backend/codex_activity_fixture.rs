@@ -18,7 +18,7 @@
 use tokio::sync::mpsc;
 
 use super::codex::{CodexPendingTracker, apply_event, parse_frame};
-use super::observation::{EngineObservation, TerminalState};
+use super::observation::{EngineObservation, ShellJobChange, TerminalState};
 use artisan_domain::{Observation, RunId};
 
 fn activity_run_id() -> RunId {
@@ -157,13 +157,19 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
                 activity_sequences.push(row.sequence().get());
                 stable_ids.push(row.observation_id().as_str().to_owned());
             }
+            // Command output streams to the terminal board, never a row.
+            EngineObservation::Shell(row) => tags.push(match row.change {
+                ShellJobChange::Opened { .. } => "shell_opened",
+                ShellJobChange::Backgrounded => "shell_backgrounded",
+                ShellJobChange::Output(_) => "shell_output",
+                ShellJobChange::Settled(_) => "shell_settled",
+            }),
             EngineObservation::Terminal(_) => panic!("terminal travels as state, not a row"),
             EngineObservation::SummaryTitle { .. }
             | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_)
-            | EngineObservation::Shell(_) => {
+            | EngineObservation::SubagentTranscript(_) => {
                 panic!("fixture emits no other owner rows")
             }
         }
@@ -183,8 +189,10 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
             "tool",
             "tool",
             "tool",
+            "shell_opened",
             "terminal_activity",
-            "terminal_activity",
+            "shell_output",
+            "shell_settled",
             "terminal_activity",
             "file",
             "search",

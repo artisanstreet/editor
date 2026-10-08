@@ -12,7 +12,10 @@ use tokio::sync::mpsc;
 
 #[cfg(test)]
 use super::super::observation::TerminalObservation;
-use super::super::observation::{EngineObservation, TerminalState, UsageObservation, chunk_text};
+use super::super::observation::{
+    EngineObservation, ShellJobChange, ShellJobEnd, ShellJobRow, TerminalState, UsageObservation,
+    chunk_text,
+};
 use super::continuation::{
     CodexUsageContext, CodexUsageScope, codex_usage_report, current_unix_millis,
 };
@@ -364,45 +367,6 @@ fn tool_rows(
         .collect()
 }
 
-fn terminal_output_rows(
-    run_id: &RunId,
-    frame_sequence: u64,
-    item_id: &str,
-    _turn_id: &str,
-    delta: &str,
-) -> Vec<DomainObservation> {
-    let Some(sequence) = activity_sequence(frame_sequence) else {
-        return Vec::new();
-    };
-    fragment_text(delta, OBSERVATION_OUTPUT_MAX_BYTES)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, output)| {
-            let id = activity_observation_id(
-                run_id,
-                frame_sequence,
-                &format!("term:{item_id}:out:{index}"),
-            )?;
-            let activity_id = ObservationId::parse(item_id.to_owned()).ok()?;
-            TerminalActivityObservation::new(
-                id,
-                sequence,
-                TerminalActivityInput {
-                    activity_id,
-                    channel: None,
-                    command: None,
-                    shell: None,
-                    output: Some(output),
-                    exit_code: None,
-                    state: TerminalActivityState::Output,
-                },
-            )
-            .ok()
-            .map(DomainObservation::TerminalActivity)
-        })
-        .collect()
-}
-
 fn terminal_lifecycle_rows(
     run_id: &RunId,
     frame_sequence: u64,
@@ -594,6 +558,18 @@ async fn emit_activity(
         }
     }
     None
+}
+
+/// Sends one shell job change to the thread's terminal board.
+async fn emit_shell(
+    observations: &mpsc::Sender<EngineObservation>,
+    row: ShellJobRow,
+) -> Option<TerminalState> {
+    observations
+        .send(EngineObservation::Shell(row))
+        .await
+        .is_err()
+        .then_some(TerminalState::Interrupted)
 }
 
 /// Applies one typed event; returns the terminal state when the turn ends.
@@ -825,8 +801,14 @@ pub(crate) async fn apply_event(
             if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
                 return None;
             }
-            let rows = terminal_output_rows(run_id, frame_sequence, &item_id, &turn_id, &delta);
-            emit_activity(observations, rows).await
+            // Output streams to the thread's terminal board, never the
+            // ledger; the completed item carries the bounded aggregate.
+            let row = ShellJobRow {
+                run_id: run_id.clone(),
+                job_id: item_id,
+                change: ShellJobChange::Output(delta.into_bytes()),
+            };
+            emit_shell(observations, row).await
         }
         CodexEvent::TerminalLifecycle {
             thread_id,
@@ -839,6 +821,27 @@ pub(crate) async fn apply_event(
         } => {
             if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
                 return None;
+            }
+            let change = match state {
+                CodexTerminalLifecycle::Started => ShellJobChange::Opened {
+                    command: command.clone(),
+                    background: false,
+                },
+                CodexTerminalLifecycle::Completed => {
+                    ShellJobChange::Settled(ShellJobEnd::Exited(exit_code))
+                }
+                CodexTerminalLifecycle::Failed => ShellJobChange::Settled(match exit_code {
+                    Some(code) => ShellJobEnd::Exited(Some(code)),
+                    None => ShellJobEnd::Failed,
+                }),
+            };
+            let job = ShellJobRow {
+                run_id: run_id.clone(),
+                job_id: item_id.clone(),
+                change,
+            };
+            if let Some(state) = emit_shell(observations, job).await {
+                return Some(state);
             }
             let rows = terminal_lifecycle_rows(
                 run_id,
