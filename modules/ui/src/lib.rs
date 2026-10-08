@@ -45,6 +45,7 @@ pub mod skeleton;
 pub mod slider;
 pub mod switch;
 pub mod tabs;
+pub mod terminal_text;
 pub mod text_runs;
 pub mod textarea;
 pub mod theme;
