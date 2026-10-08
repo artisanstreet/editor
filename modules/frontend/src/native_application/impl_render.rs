@@ -108,6 +108,7 @@ impl Render for NativeApplication {
                     }))
             }))
             .children(self.host_switch_banner())
+            .child(self.thread_terminals.clone())
             .child(self.message_images.clone())
             .child(self.machine_dropdown(window, cx))
     }

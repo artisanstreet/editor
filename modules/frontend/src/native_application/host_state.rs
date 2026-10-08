@@ -33,8 +33,36 @@ impl NativeApplication {
             HostStateEvent::EngineInstalls(snapshot) => self.apply_engine_installs(snapshot, cx),
             HostStateEvent::Extensions(catalog) => self.apply_extension_catalog(catalog, cx),
             HostStateEvent::GlobalPrompt(prompt) => self.apply_global_prompt(prompt, cx),
+            // Output re-renders only the dialog: the application renders
+            // again only when the inspector's rows changed.
+            HostStateEvent::ThreadTerminals(terminals) => {
+                if self.apply_thread_terminals(terminals, cx) {
+                    cx.notify();
+                }
+                return;
+            }
         }
         cx.notify();
+    }
+
+    /// Takes the open thread's shell jobs; returns whether the Terminals
+    /// rows changed. A push for any other thread is stale and ignored.
+    fn apply_thread_terminals(
+        &mut self,
+        terminals: artisan_domain::ThreadTerminals,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(selected) = self
+            .selected_thread
+            .clone()
+            .filter(|selected| selected == &terminals.thread_id)
+        else {
+            return false;
+        };
+        self.thread_terminals.update(cx, |view, cx| {
+            view.select_thread(Some(&selected), cx);
+            view.apply(terminals, cx)
+        })
     }
 
     /// Shows what the open thread's live run is thinking, and drops it once

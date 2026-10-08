@@ -1,7 +1,6 @@
 //! Render tree composition for [`ThreadScreen`].
 //!
-//! Extracted verbatim from `thread_screen.rs` during the module split;
-//! `is_live_terminal` was widened to `pub(super)` for the parent test suite.
+//! Extracted verbatim from `thread_screen.rs` during the module split.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -227,18 +226,17 @@ impl ThreadScreen {
         inspector_section(theme, THREAD_SCREEN_CONTEXT_SELECTOR, None, rows)
     }
 
-    /// Renders the Terminals section (`thread-terminals-card.svelte`).
+    /// Renders the Terminals section: the shell jobs of the thread's runs.
     ///
-    /// Legacy branches: a skeleton shimmer while loading (`flex flex-col
-    /// gap-2` with `h-4` bars at 3/5 and 2/5 widths, here inset like the rows
-    /// so the bars start on the row text edge), the rows only when at least
-    /// one live terminal exists, and nothing otherwise — the section and its
-    /// label then take no space. Liveness is `opening | active`
-    /// (`lib/terminal/presentation.ts` `is_live_terminal`); exited terminals
-    /// disappear like finished agents. Rows follow `thread-terminals.svelte`:
-    /// the `terminal-2` glyph plus display name plus muted command line.
-    /// Click-to-inspect and the tail-viewer dialog need transport wiring and
-    /// are gaps, so rows render without a fake affordance.
+    /// A skeleton shimmer shows while loading (`flex flex-col gap-2` with
+    /// `h-4` bars at 3/5 and 2/5 widths, inset like the rows so the bars
+    /// start on the row text edge). Each row is the `terminal-2` glyph, the
+    /// command's first line in mono, and the job's state at the right edge
+    /// in the Agents section's language: a spinning arc while it runs, then
+    /// a sky dot for a clean exit, a destructive dot for a failure, and a
+    /// muted dot when it was stopped or ended with its turn. Running jobs
+    /// list first. Clicking a row opens the job's output. The section is
+    /// omitted while the thread has no jobs.
     fn render_terminals_section(&self, theme: &ArtisanTheme) -> Option<Div> {
         if self.terminals_loading {
             let bar = |fraction: f32| {
@@ -266,60 +264,49 @@ impl ThreadScreen {
                     .child(bar(0.4)),
             ));
         }
-        let live: Vec<&TerminalSession> = self
-            .terminals
-            .iter()
-            .filter(|session| is_live_terminal(session))
-            .collect();
-        if live.is_empty() {
+        if self.terminals.is_empty() {
             return None;
         }
         let mut list = div().flex().min_w_0().flex_col();
-        for session in live {
-            list = list.child(
-                div()
-                    .flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(TERMINAL_ROW_GAP_PX))
-                    .rounded(RadiusTokens::value(RadiusStep::Lg))
-                    .px(px(ROW_PAD_PX))
-                    .py(px(ROW_PAD_PX))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(ROW_GAP_PX))
-                            .child(inspector_row_glyph(theme, InspectorRowIcon::Terminal))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(theme.typography.control_text)
-                                    .font_weight(ProseTypography::BODY_WEIGHT)
-                                    .letter_spacing(px(workspace_body_tracking(theme)))
-                                    .text_color(theme.colors.foreground.to_paint())
-                                    .child(terminal_display_name(session)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .max_w(px(160.0))
-                            .truncate()
-                            .text_size(theme.typography.label_text)
-                            // Mono command keeps normal tracking
-                            // (`utilities.css:717-719` code rule).
-                            .letter_spacing(px(0.0))
-                            .text_color(theme.colors.muted_foreground.to_paint())
-                            .child(terminal_command_line(session)),
-                    ),
-            );
+        for entry in &self.terminals {
+            let row_selector = format!("{THREAD_SCREEN_TERMINAL_ROW_PREFIX}-{}", entry.terminal_id);
+            let state = terminal_state_mark(theme, entry.state, format!("{row_selector}-state"));
+            let opener = self.on_open_terminal.clone();
+            let terminal_id = entry.terminal_id.clone();
+            let mut row = div()
+                .id(SharedString::from(row_selector.clone()))
+                .flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap(px(ROW_GAP_PX))
+                .rounded(RadiusTokens::value(RadiusStep::Lg))
+                .px(px(ROW_PAD_PX))
+                .py(px(ROW_PAD_PX))
+                .debug_selector(move || row_selector.clone())
+                .child(inspector_row_glyph(theme, InspectorRowIcon::Terminal))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(theme.typography.mono.family)
+                        .text_size(theme.typography.label_text)
+                        // Mono command keeps normal tracking
+                        // (`utilities.css:717-719` code rule).
+                        .letter_spacing(px(0.0))
+                        .text_color(theme.colors.foreground.to_paint())
+                        .child(entry.name.clone()),
+                )
+                .child(state);
+            if let Some(opener) = opener {
+                let hover_theme = *theme;
+                row = row
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(hover_fill_gradient(hover_theme)))
+                    .on_click(move |_, window, cx| opener(&terminal_id, window, cx));
+            }
+            list = list.child(row);
         }
         Some(inspector_section(
             theme,
@@ -786,16 +773,30 @@ impl ThreadScreen {
     }
 }
 
-/// Returns whether a terminal session stays visible in the Terminals section.
-///
-/// This is the legacy `is_live_terminal` boundary
-/// (`lib/terminal/presentation.ts`): `opening | active` sessions show;
-/// exited terminals disappear like finished agents.
-pub(super) fn is_live_terminal(session: &TerminalSession) -> bool {
-    matches!(
-        session.state,
-        TerminalState::Opening | TerminalState::Active
-    )
+/// A Terminals row's state at its right edge, in the Agents section's
+/// language: a spinning arc while the job runs, then a sky dot for a clean
+/// exit, a destructive dot for a failure, and a muted dot when it was
+/// stopped or ended with its turn.
+fn terminal_state_mark(theme: &ArtisanTheme, state: ThreadTerminalState, selector: String) -> Div {
+    let mark = div()
+        .flex_shrink_0()
+        .size(px(AGENT_STATE_SLOT_PX))
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector({
+            let selector = selector.clone();
+            move || selector.clone()
+        });
+    let dot = |color: Hsla| div().size(px(AGENT_STATE_DOT_PX)).rounded_full().bg(color);
+    match state {
+        ThreadTerminalState::Running => mark.child(
+            FadeArc::new(SharedString::from(selector), *theme).size(px(AGENT_STATE_SLOT_PX)),
+        ),
+        settled if settled.is_failure() => mark.child(dot(theme.colors.destructive.to_paint())),
+        ThreadTerminalState::Exited { .. } => mark.child(dot(theme.colors.unread.to_paint())),
+        _ => mark.child(dot(theme.colors.muted_foreground.to_paint())),
+    }
 }
 
 impl Render for ThreadScreen {

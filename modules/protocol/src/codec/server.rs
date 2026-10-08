@@ -235,8 +235,103 @@ pub(crate) fn encode_event(
         Event::GlobalPrompt(prompt) => {
             encode_global_prompt(builder.reborrow().init_global_prompt(), prompt)?;
         }
+        Event::ThreadTerminals(terminals) => {
+            encode_thread_terminals(builder.reborrow().init_thread_terminals(), terminals)?;
+        }
     }
     Ok(())
+}
+
+fn encode_thread_terminals(
+    mut builder: artisan_capnp::thread_terminals::Builder<'_>,
+    terminals: &ThreadTerminals,
+) -> Result<(), ProtocolEncodeError> {
+    builder.set_thread_id(terminals.thread_id.as_str());
+    let field = "threadTerminals.terminals";
+    let mut list = builder.init_terminals(list_length(field, terminals.terminals.len())?);
+    for (index, terminal) in terminals.terminals.iter().enumerate() {
+        let mut encoded = list.reborrow().get(list_index(field, index)?);
+        encoded.set_terminal_id(terminal.terminal_id.as_str());
+        encoded.set_run_id(terminal.run_id.as_str());
+        encoded.set_command(terminal.command.as_deref().unwrap_or_default());
+        encoded.set_background(terminal.background);
+        let (state, code) = match terminal.state {
+            ThreadTerminalState::Running => (artisan_capnp::ThreadTerminalState::Running, None),
+            ThreadTerminalState::Exited { code } => {
+                (artisan_capnp::ThreadTerminalState::Exited, code)
+            }
+            ThreadTerminalState::Failed => (artisan_capnp::ThreadTerminalState::Failed, None),
+            ThreadTerminalState::Killed => (artisan_capnp::ThreadTerminalState::Killed, None),
+            ThreadTerminalState::Ended => (artisan_capnp::ThreadTerminalState::Ended, None),
+        };
+        encoded.set_state(state);
+        match code {
+            Some(code) => encoded.reborrow().init_exit_code().set_exit_code(code),
+            None => encoded.reborrow().init_exit_code().set_no_exit_code(()),
+        }
+        encoded.set_started_at_millis(terminal.started_at.as_millis());
+        match terminal.ended_at {
+            Some(at) => encoded
+                .reborrow()
+                .init_ended()
+                .set_ended_at_millis(at.as_millis()),
+            None => encoded.reborrow().init_ended().set_running(()),
+        }
+        encoded.set_output_start(terminal.output.start);
+        encoded.set_output(&terminal.output.bytes);
+    }
+    Ok(())
+}
+
+fn decode_thread_terminals(
+    value: artisan_capnp::thread_terminals::Reader<'_>,
+) -> Result<ThreadTerminals, ProtocolDecodeError> {
+    let field = "event.threadTerminals.threadId";
+    let thread_id = parse_thread_id(read_text(value.get_thread_id(), field)?, field)?;
+    let list = value.get_terminals()?;
+    let mut terminals = Vec::with_capacity((list.len() as usize).min(THREAD_TERMINALS_MAX));
+    for encoded in list.iter().take(THREAD_TERMINALS_MAX) {
+        let run = "event.threadTerminals.terminal.runId";
+        let code = match encoded.get_exit_code().which()? {
+            thread_terminal::exit_code::Which::NoExitCode(()) => None,
+            thread_terminal::exit_code::Which::ExitCode(code) => Some(code),
+        };
+        let state = match encoded.get_state()? {
+            artisan_capnp::ThreadTerminalState::Running => ThreadTerminalState::Running,
+            artisan_capnp::ThreadTerminalState::Exited => ThreadTerminalState::Exited { code },
+            artisan_capnp::ThreadTerminalState::Failed => ThreadTerminalState::Failed,
+            artisan_capnp::ThreadTerminalState::Killed => ThreadTerminalState::Killed,
+            artisan_capnp::ThreadTerminalState::Ended => ThreadTerminalState::Ended,
+        };
+        let ended_at = match encoded.get_ended().which()? {
+            thread_terminal::ended::Which::Running(()) => None,
+            thread_terminal::ended::Which::EndedAtMillis(at) => Some(UnixMillis::from_millis(at)),
+        };
+        let command = read_text(
+            encoded.get_command(),
+            "event.threadTerminals.terminal.command",
+        )?;
+        terminals.push(ThreadTerminal {
+            terminal_id: read_text(
+                encoded.get_terminal_id(),
+                "event.threadTerminals.terminal.terminalId",
+            )?,
+            run_id: parse_run_id(read_text(encoded.get_run_id(), run)?, run)?,
+            command: (!command.is_empty()).then_some(command),
+            background: encoded.get_background(),
+            state,
+            started_at: UnixMillis::from_millis(encoded.get_started_at_millis()),
+            ended_at,
+            output: ThreadTerminalOutput {
+                start: encoded.get_output_start(),
+                bytes: encoded.get_output()?.to_vec(),
+            },
+        });
+    }
+    Ok(ThreadTerminals {
+        thread_id,
+        terminals,
+    })
 }
 
 pub(crate) fn encode_protocol_error(
@@ -516,6 +611,9 @@ pub(crate) fn decode_event(
         }
         event::Which::Extensions(catalog) => Event::Extensions(decode_extension_catalog(catalog?)?),
         event::Which::GlobalPrompt(prompt) => Event::GlobalPrompt(decode_global_prompt(prompt?)?),
+        event::Which::ThreadTerminals(terminals) => {
+            Event::ThreadTerminals(decode_thread_terminals(terminals?)?)
+        }
     };
     Ok(ServerEvent { cursor, event })
 }

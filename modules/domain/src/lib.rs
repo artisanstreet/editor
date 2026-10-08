@@ -45,6 +45,7 @@ pub mod message;
 pub mod model;
 pub mod observation;
 pub mod text;
+pub mod thread_terminals;
 pub mod time;
 
 pub use bounds::{
@@ -146,6 +147,10 @@ pub use observation::{
 pub use text::{
     DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,
     ThreadTitle, ThreadTitleError,
+};
+pub use thread_terminals::{
+    THREAD_TERMINAL_OUTPUT_MAX_BYTES, THREAD_TERMINALS_MAX, ThreadTerminal, ThreadTerminalOutput,
+    ThreadTerminalState, ThreadTerminals,
 };
 pub use time::UnixMillis;
 

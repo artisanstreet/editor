@@ -76,6 +76,16 @@ impl NativeApplication {
                         }
                         None => ThreadScreen::mount(thread.clone(), ThemeMode::Dark, cx).ok(),
                     };
+                    if let Some(screen) = mounted.as_ref() {
+                        let terminals = self.thread_terminals.downgrade();
+                        let opener: crate::thread_screen::ThreadTerminalOpen =
+                            std::rc::Rc::new(move |terminal_id, window, cx| {
+                                let _ = terminals.update(cx, |view, cx| {
+                                    view.open(terminal_id, window, cx);
+                                });
+                            });
+                        screen.update(cx, |screen, _| screen.set_terminal_opener(Some(opener)));
+                    }
                     self.thread_screen = mounted;
                     self.thread_screen_key = key;
                 }
@@ -333,9 +343,16 @@ impl NativeApplication {
             .filter(|_| self.run_controls.is_live_for(thread))
             .map(thread_agent_rows)
             .unwrap_or_default();
+        // Shell jobs outlive their run's turn: a dev server that died after
+        // the turn ended still shows, so this list has no run gate.
+        let terminals = self.thread_terminals.update(cx, |view, cx| {
+            view.select_thread(Some(thread), cx);
+            view.entries()
+        });
         screen.update(cx, |screen, screen_cx| {
             let mut changed = screen.set_project_label(project_label);
             changed |= screen.set_environment(environment);
+            changed |= screen.set_terminals(terminals);
             if !screen.agents_present(&agents) {
                 changed |=
                     screen.set_agents(agents.iter().copied().map(thread_agent_entry).collect());

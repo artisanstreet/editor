@@ -60,6 +60,9 @@ impl ThreadScreenGate {
 /// unavailable, and the control renders disabled rather than faking a retry.
 pub type ThreadScreenRetry = Rc<dyn Fn(&mut Window, &mut App)>;
 
+/// Activation callback for a Terminals row: opens that job's output.
+pub type ThreadTerminalOpen = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// One owned checklist entry for the inspector's Checklist section.
 ///
 /// [`ChecklistEntry`] borrows, so entries are stored owned and projected per
@@ -135,7 +138,8 @@ pub struct ThreadScreen {
     /// Project row; `None` omits the row.
     pub(super) project_label: Option<String>,
     pub(super) environment: ThreadEnvironmentInput,
-    pub(super) terminals: Vec<TerminalSession>,
+    pub(super) terminals: Vec<ThreadTerminalEntry>,
+    pub(super) on_open_terminal: Option<ThreadTerminalOpen>,
     pub(super) terminals_loading: bool,
     pub(super) checklist: Vec<ThreadChecklistEntry>,
     pub(super) agents: Vec<ThreadAgentEntry>,
@@ -170,6 +174,7 @@ impl ThreadScreen {
             project_label: None,
             environment: ThreadEnvironmentInput::default(),
             terminals: Vec::new(),
+            on_open_terminal: None,
             terminals_loading: false,
             checklist: Vec::new(),
             agents: Vec::new(),
@@ -239,6 +244,12 @@ impl ThreadScreen {
         let changed = self.gate != gate;
         self.gate = gate;
         changed
+    }
+
+    /// Installs the Terminals row callback (or clears it when `None`, which
+    /// leaves the rows read-only).
+    pub fn set_terminal_opener(&mut self, on_open: Option<ThreadTerminalOpen>) {
+        self.on_open_terminal = on_open;
     }
 
     /// Installs the gate retry callback (or clears it when `None`).
@@ -323,9 +334,12 @@ impl ThreadScreen {
         &self.environment
     }
 
-    /// Replaces the owned terminal sessions.
-    pub fn set_terminals(&mut self, terminals: Vec<TerminalSession>) {
+    /// Replaces the Terminals rows, returning whether they changed so a
+    /// per-render caller notifies only on a change.
+    pub fn set_terminals(&mut self, terminals: Vec<ThreadTerminalEntry>) -> bool {
+        let changed = self.terminals != terminals;
         self.terminals = terminals;
+        changed
     }
 
     /// Publishes whether the terminal list itself is still loading.

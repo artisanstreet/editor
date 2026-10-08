@@ -438,6 +438,8 @@ pub enum HostStateEvent {
     Extensions(artisan_domain::ExtensionCatalog),
     /// The global prompt and its state per engine.
     GlobalPrompt(artisan_domain::GlobalPrompt),
+    /// A subscribed thread's shell jobs with their new output.
+    ThreadTerminals(artisan_domain::ThreadTerminals),
 }
 
 /// Validates the delivery family of one uni-stream envelope.
@@ -501,6 +503,9 @@ pub fn validate_uni_envelope(
             )),
             artisan_domain::Event::GlobalPrompt(prompt) => Ok(UniDelivery::HostState(
                 HostStateEvent::GlobalPrompt(prompt.clone()),
+            )),
+            artisan_domain::Event::ThreadTerminals(terminals) => Ok(UniDelivery::HostState(
+                HostStateEvent::ThreadTerminals(terminals.clone()),
             )),
             artisan_domain::Event::ProjectAttached(_)
             | artisan_domain::Event::ThreadCreated(_)

@@ -1231,6 +1231,11 @@ struct Event {
     # The global prompt and its state per engine, pushed whenever it changes
     # to a connection that read it. Fresh member @18.
     globalPrompt @18 :GlobalPrompt;
+
+    # The shell jobs a subscribed thread's engine runs opened, with the
+    # output each produced since the previous push. Never stored. Fresh
+    # member @19.
+    threadTerminals @19 :ThreadTerminals;
   }
 
   # One-based per-session event cursor. Starts at 1 on a session's first
@@ -3196,4 +3201,43 @@ struct GlobalPromptResolution {
     importEngine @1 :Text;
     overwriteEngine @2 :Text;
   }
+}
+
+# The shell jobs a subscribed thread's engine runs opened. Appended so
+# existing node identities stay stable.
+struct ThreadTerminals {
+  threadId @0 :Text;
+  terminals @1 :List(ThreadTerminal);
+}
+
+# One shell job. `output` is the raw output produced since the previous push,
+# escape sequences included; `outputStart` is its byte offset in everything
+# the job wrote.
+struct ThreadTerminal {
+  terminalId @0 :Text;
+  runId @1 :Text;
+  # Empty decodes as absent: a present command is never empty.
+  command @2 :Text;
+  background @3 :Bool;
+  state @4 :ThreadTerminalState;
+  # Exit zero is a measured outcome, so presence is explicit.
+  exitCode :union {
+    noExitCode @5 :Void;
+    exitCode @6 :Int32;
+  }
+  startedAtMillis @7 :Int64;
+  ended :union {
+    running @8 :Void;
+    endedAtMillis @9 :Int64;
+  }
+  outputStart @10 :UInt64;
+  output @11 :Data;
+}
+
+enum ThreadTerminalState {
+  running @0;
+  exited @1;
+  failed @2;
+  killed @3;
+  ended @4;
 }

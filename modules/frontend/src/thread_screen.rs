@@ -37,24 +37,26 @@
 //!   Terminals sections under muted labels set like the sidebar's thread-age
 //!   groups. The shell paints the junction crosshair
 //!   where that rule meets the titlebar. Row content is projected through the
-//!   already-ported [`crate::thread_environment_presentation`],
-//!   [`crate::terminal_presentation`], and [`crate::thread_panel_policy`]
-//!   policies.
+//!   already-ported [`crate::thread_environment_presentation`] and
+//!   [`crate::thread_panel_policy`] policies; the Terminals rows come from
+//!   [`crate::thread_terminals`], which also draws their output dialog.
 //!
 //! The composer is packet 2's [`NativeComposer`](crate::native_composer)
 //! entity, consumed as-is and docked at the bottom of the frame. Anything
 //! this screen cannot honestly render yet (project picker, remote chip,
-//! terminal tail viewer, `LipCard` overlay chrome) is listed in the report as
-//! a gap, not faked; inspector rows stay non-interactive.
+//! `LipCard` overlay chrome) is listed in the report as a gap, not faked;
+//! inspector rows stay non-interactive except Terminals rows, which open
+//! their job's output.
 
 #![forbid(unsafe_code)]
 
 use std::rc::Rc;
 
 use artisan_assets::AssetId;
-use artisan_domain::{PlanEntry, PlanEntryStatus, ThreadId};
+use artisan_domain::{PlanEntry, PlanEntryStatus, ThreadId, ThreadTerminalState};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
 use artisan_ui::fade_arc::FadeArc;
+use artisan_ui::gradient::hover_fill_gradient;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::theme::{
@@ -64,7 +66,9 @@ use artisan_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
     App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
     SharedString, Subscription, Window, div,
-    prelude::{InteractiveElement as _, ParentElement as _, Styled as _},
+    prelude::{
+        InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+    },
     px, rgb, rgb_to_hsla,
 };
 
@@ -75,13 +79,11 @@ use crate::desktop_shell::{
 };
 use crate::native_composer::NativeComposer;
 use crate::shell_layout::{ProseWidth, desktop_inspector_pixels};
-use crate::terminal_presentation::{
-    TerminalSession, TerminalState, terminal_command_line, terminal_display_name,
-};
 use crate::thread_agents::{ThreadAgentEntry, ThreadAgentState};
 use crate::thread_environment_presentation::{ThreadEnvironmentInput, present_thread_environment};
 use crate::thread_panel_policy::{ChecklistEntry, ChecklistEntryState, present_checklist_entry};
 use crate::thread_route_gate_policy::{ThreadRouteGateRender, thread_route_gate_render};
+use crate::thread_terminals::ThreadTerminalEntry;
 
 // Module split submodules (see thread_screen/).
 
@@ -92,9 +94,6 @@ mod state;
 mod render;
 
 pub use state::*;
-
-#[cfg(test)]
-use render::is_live_terminal;
 
 /// Stable debug selector for the thread screen root.
 pub const THREAD_SCREEN_SELECTOR: &str = "artisan-thread-screen";
@@ -165,6 +164,9 @@ pub const THREAD_SCREEN_TERMINALS_SELECTOR: &str = "artisan-thread-screen-termin
 /// Stable debug selector for the Terminals section's muted label.
 pub const THREAD_SCREEN_TERMINALS_LABEL_SELECTOR: &str = "artisan-thread-screen-terminals-label";
 
+/// Debug selector prefix for one Terminals row; the terminal id follows.
+pub const THREAD_SCREEN_TERMINAL_ROW_PREFIX: &str = "artisan-thread-screen-terminal";
+
 /// Stable debug selector for the Context section's Project row.
 pub const THREAD_SCREEN_PROJECT_ROW_SELECTOR: &str = "artisan-thread-screen-project-row";
 
@@ -201,10 +203,6 @@ pub(crate) const fn composer_pad_bottom(viewport_width_px: f32) -> f32 {
 
 /// `max-w-md` on the gate failure column.
 const FAILURE_MAX_WIDTH_PX: f32 = 448.0;
-
-/// `gap-4` (16 px) between a terminal row's name cluster and its muted
-/// command line.
-const TERMINAL_ROW_GAP_PX: f32 = 16.0;
 
 /// Full desktop inspector column width: exactly the expanded left sidebar
 /// ([`DESKTOP_SIDEBAR_WIDTH_PX`], 327 px), so the two ruled columns frame the
@@ -329,22 +327,6 @@ mod tests {
         reason = "test assertions compare the exact pixel arithmetic the UI performs; an epsilon would weaken the regression coverage"
     )]
     use super::*;
-
-    #[test]
-    fn live_terminal_filter_keeps_opening_and_active_only() {
-        let sessions = [
-            TerminalSession::new("a", "pwsh", Vec::<String>::new(), TerminalState::Opening),
-            TerminalSession::new("b", "pwsh", Vec::<String>::new(), TerminalState::Active),
-            TerminalSession::new("c", "pwsh", Vec::<String>::new(), TerminalState::Closed),
-            TerminalSession::new("d", "pwsh", Vec::<String>::new(), TerminalState::Failed),
-        ];
-        let live: Vec<&str> = sessions
-            .iter()
-            .filter(|session| is_live_terminal(session))
-            .map(|session| session.terminal_id.as_str())
-            .collect();
-        assert_eq!(live, vec!["a", "b"]);
-    }
 
     #[test]
     fn gate_presence_maps_each_branch_through_policy_order() {
@@ -1195,12 +1177,12 @@ mod tests {
                 state: ChecklistEntryState::Active,
                 text: String::from("Port the inspector"),
             }]);
-            screen.set_terminals(vec![TerminalSession::new(
-                "t1",
-                "pwsh",
-                Vec::<String>::new(),
-                TerminalState::Active,
-            )]);
+            screen.set_terminals(vec![ThreadTerminalEntry {
+                terminal_id: String::from("run-1:t1"),
+                name: String::from("npm run dev"),
+                state: ThreadTerminalState::Running,
+                background: true,
+            }]);
             true
         });
         let tops = [

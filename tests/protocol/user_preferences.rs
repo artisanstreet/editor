@@ -213,6 +213,34 @@ fn pushed_host_state_events_round_trip() -> Result<(), Box<dyn Error>> {
             thread_id: ThreadId::parse("thread-a")?,
             current: None,
         }),
+        Event::ThreadTerminals(artisan_domain::ThreadTerminals {
+            thread_id: ThreadId::parse("thread-a")?,
+            terminals: vec![
+                artisan_domain::ThreadTerminal {
+                    terminal_id: "run-a:toolu_1".to_owned(),
+                    run_id: artisan_domain::RunId::parse("run-a")?,
+                    command: Some("npm run dev".to_owned()),
+                    background: true,
+                    state: artisan_domain::ThreadTerminalState::Running,
+                    started_at: artisan_domain::UnixMillis::from_millis(1_000),
+                    ended_at: None,
+                    output: artisan_domain::ThreadTerminalOutput {
+                        start: 4_096,
+                        bytes: b"\x1b[31merror\x1b[0m \xff\n".to_vec(),
+                    },
+                },
+                artisan_domain::ThreadTerminal {
+                    terminal_id: "run-a:item_2".to_owned(),
+                    run_id: artisan_domain::RunId::parse("run-a")?,
+                    command: None,
+                    background: false,
+                    state: artisan_domain::ThreadTerminalState::Exited { code: Some(0) },
+                    started_at: artisan_domain::UnixMillis::from_millis(1_000),
+                    ended_at: Some(artisan_domain::UnixMillis::from_millis(2_000)),
+                    output: artisan_domain::ThreadTerminalOutput::default(),
+                },
+            ],
+        }),
     ];
     for (index, event) in events.into_iter().enumerate() {
         round_trip(

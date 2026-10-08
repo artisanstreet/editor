@@ -81,6 +81,7 @@ impl NativeApplication {
             composer.set_components(&composer_controls, &model_selector, cx);
         });
         let message_images = cx.new(NativeMessageImages::new);
+        let thread_terminals = cx.new(crate::thread_terminals::ThreadTerminalsView::new);
         let message_images_subscription =
             cx.subscribe(&message_images, |application, images, event, cx| {
                 let NativeMessageImagesEvent::RequestImage(reference) = event;
@@ -159,6 +160,7 @@ impl NativeApplication {
             _composer_model_subscription: composer_model_subscription,
             _composer_subscription: composer_subscription,
             message_images,
+            thread_terminals,
             _message_images_subscription: message_images_subscription,
             _composer_observation: composer_observation,
             profile_menu: DropdownMenuState::new([

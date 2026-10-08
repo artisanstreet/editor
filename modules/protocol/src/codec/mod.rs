@@ -53,9 +53,10 @@ use artisan_domain::{
     ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
     RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
-    THREAD_LISTING_MAX_THREADS, ThreadAttention, ThreadCreated, ThreadId, ThreadListing,
-    ThreadListingError, ThreadRetitled, ThreadSummary, ThreadTitle, ThreadTitleError, TurnId,
-    TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
+    THREAD_LISTING_MAX_THREADS, THREAD_TERMINALS_MAX, ThreadAttention, ThreadCreated, ThreadId,
+    ThreadListing, ThreadListingError, ThreadRetitled, ThreadSummary, ThreadTerminal,
+    ThreadTerminalOutput, ThreadTerminalState, ThreadTerminals, ThreadTitle, ThreadTitleError,
+    TurnId, TurnOrdinal, UnixMillis, UserMessageItem, WebSearchAccess,
 };
 use capnp::message::{Builder, HeapAllocator, ReaderOptions};
 use capnp::serialize;
@@ -68,6 +69,7 @@ use crate::artisan_capnp::{
     engine_usage_snapshot, engine_usage_window, envelope as capnp_envelope, event,
     lifecycle_request, lifecycle_response, list_directories_request, live_thinking, protocol_error,
     query_range, read_account_usage_request, request, response, set_thread_engine_config_request,
+    thread_terminal,
 };
 use crate::repository::{
     PROJECT_REPOSITORY_MAXIMUM_PROJECTS, ProjectRepository, ProjectRepositoryEntry,

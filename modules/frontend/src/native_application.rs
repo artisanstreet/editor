@@ -382,6 +382,8 @@ pub struct NativeApplication {
     _composer_model_subscription: Subscription,
     message_images: Entity<NativeMessageImages>,
     _message_images_subscription: Subscription,
+    /// The open thread's shell jobs and their output dialog.
+    thread_terminals: Entity<crate::thread_terminals::ThreadTerminalsView>,
     _composer_subscription: Subscription,
     _composer_observation: Subscription,
     profile_menu: DropdownMenuState,

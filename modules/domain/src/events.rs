@@ -113,6 +113,9 @@ pub enum Event {
     /// The global prompt or its state in an engine changed; pushed to a
     /// connection that read it.
     GlobalPrompt(crate::GlobalPrompt),
+    /// The shell jobs a subscribed thread's engine runs opened, with the
+    /// output each produced since the previous push; never stored.
+    ThreadTerminals(crate::ThreadTerminals),
 }
 
 /// A subscribed thread's display title changed: the generated title was
