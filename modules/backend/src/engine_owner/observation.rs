@@ -377,7 +377,10 @@ pub(crate) enum EngineObservation {
     Subagent(SubagentLifecycleRow),
     SubagentTranscript(SubagentTranscriptRow),
     Activity(artisan_domain::Observation),
+    Shell(ShellJobRow),
 }
+
+pub(crate) use crate::thread_terminals::{ShellJobChange, ShellJobEnd, ShellJobRow};
 
 /// Payload-free error for one bounded observation delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]

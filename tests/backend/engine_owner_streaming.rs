@@ -805,7 +805,8 @@ fn terminal_observation_preserves_all_four_states_and_fields() {
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(t) => {
@@ -1743,7 +1744,8 @@ fn event_text_single_chunk_with_sse_id() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1765,7 +1767,8 @@ fn event_text_fallback_uses_run_id_when_no_sse_id() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1787,7 +1790,8 @@ fn event_text_empty_sse_id_falls_back_to_run_id() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1816,7 +1820,8 @@ fn event_multiline_json_via_framer() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1848,7 +1853,8 @@ fn event_text_unicode_and_chunking_over_4096() {
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1863,7 +1869,8 @@ fn event_text_unicode_and_chunking_over_4096() {
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(_) => "",
@@ -1883,7 +1890,8 @@ fn event_text_unicode_and_chunking_over_4096() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1906,7 +1914,8 @@ fn event_text_unicode_and_chunking_over_4096() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1954,7 +1963,8 @@ fn event_text_exact_4096_and_4097_chunking() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1966,7 +1976,8 @@ fn event_text_exact_4096_and_4097_chunking() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -1997,7 +2008,8 @@ fn event_terminal_all_four_states() {
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(term) => {
@@ -2030,7 +2042,8 @@ fn event_terminal_optional_fields() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(term) => {
@@ -2056,7 +2069,8 @@ fn event_terminal_optional_fields() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(term) => {
@@ -2080,7 +2094,8 @@ fn event_terminal_optional_fields() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(term) => {
@@ -2105,7 +2120,8 @@ fn event_terminal_optional_fields() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(term) => {
@@ -2137,7 +2153,8 @@ fn event_extra_fields_ignored() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2427,7 +2444,8 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2450,7 +2468,8 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2462,7 +2481,8 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2475,7 +2495,8 @@ fn event_sequence_preserved_and_chunk_ids_deterministic() {
             | EngineObservation::Usage(_)
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2657,7 +2678,8 @@ async fn stream_fragmented_multiline_text_then_terminal() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(_) => panic!("expected text"),
@@ -2669,7 +2691,8 @@ async fn stream_fragmented_multiline_text_then_terminal() {
         | EngineObservation::Usage(_)
         | EngineObservation::Activity(_)
         | EngineObservation::Subagent(_)
-        | EngineObservation::SubagentTranscript(_) => {
+        | EngineObservation::SubagentTranscript(_)
+        | EngineObservation::Shell(_) => {
             panic!("unexpected production observation in fixture")
         }
         EngineObservation::Terminal(t) => assert_eq!(t.state(), TerminalState::Completed),

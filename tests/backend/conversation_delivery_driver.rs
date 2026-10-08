@@ -2147,6 +2147,158 @@ async fn live_run_usage_is_pushed_as_it_changes() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn thread_terminals_are_pushed_from_memory_with_only_new_output() -> Result<(), Box<dyn Error>>
+{
+    use artisan_backend::thread_terminals::{
+        ShellJobChange, ShellJobEnd, ShellJobRow, TerminalBoard,
+    };
+    use artisan_domain::ThreadTerminalState;
+
+    let (_temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let seeded = seed_thread(&repository).await?;
+    let thread_id = seeded.thread_id.clone();
+    let run_id = seeded.run.launched.run_id.clone();
+    let stored_before = repository
+        .last_committed_observation_sequence(&run_id)
+        .await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let board = TerminalBoard::new();
+    let row = |change: ShellJobChange| ShellJobRow {
+        run_id: run_id.clone(),
+        job_id: "toolu_dev".to_owned(),
+        change,
+    };
+    let at = UnixMillis::from_millis(1_000);
+    // A dev server is already running when the Editor opens the thread.
+    board.apply(
+        &thread_id,
+        &row(ShellJobChange::Opened {
+            command: Some("npm run dev".to_owned()),
+            background: true,
+        }),
+        at,
+    );
+    board.apply(
+        &thread_id,
+        &row(ShellJobChange::Output(b"\x1b[32mready\x1b[0m\n".to_vec())),
+        at,
+    );
+    let handler = RequestHandler::new(repository.clone())
+        .with_conversation_commit_notifier(notifier.clone())
+        .with_terminal_board(board.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    type Pushed = (ThreadTerminalState, u64, Vec<u8>);
+    let pushed = |frame: WireEnvelope| -> Result<Pushed, Box<dyn Error>> {
+        let WireEnvelopeBody::Event(event) = frame.body else {
+            return Err("expected a terminals event".into());
+        };
+        let Event::ThreadTerminals(terminals) = event.event else {
+            return Err("expected the thread's terminals".into());
+        };
+        assert_eq!(terminals.thread_id, thread_id);
+        let [terminal] = terminals.terminals.as_slice() else {
+            return Err("expected one terminal".into());
+        };
+        assert_eq!(terminal.command.as_deref(), Some("npm run dev"));
+        assert!(terminal.background);
+        Ok((
+            terminal.state,
+            terminal.output.start,
+            terminal.output.bytes.clone(),
+        ))
+    };
+    let client = async {
+        let (connection, mut delivery_stream) =
+            subscribed_client(&endpoint, address, thread_id.clone()).await?;
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            (
+                ThreadTerminalState::Running,
+                0,
+                b"\x1b[32mready\x1b[0m\n".to_vec()
+            )
+        );
+        // Only the output this subscriber lacks travels.
+        board.apply(
+            &thread_id,
+            &row(ShellJobChange::Output(b"error: boom\n".to_vec())),
+            at,
+        );
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            (ThreadTerminalState::Running, 15, b"error: boom\n".to_vec())
+        );
+        let _ = notifier.publish(&thread_id);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                artisan_transport::receive_envelope(&mut delivery_stream),
+            )
+            .await
+            .is_err(),
+            "unchanged terminals are not pushed again"
+        );
+        board.apply(
+            &thread_id,
+            &row(ShellJobChange::Settled(ShellJobEnd::Exited(Some(1)))),
+            at,
+        );
+        let _ = notifier.publish(&thread_id);
+        assert_eq!(
+            pushed(receive_delivery_frame(&mut delivery_stream).await?)?,
+            (
+                ThreadTerminalState::Exited { code: Some(1) },
+                27,
+                Vec::new()
+            )
+        );
+        cancel.cancel();
+        drop(delivery_stream);
+        drop(connection);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    // Nothing of the job reached the observation ledger.
+    assert_eq!(
+        repository
+            .last_committed_observation_sequence(&run_id)
+            .await?,
+        stored_before
+    );
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"delivery terminals test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn live_thinking_is_pushed_from_memory_and_never_stored() -> Result<(), Box<dyn Error>> {
     let (_temporary, app) = opened_app().await?;
     let repository = app.repository().clone();

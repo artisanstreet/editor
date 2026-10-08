@@ -190,6 +190,9 @@ pub struct NativeRunDispatcherConfig {
     /// What each live run is thinking right now. The dispatcher writes it
     /// and publishes through `notifier`; request delivery reads it.
     live_thinking: crate::live_thinking::LiveThinkingBoard,
+    /// The shell jobs of every thread's runs. The dispatcher writes it and
+    /// publishes through `notifier`; request delivery reads it.
+    terminals: crate::thread_terminals::TerminalBoard,
     /// Claims this Forge's dispatch workers are executing right now; the
     /// live recovery sweep never reaps them.
     live_claims: LiveClaims,
@@ -239,6 +242,12 @@ impl NativeRunDispatcherConfig {
     /// request delivery.
     pub(crate) fn live_thinking_board(&self) -> crate::live_thinking::LiveThinkingBoard {
         self.live_thinking.clone()
+    }
+
+    /// Clones the process-owned board of shell jobs for Forge request
+    /// delivery.
+    pub(crate) fn terminal_board(&self) -> crate::thread_terminals::TerminalBoard {
+        self.terminals.clone()
     }
 
     /// Creates a complete injected scheduler policy.
@@ -293,6 +302,7 @@ impl NativeRunDispatcherConfig {
             authority,
             notifier,
             live_thinking: crate::live_thinking::LiveThinkingBoard::new(),
+            terminals: crate::thread_terminals::TerminalBoard::new(),
             live_claims: LiveClaims::default(),
             claim_lease,
             launch_deadline,

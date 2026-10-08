@@ -491,7 +491,9 @@ async fn deliver_events(
             // Subagent rows are progress observations, never terminal
             // receipt state; they travel the Claude owner channel only.
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => None,
+            | EngineObservation::SubagentTranscript(_)
+            // Shell job changes go to the terminal board, never the receipt.
+            | EngineObservation::Shell(_) => None,
         };
         deliver_observation(
             observation,

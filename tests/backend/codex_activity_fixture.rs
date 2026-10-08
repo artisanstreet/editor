@@ -162,7 +162,8 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
             | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Shell(_) => {
                 panic!("fixture emits no other owner rows")
             }
         }

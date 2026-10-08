@@ -25,7 +25,7 @@ use artisan_domain::{
     EarlierTurnMarkers, EngineUsageSnapshot, ErrorChain, Event, FAILED_MESSAGE_LIST_MAX,
     HeldBackWork, ListFailedMessages, ListQueuedMessages, LiveThinking, LiveThinkingBlock,
     MessageOutbox, ObservationHistoryCurrent, QUEUED_MESSAGE_LIST_MAX, QueuedMessageListOrder,
-    RunUsageResult, ThreadId, ThreadRetitled, ThreadTitle, UserPreferences,
+    RunUsageResult, ThreadId, ThreadRetitled, ThreadTerminals, ThreadTitle, UserPreferences,
 };
 use artisan_transport::{CancelHandle, DeadlineError, OperationKind, run_with_deadline};
 
@@ -71,6 +71,8 @@ pub(crate) struct ConversationDeliveryDriver {
     /// The thinking block last pushed per subscribed thread; absent when the
     /// subscriber was last told the run is not thinking.
     live_thinking: BTreeMap<ThreadId, LiveThinkingBlock>,
+    /// What each active thread's subscriber already has of its terminals.
+    terminals: BTreeMap<ThreadId, crate::thread_terminals::DeliveredTerminals>,
     /// The connection-scoped host state last pushed.
     host: DeliveredHostState,
     /// The recent threads last served or pushed, once the connection read
@@ -129,6 +131,7 @@ impl ConversationDeliveryDriver {
             titles: BTreeMap::new(),
             run_usage: BTreeMap::new(),
             live_thinking: BTreeMap::new(),
+            terminals: BTreeMap::new(),
             host: DeliveredHostState::default(),
             recent: None,
             projects: None,
@@ -231,6 +234,8 @@ impl ConversationDeliveryDriver {
                 .await?;
             self.deliver_live_thinking(&thread_id, stamp, limit, cancel)
                 .await?;
+            self.deliver_thread_terminals(&thread_id, stamp, limit, cancel)
+                .await?;
             self.active.insert(thread_id, subscription);
         }
         // Every request looks for a host-state change; the first one also
@@ -248,6 +253,7 @@ impl ConversationDeliveryDriver {
         self.titles.remove(thread_id);
         self.run_usage.remove(thread_id);
         self.live_thinking.remove(thread_id);
+        self.terminals.remove(thread_id);
     }
 
     /// Re-reads every active subscription once after a coalesced process-wide
@@ -282,6 +288,8 @@ impl ConversationDeliveryDriver {
             self.deliver_run_usage(&thread_id, stamp, limit, cancel)
                 .await?;
             self.deliver_live_thinking(&thread_id, stamp, limit, cancel)
+                .await?;
+            self.deliver_thread_terminals(&thread_id, stamp, limit, cancel)
                 .await?;
             self.active.insert(thread_id, subscription);
         }
@@ -364,6 +372,33 @@ impl ConversationDeliveryDriver {
             Some(block) => self.live_thinking.insert(thread_id.clone(), block),
             None => self.live_thinking.remove(thread_id),
         };
+        Ok(())
+    }
+
+    /// Pushes a subscribed thread's shell jobs when they changed, each with
+    /// the output this subscriber does not have yet. They are read from
+    /// memory: a job's output is never stored, so a thread whose runs opened
+    /// none pushes nothing.
+    async fn deliver_thread_terminals<F>(
+        &mut self,
+        thread_id: &ThreadId,
+        stamp: &mut F,
+        limit: Duration,
+        cancel: &CancelHandle,
+    ) -> Result<(), DeadlineError<RequestStageError>>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let mut delivered = self.terminals.get(thread_id).cloned().unwrap_or_default();
+        let Some(terminals) = self.context.thread_terminals(thread_id, &mut delivered) else {
+            return Ok(());
+        };
+        let event = Event::ThreadTerminals(ThreadTerminals {
+            thread_id: thread_id.clone(),
+            terminals,
+        });
+        self.send_state_event(event, stamp, limit, cancel).await?;
+        self.terminals.insert(thread_id.clone(), delivered);
         Ok(())
     }
 

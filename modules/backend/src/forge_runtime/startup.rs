@@ -489,7 +489,8 @@ async fn run_with_context(context: ForgeRunContext) -> Result<(), ForgeRuntimeEr
         crate::request_handler::NativeRegisteredEngineProfilesReader::new(database.clone()),
     )
     .with_conversation_commit_notifier(native_run.conversation_commit_notifier())
-    .with_live_thinking_board(native_run.live_thinking_board());
+    .with_live_thinking_board(native_run.live_thinking_board())
+    .with_terminal_board(native_run.terminal_board());
     Box::pin(run_with_handler(
         ForgeRunContext {
             app,

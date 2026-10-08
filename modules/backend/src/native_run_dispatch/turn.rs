@@ -202,7 +202,7 @@ pub(super) async fn consume_turn(
             turn.cancel();
         }
     }
-    forget_live_thinking(&context, &state);
+    forget_run_boards(&context, &state);
     persist_tail(&context, &mut state, &mut turn).await;
     let owner_result = turn.finish().await;
     report_engine_turn_failure(&state, &owner_result);
@@ -405,6 +405,7 @@ pub(super) async fn handle_observation(
         EngineObservation::SubagentTranscript(row) => {
             handle_subagent_transcript_row(context, state, turn, row).await;
         }
+        EngineObservation::Shell(row) => note_shell_job(context, state, &row),
         EngineObservation::Activity(observation) => {
             state.streaming_speed.end_interval();
             if note_live_thinking(context, state, &observation) {
@@ -458,6 +459,49 @@ fn note_live_thinking(
     }
     let _ = context.config.notifier.publish(&launched.thread_id);
     true
+}
+
+/// Keeps one shell job change on the thread's terminal board instead of
+/// committing it, and wakes subscribers when it changed what they see.
+///
+/// A job's output is unbounded over its lifetime and only its newest part is
+/// worth showing, so shell rows never reach the observation ledger.
+fn note_shell_job(
+    context: &TurnConsumptionContext<'_>,
+    state: &TurnConsumptionState<'_>,
+    row: &crate::engine_owner::observation::ShellJobRow,
+) {
+    let launched = state.scope.launched;
+    if row.run_id != launched.run_id {
+        return;
+    }
+    let at = at_or_after(context.origin, state.scope.expected_updated_at)
+        .unwrap_or(state.scope.expected_updated_at);
+    if context.config.terminals.apply(&launched.thread_id, row, at) {
+        let _ = context.config.notifier.publish(&launched.thread_id);
+    }
+}
+
+/// Clears what the settled run kept in memory: its thinking block, and its
+/// shell jobs that still run, which die with its engine process.
+fn forget_run_boards(context: &TurnConsumptionContext<'_>, state: &TurnConsumptionState<'_>) {
+    forget_live_thinking(context, state);
+    end_shell_jobs(context, state);
+}
+
+/// Ends the run's shell jobs that still run once its engine process is gone,
+/// and wakes subscribers when one was showing as running.
+fn end_shell_jobs(context: &TurnConsumptionContext<'_>, state: &TurnConsumptionState<'_>) {
+    let launched = state.scope.launched;
+    let at = at_or_after(context.origin, state.scope.expected_updated_at)
+        .unwrap_or(state.scope.expected_updated_at);
+    if context
+        .config
+        .terminals
+        .end_run(&launched.thread_id, &launched.run_id, at)
+    {
+        let _ = context.config.notifier.publish(&launched.thread_id);
+    }
 }
 
 /// Drops the run's thinking block once it is no longer the newest thing the

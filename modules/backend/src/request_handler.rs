@@ -194,6 +194,9 @@ pub(crate) struct ConversationConnectionContext {
     /// What each live run is thinking right now, when run dispatch shares
     /// its board with request delivery.
     live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
+    /// The shell jobs of every thread's runs, when run dispatch shares its
+    /// board with request delivery.
+    terminals: Option<crate::thread_terminals::TerminalBoard>,
     account_usage: Option<Arc<crate::account_usage_service::AccountUsageService>>,
     extension_sync: Option<Arc<crate::extension_sync::ExtensionSync>>,
     run_cancellation: Option<RunCancellationRegistry>,
@@ -221,6 +224,16 @@ impl ConversationConnectionContext {
         thread: &ThreadId,
     ) -> Option<artisan_domain::LiveThinkingBlock> {
         self.live_thinking.as_ref()?.current(thread)
+    }
+
+    /// `thread`'s shell jobs with the output past what `delivered` has, if
+    /// anything changed since.
+    pub(crate) fn thread_terminals(
+        &self,
+        thread: &ThreadId,
+        delivered: &mut crate::thread_terminals::DeliveredTerminals,
+    ) -> Option<Vec<artisan_domain::ThreadTerminal>> {
+        self.terminals.as_ref()?.changes_since(thread, delivered)
     }
 
     pub(crate) fn repository(&self) -> &Repository {
@@ -375,6 +388,7 @@ pub struct RequestHandler {
     subscription_identity: Option<Arc<SubscriptionRegistrarIdentity>>,
     conversation_commit_notifier: Option<ConversationCommitNotifier>,
     live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
+    terminals: Option<crate::thread_terminals::TerminalBoard>,
     directory_picker: Option<DirectoryPicker>,
     registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
     run_cancellation: Option<RunCancellationRegistry>,
@@ -512,6 +526,7 @@ impl RequestHandler {
             subscription_identity: None,
             conversation_commit_notifier: None,
             live_thinking: None,
+            terminals: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -542,6 +557,7 @@ impl RequestHandler {
             subscription_identity: None,
             conversation_commit_notifier: None,
             live_thinking: None,
+            terminals: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -573,6 +589,7 @@ impl RequestHandler {
             subscription_identity: Some(subscription_identity),
             conversation_commit_notifier: None,
             live_thinking: None,
+            terminals: None,
             directory_picker: None,
             registered_engine_profiles: None,
             run_cancellation: None,
@@ -615,6 +632,14 @@ impl RequestHandler {
         board: crate::live_thinking::LiveThinkingBoard,
     ) -> Self {
         self.live_thinking = Some(board);
+        self
+    }
+
+    /// Shares run dispatch's board of shell jobs, so subscribers of a thread
+    /// receive its terminals.
+    #[must_use]
+    pub fn with_terminal_board(mut self, board: crate::thread_terminals::TerminalBoard) -> Self {
+        self.terminals = Some(board);
         self
     }
 
@@ -743,6 +768,7 @@ impl RequestHandler {
             identity: Arc::new(0_u8),
             notifier: self.conversation_commit_notifier.clone()?,
             live_thinking: self.live_thinking.clone(),
+            terminals: self.terminals.clone(),
             account_usage: self.account_usage.clone(),
             extension_sync: self.extension_sync.clone(),
             run_cancellation: self.run_cancellation.clone(),
