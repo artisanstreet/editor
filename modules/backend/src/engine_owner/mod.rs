@@ -54,6 +54,7 @@ pub(crate) mod grok;
 pub mod http;
 pub(crate) mod interaction;
 pub(crate) mod observation;
+pub(crate) mod shell_tail;
 pub(crate) mod opencode_event;
 pub(crate) mod operation;
 mod process;

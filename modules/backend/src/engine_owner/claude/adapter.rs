@@ -235,6 +235,17 @@ impl ClaudePendingTracker {
         }
     }
 
+    /// Follows the turn's background shell jobs through `tail`.
+    pub(crate) fn attach_shell_tail(&mut self, tail: super::super::shell_tail::ShellTail) {
+        self.tools.attach_shell_tail(tail);
+    }
+
+    /// Releases the turn's background output follower, so it can be closed
+    /// before the turn settles.
+    pub(crate) fn take_shell_tail(&mut self) -> Option<super::super::shell_tail::ShellTail> {
+        self.tools.take_shell_tail()
+    }
+
     /// Notes one approval request; re-noting the same id is a no-op.
     ///
     /// The request is validated through the domain constructor first, so an
@@ -572,6 +583,23 @@ async fn emit_rows(
     Ok(())
 }
 
+/// Sends the tool tracker's pending shell job changes in order.
+async fn emit_shell_rows(
+    observations: &mpsc::Sender<EngineObservation>,
+    tracker: &mut ClaudePendingTracker,
+) -> Result<(), TerminalState> {
+    for row in tracker.tools.take_shell_rows() {
+        if observations
+            .send(EngineObservation::Shell(row))
+            .await
+            .is_err()
+        {
+            return Err(TerminalState::Interrupted);
+        }
+    }
+    Ok(())
+}
+
 /// Projects one buffered text block onto the message part it settles.
 ///
 /// The buffered text is authoritative: streamed deltas that already equal it
@@ -733,6 +761,7 @@ async fn apply_assistant_frame(
             ClaudeAssistantContent::ToolUse(tool) => {
                 mark_commentary(observations, run_id, tracker, frame_sequence).await?;
                 let rows = tracker.tools.started(run_id, frame_sequence, tool);
+                emit_shell_rows(observations, tracker).await?;
                 emit_rows(observations, rows).await?;
             }
         }
@@ -867,6 +896,9 @@ pub(crate) async fn apply_event(
                 .iter()
                 .flat_map(|result| tracker.tools.finished(run_id, frame_sequence, result))
                 .collect();
+            if let Err(state) = emit_shell_rows(observations, tracker).await {
+                return ClaudeApplyOutcome::Terminal(state);
+            }
             settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ContentBlockStopped { index } => {
@@ -889,10 +921,14 @@ pub(crate) async fn apply_event(
                 .await,
             )
         }
-        ClaudeEvent::SubagentLifecycle { task_id } => {
-            // Discovery emits its row; the root turn is never adopted and no
-            // root text is emitted.
-            tracker.note_subagent(run_id, expected_session, &task_id, frame_sequence);
+        ClaudeEvent::Task(report) => {
+            // A shell job's report moves its terminal; any other task is a
+            // subagent, whose discovery emits its row. The root turn is never
+            // adopted and no root text is emitted.
+            if tracker.tools.shell_task(run_id, &report) {
+                return settle(emit_shell_rows(observations, tracker).await);
+            }
+            tracker.note_subagent(run_id, expected_session, &report.task_id, frame_sequence);
             ClaudeApplyOutcome::Continue { end_input: false }
         }
         ClaudeEvent::BackgroundTasks { waited } => {

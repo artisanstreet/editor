@@ -272,6 +272,9 @@ pub(super) async fn execute_claude_turn(
     // thinking stretches.
     let mut tracker =
         claude_runtime::ClaudePendingTracker::with_thinking_display(settings.thinking_display());
+    tracker.attach_shell_tail(super::super::shell_tail::ShellTail::spawn(
+        observations.clone(),
+    ));
     let mut active_turn: Option<String> = None;
     let mut frame_sequence: u64 = 0;
     let mut last_activity = Instant::now();
@@ -314,6 +317,11 @@ pub(super) async fn execute_claude_turn(
         &mut steer_rx,
     )
     .await;
+    // Background jobs die with the CLI: read what they wrote last before the
+    // turn settles, so the follower's sender is gone when the channel closes.
+    if let Some(tail) = tracker.take_shell_tail() {
+        tail.close().await;
+    }
     match terminal {
         ClaudePumpOutcome::Terminal {
             state,

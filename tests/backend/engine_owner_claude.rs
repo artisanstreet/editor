@@ -406,7 +406,7 @@ fn approval_question_task_and_child_frames_decode() {
         4,
     )
     .expect("task decodes");
-    assert!(matches!(task, ClaudeEvent::SubagentLifecycle { .. }));
+    assert!(matches!(task, ClaudeEvent::Task(ref report) if report.task_id == "task-1"));
 
     let child = parse_frame(
         r#"{"type":"assistant","parent_tool_use_id":"tool-9","message":{"content":[]}}"#,

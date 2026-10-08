@@ -324,9 +324,10 @@ pub(crate) enum ClaudeEvent {
     Assistant(ClaudeAssistantFrame),
     ApprovalRequested(ClaudeApprovalRequest),
     QuestionRequested(ClaudeQuestionRequest),
-    SubagentLifecycle {
-        task_id: String,
-    },
+    /// One background task report (`task_started`, `task_progress`,
+    /// `task_updated`, `task_notification`): a subagent or workflow, or a
+    /// shell job.
+    Task(super::tools::ClaudeTaskReport),
     /// The live background-task level after a membership change: how many
     /// agents and workflows still run behind the root turn.
     BackgroundTasks {
@@ -484,7 +485,7 @@ fn decode_system(envelope: &Value) -> ClaudeEvent {
         },
         "task_started" | "task_progress" | "task_updated" | "task_notification" => {
             match bounded_id(envelope, "task_id") {
-                Some(task_id) => ClaudeEvent::SubagentLifecycle { task_id },
+                Some(task_id) => ClaudeEvent::Task(task_report(envelope, task_id)),
                 None => ClaudeEvent::Unknown,
             }
         }
@@ -499,6 +500,27 @@ fn decode_system(envelope: &Value) -> ClaudeEvent {
             None => ClaudeEvent::Unknown,
         },
         _ => ClaudeEvent::Unknown,
+    }
+}
+
+/// Reads one background task report. `task_updated` carries its status in
+/// `patch`; the other reports carry it at the top level.
+fn task_report(envelope: &Value, task_id: String) -> super::tools::ClaudeTaskReport {
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty() && text.len() <= 4096)
+            .map(str::to_owned)
+    };
+    let status = text(envelope.get("status"))
+        .or_else(|| text(envelope.get("patch").and_then(|patch| patch.get("status"))));
+    super::tools::ClaudeTaskReport {
+        task_id,
+        tool_use_id: bounded_id(envelope, "tool_use_id"),
+        task_type: text(envelope.get("task_type")),
+        status,
+        summary: text(envelope.get("summary")),
+        output_file: text(envelope.get("output_file")),
     }
 }
 
@@ -591,7 +613,7 @@ fn decode_user(envelope: &Value) -> ClaudeEvent {
         .get("message")
         .and_then(|message| message.get("content"))
         .and_then(Value::as_array)
-        .map(|content| super::tools::tool_results(content))
+        .map(|content| super::tools::tool_results(content, envelope.get("tool_use_result")))
         .unwrap_or_default();
     if results.is_empty() {
         ClaudeEvent::Unknown
