@@ -659,9 +659,12 @@ impl Repository {
         answers: &[String],
         scope: &ResolveScope,
     ) -> Result<ResolveInteractionOutcome, RunInteractionError> {
-        let transaction = self.begin_write("resolve_response").await.map_err(|source| {
-            RunInteractionError::Repository(database_error("begin resolve interaction", source))
-        })?;
+        let transaction = self
+            .begin_write("resolve_response")
+            .await
+            .map_err(|source| {
+                RunInteractionError::Repository(database_error("begin resolve interaction", source))
+            })?;
         if let Some(row) = run_interaction_receipt::Entity::find_by_id(request_id.as_str())
             .one(&transaction)
             .await

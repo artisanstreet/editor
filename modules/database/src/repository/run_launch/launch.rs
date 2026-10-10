@@ -190,9 +190,12 @@ impl Repository {
         }
 
         let encoded_owner = claimed.owner.to_storage();
-        let transaction = self.begin_write("launch_claimed_run").await.map_err(|source| {
-            RunLaunchError::Repository(database_error("begin run launch", source))
-        })?;
+        let transaction = self
+            .begin_write("launch_claimed_run")
+            .await
+            .map_err(|source| {
+                RunLaunchError::Repository(database_error("begin run launch", source))
+            })?;
 
         let statement = Statement::from_sql_and_values(
             DbBackend::Sqlite,

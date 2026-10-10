@@ -97,9 +97,12 @@ impl Repository {
         command: ProjectSteeredMessage<'_>,
     ) -> Result<ProjectSteeredMessageOutcome, RunLaunchError> {
         let operated_at_ms = millis(command.operated_at);
-        let transaction = self.begin_write("project_steered_message").await.map_err(|source| {
-            RunLaunchError::Repository(database_error("begin steered projection", source))
-        })?;
+        let transaction = self
+            .begin_write("project_steered_message")
+            .await
+            .map_err(|source| {
+                RunLaunchError::Repository(database_error("begin steered projection", source))
+            })?;
         let message = entities::message::Entity::find_by_id(command.message_id.as_str())
             .one(&transaction)
             .await

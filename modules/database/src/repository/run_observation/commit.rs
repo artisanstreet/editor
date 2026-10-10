@@ -56,9 +56,12 @@ impl Repository {
         command: CommitRunBatch<'_>,
     ) -> Result<CommitRunBatchOutcome, RunObservationError> {
         let digest = batch::validate_and_digest(&command)?;
-        let transaction = self.begin_write("commit_run_batch").await.map_err(|source| {
-            RunObservationError::Repository(database_error("begin run batch commit", source))
-        })?;
+        let transaction = self
+            .begin_write("commit_run_batch")
+            .await
+            .map_err(|source| {
+                RunObservationError::Repository(database_error("begin run batch commit", source))
+            })?;
         match execute_batch(&transaction, &command, &digest).await {
             Ok(BatchExecution::Persisted(info)) => {
                 transaction.commit().await.map_err(|source| {

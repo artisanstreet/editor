@@ -242,9 +242,12 @@ impl Repository {
         let receipt = command.receipt;
 
         let encoded_owner = claimed.owner.to_storage();
-        let transaction = self.begin_write("bind_run_provider").await.map_err(|source| {
-            RunBindingError::Repository(database_error("begin run binding", source))
-        })?;
+        let transaction = self
+            .begin_write("bind_run_provider")
+            .await
+            .map_err(|source| {
+                RunBindingError::Repository(database_error("begin run binding", source))
+            })?;
 
         let dispatch_stmt = Statement::from_sql_and_values(
             DbBackend::Sqlite,

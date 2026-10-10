@@ -193,7 +193,9 @@ impl Repository {
         new_thread_id: &ThreadId,
         recovered_at: UnixMillis,
     ) -> Result<(), QueuedMessageRepositoryError> {
-        let _write_gate = self.acquire_write_gate("record_failed_message_recovery").await;
+        let _write_gate = self
+            .acquire_write_gate("record_failed_message_recovery")
+            .await;
         self.database
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,

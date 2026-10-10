@@ -100,7 +100,7 @@ use crate::handshake::ServerWelcome;
 use crate::handshake::kind as message_kind;
 use crate::identity::PinnedIdentity;
 use crate::request_correlation::RequestCorrelationError;
-use crate::request_lifecycle::{ClientRequestLifecycle, OutcomeWaiter, ResolvedRequest};
+use crate::request_lifecycle::{ClientRequestLifecycle, ResolvedRequest};
 use crate::{
     CancelHandle, DeadlineError, HandshakeMessageKind, OperationKind, TransportError,
     run_with_deadline,
@@ -108,14 +108,16 @@ use crate::{
 
 mod exchange;
 mod link;
+mod requester;
 
 pub use exchange::{ExchangeError, HandshakeStageError, ReplyRejection};
 
 use exchange::{
-    AcknowledgingResponseError, SettledReply, classify_reply, handshake_stage, open_and_send,
-    receive_reply, request_stage, request_stage_acknowledging_response,
+    AcknowledgingResponseError, SettledReply, classify_reply, handshake_stage, request_stage,
+    request_stage_acknowledging_response,
 };
 use link::SessionLink;
+pub use requester::SessionRequester;
 
 /// The one public failure condition for the consuming server-delivery
 /// receiver.
@@ -769,138 +771,6 @@ impl ClientSession {
         // closed and is ignored; after any failure it is the guaranteed
         // synchronous teardown.
         drained.map_err(ClientSessionError::Shutdown)
-    }
-}
-
-/// Runs requests on one session's connection beside its owner; see the
-/// [module documentation](self#concurrent-requests).
-///
-/// Cloning a requester is cheap; every clone shares the session's
-/// correlation registry and its [`CONCURRENT_REQUEST_CAPACITY`].
-#[derive(Clone, Debug)]
-pub struct SessionRequester {
-    connection: Connection,
-    lifecycle: Arc<Mutex<ClientRequestLifecycle>>,
-    concurrent: Arc<tokio::sync::Semaphore>,
-    negotiated_version: ProtocolVersion,
-    connection_id: ConnectionId,
-    lifecycle_control_supported: bool,
-    /// Bounds opening the stream and sending the request.
-    send_limit: Duration,
-}
-
-impl SessionRequester {
-    /// Returns the negotiated application protocol revision.
-    #[must_use]
-    pub const fn protocol_version(&self) -> ProtocolVersion {
-        self.negotiated_version
-    }
-
-    /// Returns the server-assigned identity of the session's connection.
-    #[must_use]
-    pub fn connection_id(&self) -> &ConnectionId {
-        &self.connection_id
-    }
-
-    /// Whether the session's connection has closed, for whatever reason.
-    #[must_use]
-    pub fn is_closed(&self) -> bool {
-        self.connection.close_reason().is_some()
-    }
-
-    /// Runs one request on its own stream and returns its settled outcome.
-    ///
-    /// Waits for one of the [`CONCURRENT_REQUEST_CAPACITY`] turns, then
-    /// validates and admits the request exactly as
-    /// [`ClientSession::request`] does. Opening the stream and sending the
-    /// request are bounded by the session's request limit; the reply is
-    /// awaited for as long as the peer takes to answer, until `cancel` or
-    /// the connection ends it. Dropping the future, and every error,
-    /// abandons the request: its stream is reset and stopped and its
-    /// identity stays retired. Nothing here closes the connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same typed errors as [`ClientSession::request`]; a
-    /// cancelled wait for a turn is [`ClientRequestError::Exchange`] with
-    /// [`DeadlineError::Cancelled`].
-    pub async fn request(
-        &self,
-        envelope: WireEnvelope,
-        cancel: &CancelHandle,
-    ) -> Result<ResolvedRequest, ClientRequestError> {
-        let request_id = validate_outbound(
-            &envelope,
-            self.negotiated_version,
-            self.lifecycle_control_supported,
-        )?;
-        let cancelled = || {
-            ClientRequestError::Exchange(DeadlineError::Cancelled {
-                operation: OperationKind::Receive,
-            })
-        };
-        let _turn = tokio::select! {
-            biased;
-            () = cancel.wait() => return Err(cancelled()),
-            turn = self.concurrent.acquire() => turn.map_err(|_| cancelled())?,
-        };
-        let waiter = lock(&self.lifecycle)
-            .admit(request_id.clone())
-            .map_err(ClientRequestError::Admission)?;
-        let mut admitted = Admitted {
-            lifecycle: &self.lifecycle,
-            request_id: &request_id,
-            waiter,
-            settled: false,
-        };
-        let mut streams = run_with_deadline(
-            OperationKind::Send,
-            self.send_limit,
-            cancel,
-            open_and_send(&self.connection, &envelope),
-        )
-        .await
-        .map_err(ClientRequestError::Exchange)?;
-        streams.finish_outbound();
-        let reply = tokio::select! {
-            biased;
-            () = cancel.wait() => return Err(cancelled()),
-            reply = receive_reply(&mut streams) => reply.map_err(|error| {
-                ClientRequestError::Exchange(DeadlineError::Peer {
-                    operation: OperationKind::Receive,
-                    error,
-                })
-            })?,
-        };
-        drop(streams);
-        settle_reply(
-            &self.lifecycle,
-            &reply,
-            self.negotiated_version,
-            &request_id,
-        )?;
-        admitted.settled = true;
-        Ok(admitted
-            .waiter
-            .take_outcome()
-            .expect("the admitted request settled exactly once into its private waiter"))
-    }
-}
-
-/// One requester request admitted to the shared registry; abandoned there
-/// unless it settled.
-struct Admitted<'a> {
-    lifecycle: &'a Mutex<ClientRequestLifecycle>,
-    request_id: &'a RequestId,
-    waiter: OutcomeWaiter,
-    settled: bool,
-}
-
-impl Drop for Admitted<'_> {
-    fn drop(&mut self) {
-        if !self.settled {
-            let _abandoned = lock(self.lifecycle).abandon(self.request_id);
-        }
     }
 }
 

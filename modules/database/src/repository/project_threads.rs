@@ -65,7 +65,9 @@ impl Repository {
         title: &ThreadTitle,
     ) -> Result<(), RepositoryError> {
         use sea_orm::sea_query::Expr;
-        let _write_gate = self.acquire_write_gate("record_generated_thread_title").await;
+        let _write_gate = self
+            .acquire_write_gate("record_generated_thread_title")
+            .await;
         entities::thread::Entity::update_many()
             .col_expr(entities::thread::Column::Title, Expr::value(title.as_str()))
             .filter(entities::thread::Column::ThreadId.eq(thread.as_str()))

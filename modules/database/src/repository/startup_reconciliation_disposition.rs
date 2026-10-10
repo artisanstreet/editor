@@ -176,12 +176,15 @@ impl Repository {
     ) -> Result<StartupReconciliationDispositionOutcome, StartupReconciliationDispositionError>
     {
         validate_disposition(&command)?;
-        let transaction = self.begin_write("dispose_expired_candidate").await.map_err(|source| {
-            StartupReconciliationDispositionError::Repository(database_error(
-                "begin startup reconciliation disposition",
-                source,
-            ))
-        })?;
+        let transaction = self
+            .begin_write("dispose_expired_candidate")
+            .await
+            .map_err(|source| {
+                StartupReconciliationDispositionError::Repository(database_error(
+                    "begin startup reconciliation disposition",
+                    source,
+                ))
+            })?;
         match execute_dispose(&transaction, &command, recovery).await {
             Ok(DispositionExecution::Persisted(receipt)) => {
                 transaction.commit().await.map_err(|source| {

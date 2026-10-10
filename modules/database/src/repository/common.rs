@@ -406,7 +406,10 @@ mod write_gate_tests {
             .expect("table");
         let repository = Repository::new(database);
 
-        let held = repository.begin_write("test write").await.expect("first writer");
+        let held = repository
+            .begin_write("test write")
+            .await
+            .expect("first writer");
         held.execute_unprepared("INSERT INTO gate_rows VALUES (1)")
             .await
             .expect("first insert");

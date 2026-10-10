@@ -145,9 +145,12 @@ impl Repository {
         command: RecordRunUsage<'_>,
     ) -> Result<RecordRunUsageOutcome, RunUsageRepositoryError> {
         validate_command_scope(&command)?;
-        let transaction = self.begin_write("record_run_usage").await.map_err(|source| {
-            repository_error(database_error("begin run usage transaction", source))
-        })?;
+        let transaction = self
+            .begin_write("record_run_usage")
+            .await
+            .map_err(|source| {
+                repository_error(database_error("begin run usage transaction", source))
+            })?;
 
         let authority =
             match load_run_authority(&transaction, command.run_id, command.thread_id).await {
