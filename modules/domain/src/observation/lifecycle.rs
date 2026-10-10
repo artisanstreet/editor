@@ -274,6 +274,133 @@ impl CompactionObservation {
     }
 }
 
+/// Where a session goal stands.
+///
+/// A goal is a condition the engine keeps working toward across turns until
+/// it is judged met; it belongs to the session, not to one turn.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum GoalState {
+    /// The engine is working toward the goal.
+    Active,
+    /// Paused: by the reader, or by the engine waiting on a decision.
+    Paused,
+    /// The engine judged the goal met.
+    Met,
+    /// The engine gave the goal up as unreachable.
+    Abandoned,
+    /// The goal was cleared before it was met.
+    Cleared,
+}
+
+impl GoalState {
+    /// Returns the stable spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Met => "met",
+            Self::Abandoned => "abandoned",
+            Self::Cleared => "cleared",
+        }
+    }
+
+    /// Parses a stored goal state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationError::UnknownValue`] for any other spelling.
+    pub fn parse(value: &str) -> Result<Self, ObservationError> {
+        match value {
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            "met" => Ok(Self::Met),
+            "abandoned" => Ok(Self::Abandoned),
+            "cleared" => Ok(Self::Cleared),
+            _ => Err(ObservationError::UnknownValue { field: "state" }),
+        }
+    }
+
+    /// Whether the goal still stands: the engine works toward it or will
+    /// once resumed.
+    #[must_use]
+    pub const fn stands(self) -> bool {
+        matches!(self, Self::Active | Self::Paused)
+    }
+}
+
+/// One report of where the session goal stands.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct GoalObservation {
+    id: ObservationId,
+    sequence: ObservationSequence,
+    state: GoalState,
+    objective: Option<String>,
+    detail: Option<String>,
+}
+
+impl GoalObservation {
+    /// Creates a goal observation after validating its text bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObservationError`] when a present objective or detail is
+    /// empty or exceeds [`OBSERVATION_TEXT_MAX_BYTES`] bytes.
+    pub fn new(
+        id: ObservationId,
+        sequence: ObservationSequence,
+        state: GoalState,
+        objective: Option<String>,
+        detail: Option<String>,
+    ) -> Result<Self, ObservationError> {
+        check_optional_text(
+            objective.as_deref(),
+            "objective",
+            OBSERVATION_TEXT_MAX_BYTES,
+        )?;
+        check_optional_text(detail.as_deref(), "detail", OBSERVATION_TEXT_MAX_BYTES)?;
+        Ok(Self {
+            id,
+            sequence,
+            state,
+            objective,
+            detail,
+        })
+    }
+
+    /// Returns the observation identity.
+    #[must_use]
+    pub const fn id(&self) -> &ObservationId {
+        &self.id
+    }
+
+    /// Returns the durable sequence.
+    #[must_use]
+    pub const fn sequence(&self) -> ObservationSequence {
+        self.sequence
+    }
+
+    /// Returns where the goal stands.
+    #[must_use]
+    pub const fn state(&self) -> GoalState {
+        self.state
+    }
+
+    /// Returns the goal's condition as the reader or engine stated it, when
+    /// the report carried it.
+    #[must_use]
+    pub fn objective(&self) -> Option<&str> {
+        self.objective.as_deref()
+    }
+
+    /// Returns the engine's latest word on it: why it is not met yet, why it
+    /// paused, or how it was met.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
 /// Provider attempt state of one retry observation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RetryAttemptState {

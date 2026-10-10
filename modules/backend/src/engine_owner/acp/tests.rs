@@ -1162,3 +1162,77 @@ fn generated_title_metadata_is_scoped_and_optional() {
             .is_none()
     );
 }
+
+/// Grok reports its goal on its own session update; its statuses fold onto
+/// the shared goal states.
+#[test]
+fn grok_goal_updates_fold_onto_the_shared_goal_states() {
+    use artisan_domain::GoalState;
+    let session = SessionId::parse("s-1", 64).expect("session id");
+    let goal = |update: Value| {
+        parse_session_update(
+            &serde_json::json!({ "sessionId": "s-1", "update": update }),
+            &session,
+            64,
+        )
+        .expect("update parses")
+        .expect("same session")
+        .update
+        .goal_update()
+    };
+    let report = goal(serde_json::json!({
+        "sessionUpdate": "goal_updated",
+        "objective": "Migrate the auth module",
+        "status": "active",
+        "current_deliverable_title": "Port the token store",
+    }))
+    .expect("a goal report");
+    assert_eq!(report.0, GoalState::Active);
+    assert_eq!(report.1.as_deref(), Some("Migrate the auth module"));
+    assert_eq!(report.2.as_deref(), Some("Port the token store"));
+
+    for (status, state) in [
+        ("user_paused", GoalState::Paused),
+        ("budget_limited", GoalState::Paused),
+        ("blocked", GoalState::Paused),
+        ("complete", GoalState::Met),
+        ("failed", GoalState::Abandoned),
+        ("cancelled", GoalState::Cleared),
+    ] {
+        let report = goal(serde_json::json!({
+            "sessionUpdate": "goal_updated",
+            "goal": { "status": status, "objective": "x" },
+        }))
+        .expect("a goal report");
+        assert_eq!(report.0, state, "{status}");
+    }
+    assert_eq!(
+        goal(serde_json::json!({
+            "sessionUpdate": "goal_updated",
+            "status": "active",
+            "last_event": "goal_cleared",
+        }))
+        .map(|report| report.0),
+        Some(GoalState::Cleared)
+    );
+    assert!(
+        goal(serde_json::json!({ "sessionUpdate": "turn_completed" })).is_none(),
+        "other Grok updates are not goals"
+    );
+}
+
+#[test]
+fn a_refusal_stop_reason_is_neither_completion_nor_cancellation() {
+    let outcome = |reason: &str| {
+        parse_prompt_result(&AcpResponsePayload::Result(
+            serde_json::json!({ "stopReason": reason }),
+        ))
+        .expect("prompt result parses")
+    };
+    let refused = outcome("refusal");
+    assert!(refused.refused && !refused.cancelled);
+    let cancelled = outcome("cancelled");
+    assert!(cancelled.cancelled && !cancelled.refused);
+    let completed = outcome("end_turn");
+    assert!(!completed.cancelled && !completed.refused);
+}

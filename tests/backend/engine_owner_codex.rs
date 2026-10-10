@@ -35,7 +35,7 @@ use tokio::time::Instant;
 use super::bounded_line::{BoundedLineError, read_bounded_line};
 use super::codex::{
     CODEX_MAX_FRAME_BYTES, CodexContinuationDecision, CodexContinuationGateInput, CodexEvent,
-    CodexLineError, CodexPendingTracker, CodexQuotaWindowKind, CodexSettings,
+    CodexLineError, CodexPendingTracker, CodexQuestionHandoff, CodexQuotaWindowKind, CodexSettings,
     CodexTerminalLifecycle, CodexToolAction, CodexTurnState, CodexUsageAttribution,
     CodexUsageContext, CodexUsageScope, answer_approval, apply_event,
     check_codex_native_continuation, clamp_codex_percent_used, classify_codex_quota_window_kind,
@@ -133,11 +133,7 @@ fn initialize_params_carry_opt_out_notifications() {
         .collect::<Vec<_>>();
     assert_eq!(
         opted,
-        vec![
-            "account/rateLimits/updated",
-            "mcpServer/startupStatus/updated",
-            "remoteControl/status/changed",
-        ]
+        vec!["account/rateLimits/updated", "remoteControl/status/changed"]
     );
     let line = request_line(1, "initialize", &params);
     assert!(line.contains("\"method\":\"initialize\""));
@@ -452,12 +448,40 @@ fn unknown_opt_out_and_malformed_frames_reject_safely() {
         .expect("unknown stays observable");
     assert!(matches!(unknown, CodexEvent::UnknownMethod));
 
-    let opted = parse_frame(
+    let opted = parse_frame(r#"{"method":"account/rateLimits/updated","params":{}}"#, 2)
+        .expect("opt-out stays observable");
+    assert!(matches!(opted, CodexEvent::OptedOut));
+
+    // MCP startup states report the engine's connectors; a nameless one is
+    // just unknown.
+    let nameless = parse_frame(
         r#"{"method":"mcpServer/startupStatus/updated","params":{}}"#,
         2,
     )
-    .expect("opt-out stays observable");
-    assert!(matches!(opted, CodexEvent::OptedOut));
+    .expect("startup state stays observable");
+    assert!(matches!(nameless, CodexEvent::UnknownMethod));
+    let ready = parse_frame(
+        r#"{"method":"mcpServer/startupStatus/updated","params":{"name":"sentry","status":"ready"}}"#,
+        2,
+    )
+    .expect("startup state decodes");
+    assert!(matches!(
+        ready,
+        CodexEvent::McpServerStatus { ref name, status: artisan_domain::ConnectorStatus::Connected }
+            if name == "sentry"
+    ));
+    let signed_out = parse_frame(
+        r#"{"method":"mcpServer/startupStatus/updated","params":{"name":"posthog","status":"failed","failureReason":"reauthenticationRequired"}}"#,
+        2,
+    )
+    .expect("startup state decodes");
+    assert!(matches!(
+        signed_out,
+        CodexEvent::McpServerStatus {
+            status: artisan_domain::ConnectorStatus::NeedsAuth,
+            ..
+        }
+    ));
 
     assert!(parse_frame("not json", 3).is_err());
     assert!(parse_frame(r#"{"params":{}}"#, 4).is_err());
@@ -569,10 +593,12 @@ async fn question_answer_and_steer_verbs_shape_lines() {
             .is_err(),
         "an unknown question is refused"
     );
-    let reply = tracker
+    let Some(CodexQuestionHandoff::Reply(reply)) = tracker
         .record_question_answer("q-1:q1", &["first".to_owned()])
         .expect("the last answer records")
-        .expect("the whole request replies");
+    else {
+        panic!("the whole request replies")
+    };
     assert!(!tracker.waiting_on_user());
     let (mut client, server) = tokio::io::duplex(65_536);
     let mut server = BufReader::new(server);
@@ -2400,6 +2426,7 @@ async fn admit_codex_wire_resume_turn(
                 settings,
                 launch,
                 continuation,
+                handoff: None,
                 prompt_delivery: "immediate".to_owned(),
                 stream_after: 0,
                 control_capacity: 1,
@@ -2454,6 +2481,7 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
                     settings,
                     launch,
                     continuation: None,
+                    handoff: None,
                     prompt_delivery: "immediate".to_owned(),
                     stream_after: 0,
                     control_capacity: 1,
@@ -2499,6 +2527,67 @@ async fn codex_wire_owner_accepts_bound_turn_with_text_and_completion() {
             image_bytes
         );
         assert_eq!(recorded["serviceTier"], "fast");
+        assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
+    })
+    .await
+    .expect("wire turn completes inside 60s");
+}
+
+#[tokio::test]
+async fn codex_wire_owner_sends_a_handoff_ahead_of_the_request() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let fixture = codex_wire_fixture_program();
+        let temp = WireTempRoot::new("handoff");
+        let program = codex_wire_scenario_program(&fixture, &temp.dir, "strict");
+        let thread_id = ThreadId::parse("thread-wire-handoff").expect("thread id");
+        let settings = codex_wire_settings(
+            codex_wire_selection("codex-fixture", true),
+            &temp.root,
+            &thread_id,
+        )
+        .await;
+        let launch = NativeCodexAuthority::new()
+            .resolve_launch_with_executable(
+                &temp.db_path,
+                &EngineProfileId::parse("codex-fixture").expect("profile id"),
+                &program,
+                "codex-cli 0.145.0",
+            )
+            .expect("wire launch resolves");
+        let mut owner = EngineOwner::start_configured(
+            NonZeroUsize::new(1).expect("one slot"),
+            &tokio::runtime::Handle::current(),
+        );
+        let handoff = super::EngineHandoff::new("HISTORY".to_owned());
+        let turn = owner
+            .admit_codex_turn(
+                EngineCodexTurnInput {
+                    run_id: RunId::parse("wire-run-handoff").unwrap(),
+                    thread_id: thread_id.clone(),
+                    project_root: temp.root.clone(),
+                    prompt_id: "prompt-wire-1".to_owned(),
+                    prompt: QueueMessagePayload::text_only("hello wire").expect("payload"),
+                    settings,
+                    launch,
+                    continuation: None,
+                    handoff: Some(handoff.clone()),
+                    prompt_delivery: "immediate".to_owned(),
+                    stream_after: 0,
+                    control_capacity: 1,
+                },
+                Duration::from_secs(50),
+            )
+            .unwrap();
+        let wire = drive_codex_wire_turn(turn).await;
+        assert_eq!(wire.terminal, TerminalState::Completed);
+        // A handoff opens a fresh provider thread, never a resumed one.
+        assert_eq!(wire.session, "thread-fixture-1");
+        let recorded: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.dir.join("turn-start-params.json"))
+                .expect("fixture records turn params"),
+        )
+        .expect("recorded params are valid json");
+        assert_eq!(recorded["input"][0]["text"], handoff.frame("hello wire"));
         assert_eq!(owner.shutdown().await, EngineOwnerShutdown::Joined);
     })
     .await
@@ -3672,7 +3761,6 @@ async fn plain_message_and_terminal_paths_stay_unchanged() {
         r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"commentary","text":"","type":"agentMessage"}}}"#,
         r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"msg-1","phase":"final","text":"done","type":"agentMessage"}}}"#,
         r#"{"method":"item/started","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"u-1","type":"userMessage"}}}"#,
-        r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"c-1","type":"contextCompaction"}}}"#,
     ] {
         let event = parse_frame(line, 70).expect("envelope parses");
         assert!(
@@ -4026,4 +4114,236 @@ fn blocking_question_requests_keep_options_and_join_one_questionnaire() {
         .expect("the question fits the domain");
     assert!(free.options.is_none());
     assert!(free.header.is_none());
+}
+
+#[test]
+fn async_question_messages_become_one_questionnaire_without_blocking() {
+    let item = |questions: &str| {
+        parse_frame(
+            &format!(
+                r#"{{"method":"item/completed","params":{{"threadId":"t-1","turnId":"turn-1","item":{{"type":"agentMessage","id":"call-7","text":"Which?","phase":"final_answer","delivery":"async","questions":{questions}}}}}}}"#
+            ),
+            1,
+        )
+        .expect("frame decodes")
+    };
+    let CodexEvent::AsyncQuestionsRequested { thread_id, request } = item(
+        r#"[{"title":"Which pattern?","options":["Chocolate chip",""]},{"title":"Anything else?","options":null}]"#,
+    ) else {
+        panic!("expected async questions")
+    };
+    assert_eq!(thread_id, "t-1");
+    let [pattern, notes] = request.questions() else {
+        panic!("both questions are kept")
+    };
+    // Async questions have no ids: the item is the questionnaire and each
+    // question is keyed by its position.
+    assert_eq!(pattern.question_id(), "call-7:0");
+    assert_eq!(notes.group_id(), "call-7");
+    let input = pattern
+        .to_domain_input()
+        .expect("the question fits the domain");
+    let options = input.options.expect("suggested answers are kept");
+    assert_eq!(options.len(), 1, "an empty label is dropped");
+    assert_eq!(options[0].label(), "Chocolate chip");
+    assert!(notes.to_domain_input().expect("fits").options.is_none());
+
+    // Nothing waits on async questions, and skipping all of them sends no
+    // message at all.
+    let mut tracker = CodexPendingTracker::new();
+    assert_eq!(tracker.note_question_request(&request).len(), 2);
+    assert!(!tracker.waiting_on_user());
+    assert_eq!(
+        tracker
+            .record_question_answer("call-7:0", &[])
+            .expect("records"),
+        None
+    );
+    assert_eq!(
+        tracker
+            .record_question_answer("call-7:1", &[])
+            .expect("records"),
+        Some(CodexQuestionHandoff::Message(None))
+    );
+
+    // An async message without questions stays prose.
+    assert!(matches!(
+        item("[]"),
+        CodexEvent::AgentMessageSnapshot { .. }
+    ));
+}
+
+/// Codex reports its thread goal on `thread/goal/updated` and
+/// `thread/goal/cleared` (app-server v2 schema); its statuses fold onto the
+/// shared goal states.
+#[test]
+fn goal_notifications_decode_onto_the_shared_goal_states() {
+    use artisan_domain::GoalState;
+    let updated = |status: &str| {
+        parse_frame(
+            &format!(
+                r#"{{"method":"thread/goal/updated","params":{{"threadId":"thr-1","turnId":null,"goal":{{"threadId":"thr-1","objective":"all tests pass","status":"{status}","createdAt":1,"updatedAt":2,"timeUsedSeconds":3,"tokensUsed":4,"tokenBudget":null}}}}}}"#
+            ),
+            1,
+        )
+        .expect("frame decodes")
+    };
+    for (status, state) in [
+        ("active", GoalState::Active),
+        ("paused", GoalState::Paused),
+        ("blocked", GoalState::Paused),
+        ("usageLimited", GoalState::Paused),
+        ("budgetLimited", GoalState::Paused),
+        ("complete", GoalState::Met),
+    ] {
+        let CodexEvent::Goal {
+            thread_id,
+            state: decoded,
+            objective,
+        } = updated(status)
+        else {
+            panic!("{status} decodes as a goal");
+        };
+        assert_eq!(thread_id, "thr-1");
+        assert_eq!(decoded, state, "{status}");
+        assert_eq!(objective.as_deref(), Some("all tests pass"));
+    }
+    let cleared = parse_frame(
+        r#"{"method":"thread/goal/cleared","params":{"threadId":"thr-1"}}"#,
+        2,
+    )
+    .expect("frame decodes");
+    assert!(matches!(
+        cleared,
+        CodexEvent::Goal {
+            state: GoalState::Cleared,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn safety_screens_report_hold_reroute_and_refusal_once() {
+    use artisan_domain::{Observation, SafetyAction, SafetyCategory};
+    let run = run_id();
+    let mut tracker = bound_activity_tracker();
+    let mut active = None;
+
+    let hold = parse_frame(
+        r#"{"method":"model/safetyBuffering/updated","params":{"threadId":"t-1","turnId":"turn-1","model":"gpt-5.3-codex","useCases":["cyber"],"reasons":["high_risk_cyber_interaction_input"],"showBufferingUi":true,"fasterModel":null}}"#,
+        1,
+    )
+    .expect("hold decodes");
+    let (terminal, rows) = apply_activity(hold, &run, &mut tracker, &mut active, 1).await;
+    assert_eq!(terminal, None);
+    let [Observation::Safety(row)] = rows.as_slice() else {
+        panic!("a hold reports one safety row, got {rows:?}");
+    };
+    assert_eq!(row.action(), SafetyAction::Holding);
+    assert_eq!(row.category(), SafetyCategory::Cyber);
+    assert_eq!(
+        row.provider_code(),
+        Some("high_risk_cyber_interaction_input")
+    );
+    assert!(
+        tracker.stall_exempt(),
+        "a held response is silent, not stalled"
+    );
+
+    let rerouted = parse_frame(
+        r#"{"method":"model/rerouted","params":{"threadId":"t-1","turnId":"turn-1","fromModel":"gpt-5.3-codex","toModel":"gpt-5.2","reason":"highRiskCyberActivity"}}"#,
+        2,
+    )
+    .expect("reroute decodes");
+    let (_, rows) = apply_activity(rerouted, &run, &mut tracker, &mut active, 2).await;
+    let [Observation::Safety(row)] = rows.as_slice() else {
+        panic!("a reroute reports one safety row, got {rows:?}");
+    };
+    assert_eq!(row.action(), SafetyAction::Rerouted);
+    assert_eq!(row.category(), SafetyCategory::Cyber);
+    assert_eq!(row.model(), Some("gpt-5.2"));
+    assert!(!tracker.stall_exempt(), "the hold ended with the reroute");
+
+    let error = parse_frame(
+        r#"{"method":"error","params":{"threadId":"t-1","turnId":"turn-1","willRetry":false,"error":{"message":"This request was flagged for cybersecurity risk.","codexErrorInfo":"cyberPolicy","additionalDetails":null,"misalignment":null}}}"#,
+        3,
+    )
+    .expect("error decodes");
+    let (terminal, rows) = apply_activity(error, &run, &mut tracker, &mut active, 3).await;
+    assert_eq!(
+        terminal, None,
+        "the error notification never settles the turn"
+    );
+    let [Observation::Safety(row)] = rows.as_slice() else {
+        panic!("a policy error reports one refusal, got {rows:?}");
+    };
+    assert_eq!(row.action(), SafetyAction::Refused);
+    assert_eq!(
+        row.message(),
+        Some("This request was flagged for cybersecurity risk.")
+    );
+
+    // The failed turn repeats the refusal; it is reported once.
+    let failed = parse_frame(
+        r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"turn-1","status":"failed","error":{"message":"This request was flagged for cybersecurity risk.","codexErrorInfo":"cyberPolicy","additionalDetails":null,"misalignment":null}}}}"#,
+        4,
+    )
+    .expect("failed turn decodes");
+    let (terminal, rows) = apply_activity(failed, &run, &mut tracker, &mut active, 4).await;
+    assert_eq!(terminal, Some(TerminalState::Failed));
+    assert!(rows.is_empty(), "the refusal was already reported");
+}
+
+#[tokio::test]
+async fn a_failed_turn_alone_reports_its_policy_refusal() {
+    use artisan_domain::{Observation, SafetyAction, SafetyCategory};
+    let run = run_id();
+    let mut tracker = bound_activity_tracker();
+    let mut active = None;
+    let failed = parse_frame(
+        r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"turn-2","status":"failed","error":{"message":"Blocked.","codexErrorInfo":"misalignmentPolicyViolation","additionalDetails":null,"misalignment":null}}}}"#,
+        1,
+    )
+    .expect("failed turn decodes");
+    let (terminal, rows) = apply_activity(failed, &run, &mut tracker, &mut active, 1).await;
+    assert_eq!(terminal, Some(TerminalState::Failed));
+    let [Observation::Safety(row)] = rows.as_slice() else {
+        panic!("the refusal precedes the settlement, got {rows:?}");
+    };
+    assert_eq!(row.action(), SafetyAction::Refused);
+    assert_eq!(row.category(), SafetyCategory::Policy);
+    assert_eq!(row.provider_code(), Some("misalignmentPolicyViolation"));
+}
+
+#[test]
+fn failures_that_are_not_policy_refusals_report_no_refusal() {
+    for info in [
+        r#""usageLimitExceeded""#,
+        r#"{"httpConnectionFailed":{"httpStatusCode":502}}"#,
+        "null",
+    ] {
+        let frame = format!(
+            r#"{{"method":"turn/completed","params":{{"threadId":"t-1","turn":{{"id":"turn-1","status":"failed","error":{{"message":"x","codexErrorInfo":{info},"additionalDetails":null,"misalignment":null}}}}}}}}"#
+        );
+        let event = parse_frame(&frame, 1).expect("failed turn decodes");
+        assert!(
+            matches!(
+                event,
+                CodexEvent::TurnState {
+                    state: CodexTurnState::Failed,
+                    refusal: None,
+                    ..
+                }
+            ),
+            "{info} is not a refusal"
+        );
+        let error = parse_frame(
+            &format!(
+                r#"{{"method":"error","params":{{"threadId":"t-1","turnId":"turn-1","willRetry":true,"error":{{"message":"x","codexErrorInfo":{info},"additionalDetails":null,"misalignment":null}}}}}}"#
+            ),
+            2,
+        )
+        .expect("error decodes");
+        assert!(matches!(error, CodexEvent::UnknownMethod), "{info}");
+    }
 }

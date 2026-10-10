@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use super::codex::{CodexPendingTracker, apply_event, parse_frame};
 use super::observation::{EngineObservation, ShellJobChange, TerminalState};
-use artisan_domain::{Observation, RunId};
+use artisan_domain::{Observation, ObservationId, RunId};
 
 fn activity_run_id() -> RunId {
     RunId::parse("codex-activity-fixture").expect("run id")
@@ -169,7 +169,8 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
             | EngineObservation::TextSnapshot(_)
             | EngineObservation::Usage(_)
             | EngineObservation::Subagent(_)
-            | EngineObservation::SubagentTranscript(_) => {
+            | EngineObservation::SubagentTranscript(_)
+            | EngineObservation::Inventory(_) => {
                 panic!("fixture emits no other owner rows")
             }
         }
@@ -219,4 +220,323 @@ async fn fixture_activity_stream_emits_in_source_order_with_stable_ids() {
             .all(|id| id.starts_with("codex-activity-fixture:codex:")),
         "ids carry the stable run-scoped prefix: {stable_ids:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Context compaction
+// ---------------------------------------------------------------------------
+
+/// Replays `lines` against one bound tracker; returns every compaction row
+/// and the per-frame terminal outcomes.
+async fn replay_compaction(
+    lines: &[String],
+) -> (
+    Vec<artisan_domain::CompactionObservation>,
+    Vec<Option<TerminalState>>,
+) {
+    let run = activity_run_id();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let mut tracker = CodexPendingTracker::new();
+    tracker.bind_native_thread("t-fixture");
+    let mut active: Option<String> = None;
+    let mut terminals = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let sequence = u64::try_from(index).expect("small fixture") + 1;
+        let event = parse_frame(line, sequence).expect("fixture frame decodes");
+        terminals.push(
+            apply_event(
+                event,
+                &run,
+                &mut tracker,
+                &mut active,
+                &sender,
+                sequence,
+                None,
+            )
+            .await,
+        );
+    }
+    drop(sender);
+    let mut rows = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        match observation {
+            EngineObservation::Activity(Observation::Compaction(row)) => rows.push(row),
+            EngineObservation::TextDelta(_) => {}
+            _ => panic!("compaction fixtures emit only compaction rows and text"),
+        }
+    }
+    (rows, terminals)
+}
+
+fn compaction_item(method: &str, item_id: &str, stamp: &str) -> String {
+    notification(
+        method,
+        &format!(
+            r#"{{"threadId":"t-fixture","turnId":"turn-fixture",{stamp}"item":{{"id":"{item_id}","type":"contextCompaction"}}}}"#
+        ),
+    )
+}
+
+fn thread_compacted(turn_id: &str) -> String {
+    notification(
+        "thread/compacted",
+        &format!(r#"{{"threadId":"t-fixture","turnId":"{turn_id}"}}"#),
+    )
+}
+
+fn turn_started() -> String {
+    notification(
+        "turn/started",
+        r#"{"threadId":"t-fixture","turn":{"id":"turn-fixture","status":"inProgress"}}"#,
+    )
+}
+
+#[tokio::test]
+async fn compaction_item_pair_shares_compaction_id_and_never_settles_the_turn() {
+    use artisan_domain::CompactionState;
+
+    let lines = [
+        turn_started(),
+        compaction_item("item/started", "cmp-1", r#""startedAtMs":1000,"#),
+        compaction_item("item/completed", "cmp-1", r#""completedAtMs":4500,"#),
+        // The deprecated echo of the same compaction must not settle it again.
+        thread_compacted("turn-fixture"),
+        notification(
+            "item/agentMessage/delta",
+            r#"{"delta":"after","itemId":"msg-1","threadId":"t-fixture","turnId":"turn-fixture"}"#,
+        ),
+        notification(
+            "turn/completed",
+            r#"{"threadId":"t-fixture","turn":{"id":"turn-fixture","status":"completed"}}"#,
+        ),
+    ];
+    let (rows, terminals) = replay_compaction(&lines).await;
+
+    assert!(
+        terminals[..terminals.len() - 1].iter().all(Option::is_none),
+        "compaction frames never settle the turn: {terminals:?}"
+    );
+    assert_eq!(terminals.last(), Some(&Some(TerminalState::Completed)));
+    let [started, completed] = rows.as_slice() else {
+        panic!("exactly one started and one completed row, got {rows:?}");
+    };
+    assert_eq!(started.state(), CompactionState::Started);
+    assert_eq!(completed.state(), CompactionState::Completed);
+    assert_eq!(
+        started.compaction_id().map(ObservationId::as_str),
+        Some("codex-activity-fixture:codex:compaction:cmp-1")
+    );
+    assert_eq!(started.compaction_id(), completed.compaction_id());
+    assert_ne!(started.id(), completed.id());
+    assert_eq!(
+        started.id().as_str(),
+        "codex-activity-fixture:codex:2:compaction:cmp-1:started"
+    );
+    assert_eq!(
+        completed.id().as_str(),
+        "codex-activity-fixture:codex:3:compaction:cmp-1:completed"
+    );
+    assert_eq!(started.duration_ms(), None);
+    assert_eq!(completed.duration_ms(), Some(3500));
+    assert_eq!(started.summary(), None);
+    assert_eq!(completed.summary(), None, "Codex reports no token counts");
+}
+
+#[tokio::test]
+async fn compaction_completion_only_emits_one_completed_with_its_own_id() {
+    use artisan_domain::CompactionState;
+
+    // Only an item completion arrives.
+    let (rows, _) = replay_compaction(&[
+        turn_started(),
+        compaction_item("item/completed", "cmp-2", r#""completedAtMs":4500,"#),
+    ])
+    .await;
+    let [completed] = rows.as_slice() else {
+        panic!("exactly one completed row, got {rows:?}");
+    };
+    assert_eq!(completed.state(), CompactionState::Completed);
+    assert_eq!(
+        completed.compaction_id().map(ObservationId::as_str),
+        Some("codex-activity-fixture:codex:compaction:cmp-2")
+    );
+    assert_eq!(completed.duration_ms(), None, "no start, no duration");
+
+    // Only the deprecated notification arrives (older servers).
+    let (rows, terminals) =
+        replay_compaction(&[turn_started(), thread_compacted("turn-fixture")]).await;
+    assert!(terminals.iter().all(Option::is_none));
+    let [completed] = rows.as_slice() else {
+        panic!("exactly one completed row, got {rows:?}");
+    };
+    assert_eq!(completed.state(), CompactionState::Completed);
+    assert_eq!(
+        completed.compaction_id().map(ObservationId::as_str),
+        Some("codex-activity-fixture:codex:compaction:2")
+    );
+    assert_eq!(
+        completed.id().as_str(),
+        "codex-activity-fixture:codex:2:compaction:completed"
+    );
+}
+
+#[tokio::test]
+async fn thread_compacted_closes_an_open_item_without_double_completion() {
+    use artisan_domain::CompactionState;
+
+    let (rows, _) = replay_compaction(&[
+        turn_started(),
+        compaction_item("item/started", "cmp-3", r#""startedAtMs":1000,"#),
+        // The legacy echo arrives before the item completion.
+        thread_compacted("turn-fixture"),
+        compaction_item("item/completed", "cmp-3", r#""completedAtMs":4500,"#),
+        // A foreign turn's compaction never lands on this turn.
+        thread_compacted("turn-foreign"),
+    ])
+    .await;
+    let [started, completed] = rows.as_slice() else {
+        panic!("exactly one started and one completed row, got {rows:?}");
+    };
+    assert_eq!(started.state(), CompactionState::Started);
+    assert_eq!(completed.state(), CompactionState::Completed);
+    assert_eq!(started.compaction_id(), completed.compaction_id());
+    assert_eq!(
+        completed.id().as_str(),
+        "codex-activity-fixture:codex:3:compaction:cmp-3:completed"
+    );
+}
+
+#[test]
+fn compaction_frames_decode_to_compaction_events() {
+    use super::codex::{CodexCompactionSignal, CodexEvent};
+
+    let started = parse_frame(
+        &compaction_item("item/started", "cmp-4", r#""startedAtMs":7,"#),
+        1,
+    )
+    .expect("frame decodes");
+    assert_eq!(
+        started,
+        CodexEvent::Compaction {
+            thread_id: "t-fixture".to_owned(),
+            turn_id: "turn-fixture".to_owned(),
+            signal: CodexCompactionSignal::ItemStarted {
+                item_id: "cmp-4".to_owned(),
+                started_at_ms: Some(7),
+            },
+        }
+    );
+    let legacy = parse_frame(&thread_compacted("turn-fixture"), 2).expect("frame decodes");
+    assert!(matches!(
+        legacy,
+        CodexEvent::Compaction {
+            signal: CodexCompactionSignal::ThreadCompacted,
+            ..
+        }
+    ));
+    // Scope-free or id-free frames stay observable without inventing scope.
+    for line in [
+        notification("thread/compacted", r#"{"threadId":"t-fixture"}"#),
+        compaction_item("item/completed", "", ""),
+    ] {
+        assert!(matches!(
+            parse_frame(&line, 3).expect("frame decodes"),
+            CodexEvent::UnknownMethod
+        ));
+    }
+}
+
+#[test]
+fn image_items_decode_to_shown_images() {
+    use super::codex::{CodexEvent, CodexImage};
+
+    // Looking at an image is a step of the work: it shows no image.
+    let viewed = parse_frame(
+        &notification(
+            "item/completed",
+            r#"{"threadId":"t-fixture","turnId":"turn-fixture","item":{"id":"view-1","path":"/work/shot.png","type":"imageView"}}"#,
+        ),
+        1,
+    )
+    .expect("frame decodes");
+    assert_eq!(viewed, CodexEvent::ActivitySilent);
+    let generated = parse_frame(
+        &notification(
+            "item/completed",
+            r#"{"threadId":"t-fixture","turnId":"turn-fixture","item":{"id":"gen-1","status":"completed","revisedPrompt":"a lighthouse at dusk","result":"aGk=","failure":null,"savedPath":"/home/u/.codex/images/gen-1.png","type":"imageGeneration"}}"#,
+        ),
+        2,
+    )
+    .expect("frame decodes");
+    assert_eq!(
+        generated,
+        CodexEvent::ImageShown {
+            thread_id: "t-fixture".to_owned(),
+            turn_id: "turn-fixture".to_owned(),
+            item_id: "gen-1".to_owned(),
+            image: CodexImage {
+                saved_path: Some("/home/u/.codex/images/gen-1.png".to_owned()),
+                base64: Some("aGk=".to_owned()),
+                revised_prompt: Some("a lighthouse at dusk".to_owned()),
+            },
+        }
+    );
+    // Failed or empty generations and started items show nothing.
+    for (method, item) in [
+        (
+            "item/completed",
+            r#"{"id":"gen-2","status":"failed","revisedPrompt":null,"result":"","failure":{"type":"usageLimitExceeded","limitId":"l","resetsAt":null},"type":"imageGeneration"}"#,
+        ),
+        (
+            "item/completed",
+            r#"{"id":"gen-3","status":"completed","revisedPrompt":null,"result":"","failure":null,"type":"imageGeneration"}"#,
+        ),
+        (
+            "item/started",
+            r#"{"id":"gen-4","status":"in_progress","revisedPrompt":null,"result":"","failure":null,"type":"imageGeneration"}"#,
+        ),
+    ] {
+        let line = notification(
+            method,
+            &format!(r#"{{"threadId":"t-fixture","turnId":"turn-fixture","item":{item}}}"#),
+        );
+        assert_eq!(
+            parse_frame(&line, 3).expect("frame decodes"),
+            CodexEvent::ActivitySilent
+        );
+    }
+}
+
+#[tokio::test]
+async fn generated_inline_image_is_stored_and_observed_by_path() {
+    let store = super::engine_image::use_test_state_root();
+    let run = activity_run_id();
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut tracker = CodexPendingTracker::new();
+    tracker.bind_native_thread("t-fixture");
+    let mut active: Option<String> = None;
+    let line = notification(
+        "item/completed",
+        &format!(
+            r#"{{"threadId":"t-fixture","turnId":"turn-fixture","item":{{"id":"gen-5","status":"completed","revisedPrompt":"one pixel","result":"{}","failure":null,"type":"imageGeneration"}}}}"#,
+            super::engine_image::PIXEL_PNG_BASE64
+        ),
+    );
+    let event = parse_frame(&line, 4).expect("frame decodes");
+    assert!(
+        apply_event(event, &run, &mut tracker, &mut active, &sender, 4, None)
+            .await
+            .is_none()
+    );
+    drop(sender);
+    let Some(EngineObservation::Activity(Observation::Image(image))) = receiver.recv().await else {
+        panic!("a generated image must emit one image row");
+    };
+    assert_eq!(image.origin(), artisan_domain::ImageOrigin::Generated);
+    assert_eq!(image.item_id().as_str(), "gen-5");
+    assert_eq!(image.caption(), Some("one pixel"));
+    let path = std::path::Path::new(image.path());
+    assert_eq!(path.parent(), Some(store));
+    assert!(path.is_file(), "the inline image is written to the store");
+    assert!(receiver.recv().await.is_none());
 }

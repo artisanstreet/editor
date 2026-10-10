@@ -34,18 +34,19 @@ use artisan_domain::{
     EngineConfigUpdatePrecondition, EngineErrorRef, EngineErrorRefInput, EngineId, EngineModelId,
     EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FileAction, FileObservation, FilesystemAccess,
-    FiniteMillis, IncrementalText, ItemId, LimitScope, MessageBody, MessageId, MessagePhase,
-    NativeActionObservation, NetworkAccess, Observation, ObservationError, ObservationId,
-    ObservationSequence, OpenCode2Selection, PatchId, PermissionId, PlanEntry, PlanEntryStatus,
-    PlanObservation, ProcessDiagnosticObservation, ProjectId, ProtocolDiagnosticObservation,
-    QuestionInput, QuestionObservation, QuestionOption, ReasoningSummaryCompletedObservation,
+    FiniteMillis, GoalObservation, GoalState, ImageObservation, ImageOrigin, IncrementalText,
+    ItemId, LimitScope, MessageBody, MessageId, MessagePhase, NativeActionObservation,
+    NetworkAccess, Observation, ObservationError, ObservationId, ObservationSequence,
+    OpenCode2Selection, PatchId, PermissionId, PlanEntry, PlanEntryStatus, PlanObservation,
+    ProcessDiagnosticObservation, ProjectId, ProtocolDiagnosticObservation, QuestionInput,
+    QuestionObservation, QuestionOption, ReasoningSummaryCompletedObservation,
     ReasoningSummaryDeltaObservation, RequestId, RetryAttemptState, RetryObservation, Revision,
-    RunId, RunState, RunStateObservation, RunTerminalObservation, RunTerminalState,
-    SearchObservation, SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
-    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
-    TerminalActivityState, TerminalChannel, ThreadId, ThreadTitle, ToolAction, ToolObservation,
-    TranscriptContent, TurnId, TurnState, TurnStateObservation, UnixMillis, UsageBasis, UsageInput,
-    UsageObservation, WebSearchAccess,
+    RunId, RunState, RunStateObservation, RunTerminalObservation, RunTerminalState, SafetyAction,
+    SafetyCategory, SafetyObservation, SearchObservation, SearchScope, SearchState, SubagentInput,
+    SubagentObservation, SubagentState, SubagentTranscriptObservation, TerminalActivityInput,
+    TerminalActivityObservation, TerminalActivityState, TerminalChannel, ThreadId, ThreadTitle,
+    ToolAction, ToolObservation, TranscriptContent, TurnId, TurnState, TurnStateObservation,
+    UnixMillis, UsageBasis, UsageInput, UsageObservation, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -629,6 +630,116 @@ fn batch_scope(pair: &SeededPair, expected_updated_at: UnixMillis) -> RunBatchSc
     }
 }
 
+/// The reply item's stored first-text stamp, and the kinds of its patches.
+async fn stamp_and_patch_kinds(
+    database: &DatabaseConnection,
+    item_id: &str,
+) -> (Option<i64>, Vec<String>) {
+    use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
+    let item = entities::conversation_item::Entity::find_by_id(item_id.to_owned())
+        .one(database)
+        .await
+        .expect("item query should succeed")
+        .expect("the item should exist");
+    let kinds = entities::conversation_patch::Entity::find()
+        .filter(entities::conversation_patch::Column::ItemId.eq(item_id))
+        .order_by_asc(entities::conversation_patch::Column::Sequence)
+        .all(database)
+        .await
+        .expect("patch query should succeed")
+        .into_iter()
+        .map(|patch| format!("{:?}", patch.kind))
+        .collect();
+    (item.text_after_sequence, kinds)
+}
+
+#[tokio::test]
+async fn first_text_is_stamped_once_after_the_steps_committed_before_it() {
+    let pair = seeded_pair().await;
+    let observations = all_variant_observations();
+    validate_observation_bind(1, &pair.bound).expect("fixture bind should agree");
+    let checkpoint = encode_observation_checkpoint(EngineId::OpenCode2, 1, None, &observations)
+        .expect("fixture batch should encode");
+    let empty = AssistantBody::parse("").expect("an empty body is valid");
+    let item_id = ItemId::parse("stamp-item-1").expect("item id");
+    let activation = PatchId::parse("stamp-activate-1").expect("patch id");
+    // The turn opens its reply before any words, beside its first steps.
+    pair.repository
+        .commit_run_batch(CommitRunBatch {
+            scope: batch_scope(&pair, UnixMillis::from_millis(BOUND_AT_MS)),
+            batch_sequence: 1,
+            operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS),
+            activate_turn_patch_id: Some(&activation),
+            changes: &[AssistantChange::Start {
+                item_id: &item_id,
+                phase: AssistantMessagePhase::Final,
+                body: &empty,
+                patch_id: &PatchId::parse("stamp-patch-1").expect("patch id"),
+            }],
+            checkpoint: CheckpointUpdate::Replace(&checkpoint),
+        })
+        .await
+        .expect("the opening batch should commit");
+    let (stamp, _) = stamp_and_patch_kinds(&pair.database, item_id.as_str()).await;
+    assert_eq!(stamp, None, "an item without text carries no stamp");
+    let steps = entities::observation_ledger::Entity::find()
+        .all(&pair.database)
+        .await
+        .expect("ledger query should succeed")
+        .iter()
+        .map(|row| row.delivery_sequence)
+        .max()
+        .expect("the opening batch committed steps");
+
+    // Its first words follow every step committed so far.
+    let first = IncrementalText::parse("Done").expect("fragment");
+    pair.repository
+        .commit_run_batch(CommitRunBatch {
+            scope: batch_scope(&pair, UnixMillis::from_millis(BATCH_OPERATED_AT_MS)),
+            batch_sequence: 2,
+            operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2),
+            activate_turn_patch_id: None,
+            changes: &[AssistantChange::Append {
+                item_id: &item_id,
+                expected_revision: Revision::new(0),
+                text: &first,
+                patch_id: &PatchId::parse("stamp-patch-2").expect("patch id"),
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("the first text should commit");
+    let (stamp, kinds) = stamp_and_patch_kinds(&pair.database, item_id.as_str()).await;
+    assert_eq!(stamp, Some(steps));
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("ItemUpsert"),
+        "the first text carries the stamp to the Editor as a full upsert"
+    );
+
+    // Later text never moves it, and appends as usual.
+    let more = IncrementalText::parse(" and more").expect("fragment");
+    pair.repository
+        .commit_run_batch(CommitRunBatch {
+            scope: batch_scope(&pair, UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2)),
+            batch_sequence: 3,
+            operated_at: UnixMillis::from_millis(BATCH_OPERATED_AT_MS_2 + 10),
+            activate_turn_patch_id: None,
+            changes: &[AssistantChange::Append {
+                item_id: &item_id,
+                expected_revision: Revision::new(1),
+                text: &more,
+                patch_id: &PatchId::parse("stamp-patch-3").expect("patch id"),
+            }],
+            checkpoint: CheckpointUpdate::Keep,
+        })
+        .await
+        .expect("later text should commit");
+    let (stamp, kinds) = stamp_and_patch_kinds(&pair.database, item_id.as_str()).await;
+    assert_eq!(stamp, Some(steps), "the stamp is set once");
+    assert_eq!(kinds.last().map(String::as_str), Some("ItemAppend"));
+}
+
 #[tokio::test]
 async fn all_variants_commit_through_existing_batch_path_without_migration() {
     let pair = seeded_pair().await;
@@ -1023,4 +1134,91 @@ fn oversize_rejection() {
         }
         other => panic!("expected TooLarge, got {other:?}"),
     }
+}
+
+#[test]
+fn a_goal_report_round_trips_through_the_checkpoint_codec() {
+    let observations = vec![Observation::Goal(
+        GoalObservation::new(
+            oid("goal-obs-1"),
+            seq(1),
+            GoalState::Met,
+            Some("all tests pass".to_owned()),
+            Some("every suite is green".to_owned()),
+        )
+        .expect("goal is valid"),
+    )];
+    let bytes = encode_observation_bytes(EngineId::OpenCode2, 1, None, &observations)
+        .expect("goal batch encodes");
+    let decoded = decode_observation_checkpoint(OBSERVATION_CHECKPOINT_VERSION, &bytes)
+        .expect("goal batch decodes");
+    assert_eq!(decoded.observations(), &observations);
+}
+
+#[test]
+fn a_safety_report_round_trips_through_the_checkpoint_codec() {
+    let observations = vec![
+        Observation::Safety(
+            SafetyObservation::new(
+                oid("safety-obs-1"),
+                seq(1),
+                SafetyAction::Refused,
+                SafetyCategory::Bio,
+                Some("bioPolicy".to_owned()),
+                Some("This request was flagged.".to_owned()),
+                None,
+            )
+            .expect("refusal is valid"),
+        ),
+        Observation::Safety(
+            SafetyObservation::new(
+                oid("safety-obs-2"),
+                seq(2),
+                SafetyAction::Holding,
+                SafetyCategory::Unspecified,
+                None,
+                None,
+                None,
+            )
+            .expect("hold is valid"),
+        ),
+    ];
+    let bytes = encode_observation_bytes(EngineId::Codex, 1, None, &observations)
+        .expect("safety batch encodes");
+    let decoded = decode_observation_checkpoint(OBSERVATION_CHECKPOINT_VERSION, &bytes)
+        .expect("safety batch decodes");
+    assert_eq!(decoded.observations(), &observations);
+}
+
+#[test]
+fn an_image_round_trips_through_the_checkpoint_codec() {
+    let observations = vec![
+        Observation::Image(
+            ImageObservation::new(
+                oid("image-obs-1"),
+                seq(1),
+                oid("gen-1"),
+                ImageOrigin::Generated,
+                "/state/engine-images/abc.png".to_owned(),
+                Some("a lighthouse at dusk".to_owned()),
+            )
+            .expect("image is valid"),
+        ),
+        Observation::Image(
+            ImageObservation::new(
+                oid("image-obs-2"),
+                seq(2),
+                oid("toolu_1"),
+                ImageOrigin::ToolResult,
+                "/state/engine-images/def.png".to_owned(),
+                None,
+            )
+            .expect("image is valid"),
+        ),
+    ];
+    let bytes = encode_observation_bytes(EngineId::Codex, 1, None, &observations)
+        .expect("image batch encodes");
+    let decoded = decode_observation_checkpoint(OBSERVATION_CHECKPOINT_VERSION, &bytes)
+        .expect("image batch decodes");
+    assert_eq!(decoded.observations(), &observations);
 }

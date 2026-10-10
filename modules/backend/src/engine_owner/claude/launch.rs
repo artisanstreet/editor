@@ -122,6 +122,7 @@ pub(crate) struct ClaudeSettings {
     disable_tools: bool,
     safe_mode: bool,
     effort: Option<String>,
+    auto_compact_window: Option<u64>,
     thinking_display: ClaudeThinkingDisplay,
 }
 
@@ -155,6 +156,9 @@ impl ClaudeSettings {
             disable_tools: selection.disable_tools(),
             safe_mode: selection.safe_mode(),
             effort: selection.effort().map(|effort| effort.as_str().to_owned()),
+            auto_compact_window: selection
+                .auto_compact_window()
+                .map(artisan_domain::ClaudeAutoCompactWindow::get),
             thinking_display: ClaudeThinkingDisplay::Unrequested,
         })
     }
@@ -233,18 +237,29 @@ impl ClaudeSettings {
         args
     }
 
+    /// Builds the environment the session adds over the launch's own.
+    ///
+    /// A capped context window rides `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (the
+    /// `/autocompact` knob): the CLI compacts near it and clamps it to the
+    /// model's window. Without a cap the CLI keeps its own default.
+    pub(crate) fn spawn_env(&self) -> Vec<(&'static str, String)> {
+        self.auto_compact_window
+            .map(|window| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", window.to_string()))
+            .into_iter()
+            .collect()
+    }
+
     /// Builds the first stdio user-message line for one session.
     ///
-    /// Includes text and native image content in the same user message.
+    /// Includes the engine-facing text (the user's text, or that text framed
+    /// after a portable handoff) and native image content in the same user
+    /// message.
     pub(crate) fn user_message_payload(
         session: &ClaudeSession,
+        text: Option<&str>,
         prompt: &artisan_domain::QueueMessagePayload,
     ) -> String {
-        super::protocol::user_message_with_images(
-            session.session_id(),
-            prompt.text().map(artisan_domain::AuthoredText::as_str),
-            prompt.attachments(),
-        )
+        super::protocol::user_message_with_images(session.session_id(), text, prompt.attachments())
     }
 
     #[cfg(test)]
@@ -479,6 +494,89 @@ pub(crate) fn read_claude_session_title(transcript_path: &Path) -> Option<String
     }
     let lines: Vec<&str> = text.lines().collect();
     claude_session_title_from_lines(&lines)
+}
+
+/// Where a session's goal stands according to its transcript.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClaudeTranscriptGoal {
+    pub(crate) state: artisan_domain::GoalState,
+    /// The goal's condition as set with `/goal`.
+    pub(crate) condition: Option<String>,
+    /// The evaluator's latest word: why it is not met yet, or how it was.
+    pub(crate) reason: Option<String>,
+}
+
+/// Reads the newest `goal_status` record across transcript lines.
+///
+/// The CLI writes one whenever a goal is set, checked, met, given up, or
+/// cleared, and resumes from the newest: one neither met nor failed still
+/// stands. A cleared goal is written as met with the `sentinel` flag that
+/// also marks a fresh set.
+pub(crate) fn claude_session_goal_from_lines(lines: &[&str]) -> Option<ClaudeTranscriptGoal> {
+    use artisan_domain::GoalState;
+    for line in lines.iter().rev() {
+        if !line.contains("goal_status") {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(status) = record.get("attachment") else {
+            continue;
+        };
+        if status.get("type").and_then(Value::as_str) != Some("goal_status") {
+            continue;
+        }
+        let flag = |field: &str| status.get(field).and_then(Value::as_bool) == Some(true);
+        let text = |field: &str| {
+            status
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| {
+                    !text.is_empty() && text.len() <= artisan_domain::OBSERVATION_TEXT_MAX_BYTES
+                })
+                .map(str::to_owned)
+        };
+        let state = match (flag("met"), flag("sentinel"), flag("failed")) {
+            (true, true, _) => GoalState::Cleared,
+            (true, false, _) => GoalState::Met,
+            (false, _, true) => GoalState::Abandoned,
+            (false, _, false) => GoalState::Active,
+        };
+        return Some(ClaudeTranscriptGoal {
+            state,
+            condition: text("condition"),
+            reason: text("reason"),
+        });
+    }
+    None
+}
+
+/// Reads where one native session's goal stands from its transcript, when
+/// the managed config home names a readable one. Total like the title read:
+/// anything unreadable means "no goal known".
+pub(crate) fn claude_transcript_goal_for_session(
+    launch_environment: &[(std::ffi::OsString, std::ffi::OsString)],
+    project_root: &RootPath,
+    session_id: &str,
+) -> Option<ClaudeTranscriptGoal> {
+    let home = launch_environment
+        .iter()
+        .find(|(key, _)| key == CLAUDE_CONFIG_DIR_ENV_VAR)
+        .and_then(|(_, value)| value.to_str())
+        .filter(|value| !value.trim().is_empty())?;
+    let path = claude_session_transcript_path(home.trim(), project_root.as_str(), session_id);
+    let size = std::fs::metadata(&path).ok()?.len();
+    if size > CLAUDE_MAX_TRANSCRIPT_BYTES {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    if !text.contains("goal_status") {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    claude_session_goal_from_lines(&lines)
 }
 
 /// Captures the generated title for one native session, if the managed config

@@ -91,11 +91,15 @@ pub(super) async fn execute_grok_turn(
     };
     let definition = grok_runtime::GrokSettings::definition();
     let argv = (definition.build_args)(&settings.launch_args());
-    let Some(environment) =
+    // Resolving reads install state and may hash the executable; keep that
+    // disk work off the runtime workers.
+    let resolved = tokio::task::spawn_blocking(|| {
         artisan_native_engine::resolve_launch_target(artisan_native_engine::ManagedEngine::Grok)
             .and_then(|target| target.environment())
             .ok()
-    else {
+    })
+    .await;
+    let Ok(Some(environment)) = resolved else {
         return request.fail(EngineOperationError::SpawnFailed);
     };
     let mut child = match acp_core::spawn_acp_child(
@@ -356,11 +360,7 @@ pub(super) async fn execute_grok_turn(
     }
 
     // session/prompt + update pump -----------------------------------------
-    let prompt_text = input
-        .prompt
-        .text()
-        .map(|text| text.as_str().to_owned())
-        .unwrap_or_default();
+    let prompt_text = input.engine_prompt_text().unwrap_or_default();
     let mut prompt_parts = vec![acp_core::PromptPart::Text(prompt_text.clone())];
     for (index, image) in input.prompt.attachments().iter().enumerate() {
         prompt_parts.push(acp_core::PromptPart::Image(acp_core::ImageBlock {
@@ -492,6 +492,7 @@ async fn grok_pump_loop(
 
     let mut usage_sequence: u64 = 0;
     let mut question_sequence: u64 = 0;
+    let mut goal_sequence: u64 = 0;
     loop {
         if shutdown.is_cancelled() {
             return GrokPumpOutcome::Failed(EngineOperationError::Shutdown);
@@ -519,6 +520,18 @@ async fn grok_pump_loop(
             }
             update = transport.next_update(session, prompt) => match update {
                 Ok(UpdateEvent::SessionUpdate(update)) => {
+                    if let Some((state, objective, detail)) = update.update.goal_update() {
+                        goal_sequence = goal_sequence.saturating_add(1);
+                        if let Some(row) = grok_goal_row(
+                            run_id,
+                            goal_sequence,
+                            state,
+                            objective.as_deref(),
+                            detail.as_deref(),
+                        ) {
+                            let _ = observations.send(EngineObservation::Activity(row)).await;
+                        }
+                    }
                     if let Some(title) = update.update.summary_title() {
                         let _ = observations.send(EngineObservation::SummaryTitle { run_id: run_id.clone(), title }).await;
                     }
@@ -564,6 +577,12 @@ async fn grok_pump_loop(
                         {
                             return GrokPumpOutcome::Terminal(TerminalState::Interrupted);
                         }
+                    }
+                    if outcome.refused {
+                        if let Some(row) = grok_refusal_row(run_id, usage_sequence) {
+                            let _ = observations.send(EngineObservation::Activity(row)).await;
+                        }
+                        return GrokPumpOutcome::Terminal(TerminalState::Failed);
                     }
                     return GrokPumpOutcome::Terminal(if outcome.cancelled {
                         TerminalState::Cancelled
@@ -747,4 +766,49 @@ async fn finish_grok_turn(
             Execution::Completed
         }
     }
+}
+
+/// Builds the report of Grok refusing the prompt. ACP discloses no policy
+/// area, so none is claimed.
+fn grok_refusal_row(
+    run_id: &artisan_domain::RunId,
+    sequence: u64,
+) -> Option<artisan_domain::Observation> {
+    let id =
+        artisan_domain::ObservationId::parse(format!("{}:grok:safety:{sequence}", run_id.as_str()))
+            .ok()?;
+    let sequence = artisan_domain::ObservationSequence::new(sequence.max(1)).ok()?;
+    artisan_domain::SafetyObservation::new(
+        id,
+        sequence,
+        artisan_domain::SafetyAction::Refused,
+        artisan_domain::SafetyCategory::Unspecified,
+        Some("refusal".to_owned()),
+        None,
+        None,
+    )
+    .ok()
+    .map(artisan_domain::Observation::Safety)
+}
+
+/// Builds one Grok goal report; text outside the domain bounds is dropped
+/// rather than failing the report.
+fn grok_goal_row(
+    run_id: &artisan_domain::RunId,
+    sequence: u64,
+    state: artisan_domain::GoalState,
+    objective: Option<&str>,
+    detail: Option<&str>,
+) -> Option<artisan_domain::Observation> {
+    let id =
+        artisan_domain::ObservationId::parse(format!("{}:grok:goal:{sequence}", run_id.as_str()))
+            .ok()?;
+    let sequence = artisan_domain::ObservationSequence::new(sequence).ok()?;
+    let bounded = |text: Option<&str>| {
+        text.filter(|text| text.len() <= artisan_domain::OBSERVATION_TEXT_MAX_BYTES)
+            .map(str::to_owned)
+    };
+    artisan_domain::GoalObservation::new(id, sequence, state, bounded(objective), bounded(detail))
+        .ok()
+        .map(artisan_domain::Observation::Goal)
 }

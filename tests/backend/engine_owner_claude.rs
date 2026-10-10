@@ -35,11 +35,11 @@ use super::claude::{
     approval_response_line, check_claude_native_continuation, clamp_claude_percent_used,
     classify_claude_quota_window_kind, classify_exit, claude_cli_meets_minimum,
     claude_cli_usage_args, claude_project_directory_name, claude_requires_group_termination,
-    claude_resume_session, claude_session_title_from_lines, claude_session_transcript_path,
-    claude_usage_report, has_stalled, new_session_id, parse_claude_assistant_usage,
-    parse_claude_cli_reset_at, parse_claude_cli_usage_windows, parse_claude_result_usage,
-    parse_frame, read_claude_session_title, steer_live_turn, terminal_observation,
-    user_message_line, write_line,
+    claude_resume_session, claude_session_goal_from_lines, claude_session_title_from_lines,
+    claude_session_transcript_path, claude_usage_report, has_stalled, new_session_id,
+    parse_claude_assistant_usage, parse_claude_cli_reset_at, parse_claude_cli_usage_windows,
+    parse_claude_result_usage, parse_frame, read_claude_session_title, steer_live_turn,
+    terminal_observation, user_message_line, write_line,
 };
 use super::observation::{
     EngineObservation, SubagentLifecycleRow, SubagentTranscriptRow, TerminalState,
@@ -136,6 +136,26 @@ fn claude_settings_map_selection_without_coercion() {
         !args.contains(&"--thinking-display".to_owned()),
         "an unresolved display policy keeps the existing arguments"
     );
+}
+
+#[test]
+fn claude_settings_carry_a_capped_window_in_the_environment() {
+    let settings = ClaudeSettings::from_selection(&claude_selection()).expect("settings valid");
+    assert!(
+        settings.spawn_env().is_empty(),
+        "no cap keeps the CLI default"
+    );
+    let capped = claude_selection().with_auto_compact_window(Some(
+        artisan_domain::ClaudeAutoCompactWindow::new(400_000).expect("window"),
+    ));
+    let settings = ClaudeSettings::from_selection(&capped).expect("settings valid");
+    assert_eq!(
+        settings.spawn_env(),
+        vec![("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "400000".to_owned())]
+    );
+    // The cap never reaches the model id.
+    let args = settings.spawn_args(&ClaudeSession::Start("session-cap".to_owned()));
+    assert!(args.contains(&"claude-model".to_owned()));
 }
 
 #[test]
@@ -325,6 +345,34 @@ fn init_delta_phases_and_message_start_decode() {
     .expect("message start decodes");
     assert!(matches!(start, ClaudeEvent::MessageStart { .. }));
 
+    // A classifier refusal stops the message with `refusal`; the area comes
+    // from `stop_details` when it names one.
+    let refused = parse_frame(
+        r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber"}},"usage":{"output_tokens":3}}}"#,
+        4,
+    )
+    .expect("refusal decodes");
+    assert!(matches!(
+        refused,
+        ClaudeEvent::MessageDelta {
+            end_turn: false,
+            refusal: Some(artisan_domain::SafetyCategory::Cyber),
+            ..
+        }
+    ));
+    let undisclosed = parse_frame(
+        r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":null}}}"#,
+        4,
+    )
+    .expect("refusal without details decodes");
+    assert!(matches!(
+        undisclosed,
+        ClaudeEvent::MessageDelta {
+            refusal: Some(artisan_domain::SafetyCategory::Unspecified),
+            ..
+        }
+    ));
+
     let tokens = parse_frame(
         r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":42}"#,
         5,
@@ -439,7 +487,7 @@ fn approval_question_task_and_child_frames_decode() {
 #[test]
 fn unknown_bookkeeping_and_malformed_frames_reject_safely() {
     for line in [
-        r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"postTokens":10}}"#,
+        r#"{"type":"system","subtype":"status","status":null,"compact_result":"success"}"#,
         r#"{"type":"system","subtype":"api_retry"}"#,
         r#"{"type":"system","subtype":"status"}"#,
         r#"{"type":"stream_event","event":{"type":"ping"}}"#,
@@ -884,7 +932,7 @@ async fn subagent_and_child_frames_never_adopt_the_root_turn() {
 async fn background_agents_keep_input_open_past_the_result() {
     let run = run_id();
     let mut tracker = ClaudePendingTracker::new();
-    let (sender, _receiver) = mpsc::channel(8);
+    let (sender, mut receiver) = mpsc::channel(8);
     let mut active = None;
     let mut sequence = 0;
     let mut apply = async |line: &str, tracker: &mut ClaudePendingTracker| {
@@ -905,16 +953,22 @@ async fn background_agents_keep_input_open_past_the_result() {
     let keep = ClaudeApplyOutcome::Continue { end_input: false };
     let end = ClaudeApplyOutcome::Continue { end_input: true };
 
-    // Only agents and workflows are waited for: the CLI reaps background
-    // shells once input closes, and ambient watchers are never activity.
+    // Only agents and workflows are waited for: background shells are
+    // turn-bounded (the pump settles a CLI that outlives its closed input
+    // holding only them), and ambient watchers are never activity.
     let level = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent","description":"Implement"},{"task_id":"b1","task_type":"local_bash","description":"dev server"},{"task_id":"w1","task_type":"local_agent","description":"watch","ambient":true}]}"#;
     assert_eq!(apply(level, &mut tracker).await, keep);
 
     // The reply is done but the agent still runs: stdin stays open, so a
-    // steer can still be written.
+    // steer can still be written, and the turn's end is reported on its own
+    // so its whole reply can show while the run goes on.
     assert_eq!(apply(&result_line(), &mut tracker).await, keep);
     assert!(tracker.result_seen());
     assert!(!tracker.input_settled());
+    let Ok(EngineObservation::Activity(Observation::TurnState(turn))) = receiver.try_recv() else {
+        panic!("the turn's end is reported");
+    };
+    assert_eq!(turn.state(), artisan_domain::TurnState::Completed);
 
     // The agent ending settles the session without closing on the frame
     // itself: its report opens a follow-up turn.
@@ -926,9 +980,254 @@ async fn background_agents_keep_input_open_past_the_result() {
     assert_eq!(apply(follow_up, &mut tracker).await, keep);
     assert!(!tracker.input_settled());
 
-    // With nothing waited for, the next result ends input as before.
+    // With nothing waited for, the next result ends input as before; the
+    // run settles on it, so no separate turn report is needed.
     assert_eq!(apply(&result_line(), &mut tracker).await, end);
     assert!(tracker.input_settled());
+    assert!(receiver.try_recv().is_err());
+}
+
+/// Captured from the CLI (2.1.290): `/goal` replies with a synthetic
+/// assistant frame marked as the goal command, and a failed check feeds a
+/// synthetic user frame back. Both report the goal; neither is prose.
+#[tokio::test]
+async fn goal_bookkeeping_reports_the_goal_and_paints_no_prose() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut active = None;
+    let mut sequence = 0;
+    let mut apply = async |line: &str, tracker: &mut ClaudePendingTracker| {
+        sequence += 1;
+        let event = parse_frame(line, sequence).expect("frame decodes");
+        apply_event(
+            event,
+            &run,
+            SESSION,
+            tracker,
+            &mut active,
+            &sender,
+            sequence,
+            None,
+        )
+        .await
+    };
+    let mut goal = |receiver: &mut mpsc::Receiver<EngineObservation>| {
+        let Ok(EngineObservation::Activity(artisan_domain::Observation::Goal(goal))) =
+            receiver.try_recv()
+        else {
+            panic!("a goal report");
+        };
+        goal
+    };
+
+    let set = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Goal set: all tests pass"}]},"local_command_run":{"command":"goal","args":"all tests pass"}}"#;
+    apply(set, &mut tracker).await;
+    let reported = goal(&mut receiver);
+    assert_eq!(reported.state(), artisan_domain::GoalState::Active);
+    assert_eq!(reported.objective(), Some("all tests pass"));
+    assert!(receiver.try_recv().is_err(), "the reply paints no prose");
+
+    let check = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\n[all tests pass]: two tests still fail"}]},"isSynthetic":true}"#;
+    apply(check, &mut tracker).await;
+    let reported = goal(&mut receiver);
+    assert_eq!(reported.state(), artisan_domain::GoalState::Active);
+    assert_eq!(reported.detail(), Some("two tests still fail"));
+
+    let cleared = r#"{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Goal cleared: all tests pass"}]},"local_command_run":{"command":"goal","args":"clear"}}"#;
+    apply(cleared, &mut tracker).await;
+    assert_eq!(
+        goal(&mut receiver).state(),
+        artisan_domain::GoalState::Cleared
+    );
+}
+
+/// The transcript's newest `goal_status` decides where the goal stands.
+#[test]
+fn the_newest_goal_status_in_the_transcript_decides_the_goal() {
+    use artisan_domain::GoalState;
+    let status = |fields: &str| {
+        format!(r#"{{"type":"attachment","attachment":{{"type":"goal_status",{fields}}}}}"#)
+    };
+    let set = status(r#""met":false,"sentinel":true,"condition":"ship it""#);
+    let check = status(r#""met":false,"condition":"ship it","reason":"not yet""#);
+    let met = status(r#""met":true,"condition":"ship it","reason":"done","iterations":2"#);
+    let failed = status(r#""met":false,"failed":true,"condition":"ship it","reason":"impossible""#);
+    let cleared = status(r#""met":true,"sentinel":true,"condition":"ship it""#);
+    let state = |lines: &[&str]| claude_session_goal_from_lines(lines).map(|goal| goal.state);
+
+    assert_eq!(state(&["{}"]), None);
+    assert_eq!(state(&[&set]), Some(GoalState::Active));
+    assert_eq!(state(&[&set, &check]), Some(GoalState::Active));
+    assert_eq!(state(&[&set, &check, &met]), Some(GoalState::Met));
+    assert_eq!(state(&[&set, &failed]), Some(GoalState::Abandoned));
+    assert_eq!(state(&[&set, &cleared]), Some(GoalState::Cleared));
+    let goal = claude_session_goal_from_lines(&[&set, &check]).expect("goal");
+    assert_eq!(goal.condition.as_deref(), Some("ship it"));
+    assert_eq!(goal.reason.as_deref(), Some("not yet"));
+}
+
+/// Captured from the CLI: compaction opens with `status: compacting` and
+/// closes with `compact_boundary`, whose metadata carries the context before
+/// and after.
+#[tokio::test]
+async fn a_compaction_settles_one_row_and_drops_the_gauge() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut active = None;
+    let thread = ThreadId::parse("thread-1").expect("thread id");
+    let model = EngineModelId::parse("claude-opus-5-5").expect("model id");
+    let scope = ClaudeUsageScope {
+        thread_id: &thread,
+        model_id: &model,
+        provider_session_id: SESSION,
+        window_cap: None,
+    };
+    let mut sequence = 0;
+    let mut apply = async |line: &str, tracker: &mut ClaudePendingTracker| {
+        sequence += 1;
+        let event = parse_frame(line, sequence).expect("frame decodes");
+        apply_event(
+            event,
+            &run,
+            SESSION,
+            tracker,
+            &mut active,
+            &sender,
+            sequence,
+            Some(&scope),
+        )
+        .await
+    };
+    let keep = ClaudeApplyOutcome::Continue { end_input: false };
+
+    let compacting = r#"{"type":"system","subtype":"status","status":"compacting"}"#;
+    assert_eq!(apply(compacting, &mut tracker).await, keep);
+    let Ok(EngineObservation::Activity(artisan_domain::Observation::Compaction(started))) =
+        receiver.try_recv()
+    else {
+        panic!("compaction start projects a row");
+    };
+    assert_eq!(started.state(), artisan_domain::CompactionState::Started);
+
+    let boundary = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":967247,"post_tokens":10933,"duration_ms":93465}}"#;
+    assert_eq!(apply(boundary, &mut tracker).await, keep);
+    let Ok(EngineObservation::Activity(artisan_domain::Observation::Compaction(completed))) =
+        receiver.try_recv()
+    else {
+        panic!("compaction end projects a row");
+    };
+    assert_eq!(
+        completed.state(),
+        artisan_domain::CompactionState::Completed
+    );
+    assert_eq!(completed.compaction_id(), started.compaction_id());
+    assert!(started.compaction_id().is_some());
+    assert_eq!(completed.duration_ms(), Some(93465));
+    assert_eq!(completed.summary(), Some("967K → 11K"));
+    let Ok(EngineObservation::Usage(usage)) = receiver.try_recv() else {
+        panic!("the shrunken context reports at once");
+    };
+    assert_eq!(usage.report().context_tokens(), Some(10933));
+}
+
+/// Captured from the CLI: resuming a session whose background shell stopped
+/// after the last process exited, the stream is `init`, then this model-less
+/// `result` flushing the stop notice, then a second `init` and the prompt's
+/// actual turn.
+#[tokio::test]
+async fn a_resume_flush_result_keeps_input_open_for_the_prompt_turn() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut active = None;
+    let mut sequence = 0;
+    let mut apply = async |line: &str, tracker: &mut ClaudePendingTracker| {
+        sequence += 1;
+        let event = parse_frame(line, sequence).expect("frame decodes");
+        apply_event(
+            event,
+            &run,
+            SESSION,
+            tracker,
+            &mut active,
+            &sender,
+            sequence,
+            None,
+        )
+        .await
+    };
+    let flush = format!(
+        r#"{{"type":"result","subtype":"success","session_id":"{SESSION}","is_error":false,"duration_api_ms":0,"num_turns":0,"stop_reason":null,"usage":{{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}},"modelUsage":{{"claude-opus-5-5":{{"contextWindow":1000000}}}}}}"#
+    );
+    assert_eq!(
+        apply(&flush, &mut tracker).await,
+        ClaudeApplyOutcome::Continue { end_input: false }
+    );
+    assert!(!tracker.result_seen());
+    assert!(!tracker.input_settled(), "a steer can still be written");
+    assert!(receiver.try_recv().is_err(), "the flush emits nothing");
+
+    let init = format!(r#"{{"type":"system","subtype":"init","session_id":"{SESSION}"}}"#);
+    apply(&init, &mut tracker).await;
+    let start =
+        r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1"}}}"#;
+    apply(start, &mut tracker).await;
+    let done = format!(
+        r#"{{"type":"result","subtype":"success","session_id":"{SESSION}","is_error":false,"num_turns":1}}"#
+    );
+    assert_eq!(
+        apply(&done, &mut tracker).await,
+        ClaudeApplyOutcome::Continue { end_input: true }
+    );
+    assert!(tracker.result_seen());
+}
+
+/// A prompt that runs no model turn, such as `/compact`, still settles on
+/// its model-less `result`: frames of its own precede it.
+#[tokio::test]
+async fn a_model_less_result_after_turn_frames_still_settles() {
+    let run = run_id();
+    let mut tracker = ClaudePendingTracker::new();
+    let (sender, _receiver) = mpsc::channel(8);
+    let mut active = None;
+    let compacting = parse_frame(
+        r#"{"type":"system","subtype":"status","status":"compacting"}"#,
+        1,
+    )
+    .expect("status decodes");
+    apply_event(
+        compacting,
+        &run,
+        SESSION,
+        &mut tracker,
+        &mut active,
+        &sender,
+        1,
+        None,
+    )
+    .await;
+    let result = parse_frame(
+        &format!(
+            r#"{{"type":"result","subtype":"success","session_id":"{SESSION}","is_error":false,"num_turns":0}}"#
+        ),
+        2,
+    )
+    .expect("result decodes");
+    let outcome = apply_event(
+        result,
+        &run,
+        SESSION,
+        &mut tracker,
+        &mut active,
+        &sender,
+        2,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: true });
+    assert!(tracker.result_seen());
 }
 
 #[tokio::test]
@@ -1849,6 +2148,8 @@ async fn fixture_subagent_rows_traverse_channel_plus_dispatcher_commit() {
         assistant_item: None,
         assistant_revision: Revision::new(0),
         assistant_body: "root ".to_owned(),
+
+        turn_activated: false,
     };
 
     // Rows come from the real owner boundary: parse plus apply, then wrap
@@ -2323,11 +2624,13 @@ async fn usage_projects_a_usage_observation_without_blocking_the_turn() {
     let attribution = ClaudeUsageAttribution {
         thread_id: ThreadId::parse("thread-usage-1").expect("thread id"),
         model_id: EngineModelId::parse("model-usage-1").expect("model id"),
+        window_cap: None,
     };
     let scope = ClaudeUsageScope {
         thread_id: &attribution.thread_id,
         model_id: &attribution.model_id,
         provider_session_id: "session-stored-1",
+        window_cap: attribution.window_cap,
     };
     let (sender, mut receiver) = mpsc::channel(8);
     let mut tracker = ClaudePendingTracker::new();

@@ -64,6 +64,9 @@ pub(crate) const METHOD_SESSION_LOAD: &str = "session/load";
 pub(crate) const METHOD_SESSION_PROMPT: &str = "session/prompt";
 pub(crate) const METHOD_SESSION_CANCEL: &str = "session/cancel";
 pub(crate) const METHOD_SESSION_UPDATE: &str = "session/update";
+/// Grok's own session updates, beside the ACP ones: it reports its goal here
+/// (`goal_updated`). ACP extension notifications carry a leading underscore.
+pub(crate) const METHOD_XAI_SESSION_UPDATE: &str = "_x.ai/session/update";
 
 // ---------------------------------------------------------------------------
 // Fixture-agent tests: a fake agent speaking JSON-RPC over stdio

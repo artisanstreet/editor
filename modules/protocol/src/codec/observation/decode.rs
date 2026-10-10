@@ -133,6 +133,25 @@ pub(crate) fn decode_engine_observation(
                 }
             }
         }
+        artisan_capnp::engine_observation::Which::Goal(observation) => {
+            let observation = observation?;
+            Ok(Observation::Goal(GoalObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.goal.id")?,
+                    "event.engineObservation.goal.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                decode_observation_goal_state(observation.get_state()?),
+                absent_if_empty(read_text(
+                    observation.get_objective(),
+                    "event.engineObservation.goal.objective",
+                )?),
+                absent_if_empty(read_text(
+                    observation.get_detail(),
+                    "event.engineObservation.goal.detail",
+                )?),
+            )?))
+        }
         artisan_capnp::engine_observation::Which::Compaction(observation) => {
             let observation = observation?;
             Ok(Observation::Compaction(CompactionObservation::new(
@@ -163,6 +182,53 @@ pub(crate) fn decode_engine_observation(
                 absent_if_empty(read_text(
                     observation.get_summary(),
                     "event.engineObservation.compaction.summary",
+                )?),
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::Image(observation) => {
+            let observation = observation?;
+            Ok(Observation::Image(ImageObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.image.id")?,
+                    "event.engineObservation.image.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                parse_observation_id(
+                    read_text(
+                        observation.get_item_id(),
+                        "event.engineObservation.image.itemId",
+                    )?,
+                    "event.engineObservation.image.itemId",
+                )?,
+                decode_observation_image_origin(observation.get_origin()?),
+                read_text(observation.get_path(), "event.engineObservation.image.path")?,
+                absent_if_empty(read_text(
+                    observation.get_caption(),
+                    "event.engineObservation.image.caption",
+                )?),
+            )?))
+        }
+        artisan_capnp::engine_observation::Which::Safety(observation) => {
+            let observation = observation?;
+            Ok(Observation::Safety(SafetyObservation::new(
+                parse_observation_id(
+                    read_text(observation.get_id(), "event.engineObservation.safety.id")?,
+                    "event.engineObservation.safety.id",
+                )?,
+                parse_observation_sequence(observation.get_sequence())?,
+                decode_observation_safety_action(observation.get_action()?),
+                decode_observation_safety_category(observation.get_category()?),
+                absent_if_empty(read_text(
+                    observation.get_provider_code(),
+                    "event.engineObservation.safety.providerCode",
+                )?),
+                absent_if_empty(read_text(
+                    observation.get_message(),
+                    "event.engineObservation.safety.message",
+                )?),
+                absent_if_empty(read_text(
+                    observation.get_model(),
+                    "event.engineObservation.safety.model",
                 )?),
             )?))
         }

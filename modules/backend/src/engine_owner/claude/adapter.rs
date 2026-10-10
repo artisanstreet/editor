@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use artisan_domain::{
-    MessagePhase, Observation, ObservationId, ObservationSequence, QuestionObservation, RunId,
-    SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
-    TranscriptAgentMessageDelta, TranscriptContent,
+    CompactionObservation, CompactionState, GoalObservation, GoalState, MessagePhase, Observation,
+    ObservationId, ObservationSequence, QuestionObservation, RunId, SubagentInput,
+    SubagentObservation, SubagentState, SubagentTranscriptObservation, TranscriptAgentMessageDelta,
+    TranscriptContent,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -52,6 +53,133 @@ fn discovered_subagent_row(
     SubagentObservation::new(id, sequence, input)
         .ok()
         .map(Observation::Subagent)
+}
+
+/// Builds one compaction row. Both rows of a compaction carry the identity
+/// of the frame that started it, so the conversation shows one separator
+/// that settles in place.
+fn compaction_row(
+    run_id: &RunId,
+    frame_sequence: u64,
+    state: CompactionState,
+    compaction: &ObservationId,
+    duration_ms: Option<u64>,
+    summary: Option<String>,
+) -> Option<Observation> {
+    let id = ObservationId::parse(format!(
+        "{}:claude:compaction:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    CompactionObservation::new(
+        id,
+        sequence,
+        state,
+        Some(compaction.clone()),
+        duration_ms,
+        summary,
+    )
+    .ok()
+    .map(Observation::Compaction)
+}
+
+/// Builds one goal report; text outside the domain bounds is dropped
+/// rather than failing the report.
+pub(crate) fn goal_row(
+    run_id: &RunId,
+    frame_sequence: u64,
+    state: GoalState,
+    objective: Option<&str>,
+    detail: Option<&str>,
+) -> Option<Observation> {
+    let id =
+        ObservationId::parse(format!("{}:claude:goal:{frame_sequence}", run_id.as_str())).ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    let bounded = |text: Option<&str>| {
+        text.map(str::trim)
+            .filter(|text| {
+                !text.is_empty() && text.len() <= artisan_domain::OBSERVATION_TEXT_MAX_BYTES
+            })
+            .map(str::to_owned)
+    };
+    GoalObservation::new(id, sequence, state, bounded(objective), bounded(detail))
+        .ok()
+        .map(Observation::Goal)
+}
+
+/// Builds the report of Anthropic's safety classifiers refusing the message.
+fn refusal_row(
+    run_id: &RunId,
+    frame_sequence: u64,
+    category: artisan_domain::SafetyCategory,
+) -> Option<Observation> {
+    let id = ObservationId::parse(format!(
+        "{}:claude:safety:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    artisan_domain::SafetyObservation::new(
+        id,
+        sequence,
+        artisan_domain::SafetyAction::Refused,
+        category,
+        Some("refusal".to_owned()),
+        None,
+        None,
+    )
+    .ok()
+    .map(Observation::Safety)
+}
+
+/// Reports that the session's root turn ended with its `result`: whatever
+/// text it produced is whole, though the run may go on (a background agent
+/// reports back in a follow-up turn).
+pub(crate) fn turn_completed_row(run_id: &RunId, frame_sequence: u64) -> Option<Observation> {
+    let id = ObservationId::parse(format!(
+        "{}:claude:turn-completed:{frame_sequence}",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let turn_id = ObservationId::parse(format!("claude-turn-{frame_sequence}")).ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    Some(Observation::TurnState(
+        artisan_domain::TurnStateObservation::new(
+            id,
+            sequence,
+            turn_id,
+            artisan_domain::TurnState::Completed,
+        ),
+    ))
+}
+
+/// The context a compaction freed, as `967K → 11K`.
+fn compaction_summary(pre_tokens: Option<u64>, post_tokens: Option<u64>) -> Option<String> {
+    Some(format!(
+        "{} → {}",
+        short_token_count(pre_tokens?),
+        short_token_count(post_tokens?)
+    ))
+}
+
+/// A token count in at most three significant figures: `950`, `11K`, `1.2M`.
+fn short_token_count(tokens: u64) -> String {
+    #[expect(clippy::cast_precision_loss, reason = "display rounding only")]
+    let value = tokens as f64;
+    let (scaled, unit) = if tokens >= 1_000_000 {
+        (value / 1_000_000.0, "M")
+    } else if tokens >= 1_000 {
+        (value / 1_000.0, "K")
+    } else {
+        return tokens.to_string();
+    };
+    let text = if scaled < 10.0 {
+        format!("{scaled:.1}")
+    } else {
+        format!("{scaled:.0}")
+    };
+    format!("{}{unit}", text.trim_end_matches(".0"))
 }
 
 /// Projects one child text fragment into a validated transcript row.
@@ -208,15 +336,21 @@ pub(crate) struct ClaudePendingTracker {
     permission_denials: usize,
     stream_message_id: Option<String>,
     init_seen: bool,
+    /// Whether the pump has applied any frame since the session's `init`.
+    frame_applied: bool,
     result_seen: bool,
     root_turn: RootTurn,
     /// Background agents and workflows still running behind the root turn.
     background_tasks: usize,
     semantic_failure: bool,
     summary_title: Option<String>,
+    /// The compaction under way, by the identity both of its rows carry.
+    open_compaction: Option<ObservationId>,
     /// The latest per-response context gauge, kept for the result frame:
     /// its totals carry no gauge, and its report must not drop the reading.
     usage_context: Option<u64>,
+    /// The root model's generation speed across the turn's messages.
+    generation: super::generation::ClaudeGenerationClock,
 }
 
 impl ClaudePendingTracker {
@@ -597,6 +731,9 @@ async fn emit_shell_rows(
             return Err(TerminalState::Interrupted);
         }
     }
+    // The follower may now read and settle: everything it follows on from
+    // is already on the channel.
+    tracker.tools.release_tail_commands();
     Ok(())
 }
 
@@ -771,7 +908,9 @@ async fn apply_assistant_frame(
     }
     match frame.usage.as_ref() {
         Some(sample) => {
-            match project_usage_sample(observations, run_id, usage, frame_sequence, sample).await {
+            match project_usage_sample(observations, run_id, usage, frame_sequence, sample, None)
+                .await
+            {
                 Some(state) => Err(state),
                 None => Ok(()),
             }
@@ -808,6 +947,7 @@ pub(crate) async fn apply_event(
     usage: Option<&ClaudeUsageScope<'_>>,
 ) -> ClaudeApplyOutcome {
     let continued = ClaudeApplyOutcome::Continue { end_input: false };
+    let first_frame = !std::mem::replace(&mut tracker.frame_applied, true);
     let settle = |sent: Result<(), TerminalState>| match sent {
         Ok(()) => continued,
         Err(state) => ClaudeApplyOutcome::Terminal(state),
@@ -821,6 +961,7 @@ pub(crate) async fn apply_event(
             continued
         }
         ClaudeEvent::MessageStart { message_id } => {
+            tracker.generation.message_started();
             tracker.note_turn_opened();
             // The run went on after a message marked final (a steer or a
             // goal check): it was not the answer after all.
@@ -839,13 +980,124 @@ pub(crate) async fn apply_event(
             tracker.thinking.message_started();
             settle(demoted)
         }
-        ClaudeEvent::MessageDelta { end_turn } => {
+        ClaudeEvent::GoalCommand { text } => {
+            let text = text.trim();
+            let (state, objective) = if let Some(condition) = text.strip_prefix("Goal set:") {
+                (GoalState::Active, condition)
+            } else if let Some(condition) = text.strip_prefix("Goal cleared:") {
+                (GoalState::Cleared, condition)
+            } else {
+                // A status reply or usage line changes nothing.
+                return continued;
+            };
+            let row = goal_row(run_id, frame_sequence, state, Some(objective.trim()), None);
+            settle(emit_rows(observations, row.into_iter().collect()).await)
+        }
+        ClaudeEvent::GoalCheck { condition, reason } => {
+            let row = goal_row(
+                run_id,
+                frame_sequence,
+                GoalState::Active,
+                Some(condition.as_str()),
+                Some(reason.as_str()),
+            );
+            settle(emit_rows(observations, row.into_iter().collect()).await)
+        }
+        ClaudeEvent::CompactionStarted => {
+            tracker.note_turn_opened();
+            if tracker.open_compaction.is_some() {
+                return continued;
+            }
+            let Ok(compaction) = ObservationId::parse(format!(
+                "{}:claude:compaction:{frame_sequence}",
+                run_id.as_str()
+            )) else {
+                return continued;
+            };
+            let row = compaction_row(
+                run_id,
+                frame_sequence,
+                CompactionState::Started,
+                &compaction,
+                None,
+                None,
+            );
+            tracker.open_compaction = Some(compaction);
+            settle(emit_rows(observations, row.into_iter().collect()).await)
+        }
+        ClaudeEvent::CompactionCompleted {
+            pre_tokens,
+            post_tokens,
+            duration_ms,
+        } => {
+            tracker.note_turn_opened();
+            // A boundary with no announced start still settles as its own
+            // compaction.
+            let Some(compaction) = tracker.open_compaction.take().or_else(|| {
+                ObservationId::parse(format!(
+                    "{}:claude:compaction:{frame_sequence}",
+                    run_id.as_str()
+                ))
+                .ok()
+            }) else {
+                return continued;
+            };
+            let row = compaction_row(
+                run_id,
+                frame_sequence,
+                CompactionState::Completed,
+                &compaction,
+                duration_ms,
+                compaction_summary(pre_tokens, post_tokens),
+            );
+            if let Err(state) = emit_rows(observations, row.into_iter().collect()).await {
+                return ClaudeApplyOutcome::Terminal(state);
+            }
+            // The context just shrank: the gauge follows now rather than at
+            // the next response.
+            let Some(context) = post_tokens else {
+                return continued;
+            };
+            tracker.usage_context = Some(context);
+            let sample = ClaudeUsageSample {
+                input: None,
+                cached_input: None,
+                output: None,
+                context: Some(context),
+                window: None,
+            };
+            match project_usage_sample(observations, run_id, usage, frame_sequence, &sample, None)
+                .await
+            {
+                Some(state) => ClaudeApplyOutcome::Terminal(state),
+                None => continued,
+            }
+        }
+        ClaudeEvent::MessageDelta {
+            output_tokens,
+            end_turn,
+            refusal,
+        } => {
+            if let Some(output_tokens) = output_tokens {
+                tracker
+                    .generation
+                    .output_tokens(output_tokens, std::time::Instant::now());
+            }
+            // The refusal is said as it happens; the `result` frame that
+            // follows settles the turn as failed.
+            if let Some(category) = refusal {
+                let row = refusal_row(run_id, frame_sequence, category);
+                if let Err(state) = emit_rows(observations, row.into_iter().collect()).await {
+                    return ClaudeApplyOutcome::Terminal(state);
+                }
+            }
             if !end_turn {
                 return continued;
             }
             settle(mark_final(observations, run_id, tracker, frame_sequence).await)
         }
         ClaudeEvent::TextDelta { delta, phase } => {
+            tracker.generation.content(std::time::Instant::now());
             tracker.note_turn_opened();
             if active_turn.is_none() {
                 *active_turn = Some(expected_session.to_owned());
@@ -874,6 +1126,7 @@ pub(crate) async fn apply_event(
             continued
         }
         ClaudeEvent::ThinkingStarted { index, title } => {
+            tracker.generation.content(std::time::Instant::now());
             let message_id = tracker.stream_message_id.clone();
             tracker.thinking.start(message_id.as_deref(), index, title);
             settle(
@@ -885,13 +1138,16 @@ pub(crate) async fn apply_event(
             )
         }
         ClaudeEvent::ThinkingDelta { index, text } => {
+            tracker.generation.content(std::time::Instant::now());
             let rows = tracker.thinking.delta(run_id, frame_sequence, index, &text);
             settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ToolUseStarted => {
+            tracker.generation.content(std::time::Instant::now());
             settle(mark_commentary(observations, run_id, tracker, frame_sequence).await)
         }
         ClaudeEvent::ToolResults(results) => {
+            tracker.generation.close();
             let rows = results
                 .iter()
                 .flat_map(|result| tracker.tools.finished(run_id, frame_sequence, result))
@@ -902,6 +1158,7 @@ pub(crate) async fn apply_event(
             settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ContentBlockStopped { index } => {
+            tracker.generation.content(std::time::Instant::now());
             let rows = tracker.thinking.stop(run_id, frame_sequence, index);
             settle(emit_rows(observations, rows).await)
         }
@@ -958,14 +1215,25 @@ pub(crate) async fn apply_event(
             session_id,
             permission_denials,
             usage: sample,
+            model_turns,
         } => {
             if let Some(session_id) = session_id
                 && session_id != expected_session
             {
                 return ClaudeApplyOutcome::Terminal(TerminalState::Failed);
             }
+            // A resumed session first flushes what an earlier process left
+            // queued, such as the notice that its background task stopped,
+            // and reports that flush as a model-less `result` straight after
+            // `init`, before the prompt's turn begins. It reports nothing
+            // about the prompt: settling on it would end input while the turn
+            // still runs, failing every steer, and blank the usage reading.
+            if first_frame && model_turns == Some(0) {
+                return continued;
+            }
             tracker.result_seen = true;
             tracker.root_turn = RootTurn::Reported;
+            tracker.generation.close();
             if !success {
                 tracker.semantic_failure = true;
             }
@@ -977,13 +1245,31 @@ pub(crate) async fn apply_event(
                 ..sample
             });
             if let Some(sample) = sample.as_ref()
-                && let Some(state) =
-                    project_usage_sample(observations, run_id, usage, frame_sequence, sample).await
+                && let Some(state) = project_usage_sample(
+                    observations,
+                    run_id,
+                    usage,
+                    frame_sequence,
+                    sample,
+                    tracker.generation.rate(),
+                )
+                .await
             {
                 return ClaudeApplyOutcome::Terminal(state);
             }
             // Background agents and workflows report back into this session:
             // stdin stays open for them, and for steers, until they finish.
+            // The run outlives this turn then, so the turn's end is reported
+            // on its own: its text is whole and may show in full.
+            if tracker.background_tasks > 0
+                && let Some(row) = turn_completed_row(run_id, frame_sequence)
+                && observations
+                    .send(EngineObservation::Activity(row))
+                    .await
+                    .is_err()
+            {
+                return ClaudeApplyOutcome::Terminal(TerminalState::Interrupted);
+            }
             ClaudeApplyOutcome::Continue {
                 end_input: tracker.background_tasks == 0,
             }
@@ -1117,7 +1403,11 @@ mod answer_phase_tests {
     }
 
     fn end_turn() -> ClaudeEvent {
-        ClaudeEvent::MessageDelta { end_turn: true }
+        ClaudeEvent::MessageDelta {
+            output_tokens: Some(12),
+            end_turn: true,
+            refusal: None,
+        }
     }
 
     #[tokio::test]

@@ -50,6 +50,14 @@ pub(crate) fn encode_engine_observation(
                 }
             }
         }
+        Observation::Goal(observation) => {
+            let mut encoded = builder.reborrow().init_goal();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_state(encode_observation_goal_state(observation.state()));
+            encoded.set_objective(observation.objective().unwrap_or(""));
+            encoded.set_detail(observation.detail().unwrap_or(""));
+        }
         Observation::Compaction(observation) => {
             let mut encoded = builder.reborrow().init_compaction();
             encoded.set_id(observation.id().as_str());
@@ -72,6 +80,25 @@ pub(crate) fn encode_engine_observation(
                 }
             }
             encoded.set_summary(observation.summary().unwrap_or(""));
+        }
+        Observation::Image(observation) => {
+            let mut encoded = builder.reborrow().init_image();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_item_id(observation.item_id().as_str());
+            encoded.set_origin(encode_observation_image_origin(observation.origin()));
+            encoded.set_path(observation.path());
+            encoded.set_caption(observation.caption().unwrap_or(""));
+        }
+        Observation::Safety(observation) => {
+            let mut encoded = builder.reborrow().init_safety();
+            encoded.set_id(observation.id().as_str());
+            encoded.set_sequence(observation.sequence().get());
+            encoded.set_action(encode_observation_safety_action(observation.action()));
+            encoded.set_category(encode_observation_safety_category(observation.category()));
+            encoded.set_provider_code(observation.provider_code().unwrap_or(""));
+            encoded.set_message(observation.message().unwrap_or(""));
+            encoded.set_model(observation.model().unwrap_or(""));
         }
         Observation::File(observation) => {
             let mut encoded = builder.reborrow().init_file();

@@ -1,8 +1,9 @@
 use artisan_domain::{
-    FileAction, FileObservation, OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_DELTA_MAX_BYTES,
-    OBSERVATION_MESSAGE_MAX_BYTES, OBSERVATION_OUTPUT_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES,
-    OBSERVATION_TEXT_MAX_BYTES, Observation as DomainObservation, ObservationId,
-    ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation,
+    CompactionObservation, CompactionState, FileAction, FileObservation, ImageObservation,
+    ImageOrigin, OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_DELTA_MAX_BYTES,
+    OBSERVATION_DURATION_MAX_MILLIS, OBSERVATION_MESSAGE_MAX_BYTES, OBSERVATION_OUTPUT_MAX_BYTES,
+    OBSERVATION_PLAN_MAX_ENTRIES, OBSERVATION_TEXT_MAX_BYTES, Observation as DomainObservation,
+    ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation,
     ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, RunId,
     SearchObservation, SearchScope, SearchState, TerminalActivityInput,
     TerminalActivityObservation, TerminalActivityState, ToolAction, ToolObservation,
@@ -16,13 +17,14 @@ use super::super::observation::{
     EngineObservation, ShellJobChange, ShellJobEnd, ShellJobRow, TerminalState, UsageObservation,
     chunk_text,
 };
+use super::compaction::CodexCompactionStep;
 use super::continuation::{
     CodexUsageContext, CodexUsageScope, codex_usage_report, current_unix_millis,
 };
 use super::protocol::{
-    CodexEvent, CodexFileChange, CodexFileKind, CodexPendingTracker, CodexPlanEntry,
-    CodexPlanStatus, CodexQuestion, CodexSearchLifecycle, CodexTerminalLifecycle, CodexToolAction,
-    CodexTurnError, CodexTurnState, prompt_input, request_line, write_line,
+    CodexEvent, CodexFileChange, CodexFileKind, CodexImage, CodexPendingTracker, CodexPlanEntry,
+    CodexPlanStatus, CodexQuestion, CodexSafety, CodexSearchLifecycle, CodexTerminalLifecycle,
+    CodexToolAction, CodexTurnError, CodexTurnState, prompt_input, request_line, write_line,
 };
 
 // ---------------------------------------------------------------------------
@@ -459,6 +461,54 @@ fn file_completed_rows(
         .collect()
 }
 
+/// Builds the image row for one generated Codex image. An image the engine
+/// did not save is written to the Forge's image store first; an image that
+/// cannot be placed on disk shows nothing.
+fn image_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    item_id: &str,
+    image: CodexImage,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let CodexImage {
+        saved_path,
+        base64,
+        revised_prompt,
+    } = image;
+    let Some(path) = saved_path.or_else(|| {
+        base64.and_then(|payload| {
+            super::super::engine_image::persist_inline_image("codex", item_id, &payload)
+        })
+    }) else {
+        return Vec::new();
+    };
+    let caption = revised_prompt
+        .as_deref()
+        .and_then(super::super::engine_image::bounded_caption);
+    let Some(id) = activity_observation_id(run_id, frame_sequence, &format!("image:{item_id}"))
+    else {
+        return Vec::new();
+    };
+    let Ok(image_item) = ObservationId::parse(item_id.to_owned()) else {
+        return Vec::new();
+    };
+    ImageObservation::new(
+        id,
+        sequence,
+        image_item,
+        ImageOrigin::Generated,
+        path,
+        caption,
+    )
+    .ok()
+    .map(DomainObservation::Image)
+    .into_iter()
+    .collect()
+}
+
 fn search_rows(
     run_id: &RunId,
     frame_sequence: u64,
@@ -536,6 +586,55 @@ fn plan_rows(
     PlanObservation::new(id, sequence, built, Some(turn))
         .ok()
         .map(DomainObservation::Plan)
+        .into_iter()
+        .collect()
+}
+
+/// Builds the compaction row for one paired compaction step.
+///
+/// Started and Completed rows of one compaction share a run-scoped
+/// `compaction_id` derived from the provider item; a completion reported only
+/// by `thread/compacted` carries its own frame-scoped identity. Codex reports
+/// no token counts for a compaction, so the summary stays empty.
+fn compaction_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    step: CodexCompactionStep,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let (state, item_id, duration_ms) = match step {
+        CodexCompactionStep::Started { item_id } => (CompactionState::Started, Some(item_id), None),
+        CodexCompactionStep::Completed {
+            item_id,
+            duration_ms,
+        } => (CompactionState::Completed, item_id, duration_ms),
+        CodexCompactionStep::Duplicate => return Vec::new(),
+    };
+    let (slug, compaction_key) = match &item_id {
+        Some(item_id) => (
+            format!("compaction:{item_id}:{}", state.as_str()),
+            item_id.clone(),
+        ),
+        None => (
+            format!("compaction:{}", state.as_str()),
+            frame_sequence.to_string(),
+        ),
+    };
+    let Some(id) = activity_observation_id(run_id, frame_sequence, &slug) else {
+        return Vec::new();
+    };
+    let Ok(compaction_id) = ObservationId::parse(format!(
+        "{}:codex:compaction:{compaction_key}",
+        run_id.as_str()
+    )) else {
+        return Vec::new();
+    };
+    let duration_ms = duration_ms.filter(|duration| *duration <= OBSERVATION_DURATION_MAX_MILLIS);
+    CompactionObservation::new(id, sequence, state, Some(compaction_id), duration_ms, None)
+        .ok()
+        .map(DomainObservation::Compaction)
         .into_iter()
         .collect()
 }
@@ -653,7 +752,20 @@ pub(crate) async fn apply_event(
             }
             None
         }
-        CodexEvent::TurnState { turn_id, state } => {
+        CodexEvent::TurnState {
+            turn_id,
+            state,
+            refusal,
+        } => {
+            // A refusal is said before the turn settles, so the reader
+            // learns why it failed.
+            if let Some(refusal) = refusal
+                && tracker.observe_safety(&turn_id, &refusal)
+                && let Some(interrupted) =
+                    emit_activity(observations, safety_rows(run_id, frame_sequence, &refusal)).await
+            {
+                return Some(interrupted);
+            }
             *active_turn = Some(turn_id);
             match state {
                 CodexTurnState::Completed => Some(TerminalState::Completed),
@@ -714,6 +826,16 @@ pub(crate) async fn apply_event(
         CodexEvent::QuestionRequested(request) => {
             // The request stays open in the tracker until the user answers
             // every question; the questions present as one questionnaire.
+            let asked = tracker.note_question_request(&request);
+            emit_activity(observations, question_rows(run_id, frame_sequence, &asked)).await
+        }
+        CodexEvent::AsyncQuestionsRequested { thread_id, request } => {
+            // The same questionnaire, answered by a steered user message
+            // while the run lasts; a child thread's questions are not ours
+            // to answer.
+            if tracker.native_thread_id() != Some(thread_id.as_str()) {
+                return None;
+            }
             let asked = tracker.note_question_request(&request);
             emit_activity(observations, question_rows(run_id, frame_sequence, &asked)).await
         }
@@ -879,6 +1001,18 @@ pub(crate) async fn apply_event(
             let rows = search_rows(run_id, frame_sequence, &item_id, &query, state);
             emit_activity(observations, rows).await
         }
+        CodexEvent::ImageShown {
+            thread_id,
+            turn_id,
+            item_id,
+            image,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let rows = image_rows(run_id, frame_sequence, &item_id, image);
+            emit_activity(observations, rows).await
+        }
         CodexEvent::PlanUpdated {
             thread_id,
             turn_id,
@@ -890,11 +1024,123 @@ pub(crate) async fn apply_event(
             let rows = plan_rows(run_id, frame_sequence, &turn_id, &entries);
             emit_activity(observations, rows).await
         }
+        CodexEvent::Compaction {
+            thread_id,
+            turn_id,
+            signal,
+        } => {
+            // Compaction runs inside the turn and never settles it.
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let step = tracker.compactions_mut().observe(&turn_id, signal);
+            emit_activity(observations, compaction_rows(run_id, frame_sequence, step)).await
+        }
+        CodexEvent::Goal {
+            thread_id,
+            state,
+            objective,
+        } => {
+            // Only the root thread's goal; it may arrive between turns, so it
+            // claims no turn.
+            if tracker.native_thread_id() != Some(thread_id.as_str())
+                || tracker.is_known_child_thread(&thread_id)
+            {
+                return None;
+            }
+            emit_activity(
+                observations,
+                goal_rows(run_id, frame_sequence, state, objective),
+            )
+            .await
+        }
+        CodexEvent::Safety {
+            thread_id,
+            turn_id,
+            safety,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn)
+                || !tracker.observe_safety(&turn_id, &safety)
+            {
+                return None;
+            }
+            emit_activity(observations, safety_rows(run_id, frame_sequence, &safety)).await
+        }
+        CodexEvent::McpServerStatus { name, status } => {
+            // Best effort: a full channel drops the update, never the turn.
+            let _ = observations.try_send(EngineObservation::Inventory(
+                crate::engine_inventory::InventoryReport {
+                    skills: None,
+                    connectors: crate::engine_inventory::ConnectorReport::Update(
+                        artisan_domain::InventoryConnector {
+                            name,
+                            status,
+                            plugin: None,
+                        },
+                    ),
+                },
+            ));
+            None
+        }
         CodexEvent::ActivitySilent
         | CodexEvent::ThreadClosed
         | CodexEvent::OptedOut
         | CodexEvent::UnknownMethod => None,
     }
+}
+
+/// Builds one goal report row.
+fn goal_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    state: artisan_domain::GoalState,
+    objective: Option<String>,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let Some(id) =
+        activity_observation_id(run_id, frame_sequence, &format!("goal:{}", state.as_str()))
+    else {
+        return Vec::new();
+    };
+    artisan_domain::GoalObservation::new(id, sequence, state, objective, None)
+        .map(|goal| vec![DomainObservation::Goal(goal)])
+        .unwrap_or_default()
+}
+
+/// Builds one safety report row.
+fn safety_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    safety: &CodexSafety,
+) -> Vec<DomainObservation> {
+    let Some(sequence) = activity_sequence(frame_sequence) else {
+        return Vec::new();
+    };
+    let Some(id) = activity_observation_id(
+        run_id,
+        frame_sequence,
+        &format!("safety:{}", safety.action.as_str()),
+    ) else {
+        return Vec::new();
+    };
+    // A model name too long to label is dropped, never the report.
+    let model = safety
+        .model
+        .clone()
+        .filter(|model| model.len() <= artisan_domain::OBSERVATION_LABEL_MAX_BYTES);
+    artisan_domain::SafetyObservation::new(
+        id,
+        sequence,
+        safety.action,
+        safety.category,
+        safety.provider_code.clone(),
+        safety.message.clone(),
+        model,
+    )
+    .map(|row| vec![DomainObservation::Safety(row)])
+    .unwrap_or_default()
 }
 
 /// Steers a live turn with a follow-up message (`turn/steer`).
@@ -966,7 +1212,9 @@ pub(crate) async fn answer_approval<W: AsyncWrite + Unpin>(
     if !tracker.resolve_approval(approval_id) {
         return Err(CodexTurnError::Configuration);
     }
-    let decision = if approved { "approved" } else { "denied" };
+    // The app-server v2 vocabulary, as `CodexPendingTracker::approval_reply`
+    // answers in production: Codex rejects any other spelling.
+    let decision = if approved { "accept" } else { "decline" };
     let line =
         serde_json::json!({ "id": native_id, "result": { "decision": decision } }).to_string();
     write_line(stdin, &line).await

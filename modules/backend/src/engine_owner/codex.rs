@@ -39,10 +39,12 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod compaction;
 mod continuation;
 mod protocol;
 mod wire;
 pub(crate) use adapter::*;
+pub(crate) use compaction::*;
 pub(crate) use continuation::*;
 pub(crate) use protocol::*;
 pub(crate) use wire::*;

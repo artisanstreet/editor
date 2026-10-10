@@ -8,9 +8,13 @@ use artisan_domain::{
 use artisan_native_engine::CODEX_OPT_OUT_NOTIFICATION_METHODS;
 use base64::Engine as _;
 use serde_json::Value;
+
+use crate::engine_inventory::InventoryReport;
 use thiserror::Error;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
+
+use super::compaction::{CodexCompactionSignal, CodexCompactionTracker};
 
 /// Maximum accepted JSONL frame bytes (mirrors the TS 8 MiB transport cap).
 pub(crate) const CODEX_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -313,11 +317,14 @@ impl CodexQuestion {
     }
 }
 
-/// One typed Codex question request frame.
+/// One typed Codex question request: a blocking `requestUserInput` frame,
+/// or the questions of an async `agentMessage`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodexQuestionRequest {
-    /// The JSON-RPC request id the answer reply must echo.
-    rpc_id: Value,
+    /// The JSON-RPC request id the answer reply must echo; [`None`] for an
+    /// async request, which nothing waits on: its answers travel back as a
+    /// user message steered into the turn.
+    rpc_id: Option<Value>,
     /// The questionnaire identity every question of the request shares.
     group_id: String,
     questions: Vec<CodexQuestion>,
@@ -356,6 +363,16 @@ pub(crate) enum CodexEvent {
     TurnState {
         turn_id: String,
         state: CodexTurnState,
+        /// Why a failed turn failed, when a policy screen refused it.
+        refusal: Option<CodexSafety>,
+    },
+    /// A safety screen holding the response, releasing it, rerouting the
+    /// request, or refusing it (`model/safetyBuffering/updated`,
+    /// `model/rerouted`, or a policy `error`).
+    Safety {
+        thread_id: String,
+        turn_id: String,
+        safety: CodexSafety,
     },
     /// Cumulative token usage from one `thread/tokenUsage/updated` frame.
     ///
@@ -367,6 +384,13 @@ pub(crate) enum CodexEvent {
     },
     ApprovalRequested(CodexApprovalRequest),
     QuestionRequested(CodexQuestionRequest),
+    /// The questions of an async `agentMessage` (`request_user_input_async`):
+    /// the tool already returned, so the model keeps working while they
+    /// wait. They replace the item's prose, which only restates them.
+    AsyncQuestionsRequested {
+        thread_id: String,
+        request: CodexQuestionRequest,
+    },
     SubagentDiscovered {
         agent_thread_id: String,
         parent_thread_id: String,
@@ -445,12 +469,38 @@ pub(crate) enum CodexEvent {
         query: String,
         state: CodexSearchLifecycle,
     },
+    /// One image the engine generated: a completed, successful
+    /// `imageGeneration` item. Images it only looked at (`imageView`) are
+    /// steps of its work and show nothing; an agent shows an image with an
+    /// `artisan-image` block.
+    ImageShown {
+        thread_id: String,
+        turn_id: String,
+        item_id: String,
+        image: CodexImage,
+    },
     /// One provider-neutral plan update (`turn/plan/updated` or an
     /// `item/started` / `item/completed` plan item).
     PlanUpdated {
         thread_id: String,
         turn_id: String,
         entries: Vec<CodexPlanEntry>,
+    },
+    /// One context-compaction signal: a `contextCompaction` item lifecycle
+    /// step or the deprecated `thread/compacted` notification. Never a turn
+    /// settlement.
+    Compaction {
+        thread_id: String,
+        turn_id: String,
+        signal: CodexCompactionSignal,
+    },
+    /// Where the thread's goal stands (`thread/goal/updated`), or that it was
+    /// cleared (`thread/goal/cleared`). A goal belongs to the thread; it
+    /// can change between turns as well as during one.
+    Goal {
+        thread_id: String,
+        state: artisan_domain::GoalState,
+        objective: Option<String>,
     },
     /// A decoded-known frame that intentionally emits no observation: started
     /// reasoning items, the section-zero `summaryPartAdded` opener, and
@@ -459,6 +509,84 @@ pub(crate) enum CodexEvent {
     ThreadClosed,
     OptedOut,
     UnknownMethod,
+    /// One MCP server's startup state (`mcpServer/startupStatus/updated`).
+    /// It belongs to the engine, not the turn: it updates the Forge's
+    /// record of the engine's connectors.
+    McpServerStatus {
+        name: String,
+        status: artisan_domain::ConnectorStatus,
+    },
+}
+
+/// One image Codex generated, saved by the engine (`savedPath`) or inline
+/// as base64 (`result`), with the prompt the model actually used.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexImage {
+    pub(crate) saved_path: Option<String>,
+    pub(crate) base64: Option<String>,
+    pub(crate) revised_prompt: Option<String>,
+}
+
+/// One step of Codex's safety screening, in the shared vocabulary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexSafety {
+    pub(crate) action: artisan_domain::SafetyAction,
+    pub(crate) category: artisan_domain::SafetyCategory,
+    /// Codex's own code: the `codexErrorInfo`, reroute reason, or first
+    /// buffering reason.
+    pub(crate) provider_code: Option<String>,
+    pub(crate) message: Option<String>,
+    /// The model a reroute moved the request to.
+    pub(crate) model: Option<String>,
+}
+
+/// Reads the policy area out of a Codex signal such as
+/// `highRiskCyberActivity` or a buffering use case.
+fn safety_category_of<'a>(
+    signals: impl IntoIterator<Item = &'a str>,
+) -> artisan_domain::SafetyCategory {
+    use artisan_domain::SafetyCategory;
+    for signal in signals {
+        let signal = signal.to_ascii_lowercase();
+        if signal.contains("cyber") {
+            return SafetyCategory::Cyber;
+        }
+        if signal.contains("bio") {
+            return SafetyCategory::Bio;
+        }
+        if signal.contains("chem") {
+            return SafetyCategory::Chemical;
+        }
+    }
+    SafetyCategory::Unspecified
+}
+
+/// Decodes a policy refusal from a `TurnError` (`turn.error` on a failed
+/// turn, or an `error` notification's `error`). Other failures, such as
+/// limits or transport errors, are not refusals and decode to [`None`].
+fn decode_policy_refusal(error: &Value) -> Option<CodexSafety> {
+    use artisan_domain::SafetyCategory;
+    let code = error.get("codexErrorInfo")?.as_str()?;
+    let category = match code {
+        "cyberPolicy" => SafetyCategory::Cyber,
+        "bioPolicy" => SafetyCategory::Bio,
+        _ if code.ends_with("Policy") || code.ends_with("PolicyViolation") => {
+            SafetyCategory::Policy
+        }
+        _ => return None,
+    };
+    let message = bounded_text(error, "message").or_else(|| {
+        error
+            .get("misalignment")
+            .and_then(|details| bounded_text(details, "detailedExplanation"))
+    });
+    Some(CodexSafety {
+        action: artisan_domain::SafetyAction::Refused,
+        category,
+        provider_code: Some(code.to_owned()),
+        message,
+        model: None,
+    })
 }
 
 /// Typed Codex turn lifecycle state.
@@ -579,6 +707,33 @@ pub(crate) fn parse_frame(line: &str, frame_sequence: u64) -> Result<CodexEvent,
     Ok(decode_method(method, &envelope, &params))
 }
 
+/// Decodes `thread/goal/updated`: `{threadId, turnId?, goal: {objective,
+/// status, ...}}`. Codex's statuses fold onto the shared ones: a pause, a
+/// block, and an exhausted usage or token budget all wait on the reader;
+/// `complete` is met.
+fn decode_goal_updated(params: &Value) -> Option<CodexEvent> {
+    use artisan_domain::GoalState;
+    let thread_id = raw_text(params, "threadId")?;
+    let goal = params.get("goal")?;
+    let state = match goal.get("status")?.as_str()? {
+        "active" => GoalState::Active,
+        "paused" | "blocked" | "usageLimited" | "budgetLimited" => GoalState::Paused,
+        "complete" => GoalState::Met,
+        _ => return None,
+    };
+    let objective = goal
+        .get("objective")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && text.len() <= artisan_domain::OBSERVATION_TEXT_MAX_BYTES)
+        .map(str::to_owned);
+    Some(CodexEvent::Goal {
+        thread_id,
+        state,
+        objective,
+    })
+}
+
 /// Extracts the exact claimed `(threadId, turnId)` scope of one activity
 /// frame. Both identities must be present and non-empty: activity never
 /// invents scope, and scope-free frames stay [`CodexEvent::UnknownMethod`].
@@ -613,6 +768,55 @@ fn labelled_options(options: Option<&Value>) -> Vec<(String, Option<String>)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Reads the questions of an async `agentMessage`: `[{title, options?}]`,
+/// options as bare labels, bounded. The item is the questionnaire, and
+/// each question is keyed by its position, the only identity it has.
+fn async_question_request(
+    item_id: &str,
+    questions: Option<&Value>,
+) -> Option<CodexQuestionRequest> {
+    let questions: Vec<CodexQuestion> = questions?
+        .as_array()?
+        .iter()
+        .take(CODEX_MAX_QUESTIONS_PER_FRAME)
+        .enumerate()
+        .filter_map(|(index, question)| {
+            let title = question.get("title")?.as_str()?;
+            if title.is_empty() || title.len() > CODEX_MAX_TEXT_FIELD_BYTES {
+                return None;
+            }
+            let options = question
+                .get("options")
+                .and_then(Value::as_array)
+                .map(|options| {
+                    options
+                        .iter()
+                        .take(CODEX_MAX_OPTIONS_PER_QUESTION)
+                        .filter_map(Value::as_str)
+                        .filter(|label| {
+                            !label.is_empty() && label.len() <= CODEX_MAX_TEXT_FIELD_BYTES
+                        })
+                        .map(|label| (label.to_owned(), None))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(CodexQuestion {
+                question_id: format!("{item_id}:{index}"),
+                provider_id: index.to_string(),
+                group_id: item_id.to_owned(),
+                text: title.to_owned(),
+                header: None,
+                options,
+            })
+        })
+        .collect();
+    (!questions.is_empty()).then(|| CodexQuestionRequest {
+        rpc_id: None,
+        group_id: item_id.to_owned(),
+        questions,
+    })
 }
 
 fn nested_text(item: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
@@ -685,7 +889,87 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             if turn_id.is_empty() {
                 return CodexEvent::UnknownMethod;
             }
-            CodexEvent::TurnState { turn_id, state }
+            let refusal = match state {
+                CodexTurnState::Failed => params
+                    .get("turn")
+                    .and_then(|turn| turn.get("error"))
+                    .and_then(decode_policy_refusal),
+                _ => None,
+            };
+            CodexEvent::TurnState {
+                turn_id,
+                state,
+                refusal,
+            }
+        }
+        "model/safetyBuffering/updated" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let Some(holding) = params.get("showBufferingUi").and_then(Value::as_bool) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let signals: Vec<&str> = ["useCases", "reasons"]
+                .iter()
+                .filter_map(|field| params.get(*field).and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let reason = params
+                .get("reasons")
+                .and_then(Value::as_array)
+                .and_then(|reasons| reasons.first())
+                .and_then(Value::as_str)
+                .filter(|reason| {
+                    !reason.is_empty()
+                        && reason.len() <= artisan_domain::OBSERVATION_PROVIDER_CODE_MAX_BYTES
+                })
+                .map(str::to_owned);
+            CodexEvent::Safety {
+                thread_id,
+                turn_id,
+                safety: CodexSafety {
+                    action: if holding {
+                        artisan_domain::SafetyAction::Holding
+                    } else {
+                        artisan_domain::SafetyAction::Released
+                    },
+                    category: safety_category_of(signals),
+                    provider_code: reason,
+                    message: None,
+                    model: None,
+                },
+            }
+        }
+        "model/rerouted" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let reason = raw_text(params, "reason");
+            CodexEvent::Safety {
+                thread_id,
+                turn_id,
+                safety: CodexSafety {
+                    action: artisan_domain::SafetyAction::Rerouted,
+                    category: safety_category_of(reason.as_deref()),
+                    provider_code: reason,
+                    message: None,
+                    model: bounded_text(params, "toModel"),
+                },
+            }
+        }
+        "error" => {
+            let Some((thread_id, turn_id)) = claimed_scope(params) else {
+                return CodexEvent::UnknownMethod;
+            };
+            match params.get("error").and_then(decode_policy_refusal) {
+                Some(safety) => CodexEvent::Safety {
+                    thread_id,
+                    turn_id,
+                    safety,
+                },
+                None => CodexEvent::UnknownMethod,
+            }
         }
         "thread/tokenUsage/updated" => {
             let turn_id = raw_text(params, "turnId").unwrap_or_default();
@@ -784,7 +1068,7 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 return CodexEvent::UnknownMethod;
             }
             CodexEvent::QuestionRequested(CodexQuestionRequest {
-                rpc_id,
+                rpc_id: Some(rpc_id),
                 group_id,
                 questions,
             })
@@ -936,6 +1220,26 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
             }
         }
         "item/started" | "item/completed" => decode_item_envelope(method == "item/started", params),
+        "thread/goal/updated" => decode_goal_updated(params).unwrap_or(CodexEvent::UnknownMethod),
+        "mcpServer/startupStatus/updated" => {
+            decode_mcp_server_status(params).unwrap_or(CodexEvent::UnknownMethod)
+        }
+        "thread/goal/cleared" => match raw_text(params, "threadId") {
+            Some(thread_id) => CodexEvent::Goal {
+                thread_id,
+                state: artisan_domain::GoalState::Cleared,
+                objective: None,
+            },
+            None => CodexEvent::UnknownMethod,
+        },
+        "thread/compacted" => match claimed_scope(params) {
+            Some((thread_id, turn_id)) => CodexEvent::Compaction {
+                thread_id,
+                turn_id,
+                signal: CodexCompactionSignal::ThreadCompacted,
+            },
+            None => CodexEvent::UnknownMethod,
+        },
         _ => {
             if CODEX_OPT_OUT_NOTIFICATION_METHODS.contains(&method) {
                 return CodexEvent::OptedOut;
@@ -945,15 +1249,110 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
     }
 }
 
+/// The skills a `skills/list` reply reports for the run's project; skills
+/// turned off in Codex are left out.
+pub(crate) fn skills_list_inventory(line: &str) -> Option<InventoryReport> {
+    use artisan_domain::{InventorySkill, InventorySkillSource};
+
+    let value: Value = serde_json::from_str(line).ok()?;
+    let entries = value.get("result")?.get("data")?.as_array()?;
+    let mut skills = Vec::new();
+    for skill in entries
+        .iter()
+        .filter_map(|entry| entry.get("skills").and_then(Value::as_array))
+        .flatten()
+    {
+        if skill.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let Some(name) = skill
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| artisan_domain::valid_inventory_name(name))
+        else {
+            continue;
+        };
+        let description = trimmed_text(
+            skill
+                .get("interface")
+                .and_then(|face| face.get("shortDescription")),
+        )
+        .or_else(|| trimmed_text(skill.get("shortDescription")))
+        .or_else(|| trimmed_text(skill.get("description")))
+        .unwrap_or_default();
+        let plugin = trimmed_text(skill.get("pluginId"))
+            .filter(|plugin| artisan_domain::valid_inventory_name(plugin))
+            .map(str::to_owned);
+        let source = if plugin.is_some() {
+            InventorySkillSource::Plugin
+        } else {
+            match trimmed_text(skill.get("scope")) {
+                Some("repo") => InventorySkillSource::Project,
+                Some("user") => InventorySkillSource::User,
+                _ => InventorySkillSource::System,
+            }
+        };
+        skills.push(InventorySkill {
+            name: name.to_owned(),
+            description: bounded_description(description),
+            source,
+            plugin,
+        });
+    }
+    Some(InventoryReport {
+        skills: Some(skills),
+        connectors: crate::engine_inventory::ConnectorReport::Unchanged,
+    })
+}
+
+fn trimmed_text(value: Option<&Value>) -> Option<&str> {
+    value.and_then(Value::as_str).map(str::trim)
+}
+
+fn bounded_description(description: &str) -> String {
+    let single_line = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut end = single_line
+        .len()
+        .min(artisan_domain::EXTENSION_DESCRIPTION_MAX_BYTES);
+    while !single_line.is_char_boundary(end) {
+        end -= 1;
+    }
+    single_line[..end].to_owned()
+}
+
+/// Decodes one MCP server's startup state. A server that needs its user to
+/// sign in again reports `failed` with `reauthenticationRequired`.
+fn decode_mcp_server_status(params: &Value) -> Option<CodexEvent> {
+    let name = params.get("name")?.as_str()?;
+    if !artisan_domain::valid_inventory_name(name) {
+        return None;
+    }
+    let reauthenticate =
+        params.get("failureReason").and_then(Value::as_str) == Some("reauthenticationRequired");
+    let status = match params.get("status")?.as_str()? {
+        "ready" => artisan_domain::ConnectorStatus::Connected,
+        "starting" => artisan_domain::ConnectorStatus::Pending,
+        "failed" if reauthenticate => artisan_domain::ConnectorStatus::NeedsAuth,
+        "failed" => artisan_domain::ConnectorStatus::Failed,
+        "cancelled" => artisan_domain::ConnectorStatus::Disabled,
+        _ => return None,
+    };
+    Some(CodexEvent::McpServerStatus {
+        name: name.to_owned(),
+        status,
+    })
+}
+
 /// Decodes one `item/started` / `item/completed` envelope into a typed
 /// activity event, mirroring the TypeScript item union.
 ///
 /// Only item types with a valid existing domain observation normalize:
 /// reasoning (published summary only), tool (`mcpToolCall` /
 /// `dynamicToolCall`), `commandExecution`, `fileChange`, `webSearch`, and
-/// plan. Agent messages preserve authoritative text and phase alongside the
-/// delta path. User and subagent items stay on the tracker path; compaction has no
-/// owner channel, so all of those remain [`CodexEvent::UnknownMethod`]
+/// plan, `contextCompaction` lifecycle steps, and completed
+/// `imageGeneration` items (`imageView` is acknowledged silently). Agent messages preserve
+/// authoritative text and phase alongside the delta path. User and subagent
+/// items stay on the tracker path and remain [`CodexEvent::UnknownMethod`]
 /// without disturbing the turn.
 #[expect(
     clippy::too_many_lines,
@@ -970,6 +1369,11 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
     let item_id = nested_text(item, "id").unwrap_or_default();
     match item_type {
         "agentMessage" if !item_id.is_empty() => {
+            if item.get("delivery").and_then(Value::as_str) == Some("async")
+                && let Some(request) = async_question_request(&item_id, item.get("questions"))
+            {
+                return CodexEvent::AsyncQuestionsRequested { thread_id, request };
+            }
             let phase = match item.get("phase").and_then(Value::as_str) {
                 Some("commentary") => artisan_domain::AssistantMessagePhase::Commentary,
                 Some("final_answer") => artisan_domain::AssistantMessagePhase::Final,
@@ -1175,6 +1579,70 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
                 }],
             }
         }
+        // Looking at an image is a step of the work, never a preview.
+        "imageView" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            CodexEvent::ActivitySilent
+        }
+        "imageGeneration" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            if started {
+                return CodexEvent::ActivitySilent;
+            }
+            // A failed generation (a usage limit, a refusal) shows nothing;
+            // the turn's own error path reports why.
+            let failed = item
+                .get("failure")
+                .is_some_and(|failure| !failure.is_null())
+                || matches!(
+                    item.get("status").and_then(Value::as_str),
+                    Some("failed" | "error" | "cancelled")
+                );
+            let saved_path = nested_text(item, "savedPath");
+            let base64 = item
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|result| !result.is_empty())
+                .map(str::to_owned);
+            if failed || (saved_path.is_none() && base64.is_none()) {
+                return CodexEvent::ActivitySilent;
+            }
+            CodexEvent::ImageShown {
+                thread_id,
+                turn_id,
+                item_id,
+                image: CodexImage {
+                    saved_path,
+                    base64,
+                    revised_prompt: nested_text(item, "revisedPrompt"),
+                },
+            }
+        }
+        "contextCompaction" => {
+            if item_id.is_empty() {
+                return CodexEvent::UnknownMethod;
+            }
+            let signal = if started {
+                CodexCompactionSignal::ItemStarted {
+                    item_id,
+                    started_at_ms: params.get("startedAtMs").and_then(Value::as_u64),
+                }
+            } else {
+                CodexCompactionSignal::ItemCompleted {
+                    item_id,
+                    completed_at_ms: params.get("completedAtMs").and_then(Value::as_u64),
+                }
+            };
+            CodexEvent::Compaction {
+                thread_id,
+                turn_id,
+                signal,
+            }
+        }
         _ => CodexEvent::UnknownMethod,
     }
 }
@@ -1197,12 +1665,41 @@ pub(crate) struct CodexPendingTracker {
     /// resumed thread). Rich activity frames must claim exactly this thread;
     /// an unbound tracker emits no activity at all.
     native_thread_id: Option<String>,
+    /// Pairs `contextCompaction` items with the deprecated
+    /// `thread/compacted` echo so one compaction settles once.
+    compactions: CodexCompactionTracker,
+    /// The `skills/list` request whose reply is still due.
+    skills_request: Option<u64>,
+    /// Whether Codex holds the response back for a safety check: the turn
+    /// is alive though silent, so it must not settle as a stall.
+    safety_hold: bool,
+    /// The turn whose policy refusal was already reported, so the `error`
+    /// notification and the failed turn report it once.
+    refusal_reported: Option<String>,
 }
 
 impl CodexPendingTracker {
     /// Creates an empty tracker for one turn.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Expects the reply to the `skills/list` request `request_id`.
+    pub(crate) fn expect_skills_reply(&mut self, request_id: u64) {
+        self.skills_request = Some(request_id);
+    }
+
+    /// Takes `line` when it is the expected `skills/list` reply, success or
+    /// error alike, so the probe can never fail the turn. The caller reads
+    /// the reply with [`skills_list_inventory`].
+    pub(crate) fn take_skills_reply(&mut self, line: &str) -> bool {
+        let taken = self
+            .skills_request
+            .is_some_and(|request_id| super::wire::codex_response_id_matches(line, request_id));
+        if taken {
+            self.skills_request = None;
+        }
+        taken
     }
 
     /// Binds the root native thread authority for rich activity.
@@ -1222,6 +1719,11 @@ impl CodexPendingTracker {
     /// Returns the bound root native thread, when the pump pinned one.
     pub(crate) fn native_thread_id(&self) -> Option<&str> {
         self.native_thread_id.as_deref()
+    }
+
+    /// Returns the turn's compaction pairing state.
+    pub(crate) fn compactions_mut(&mut self) -> &mut CodexCompactionTracker {
+        &mut self.compactions
     }
 
     ///
@@ -1288,7 +1790,7 @@ impl CodexPendingTracker {
 
     /// Records the durable answer to one question of an open request.
     ///
-    /// Returns the reply line once every question of the request has an
+    /// Returns the handoff once every question of the request has an
     /// answer, and [`None`] while others are still open; the request then
     /// leaves the tracker. Unknown or already answered questions are
     /// refused.
@@ -1301,7 +1803,7 @@ impl CodexPendingTracker {
         &mut self,
         question_id: &str,
         answers: &[String],
-    ) -> Result<Option<String>, CodexTurnError> {
+    ) -> Result<Option<CodexQuestionHandoff>, CodexTurnError> {
         let Some((group_id, request)) = self
             .question_requests
             .iter_mut()
@@ -1321,7 +1823,7 @@ impl CodexPendingTracker {
             .question_requests
             .remove(&group_id)
             .ok_or(CodexTurnError::Configuration)?;
-        Ok(Some(request.reply_line()))
+        Ok(Some(request.handoff()))
     }
 
     /// Notes one subagent discovery without adopting the root turn.
@@ -1362,10 +1864,35 @@ impl CodexPendingTracker {
     }
 
     /// Returns whether the provider is waiting on the user: an open
-    /// approval or question keeps the turn alive however long the user
-    /// takes.
+    /// approval or blocking question keeps the turn alive however long the
+    /// user takes. Async questions block nothing, so they never count.
     pub(crate) fn waiting_on_user(&self) -> bool {
-        !self.approvals.is_empty() || !self.question_requests.is_empty()
+        !self.approvals.is_empty()
+            || self
+                .question_requests
+                .values()
+                .any(|request| request.rpc_id.is_some())
+    }
+
+    /// Whether the turn may stay silent without settling as a stall: the
+    /// user owes an answer, or Codex holds the response for a safety check.
+    pub(crate) fn stall_exempt(&self) -> bool {
+        self.waiting_on_user() || self.safety_hold
+    }
+
+    /// Follows a safety step; returns whether it should be reported, which
+    /// a refusal already reported for its turn is not.
+    pub(crate) fn observe_safety(&mut self, turn_id: &str, safety: &CodexSafety) -> bool {
+        use artisan_domain::SafetyAction;
+        self.safety_hold = safety.action == SafetyAction::Holding;
+        if safety.action != SafetyAction::Refused {
+            return true;
+        }
+        if self.refusal_reported.as_deref() == Some(turn_id) {
+            return false;
+        }
+        self.refusal_reported = Some(turn_id.to_owned());
+        true
     }
 
     /// Returns the number of discovered subagents.
@@ -1375,10 +1902,20 @@ impl CodexPendingTracker {
     }
 }
 
-/// One open `requestUserInput` request with the answers recorded so far.
+/// How a fully answered question request goes back to Codex.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CodexQuestionHandoff {
+    /// The JSON-RPC reply line answering a blocking `requestUserInput`.
+    Reply(String),
+    /// The user message answering async questions, steered into the turn;
+    /// [`None`] when every question was skipped, which needs no message.
+    Message(Option<String>),
+}
+
+/// One open question request with the answers recorded so far.
 #[derive(Debug)]
 struct PendingQuestionRequest {
-    rpc_id: Value,
+    rpc_id: Option<Value>,
     questions: Vec<CodexQuestion>,
     /// Answers by provider question id; a skipped question records an
     /// empty list.
@@ -1399,10 +1936,19 @@ impl PendingQuestionRequest {
             .is_some_and(|provider_id| !self.answers.contains_key(&provider_id))
     }
 
+    /// The handoff answering the request: the JSON-RPC reply for a
+    /// blocking request, the user message for an async one.
+    fn handoff(&self) -> CodexQuestionHandoff {
+        match &self.rpc_id {
+            Some(rpc_id) => CodexQuestionHandoff::Reply(self.reply_line(rpc_id)),
+            None => CodexQuestionHandoff::Message(self.answer_message()),
+        }
+    }
+
     /// The JSON-RPC reply that answers the request: every answered
     /// question by its provider id, skipped questions left out (Codex treats
     /// a missing answer as "continue with best judgment").
-    fn reply_line(&self) -> String {
+    fn reply_line(&self, rpc_id: &Value) -> String {
         let mut map = serde_json::Map::new();
         for (provider_id, answers) in self
             .answers
@@ -1415,8 +1961,31 @@ impl PendingQuestionRequest {
                 serde_json::json!({ "answers": answers }),
             );
         }
-        serde_json::json!({ "id": self.rpc_id, "result": { "answers": Value::Object(map) } })
-            .to_string()
+        serde_json::json!({ "id": rpc_id, "result": { "answers": Value::Object(map) } }).to_string()
+    }
+
+    /// The user message answering async questions: each answered question
+    /// quoted above its answer, in the order asked. Skipped questions are
+    /// left out; the model already went on with its own default for them.
+    fn answer_message(&self) -> Option<String> {
+        let answered: Vec<String> = self
+            .questions
+            .iter()
+            .filter_map(|question| {
+                let answers = self.answers.get(&question.provider_id)?;
+                if answers.is_empty() {
+                    return None;
+                }
+                let quoted = question
+                    .text
+                    .lines()
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Some(format!("{quoted}\n\n{}", answers.join(", ")))
+            })
+            .collect();
+        (!answered.is_empty()).then(|| answered.join("\n\n"))
     }
 }
 

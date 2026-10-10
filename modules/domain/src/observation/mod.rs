@@ -386,6 +386,8 @@ mod conversation;
 mod diagnostics;
 mod interaction;
 mod lifecycle;
+mod media;
+mod safety;
 mod tooling;
 mod usage;
 
@@ -405,11 +407,13 @@ pub use interaction::{
     QuestionObservation, QuestionOption, QuestionState,
 };
 pub use lifecycle::{
-    CompactionObservation, CompactionState, PlanEntry, PlanEntryStatus, PlanObservation,
-    RetryAttemptState, RetryObservation, RunState, RunStateObservation, RunTerminalObservation,
-    RunTerminalState, SubagentInput, SubagentObservation, SubagentState, TurnState,
-    TurnStateObservation,
+    CompactionObservation, CompactionState, GoalObservation, GoalState, PlanEntry, PlanEntryStatus,
+    PlanObservation, RetryAttemptState, RetryObservation, RunState, RunStateObservation,
+    RunTerminalObservation, RunTerminalState, SubagentInput, SubagentObservation, SubagentState,
+    TurnState, TurnStateObservation,
 };
+pub use media::{ImageObservation, ImageOrigin};
+pub use safety::{SafetyAction, SafetyCategory, SafetyObservation};
 pub use tooling::{
     FileAction, FileObservation, SearchObservation, SearchScope, SearchState,
     TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
@@ -437,8 +441,12 @@ pub enum Observation {
     Approval(ApprovalObservation),
     /// A provider context compaction report.
     Compaction(CompactionObservation),
+    /// Where the session goal stands.
+    Goal(GoalObservation),
     /// A file mutation or inspection.
     File(FileObservation),
+    /// An image the engine generated, viewed, or received from a tool.
+    Image(ImageObservation),
     /// A provider-native action with no canonical tool equivalent.
     NativeAction(NativeActionObservation),
     /// A provider-neutral plan update.
@@ -455,6 +463,8 @@ pub enum Observation {
     ReasoningSummaryDelta(ReasoningSummaryDeltaObservation),
     /// A provider error with its continuation intent.
     Retry(RetryObservation),
+    /// A provider safety system holding, rerouting, or refusing the request.
+    Safety(SafetyObservation),
     /// A non-terminal lifecycle change for the run.
     RunState(RunStateObservation),
     /// The sole terminal outcome of the run.
@@ -484,7 +494,9 @@ impl Observation {
             Self::AgentMessageCompleted(_) => "agent_message_completed",
             Self::Approval(_) => "approval",
             Self::Compaction(_) => "compaction",
+            Self::Goal(_) => "goal",
             Self::File(_) => "file",
+            Self::Image(_) => "image",
             Self::NativeAction(_) => "native_action",
             Self::Plan(_) => "plan",
             Self::ProcessDiagnostic(_) => "process_diagnostic",
@@ -493,6 +505,7 @@ impl Observation {
             Self::ReasoningSummaryCompleted(_) => "reasoning_summary_completed",
             Self::ReasoningSummaryDelta(_) => "reasoning_summary_delta",
             Self::Retry(_) => "retry",
+            Self::Safety(_) => "safety",
             Self::RunState(_) => "run_state",
             Self::RunTerminal(_) => "run_terminal",
             Self::Search(_) => "search",
@@ -513,7 +526,9 @@ impl Observation {
             Self::AgentMessageCompleted(value) => value.id(),
             Self::Approval(value) => value.id(),
             Self::Compaction(value) => value.id(),
+            Self::Goal(value) => value.id(),
             Self::File(value) => value.id(),
+            Self::Image(value) => value.id(),
             Self::NativeAction(value) => value.id(),
             Self::Plan(value) => value.id(),
             Self::ProcessDiagnostic(value) => value.id(),
@@ -522,6 +537,7 @@ impl Observation {
             Self::ReasoningSummaryCompleted(value) => value.id(),
             Self::ReasoningSummaryDelta(value) => value.id(),
             Self::Retry(value) => value.id(),
+            Self::Safety(value) => value.id(),
             Self::RunState(value) => value.id(),
             Self::RunTerminal(value) => value.id(),
             Self::Search(value) => value.id(),
@@ -542,7 +558,9 @@ impl Observation {
             Self::AgentMessageCompleted(value) => value.sequence(),
             Self::Approval(value) => value.sequence(),
             Self::Compaction(value) => value.sequence(),
+            Self::Goal(value) => value.sequence(),
             Self::File(value) => value.sequence(),
+            Self::Image(value) => value.sequence(),
             Self::NativeAction(value) => value.sequence(),
             Self::Plan(value) => value.sequence(),
             Self::ProcessDiagnostic(value) => value.sequence(),
@@ -551,6 +569,7 @@ impl Observation {
             Self::ReasoningSummaryCompleted(value) => value.sequence(),
             Self::ReasoningSummaryDelta(value) => value.sequence(),
             Self::Retry(value) => value.sequence(),
+            Self::Safety(value) => value.sequence(),
             Self::RunState(value) => value.sequence(),
             Self::RunTerminal(value) => value.sequence(),
             Self::Search(value) => value.sequence(),
@@ -573,7 +592,9 @@ impl Observation {
             | Self::AgentMessageCompleted(_)
             | Self::Approval(_)
             | Self::Compaction(_)
+            | Self::Goal(_)
             | Self::File(_)
+            | Self::Image(_)
             | Self::NativeAction(_)
             | Self::Plan(_)
             | Self::ProcessDiagnostic(_)
@@ -582,6 +603,7 @@ impl Observation {
             | Self::ReasoningSummaryCompleted(_)
             | Self::ReasoningSummaryDelta(_)
             | Self::Retry(_)
+            | Self::Safety(_)
             | Self::RunState(_)
             | Self::RunTerminal(_)
             | Self::Search(_)

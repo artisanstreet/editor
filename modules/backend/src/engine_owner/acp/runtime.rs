@@ -24,8 +24,8 @@ use super::{
     ACP_CLIENT_NAME, ACP_CLIENT_VERSION, ACP_PROTOCOL_VERSION, AcpBounds, AcpEnvelope, AcpError,
     AcpFramer, AcpId, AcpResponsePayload, InitializeResult, METHOD_AUTHENTICATE, METHOD_INITIALIZE,
     METHOD_SESSION_CANCEL, METHOD_SESSION_LOAD, METHOD_SESSION_NEW, METHOD_SESSION_PROMPT,
-    METHOD_SESSION_UPDATE, PromptOutcome, SessionId, SessionUpdate, parse_envelope,
-    parse_initialize_result, parse_prompt_result, parse_session_update,
+    METHOD_SESSION_UPDATE, METHOD_XAI_SESSION_UPDATE, PromptOutcome, SessionId, SessionUpdate,
+    parse_envelope, parse_initialize_result, parse_prompt_result, parse_session_update,
 };
 
 // ---------------------------------------------------------------------------
@@ -688,6 +688,17 @@ impl<R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin + Send> AcpTransport<R, 
                 AcpInbound::Notification { method, params } if method == METHOD_SESSION_UPDATE => {
                     if let Some(update) =
                         parse_session_update(&params, session, self.max_session_id)?
+                    {
+                        return Ok(UpdateEvent::SessionUpdate(update));
+                    }
+                }
+                // Grok's own updates ride the same envelope; one that does
+                // not parse is skipped, never fatal to the turn.
+                AcpInbound::Notification { method, params }
+                    if method == METHOD_XAI_SESSION_UPDATE =>
+                {
+                    if let Ok(Some(update)) =
+                        parse_session_update(&params, session, self.max_session_id)
                     {
                         return Ok(UpdateEvent::SessionUpdate(update));
                     }

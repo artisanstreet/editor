@@ -78,6 +78,26 @@ pub(crate) const fn encode_observation_file_action(
     }
 }
 
+pub(crate) const fn encode_observation_image_origin(
+    value: ImageOrigin,
+) -> artisan_capnp::ObservationImageOrigin {
+    match value {
+        ImageOrigin::Generated => artisan_capnp::ObservationImageOrigin::Generated,
+        ImageOrigin::Viewed => artisan_capnp::ObservationImageOrigin::Viewed,
+        ImageOrigin::ToolResult => artisan_capnp::ObservationImageOrigin::ToolResult,
+    }
+}
+
+pub(crate) const fn decode_observation_image_origin(
+    value: artisan_capnp::ObservationImageOrigin,
+) -> ImageOrigin {
+    match value {
+        artisan_capnp::ObservationImageOrigin::Generated => ImageOrigin::Generated,
+        artisan_capnp::ObservationImageOrigin::Viewed => ImageOrigin::Viewed,
+        artisan_capnp::ObservationImageOrigin::ToolResult => ImageOrigin::ToolResult,
+    }
+}
+
 pub(crate) const fn decode_observation_file_action(
     value: artisan_capnp::ObservationFileAction,
 ) -> FileAction {
@@ -238,6 +258,76 @@ pub(crate) const fn decode_observation_plan_entry_status(
         artisan_capnp::ObservationPlanEntryStatus::Pending => PlanEntryStatus::Pending,
         artisan_capnp::ObservationPlanEntryStatus::InProgress => PlanEntryStatus::InProgress,
         artisan_capnp::ObservationPlanEntryStatus::Completed => PlanEntryStatus::Completed,
+    }
+}
+
+pub(crate) const fn encode_observation_safety_action(
+    value: SafetyAction,
+) -> artisan_capnp::ObservationSafetyAction {
+    match value {
+        SafetyAction::Holding => artisan_capnp::ObservationSafetyAction::Holding,
+        SafetyAction::Released => artisan_capnp::ObservationSafetyAction::Released,
+        SafetyAction::Rerouted => artisan_capnp::ObservationSafetyAction::Rerouted,
+        SafetyAction::Refused => artisan_capnp::ObservationSafetyAction::Refused,
+    }
+}
+
+pub(crate) const fn decode_observation_safety_action(
+    value: artisan_capnp::ObservationSafetyAction,
+) -> SafetyAction {
+    match value {
+        artisan_capnp::ObservationSafetyAction::Holding => SafetyAction::Holding,
+        artisan_capnp::ObservationSafetyAction::Released => SafetyAction::Released,
+        artisan_capnp::ObservationSafetyAction::Rerouted => SafetyAction::Rerouted,
+        artisan_capnp::ObservationSafetyAction::Refused => SafetyAction::Refused,
+    }
+}
+
+pub(crate) const fn encode_observation_safety_category(
+    value: SafetyCategory,
+) -> artisan_capnp::ObservationSafetyCategory {
+    match value {
+        SafetyCategory::Cyber => artisan_capnp::ObservationSafetyCategory::Cyber,
+        SafetyCategory::Bio => artisan_capnp::ObservationSafetyCategory::Bio,
+        SafetyCategory::Chemical => artisan_capnp::ObservationSafetyCategory::Chemical,
+        SafetyCategory::Policy => artisan_capnp::ObservationSafetyCategory::Policy,
+        SafetyCategory::Unspecified => artisan_capnp::ObservationSafetyCategory::Unspecified,
+    }
+}
+
+pub(crate) const fn decode_observation_safety_category(
+    value: artisan_capnp::ObservationSafetyCategory,
+) -> SafetyCategory {
+    match value {
+        artisan_capnp::ObservationSafetyCategory::Cyber => SafetyCategory::Cyber,
+        artisan_capnp::ObservationSafetyCategory::Bio => SafetyCategory::Bio,
+        artisan_capnp::ObservationSafetyCategory::Chemical => SafetyCategory::Chemical,
+        artisan_capnp::ObservationSafetyCategory::Policy => SafetyCategory::Policy,
+        artisan_capnp::ObservationSafetyCategory::Unspecified => SafetyCategory::Unspecified,
+    }
+}
+
+pub(crate) const fn encode_observation_goal_state(
+    value: GoalState,
+) -> artisan_capnp::ObservationGoalState {
+    match value {
+        GoalState::Active => artisan_capnp::ObservationGoalState::Active,
+        GoalState::Paused => artisan_capnp::ObservationGoalState::Paused,
+        GoalState::Met => artisan_capnp::ObservationGoalState::Met,
+        GoalState::Abandoned => artisan_capnp::ObservationGoalState::Abandoned,
+        GoalState::Cleared => artisan_capnp::ObservationGoalState::Cleared,
+    }
+}
+
+pub(crate) const fn decode_observation_goal_state(
+    value: artisan_capnp::ObservationGoalState,
+) -> GoalState {
+    match value {
+        artisan_capnp::ObservationGoalState::Active => GoalState::Active,
+        artisan_capnp::ObservationGoalState::Paused => GoalState::Paused,
+        artisan_capnp::ObservationGoalState::Met => GoalState::Met,
+        artisan_capnp::ObservationGoalState::Abandoned => GoalState::Abandoned,
+        artisan_capnp::ObservationGoalState::Cleared => GoalState::Cleared,
     }
 }
 

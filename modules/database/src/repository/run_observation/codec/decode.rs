@@ -624,6 +624,49 @@ fn decode_observation(object: &Map<String, Value>) -> Result<Observation, Observ
             .map(Observation::Approval)
             .map_err(ObservationCommitError::InvalidObservation)
         }
+        "goal" => {
+            require_keys(
+                object,
+                &["tag", "id", "sequence", "state", "objective", "detail"],
+            )?;
+            let (id, sequence) = header(object)?;
+            GoalObservation::new(
+                id,
+                sequence,
+                GoalState::parse(get_str(object, "state")?)?,
+                get_opt_str(object, "objective")?.map(str::to_owned),
+                get_opt_str(object, "detail")?.map(str::to_owned),
+            )
+            .map(Observation::Goal)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "safety" => {
+            require_keys(
+                object,
+                &[
+                    "tag",
+                    "id",
+                    "sequence",
+                    "action",
+                    "category",
+                    "provider_code",
+                    "message",
+                    "model",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            SafetyObservation::new(
+                id,
+                sequence,
+                SafetyAction::parse(get_str(object, "action")?)?,
+                SafetyCategory::parse(get_str(object, "category")?)?,
+                get_opt_str(object, "provider_code")?.map(str::to_owned),
+                get_opt_str(object, "message")?.map(str::to_owned),
+                get_opt_str(object, "model")?.map(str::to_owned),
+            )
+            .map(Observation::Safety)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
         "compaction" => {
             require_keys(
                 object,
@@ -672,6 +715,26 @@ fn decode_observation(object: &Map<String, Value>) -> Result<Observation, Observ
                 get_opt_u64(object, "lines_deleted")?,
             )
             .map(Observation::File)
+            .map_err(ObservationCommitError::InvalidObservation)
+        }
+        "image" => {
+            require_keys(
+                object,
+                &[
+                    "tag", "id", "sequence", "item_id", "origin", "path", "caption",
+                ],
+            )?;
+            let (id, sequence) = header(object)?;
+            ImageObservation::new(
+                id,
+                sequence,
+                ObservationId::parse(get_str(object, "item_id")?.to_owned())
+                    .map_err(ObservationError::Identifier)?,
+                ImageOrigin::parse(get_str(object, "origin")?)?,
+                get_str(object, "path")?.to_owned(),
+                get_opt_str(object, "caption")?.map(str::to_owned),
+            )
+            .map(Observation::Image)
             .map_err(ObservationCommitError::InvalidObservation)
         }
         "native_action" => {

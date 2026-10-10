@@ -297,6 +297,18 @@ pub(crate) fn spawn_configured_fixture_engine(
     EngineChild::spawn(command, true)
 }
 
+/// Test-only launch seam: spawns `program` under the same group custody
+/// as a CLI engine, with piped streams and no arguments.
+#[cfg(test)]
+pub(crate) fn spawn_script_engine(program: &Path) -> io::Result<EngineChild> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    EngineChild::spawn(command, true)
+}
+
 const CONFIGURED_PROFILE_DIRECTORIES: [&str; 5] = ["config", "cache", "data", "state", "tmp"];
 const MAX_MANAGED_CONFIG_BYTES: usize = 16 * 1024;
 
@@ -536,12 +548,14 @@ pub(crate) fn spawn_claude_engine(
     launch: &artisan_native_engine::VerifiedClaudeLaunch,
     project_root: &RootPath,
     args: &[String],
+    env: &[(&str, String)],
 ) -> io::Result<EngineChild> {
     let mut command = tokio::process::Command::new(launch.executable_path());
     command.current_dir(Path::new(project_root.as_str()));
     command
         .env_clear()
-        .envs(launch.environment().iter().cloned());
+        .envs(launch.environment().iter().cloned())
+        .envs(env.iter().map(|(key, value)| (key, value)));
     command.args(args);
     command
         .stdin(Stdio::piped())

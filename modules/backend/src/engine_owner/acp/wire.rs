@@ -495,6 +495,50 @@ impl WireUpdate {
         artisan_domain::ThreadTitle::parse(self.0.get("title")?.as_str()?.to_owned()).ok()
     }
 
+    /// Grok's goal report (`goal_updated` on its own session update): where
+    /// the goal stands, its objective, and the latest word on it.
+    ///
+    /// Grok's statuses fold onto the shared ones: every kind of pause, a
+    /// block, an exhausted budget, and an interrupted run all wait on the
+    /// reader; `complete` is met, `failed` gave up, `cancelled` cleared.
+    pub(crate) fn goal_update(
+        &self,
+    ) -> Option<(artisan_domain::GoalState, Option<String>, Option<String>)> {
+        use artisan_domain::GoalState;
+        if self.0.get("sessionUpdate")?.as_str()? != "goal_updated" {
+            return None;
+        }
+        // Fields sit on the update or, in some builds, on a nested `goal`.
+        let field = |name: &str| {
+            self.0
+                .get(name)
+                .or_else(|| self.0.get("goal").and_then(|goal| goal.get(name)))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let cleared = field("last_event").as_deref() == Some("goal_cleared");
+        let state = match (cleared, field("status").as_deref()) {
+            (true, _) | (false, Some("cancelled")) => GoalState::Cleared,
+            (false, Some("active")) => GoalState::Active,
+            (false, Some("complete")) => GoalState::Met,
+            (false, Some("failed")) => GoalState::Abandoned,
+            (
+                false,
+                Some(
+                    "user_paused" | "back_off_paused" | "no_progress_paused" | "infra_paused"
+                    | "blocked" | "budget_limited" | "interrupted",
+                ),
+            ) => GoalState::Paused,
+            _ => return None,
+        };
+        let detail = field("pause_message")
+            .or_else(|| field("result_summary"))
+            .or_else(|| field("current_deliverable_title"));
+        Some((state, field("objective"), detail))
+    }
+
     /// Returns the opaque update value for A2 interpretation.
     #[must_use]
     pub(crate) fn value(&self) -> &Value {
@@ -553,16 +597,19 @@ pub(crate) struct TokenUsage {
     pub(crate) cached_input: Option<u64>,
 }
 
-/// The typed outcome of one prompt round: cancellation plus optional usage.
-/// A `null` or missing `usage` means the agent reported none.
+/// The typed outcome of one prompt round: cancellation or refusal plus
+/// optional usage. A `null` or missing `usage` means the agent reported none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PromptOutcome {
     pub(crate) cancelled: bool,
+    /// The agent refused to continue (`stopReason: "refusal"`).
+    pub(crate) refused: bool,
     pub(crate) usage: Option<TokenUsage>,
 }
 
 /// Parses a prompt response payload. Only the literal `"cancelled"`
-/// stop reason counts as cancellation; other or missing reasons complete.
+/// stop reason counts as cancellation and `"refusal"` as refusal; other or
+/// missing reasons complete.
 /// Usage counters default to zero when absent and must be `u64` when
 /// present.
 ///
@@ -576,9 +623,9 @@ pub(crate) fn parse_prompt_result(payload: &AcpResponsePayload) -> Result<Prompt
         AcpResponsePayload::Result(result) => result,
     };
     let obj = result.as_object().ok_or(AcpError::MalformedEnvelope)?;
-    let cancelled = match obj.get("stopReason") {
-        None => false,
-        Some(Value::String(reason)) => reason == "cancelled",
+    let (cancelled, refused) = match obj.get("stopReason") {
+        None => (false, false),
+        Some(Value::String(reason)) => (reason == "cancelled", reason == "refusal"),
         Some(_) => return Err(AcpError::MalformedEnvelope),
     };
     let usage = match obj.get("usage") {
@@ -602,7 +649,11 @@ pub(crate) fn parse_prompt_result(payload: &AcpResponsePayload) -> Result<Prompt
         }
         Some(_) => return Err(AcpError::MalformedEnvelope),
     };
-    Ok(PromptOutcome { cancelled, usage })
+    Ok(PromptOutcome {
+        cancelled,
+        refused,
+        usage,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -650,6 +650,35 @@ impl AcceptedTurn {
         self.observations.recv().await
     }
 
+    /// Waits for the operation's result while still reading what it sends
+    /// after its terminal, returned in order beside the result.
+    ///
+    /// An operation may hold its observation sender until it returns, so the
+    /// wait never depends on the channel closing first.
+    pub(crate) async fn finish_with_trailing(mut self) -> (TurnResult, Vec<EngineObservation>) {
+        let mut trailing = Vec::new();
+        let Some(mut result) = self.receiver.take() else {
+            return (Err(EngineOperationError::ReapUnresolved), trailing);
+        };
+        let mut open = true;
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                observation = self.observations.recv(), if open => match observation {
+                    Some(observation) => trailing.push(observation),
+                    None => open = false,
+                },
+                outcome = &mut result => {
+                    break outcome.unwrap_or(Err(EngineOperationError::ReapUnresolved));
+                }
+            }
+        };
+        while let Ok(observation) = self.observations.try_recv() {
+            trailing.push(observation);
+        }
+        (outcome, trailing)
+    }
+
     /// Writes a follow-up message into the live turn's provider session.
     ///
     /// Returns an OWNED future (not `async fn`): the future captures a

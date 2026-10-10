@@ -7,7 +7,9 @@
 //! becomes a tool step under a canonical kind the Editor already groups
 //! (`read`, `edit`, `grep`, `web_search`, ...) with its target as detail.
 //! Tool input and output never cross this boundary beyond those bounded
-//! fields.
+//! fields. Image parts of a result (a `Read` on a picture, an MCP
+//! screenshot) are what the model looked at, not something it showed: they
+//! project nothing. An agent shows an image with an `artisan-image` block.
 //!
 //! Every shell command is also a job on the thread's terminal board. A
 //! command run in the background keeps going after its tool call settles:
@@ -164,6 +166,25 @@ pub(crate) struct ClaudeToolTracker {
     shell_tasks: HashMap<String, String>,
     /// Follows background jobs' output files, when the turn runs one.
     tail: Option<ShellTail>,
+    /// Follower commands held until the rows queued before them are sent:
+    /// the follower runs on its own task, so a settle handed over early
+    /// could reach the terminal board ahead of the job's `Backgrounded`.
+    tail_commands: Vec<TailCommand>,
+}
+
+/// One command for the output follower, in the order it was decided.
+#[derive(Debug)]
+enum TailCommand {
+    Follow {
+        run_id: RunId,
+        job_id: String,
+        path: String,
+    },
+    Settle {
+        run_id: RunId,
+        job_id: String,
+        end: ShellJobEnd,
+    },
 }
 
 impl ClaudeToolTracker {
@@ -174,7 +195,31 @@ impl ClaudeToolTracker {
 
     /// Releases the turn's output follower, if one is attached.
     pub(crate) fn take_shell_tail(&mut self) -> Option<ShellTail> {
+        self.release_tail_commands();
         self.tail.take()
+    }
+
+    /// Hands the held follower commands over. Call once the shell rows
+    /// taken before them are sent.
+    pub(crate) fn release_tail_commands(&mut self) {
+        let Some(tail) = &self.tail else {
+            self.tail_commands.clear();
+            return;
+        };
+        for command in self.tail_commands.drain(..) {
+            match command {
+                TailCommand::Follow {
+                    run_id,
+                    job_id,
+                    path,
+                } => tail.follow(&run_id, &job_id, &path),
+                TailCommand::Settle {
+                    run_id,
+                    job_id,
+                    end,
+                } => tail.settle(&run_id, &job_id, end),
+            }
+        }
     }
 
     /// Drains the shell job changes not yet sent, in order.
@@ -217,8 +262,12 @@ impl ClaudeToolTracker {
     }
 
     fn follow(&mut self, run_id: &RunId, job_id: &str, path: &str) {
-        if let Some(tail) = &self.tail {
-            tail.follow(run_id, job_id, path);
+        if self.tail.is_some() {
+            self.tail_commands.push(TailCommand::Follow {
+                run_id: run_id.clone(),
+                job_id: job_id.to_owned(),
+                path: path.to_owned(),
+            });
         }
     }
 
@@ -226,7 +275,11 @@ impl ClaudeToolTracker {
     /// first when it follows the job.
     fn settle(&mut self, run_id: &RunId, job_id: &str, end: ShellJobEnd) {
         match &self.tail {
-            Some(tail) => tail.settle(run_id, job_id, end),
+            Some(_) => self.tail_commands.push(TailCommand::Settle {
+                run_id: run_id.clone(),
+                job_id: job_id.to_owned(),
+                end,
+            }),
             None => self.shell_rows.push(ShellJobRow {
                 run_id: run_id.clone(),
                 job_id: job_id.to_owned(),
@@ -611,5 +664,29 @@ mod tests {
         };
         assert!(!tracker.shell_task(&run(), &report));
         assert!(changes(&mut tracker).is_empty());
+    }
+
+    #[test]
+    fn a_read_of_a_picture_settles_its_step_and_shows_no_image() {
+        let mut tracker = ClaudeToolTracker::default();
+        let tool = ClaudeToolUse {
+            id: "toolu_2".to_owned(),
+            name: "Read".to_owned(),
+            input: serde_json::json!({ "file_path": "/work/diagram.png" }),
+        };
+        let _ = tracker.started(&run(), 1, &tool);
+        let content = [serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_2",
+            "content": [
+                { "type": "text", "text": "a picture" },
+                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": "aGk=" } },
+            ],
+        })];
+        let results = tool_results(&content, None);
+        assert_eq!(results[0].output, "a picture");
+        let rows = tracker.finished(&run(), 2, &results[0]);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Observation::Tool(_)));
     }
 }

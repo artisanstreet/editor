@@ -9,8 +9,8 @@
 
 use artisan_database::{AssistantChange, Repository, RunBatchScope};
 use artisan_domain::{
-    AssistantBody, AssistantMessagePhase, EngineId, FileObservation, ItemId, Observation,
-    ObservationId, ObservationSequence, PlanEntry, PlanObservation,
+    AssistantBody, AssistantMessagePhase, EngineId, FileObservation, ImageObservation, ItemId,
+    Observation, ObservationId, ObservationSequence, PlanEntry, PlanObservation,
     ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, Revision,
     SearchObservation, SubagentInput, SubagentObservation, SubagentTranscriptObservation,
     TerminalActivityInput, TerminalActivityObservation, ToolObservation,
@@ -38,6 +38,9 @@ pub(crate) struct SubagentCommitCursor<'a> {
     pub assistant_revision: Revision,
     pub assistant_body: String,
     pub assistant_phase: AssistantMessagePhase,
+    /// Whether an earlier batch already activated the origin turn; a steer
+    /// can retire the open item without un-activating the turn.
+    pub turn_activated: bool,
 }
 
 /// Commits one re-sequenced subagent observation through the S1b batch path.
@@ -152,7 +155,7 @@ pub(crate) async fn commit_subagent_observation(
             scope: &cursor.scope,
             batch_sequence: cursor.batch_sequence,
             operated_at,
-            activate_turn_patch_id: Some(&activation_patch_id),
+            activate_turn_patch_id: (!cursor.turn_activated).then_some(&activation_patch_id),
             changes: &changes,
             checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
             retries: config.max_command_retries,
@@ -166,6 +169,7 @@ pub(crate) async fn commit_subagent_observation(
         })?;
         cursor.assistant_item = Some(item_id);
         cursor.assistant_revision = Revision::new(0);
+        cursor.turn_activated = true;
     }
     let next_sequence = cursor
         .batch_sequence
@@ -371,7 +375,7 @@ pub(crate) async fn commit_activity_observation(
             scope: &cursor.scope,
             batch_sequence: cursor.batch_sequence,
             operated_at,
-            activate_turn_patch_id: Some(&activation_patch_id),
+            activate_turn_patch_id: (!cursor.turn_activated).then_some(&activation_patch_id),
             changes: &changes,
             checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
             retries: config.max_command_retries,
@@ -385,6 +389,7 @@ pub(crate) async fn commit_activity_observation(
         })?;
         cursor.assistant_item = Some(item_id);
         cursor.assistant_revision = Revision::new(0);
+        cursor.turn_activated = true;
     }
     let next_sequence = cursor
         .batch_sequence
@@ -401,7 +406,7 @@ pub(crate) async fn commit_activity_observation(
 ///
 /// Source-local identity/sequence never cross into durable history: every
 /// supported activity variant (reasoning-summary delta/completed, tool,
-/// terminal activity, file, search, plan) is rebuilt with the dispatcher
+/// terminal activity, file, search, plan, compaction, goal, safety) is rebuilt with the dispatcher
 /// base-plus-one run-local sequence and a fresh identity, preserving all
 /// provider payload fields verbatim. Subagent rows stay on the existing
 /// subagent path; any other row rejects so no discard or no-op commit can be
@@ -509,6 +514,16 @@ fn resequence_activity_observation(
         )
         .ok()
         .map(Observation::File),
+        Observation::Image(row) => ImageObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.item_id().clone(),
+            row.origin(),
+            row.path().to_owned(),
+            row.caption().map(str::to_owned),
+        )
+        .ok()
+        .map(Observation::Image),
         Observation::Search(row) => SearchObservation::new(
             observation_id.clone(),
             sequence,
@@ -540,6 +555,44 @@ fn resequence_activity_observation(
             .ok()
             .map(Observation::Plan)
         }
+        Observation::Compaction(row) => artisan_domain::CompactionObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.state(),
+            row.compaction_id().cloned(),
+            row.duration_ms(),
+            row.summary().map(str::to_owned),
+        )
+        .ok()
+        .map(Observation::Compaction),
+        Observation::Goal(row) => artisan_domain::GoalObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.state(),
+            row.objective().map(str::to_owned),
+            row.detail().map(str::to_owned),
+        )
+        .ok()
+        .map(Observation::Goal),
+        Observation::Safety(row) => artisan_domain::SafetyObservation::new(
+            observation_id.clone(),
+            sequence,
+            row.action(),
+            row.category(),
+            row.provider_code().map(str::to_owned),
+            row.message().map(str::to_owned),
+            row.model().map(str::to_owned),
+        )
+        .ok()
+        .map(Observation::Safety),
+        Observation::TurnState(row) => Some(Observation::TurnState(
+            artisan_domain::TurnStateObservation::new(
+                observation_id.clone(),
+                sequence,
+                row.turn_id().clone(),
+                row.state(),
+            ),
+        )),
         _ => None,
     }
 }
@@ -548,10 +601,11 @@ fn resequence_activity_observation(
 mod activity_resequence_tests {
     use super::resequence_activity_observation;
     use artisan_domain::{
-        FileAction, FileObservation, MessagePhase, Observation, ObservationId, ObservationSequence,
-        PlanEntry, PlanEntryStatus, PlanObservation, ReasoningSummaryCompletedObservation,
-        ReasoningSummaryDeltaObservation, SearchObservation, SearchState, TerminalActivityInput,
-        TerminalActivityObservation, TerminalActivityState, ToolAction, ToolObservation,
+        FileAction, FileObservation, ImageObservation, ImageOrigin, MessagePhase, Observation,
+        ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation,
+        ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, SearchObservation,
+        SearchState, TerminalActivityInput, TerminalActivityObservation, TerminalActivityState,
+        ToolAction, ToolObservation,
     };
 
     fn observation_id(value: &str) -> ObservationId {
@@ -591,6 +645,36 @@ mod activity_resequence_tests {
     }
 
     #[test]
+    fn compaction_rows_remint_identity_and_keep_the_pairing_id() {
+        let source = Observation::Compaction(
+            artisan_domain::CompactionObservation::new(
+                observation_id("source-compaction-row"),
+                sequence(12),
+                artisan_domain::CompactionState::Completed,
+                Some(observation_id("compaction-1")),
+                Some(3_500),
+                None,
+            )
+            .expect("fixture compaction row is valid"),
+        );
+        let fresh_id = observation_id("dispatcher-minted-compaction");
+        let resequenced = resequence_activity_observation(&source, &fresh_id, sequence(3))
+            .expect("compaction activity must resequence");
+        let Observation::Compaction(row) = resequenced else {
+            panic!("compaction activity must stay a compaction row");
+        };
+        assert_eq!(row.id(), &fresh_id);
+        assert_eq!(row.sequence(), sequence(3));
+        assert_eq!(row.state(), artisan_domain::CompactionState::Completed);
+        assert_eq!(
+            row.compaction_id().map(ObservationId::as_str),
+            Some("compaction-1")
+        );
+        assert_eq!(row.duration_ms(), Some(3_500));
+        assert_eq!(row.summary(), None);
+    }
+
+    #[test]
     fn file_search_terminal_plan_and_reasoning_rows_preserve_payload() {
         let fresh_id = observation_id("dispatcher-minted-rich");
         let fresh_sequence = sequence(8);
@@ -605,6 +689,17 @@ mod activity_resequence_tests {
                     Some(2),
                 )
                 .expect("fixture file row is valid"),
+            ),
+            Observation::Image(
+                ImageObservation::new(
+                    observation_id("source-image"),
+                    sequence(48),
+                    observation_id("image-item-1"),
+                    ImageOrigin::Generated,
+                    String::from("/state/engine-images/abc.png"),
+                    Some(String::from("a lighthouse at dusk")),
+                )
+                .expect("fixture image row is valid"),
             ),
             Observation::Search(
                 SearchObservation::new(
@@ -683,13 +778,32 @@ mod activity_resequence_tests {
         // Plan entry identities stay renderer-scoped while the observation
         // identity itself is freshly minted.
         let Observation::Plan(plan) =
-            resequence_activity_observation(&rows[3], &fresh_id, fresh_sequence)
+            resequence_activity_observation(&rows[4], &fresh_id, fresh_sequence)
                 .expect("plan activity must resequence")
         else {
             panic!("plan activity must stay a plan row");
         };
         assert_eq!(plan.entries().len(), 1);
         assert_eq!(plan.entries()[0].id().as_str(), "plan-entry-1");
+    }
+
+    #[test]
+    fn a_turn_state_keeps_its_turn_and_state_under_dispatcher_identity() {
+        let source = Observation::TurnState(artisan_domain::TurnStateObservation::new(
+            observation_id("source-turn"),
+            sequence(12),
+            observation_id("claude-turn-12"),
+            artisan_domain::TurnState::Completed,
+        ));
+        let Some(Observation::TurnState(row)) =
+            resequence_activity_observation(&source, &observation_id("minted"), sequence(40))
+        else {
+            panic!("a turn state is an activity row");
+        };
+        assert_eq!(row.id().as_str(), "minted");
+        assert_eq!(row.sequence(), sequence(40));
+        assert_eq!(row.turn_id().as_str(), "claude-turn-12");
+        assert_eq!(row.state(), artisan_domain::TurnState::Completed);
     }
 
     #[test]

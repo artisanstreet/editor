@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use super::super::codex::CodexLineError;
+use super::super::codex::CodexQuestionHandoff;
 use super::super::codex::codex_response_id;
 use super::super::codex::codex_response_id_matches;
 use super::super::codex::codex_turn_id;
@@ -217,9 +218,50 @@ pub(super) async fn execute_codex_turn(
     // notifications are processed through the same event pipeline (never
     // discarded), a matching error envelope fails the turn fast, and
     // anything else keeps waiting inside the same absolute phase deadline.
+    // Codex keeps a thread's goal through its own requests, not through the
+    // prompt: a `/goal` message becomes the matching goal request, and the
+    // turn then starts toward the goal (or, for the bookkeeping forms, says
+    // what changed).
+    let (goal_request, turn_text) = codex_goal_command(&prompt_text, thread_id.as_str());
+    // A handoff frames what the turn sends only after `/goal` parsing, so the
+    // command still reads exactly what the user wrote.
+    let turn_text = match &input.handoff {
+        Some(handoff) => handoff.frame(&turn_text),
+        None => turn_text,
+    };
+    if let Some((method, params)) = goal_request {
+        let goal_line = codex_runtime::request_line(next_id, method, &params);
+        next_id += 1;
+        if write_codex_line(&mut parts.lifeline, &goal_line)
+            .await
+            .is_err()
+        {
+            return finish_turn_result(
+                parts,
+                Err(EngineOperationError::ProviderRequestFailed),
+                respond,
+                runtime.limits.close,
+            )
+            .await;
+        }
+    }
+    // What Codex can load for this project: asked before the turn starts so
+    // the reply usually lands while waiting for `turn/start`'s. The tracker
+    // consumes the reply wherever it arrives; a failed write just asks
+    // nothing.
+    let skills_request_id = next_id;
+    let skills_line = codex_runtime::request_line(
+        next_id,
+        "skills/list",
+        &serde_json::json!({ "cwds": [input.project_root.as_str()] }),
+    );
+    next_id += 1;
+    let skills_requested = write_codex_line(&mut parts.lifeline, &skills_line)
+        .await
+        .is_ok();
     let turn_params = settings.turn_start_params_with_images(
         thread_id.as_str(),
-        &prompt_text,
+        &turn_text,
         input.prompt.attachments(),
     );
     let turn_request_id = next_id;
@@ -239,6 +281,9 @@ pub(super) async fn execute_codex_turn(
     }
     let inactivity = runtime.limits.sse;
     let mut tracker = codex_runtime::CodexPendingTracker::new();
+    if skills_requested {
+        tracker.expect_skills_reply(skills_request_id);
+    }
     // Root thread authority for rich activity: the native thread from
     // thread/start (or the resumed thread) is the only thread whose frames
     // may emit onto the root activity channel. Bound before the turn/start
@@ -513,6 +558,10 @@ async fn codex_await_turn_start(
                 *last_activity = Instant::now();
                 *frame_sequence += 1;
                 let trimmed = line.trim_end_matches(['\r', '\n']).to_owned();
+                if tracker.take_skills_reply(&trimmed) {
+                    report_inventory(observations, codex_runtime::skills_list_inventory(&trimmed));
+                    continue;
+                }
                 if codex_runtime::is_codex_error_response(&trimmed)
                     && codex_response_id_matches(&trimmed, turn_request_id)
                 {
@@ -543,9 +592,10 @@ async fn codex_await_turn_start(
 /// Writes an explicit approval or question response onto its pending
 /// provider request, or delegates a steer to the provider pump.
 ///
-/// A question answer is recorded on its open `requestUserInput` request;
-/// the reply is written once the last question of that request is answered,
-/// so the provider sees every answer at once. Either way the ack is the
+/// A question answer is recorded on its open request; the reply is written
+/// once the last question of that request is answered, so the provider sees
+/// every answer at once. Async questions answer as one steered user message
+/// instead. Either way the ack is the
 /// record or write outcome, never mere channel enqueue.
 pub(crate) async fn service_codex_delivery<W: tokio::io::AsyncWrite + Unpin>(
     tracker: &mut super::super::codex::CodexPendingTracker,
@@ -578,10 +628,30 @@ pub(crate) async fn service_codex_delivery<W: tokio::io::AsyncWrite + Unpin>(
             answers,
         }) => {
             let result = match tracker.record_question_answer(question_id, answers) {
-                Ok(None) => Ok(()),
-                Ok(Some(reply)) => write_codex_line(stdin, &reply)
+                Ok(None | Some(CodexQuestionHandoff::Message(None))) => Ok(()),
+                Ok(Some(CodexQuestionHandoff::Reply(reply))) => write_codex_line(stdin, &reply)
                     .await
                     .map_err(|_| SteerError::DeliveryFailed),
+                Ok(Some(CodexQuestionHandoff::Message(Some(text)))) => {
+                    // Async questions have no request to answer: the
+                    // answers reach the model as a steered user message,
+                    // acked by the provider's steer result.
+                    let delivery = SteerDelivery {
+                        text,
+                        response: None,
+                        ..delivery
+                    };
+                    service_codex_steer_delivery(
+                        stdin,
+                        next_id,
+                        thread_id,
+                        turn_id,
+                        delivery,
+                        pending_acks,
+                    )
+                    .await;
+                    return;
+                }
                 Err(_) => Err(SteerError::DeliveryFailed),
             };
             let _ = delivery.ack.send(result);
@@ -783,14 +853,14 @@ async fn codex_pump_loop_inner(
             return CodexPumpOutcome::Failed(EngineOperationError::Deadline);
         }
         if codex_runtime::has_stalled(
-            active_turn.is_some() && !tracker.waiting_on_user(),
+            active_turn.is_some() && !tracker.stall_exempt(),
             *last_activity,
             inactivity,
             Instant::now(),
         ) {
             return CodexPumpOutcome::Terminal(TerminalState::Failed);
         }
-        let stall_at = if tracker.waiting_on_user() {
+        let stall_at = if tracker.stall_exempt() {
             deadline
         } else {
             last_activity
@@ -817,7 +887,7 @@ async fn codex_pump_loop_inner(
             }
             () = tokio::time::sleep_until(stall_at) => {
                 if codex_runtime::has_stalled(
-                    active_turn.is_some() && !tracker.waiting_on_user(),
+                    active_turn.is_some() && !tracker.stall_exempt(),
                     *last_activity,
                     inactivity,
                     Instant::now(),
@@ -869,6 +939,13 @@ async fn codex_pump_loop_inner(
                         if ack_codex_steer_response(&trimmed, pending_acks) {
                             continue;
                         }
+                        if tracker.take_skills_reply(&trimmed) {
+                            report_inventory(
+                                observations,
+                                codex_runtime::skills_list_inventory(&trimmed),
+                            );
+                            continue;
+                        }
                         // Late JSON-RPC error replies (for example a rejected
                         // steer/interrupt) never become turn events: fail the
                         // turn fast instead of ignoring them until the lease
@@ -901,6 +978,17 @@ async fn codex_pump_loop_inner(
                 }
             }
         }
+    }
+}
+
+/// Hands a `skills/list` report to the Forge's inventory without ever
+/// holding the turn: a full channel drops it.
+fn report_inventory(
+    observations: &mpsc::Sender<EngineObservation>,
+    report: Option<crate::engine_inventory::InventoryReport>,
+) {
+    if let Some(report) = report {
+        let _ = observations.try_send(EngineObservation::Inventory(report));
     }
 }
 
@@ -1270,5 +1358,167 @@ mod approval_delivery_tests {
         )
         .await;
         assert_eq!(result.await.unwrap(), Err(SteerError::DeliveryFailed));
+    }
+
+    #[tokio::test]
+    async fn async_questions_answer_as_one_steered_message() {
+        // Captured shape (0.162.1): `request_user_input_async` returns at
+        // once and reports its questions on an `agentMessage`.
+        let frame = serde_json::json!({"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"type":"agentMessage","id":"call-async","text":"Which pattern?\n- Chocolate chip\n- Three-color","phase":"final_answer","delivery":"async","questions":[{"title":"Which pattern?","options":["Chocolate chip","Three-color"]},{"title":"Patch?"}]}}});
+        let event = parse_frame(&frame.to_string(), 65536).expect("frame");
+        let mut tracker = CodexPendingTracker::default();
+        tracker.bind_native_thread("t-1");
+        let (tx, mut rx) = mpsc::channel(4);
+        let run = artisan_domain::RunId::parse("run-async-question-test").unwrap();
+        assert!(
+            apply_event(
+                event,
+                &run,
+                &mut tracker,
+                &mut Some("turn-1".into()),
+                &tx,
+                1,
+                None
+            )
+            .await
+            .is_none()
+        );
+        // The questions reach the thread in place of the item's prose, and
+        // nothing waits on them.
+        for _ in 0..2 {
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                EngineObservation::Activity(artisan_domain::Observation::Question(_))
+            ));
+        }
+        assert!(rx.try_recv().is_err(), "the restated prose never paints");
+        assert!(!tracker.waiting_on_user());
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut pending_acks = HashMap::new();
+        let answer = |question_id: &str, answers: Vec<String>| {
+            let (ack, result) = oneshot::channel();
+            let mut delivery = SteerDelivery::new(question_id.into(), String::new(), ack);
+            delivery.response = Some(ProviderResponse::Question {
+                question_id: question_id.into(),
+                answers,
+            });
+            (delivery, result)
+        };
+        let (delivery, first) = answer("call-async:0", vec!["Three-color".into()]);
+        service_codex_delivery(
+            &mut tracker,
+            &mut writer,
+            &mut 20,
+            "t-1",
+            Some("turn-1"),
+            delivery,
+            &mut pending_acks,
+        )
+        .await;
+        assert_eq!(first.await.unwrap(), Ok(()));
+        // The last answer (a skip) completes the questionnaire: one steer
+        // carries the answered question, quoted above its answer.
+        let (delivery, mut last) = answer("call-async:1", Vec::new());
+        service_codex_delivery(
+            &mut tracker,
+            &mut writer,
+            &mut 20,
+            "t-1",
+            Some("turn-1"),
+            delivery,
+            &mut pending_acks,
+        )
+        .await;
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let steer: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(steer["method"], "turn/steer");
+        assert_eq!(steer["params"]["expectedTurnId"], "turn-1");
+        assert_eq!(
+            steer["params"]["input"][0]["text"],
+            "> Which pattern?\n\nThree-color"
+        );
+        // The ack waits for the provider's steer result.
+        assert!(last.try_recv().is_err());
+        assert!(ack_codex_steer_response(
+            &serde_json::json!({"id":20,"result":{}}).to_string(),
+            &mut pending_acks
+        ));
+        assert_eq!(last.await.unwrap(), Ok(()));
+    }
+}
+
+/// Reads a `/goal` message the way Codex's own client does: an objective
+/// sets the goal and the turn works toward it; `pause`, `resume`, and
+/// `clear` change it and the turn reports the change. Any other message
+/// passes through unchanged.
+fn codex_goal_command(
+    prompt: &str,
+    thread_id: &str,
+) -> (Option<(&'static str, serde_json::Value)>, String) {
+    use serde_json::json;
+    let Some(argument) = prompt
+        .trim()
+        .strip_prefix("/goal")
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+    else {
+        return (None, prompt.to_owned());
+    };
+    let status = |status: &str| {
+        Some((
+            "thread/goal/set",
+            json!({ "threadId": thread_id, "status": status }),
+        ))
+    };
+    match argument {
+        "" | "status" => (None, prompt.to_owned()),
+        "pause" => (status("paused"), String::from("The goal is paused.")),
+        "resume" => (
+            status("active"),
+            String::from("Resume working toward the goal."),
+        ),
+        "clear" | "stop" | "off" => (
+            Some(("thread/goal/clear", json!({ "threadId": thread_id }))),
+            String::from("The goal is cleared."),
+        ),
+        objective => (
+            Some((
+                "thread/goal/set",
+                json!({ "threadId": thread_id, "objective": objective, "status": "active" }),
+            )),
+            objective.to_owned(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod goal_command_tests {
+    use super::codex_goal_command;
+
+    #[test]
+    fn a_goal_message_becomes_the_goal_request() {
+        let (request, text) = codex_goal_command("/goal all tests pass", "t-1");
+        let (method, params) = request.expect("a goal request");
+        assert_eq!(method, "thread/goal/set");
+        assert_eq!(params["objective"], "all tests pass");
+        assert_eq!(params["status"], "active");
+        assert_eq!(text, "all tests pass", "the turn works toward it");
+
+        let (request, _) = codex_goal_command("  /goal clear ", "t-1");
+        assert_eq!(request.expect("clear").0, "thread/goal/clear");
+        let (request, _) = codex_goal_command("/goal pause", "t-1");
+        assert_eq!(request.expect("pause").1["status"], "paused");
+    }
+
+    #[test]
+    fn other_messages_pass_through() {
+        for message in ["fix the goalpost", "/goals are fun", "please /goal x"] {
+            let (request, text) = codex_goal_command(message, "t-1");
+            assert!(request.is_none(), "{message}");
+            assert_eq!(text, message);
+        }
     }
 }

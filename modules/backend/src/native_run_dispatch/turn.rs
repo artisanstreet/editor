@@ -44,7 +44,8 @@ use super::steer::handle_steer;
 use super::text_projection::OrderedAssistantText;
 use super::{
     CommitBatchRequest, INTERRUPTED_CODE, INTERRUPTED_MESSAGE, NativeRunDispatcherConfig,
-    PROVIDER_FAILURE_CODE, PROVIDER_FAILURE_MESSAGE, commit_batch_with_retry,
+    PROVIDER_FAILURE_CODE, PROVIDER_FAILURE_MESSAGE, PROVIDER_REFUSED_CODE,
+    commit_batch_with_retry,
 };
 
 fn copy_scope<'a>(scope: &RunBatchScope<'a>) -> RunBatchScope<'a> {
@@ -80,15 +81,25 @@ pub(super) struct TurnConsumptionState<'a> {
     pub(super) last_part: Option<String>,
     pub(super) parked_parts:
         std::collections::BTreeMap<String, super::message_parts::MessageCursor>,
+    /// Whether a committed batch already activated the origin turn. Only the
+    /// first batch carries the activation patch: an open assistant item is no
+    /// proxy, because part switches and steers retire it mid-turn.
+    pub(super) turn_activated: bool,
     /// Byte-exact append fragments waiting for one coalesced batch commit.
     pub(super) coalescer: DeltaCoalescer,
     pub(super) last_usage: Option<artisan_domain::RunUsageReport>,
     pub(super) streaming_speed: super::streaming_speed::StreamingSpeed,
+    /// A generation speed the engine measured itself; it replaces the
+    /// receipt-time estimate, which bursty streams inflate.
+    pub(super) provider_speed: Option<u32>,
     pub(super) batch_sequence: i64,
     pub(super) forced_interrupted: bool,
     pub(super) forced_cancelled: bool,
     pub(super) progress_uncertain: bool,
     pub(super) terminal: Option<TerminalState>,
+    /// The provider's refusal of this turn, when its safety system refused
+    /// it: a failed settlement then says so instead of a generic failure.
+    pub(super) refusal: Option<artisan_domain::SafetyObservation>,
 }
 
 impl<'a> TurnConsumptionState<'a> {
@@ -104,14 +115,17 @@ impl<'a> TurnConsumptionState<'a> {
             active_part: None,
             last_part: None,
             parked_parts: std::collections::BTreeMap::new(),
+            turn_activated: false,
             coalescer: DeltaCoalescer::default(),
             last_usage: None,
             streaming_speed: super::streaming_speed::StreamingSpeed::default(),
+            provider_speed: None,
             batch_sequence: 1,
             forced_interrupted: false,
             forced_cancelled: false,
             progress_uncertain: false,
             terminal: None,
+            refusal: None,
         }
     }
 }
@@ -204,6 +218,37 @@ pub(super) async fn consume_turn(
     }
     forget_run_boards(&context, &state);
     persist_tail(&context, &mut state, &mut turn).await;
+    // The engine reported the turn's end, so the reply is whole: settle it
+    // now. What the operation still does after its terminal (naming the
+    // thread, closing its process) must never hold the reply open; the owner
+    // result only decides process custody from here.
+    if !state.progress_uncertain
+        && let Some(observed) = state.terminal
+    {
+        let terminal = if state.forced_interrupted {
+            TerminalState::Interrupted
+        } else if state.forced_cancelled {
+            TerminalState::Cancelled
+        } else {
+            observed
+        };
+        let label = RunLabel(&state.scope).to_string();
+        let engine = state.engine;
+        let thread_id = state.scope.launched.thread_id.clone();
+        let run_id = state.scope.launched.run_id.clone();
+        settle_observed_terminal(&context, state, terminal).await;
+        let (owner_result, trailing) = turn.finish_with_trailing().await;
+        record_trailing_titles(&context, &thread_id, &run_id, trailing).await;
+        if let Err(error) = &owner_result
+            && !matches!(error, EngineOperationError::Cancelled)
+        {
+            eprintln!(
+                "native run engine turn failed after settling as {terminal:?} ({label}, engine {engine:?}): {}",
+                ErrorChain(error)
+            );
+        }
+        return is_unresolved_reap(&owner_result);
+    }
     let owner_result = turn.finish().await;
     report_engine_turn_failure(&state, &owner_result);
     if is_unresolved_reap(&owner_result) {
@@ -238,11 +283,67 @@ pub(super) async fn consume_turn(
         // a failed run. The provider counters were already committed above.
         let _ = context
             .repository
-            .record_run_streaming_speed(report, state.streaming_speed.rate())
+            .record_run_streaming_speed(
+                report,
+                state
+                    .provider_speed
+                    .or_else(|| state.streaming_speed.rate()),
+            )
             .await;
     }
     settle_terminal(&context, state, terminal).await;
     false
+}
+
+/// Settles a turn whose engine already reported its terminal.
+async fn settle_observed_terminal(
+    context: &TurnConsumptionContext<'_>,
+    mut state: TurnConsumptionState<'_>,
+    terminal: TerminalState,
+) {
+    if let Err(error) = ensure_assistant_item(context, &mut state).await {
+        report_unsettled(&state, terminal, &error);
+        return;
+    }
+    if let Some(report) = &state.last_usage {
+        // Optional display metadata must never turn a successful response into
+        // a failed run. The provider counters were already committed above.
+        let _ = context
+            .repository
+            .record_run_streaming_speed(
+                report,
+                state
+                    .provider_speed
+                    .or_else(|| state.streaming_speed.rate()),
+            )
+            .await;
+    }
+    settle_terminal(context, state, terminal).await;
+}
+
+/// Records a title the engine named the thread with after the reply, exactly
+/// as one arriving mid-run is; anything else that trailed the terminal belongs
+/// to a turn that already settled.
+async fn record_trailing_titles(
+    context: &TurnConsumptionContext<'_>,
+    thread_id: &artisan_domain::ThreadId,
+    run_id: &artisan_domain::RunId,
+    trailing: Vec<EngineObservation>,
+) {
+    for observation in trailing {
+        if let EngineObservation::SummaryTitle {
+            run_id: titled,
+            title,
+        } = observation
+            && &titled == run_id
+        {
+            let _ = context
+                .repository
+                .record_generated_thread_title(thread_id, &title)
+                .await;
+            let _ = context.config.notifier.publish(thread_id);
+        }
+    }
 }
 
 /// Persists the coalesced tail before ownership resolution and terminal
@@ -406,14 +507,42 @@ pub(super) async fn handle_observation(
             handle_subagent_transcript_row(context, state, turn, row).await;
         }
         EngineObservation::Shell(row) => note_shell_job(context, state, &row),
+        EngineObservation::Inventory(report) => {
+            record_inventory(context, state, report).await;
+        }
         EngineObservation::Activity(observation) => {
             state.streaming_speed.end_interval();
             if note_live_thinking(context, state, &observation) {
                 return;
             }
+            if let artisan_domain::Observation::Safety(safety) = &observation
+                && safety.action() == artisan_domain::SafetyAction::Refused
+            {
+                state.refusal = Some(safety.clone());
+            }
             handle_activity_observation(context, state, turn, observation).await;
         }
     }
+}
+
+/// Records what the engine reported it can use for the thread's project.
+/// Best effort: a thread whose project cannot be read records nothing.
+async fn record_inventory(
+    context: &TurnConsumptionContext<'_>,
+    state: &TurnConsumptionState<'_>,
+    report: crate::engine_inventory::InventoryReport,
+) {
+    let Ok(project) = context
+        .repository
+        .read_thread_project(&state.scope.launched.thread_id)
+        .await
+    else {
+        return;
+    };
+    context
+        .config
+        .engine_inventory()
+        .record(state.engine.as_str(), Some(project.as_str()), report);
 }
 
 /// Keeps a thinking summary in memory instead of committing it, and returns
@@ -1023,7 +1152,7 @@ async fn commit_resolution_replace(
 ///
 /// Used only when the response arrived before any text: the item opens with
 /// the current (possibly empty) body exactly like the text path opens it,
-/// including turn activation.
+/// activating the turn unless an earlier batch already did.
 async fn commit_resolution_start(
     context: &TurnConsumptionContext<'_>,
     state: &mut TurnConsumptionState<'_>,
@@ -1050,7 +1179,7 @@ async fn commit_resolution_start(
         scope: &state.scope,
         batch_sequence: state.batch_sequence,
         operated_at,
-        activate_turn_patch_id: Some(&activation_patch_id),
+        activate_turn_patch_id: (!state.turn_activated).then_some(&activation_patch_id),
         changes: &changes,
         checkpoint: artisan_database::CheckpointUpdate::Replace(&checkpoint),
         retries: context.config.max_command_retries,
@@ -1064,6 +1193,7 @@ async fn commit_resolution_start(
     })?;
     state.assistant_item = Some(item_id);
     state.assistant_revision = Revision::new(0);
+    state.turn_activated = true;
     state.scope.expected_updated_at = operated_at;
     let next_sequence = state
         .batch_sequence
@@ -1180,6 +1310,7 @@ async fn handle_subagent_row(
         assistant_revision: state.assistant_revision,
         assistant_body: state.assistant_body.clone(),
         assistant_phase: state.assistant_phase,
+        turn_activated: state.turn_activated,
     };
     if let Err(error) = commit_subagent_observation(
         context.repository,
@@ -1198,11 +1329,13 @@ async fn handle_subagent_row(
     let sequence = cursor.batch_sequence;
     let item = cursor.assistant_item.clone();
     let body = cursor.assistant_body.clone();
+    let activated = cursor.turn_activated;
     state.scope.expected_updated_at = updated_at;
     state.assistant_revision = revision;
     state.batch_sequence = sequence;
     state.assistant_item = item;
     state.assistant_body = body;
+    state.turn_activated = activated;
     // The content-neutral replace persisted the whole assembled body,
     // including any buffered append fragments.
     state.coalescer.clear();
@@ -1235,6 +1368,7 @@ async fn handle_activity_observation(
         assistant_revision: state.assistant_revision,
         assistant_body: state.assistant_body.clone(),
         assistant_phase: state.assistant_phase,
+        turn_activated: state.turn_activated,
     };
     if let Err(error) = commit_activity_observation(
         context.repository,
@@ -1253,11 +1387,13 @@ async fn handle_activity_observation(
     let sequence = cursor.batch_sequence;
     let item = cursor.assistant_item.clone();
     let body = cursor.assistant_body.clone();
+    let activated = cursor.turn_activated;
     state.scope.expected_updated_at = updated_at;
     state.assistant_revision = revision;
     state.batch_sequence = sequence;
     state.assistant_item = item;
     state.assistant_body = body;
+    state.turn_activated = activated;
     // The content-neutral replace persisted the whole assembled body,
     // including any buffered append fragments.
     state.coalescer.clear();
@@ -1271,6 +1407,9 @@ async fn handle_usage(
 ) {
     let report = usage.report();
     state.last_usage = Some(report.clone());
+    if let Some(speed) = report.streaming_millitokens_per_second() {
+        state.provider_speed = Some(speed);
+    }
     // A valid text stream must not be presented as durably completed when
     // its authenticated usage observation could not be fenced/persisted.
     if report.run_id() != &state.scope.launched.run_id
@@ -1483,6 +1622,8 @@ struct TerminalSettlement<'a> {
     phase: AssistantMessagePhase,
     item_patch_id: &'a PatchId,
     turn_patch_id: &'a PatchId,
+    /// What a failed settlement reports, when the provider refused the turn.
+    refusal: Option<String>,
 }
 
 async fn settle_terminal(
@@ -1504,6 +1645,10 @@ async fn settle_terminal(
     }
     let engine = state.engine;
     let assistant_phase = state.assistant_phase;
+    let refusal = state
+        .refusal
+        .as_ref()
+        .map(|safety| refusal_message(engine, safety));
     let label = RunLabel(&state.scope).to_string();
     let TurnConsumptionState {
         scope,
@@ -1549,6 +1694,7 @@ async fn settle_terminal(
         phase,
         item_patch_id: &item_patch_id,
         turn_patch_id: &turn_patch_id,
+        refusal,
     };
     match persist_terminal_settlement(&settlement, terminal).await {
         Ok(()) => {
@@ -1628,9 +1774,13 @@ async fn persist_completed(settlement: &TerminalSettlement<'_>) -> Result<(), St
 }
 
 async fn persist_failed(settlement: &TerminalSettlement<'_>) -> Result<(), StepError> {
-    let error_code = RunErrorCode::parse(PROVIDER_FAILURE_CODE.to_owned())
+    let (code, message) = match &settlement.refusal {
+        Some(message) => (PROVIDER_REFUSED_CODE, message.clone()),
+        None => (PROVIDER_FAILURE_CODE, PROVIDER_FAILURE_MESSAGE.to_owned()),
+    };
+    let error_code = RunErrorCode::parse(code.to_owned())
         .map_err(|error| StepError::failed("validating the provider failure code", error))?;
-    let error_message = RunErrorMessage::parse(PROVIDER_FAILURE_MESSAGE.to_owned())
+    let error_message = RunErrorMessage::parse(message)
         .map_err(|error| StepError::failed("validating the provider failure message", error))?;
     let mut last = StepError::refused("storing the failed run: no attempt ran");
     for _ in 0..settlement.retries.get() {
@@ -1709,4 +1859,54 @@ async fn persist_interrupted(settlement: &TerminalSettlement<'_>) -> Result<(), 
         }
     }
     Err(last)
+}
+
+/// The run error for a turn the provider's safety system refused, naming
+/// the engine and, when disclosed, the policy area.
+fn refusal_message(engine: EngineId, safety: &artisan_domain::SafetyObservation) -> String {
+    use artisan_domain::SafetyCategory;
+    let area = match safety.category() {
+        SafetyCategory::Cyber => " (cybersecurity)",
+        SafetyCategory::Bio => " (biology)",
+        SafetyCategory::Chemical => " (chemistry)",
+        SafetyCategory::Policy => " (usage policy)",
+        SafetyCategory::Unspecified => "",
+    };
+    format!(
+        "{} refused to serve this request{area}.",
+        engine.display_name()
+    )
+}
+
+#[cfg(test)]
+mod refusal_message_tests {
+    use super::refusal_message;
+    use artisan_domain::{
+        EngineId, ObservationId, ObservationSequence, SafetyAction, SafetyCategory,
+        SafetyObservation,
+    };
+
+    #[test]
+    fn a_refused_run_names_the_engine_and_area() {
+        let refusal = |category| {
+            SafetyObservation::new(
+                ObservationId::parse("safety-1").expect("valid id"),
+                ObservationSequence::new(1).expect("valid sequence"),
+                SafetyAction::Refused,
+                category,
+                None,
+                None,
+                None,
+            )
+            .expect("valid refusal")
+        };
+        assert_eq!(
+            refusal_message(EngineId::Codex, &refusal(SafetyCategory::Bio)),
+            "Codex refused to serve this request (biology)."
+        );
+        assert_eq!(
+            refusal_message(EngineId::Claude, &refusal(SafetyCategory::Unspecified)),
+            "Claude Code refused to serve this request."
+        );
+    }
 }

@@ -17,14 +17,15 @@ use artisan_domain::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalObservation,
     ApprovalRequest, ArtisanCode, CompactionObservation, CompactionState, DiagnosticLevel,
     DisplayName, EngineErrorRef, EngineErrorRefInput, EngineObservationEvent, Event, FileAction,
-    FileObservation, FirstMessageQueued, LimitScope, MessageBody, MessageId, MessagePhase,
-    NativeActionObservation, Observation, ObservationHistoryCurrent, ObservationId,
-    ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation,
-    ProjectAttached, ProjectId, ProjectSummary, ProtocolDiagnosticObservation, QuestionInput,
-    QuestionObservation, QuestionOption, QueuedMessage, ReasoningSummaryCompletedObservation,
-    ReasoningSummaryDeltaObservation, RequestId, RetryAttemptState, RetryObservation, RootPath,
-    RunState, RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation,
-    SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
+    FileObservation, FirstMessageQueued, GoalObservation, GoalState, ImageObservation, ImageOrigin,
+    LimitScope, MessageBody, MessageId, MessagePhase, NativeActionObservation, Observation,
+    ObservationHistoryCurrent, ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus,
+    PlanObservation, ProcessDiagnosticObservation, ProjectAttached, ProjectId, ProjectSummary,
+    ProtocolDiagnosticObservation, QuestionInput, QuestionObservation, QuestionOption,
+    QueuedMessage, ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation,
+    RequestId, RetryAttemptState, RetryObservation, RootPath, RunState, RunStateObservation,
+    RunTerminalObservation, RunTerminalState, SafetyAction, SafetyCategory, SafetyObservation,
+    SearchObservation, SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
     SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
     TerminalActivityState, TerminalChannel, ThreadCreated, ThreadId, ThreadSummary, ThreadTitle,
     ToolAction, ToolObservation, TranscriptContent, TranscriptTool, TurnState,
@@ -202,6 +203,20 @@ fn file(sequence_value: u64) -> Observation {
     )
 }
 
+fn image(sequence_value: u64, caption: Option<&str>) -> Observation {
+    Observation::Image(
+        ImageObservation::new(
+            observation_id("obs-image"),
+            sequence(sequence_value),
+            observation_id("image-item-1"),
+            ImageOrigin::Generated,
+            String::from("/state/engine-images/abc.png"),
+            caption.map(str::to_owned),
+        )
+        .expect("fixture image row is valid"),
+    )
+}
+
 fn search(sequence_value: u64) -> Observation {
     Observation::Search(
         SearchObservation::new(
@@ -355,6 +370,36 @@ fn compaction(sequence_value: u64) -> Observation {
             Some(String::from("compacted 128k tokens")),
         )
         .expect("fixture compaction is valid"),
+    )
+}
+
+fn goal(sequence_value: u64) -> Observation {
+    Observation::Goal(
+        GoalObservation::new(
+            observation_id("obs-goal"),
+            sequence(sequence_value),
+            GoalState::Paused,
+            Some(String::from("all tests pass")),
+            Some(String::from("waiting on a decision")),
+        )
+        .expect("fixture goal is valid"),
+    )
+}
+
+fn safety(sequence_value: u64, action: SafetyAction, model: Option<&str>) -> Observation {
+    Observation::Safety(
+        SafetyObservation::new(
+            observation_id("obs-safety"),
+            sequence(sequence_value),
+            action,
+            SafetyCategory::Cyber,
+            Some(String::from("cyberPolicy")),
+            model
+                .is_none()
+                .then(|| String::from("This request was flagged.")),
+            model.map(str::to_owned),
+        )
+        .expect("fixture safety is valid"),
     )
 }
 
@@ -544,8 +589,13 @@ fn every_engine_observation_row_roundtrips() -> Result<(), Box<dyn Error>> {
         process_diagnostic(22),
         protocol_diagnostic(23),
         run_terminal(24),
+        goal(25),
+        image(26, Some("a lighthouse at dusk")),
+        image(27, None),
+        safety(28, SafetyAction::Refused, None),
+        safety(29, SafetyAction::Rerouted, Some("gpt-5.2")),
     ];
-    assert_eq!(rows.len(), 24, "every observation row needs a round-trip");
+    assert_eq!(rows.len(), 29, "every observation row needs a round-trip");
     for (index, observation) in rows.into_iter().enumerate() {
         let cursor = u64::try_from(index + 1).expect("fixture cursor fits") + 100;
         assert_roundtrip(&observation_envelope(
@@ -1047,10 +1097,16 @@ fn v1_event_bytes_decode_unchanged() -> Result<(), Box<dyn Error>> {
         panic!("v1 threadCreated must still decode as an event");
     };
     assert_eq!(event.cursor.get(), 2);
+    // These bytes predate `hasStartedResponse`, so they carry no saved
+    // signal and decode as a waiting draft; every field they did carry
+    // decodes unchanged.
     assert_eq!(
         event.event,
         Event::ThreadCreated(ThreadCreated {
-            thread: thread_fixture()
+            thread: ThreadSummary {
+                has_started_response: false,
+                ..thread_fixture()
+            }
         })
     );
 

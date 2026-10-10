@@ -119,7 +119,9 @@ enum StoredObservation<'a> {
     AgentMessageCompleted(StoredAgentMessageCompleted<'a>),
     Approval(StoredApproval<'a>),
     Compaction(StoredCompaction<'a>),
+    Goal(StoredGoal<'a>),
     File(StoredFile<'a>),
+    Image(StoredImage<'a>),
     NativeAction(StoredNativeAction<'a>),
     Plan(StoredPlan<'a>),
     ProcessDiagnostic(StoredProcessDiagnostic<'a>),
@@ -128,6 +130,7 @@ enum StoredObservation<'a> {
     ReasoningSummaryCompleted(StoredReasoningSummaryCompleted<'a>),
     ReasoningSummaryDelta(StoredReasoningSummaryDelta<'a>),
     Retry(StoredRetry<'a>),
+    Safety(StoredSafety<'a>),
     RunState(StoredRunState<'a>),
     RunTerminal(StoredRunTerminal<'a>),
     Search(StoredSearch<'a>),
@@ -203,6 +206,17 @@ struct StoredFile<'a> {
     action: &'static str,
     lines_added: Option<u64>,
     lines_deleted: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct StoredImage<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    item_id: &'a str,
+    origin: &'static str,
+    path: &'a str,
+    caption: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -289,6 +303,28 @@ struct StoredPlan<'a> {
     sequence: u64,
     entries: Vec<StoredPlanEntry<'a>>,
     turn_id: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredGoal<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    state: &'static str,
+    objective: Option<&'a str>,
+    detail: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct StoredSafety<'a> {
+    tag: &'static str,
+    id: &'a str,
+    sequence: u64,
+    action: &'static str,
+    category: &'static str,
+    provider_code: Option<&'a str>,
+    message: Option<&'a str>,
+    model: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -630,6 +666,24 @@ fn stored_observation(observation: &Observation) -> StoredObservation<'_> {
             },
             approved: value.approved(),
         }),
+        Observation::Goal(value) => StoredObservation::Goal(StoredGoal {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            state: value.state().as_str(),
+            objective: value.objective(),
+            detail: value.detail(),
+        }),
+        Observation::Safety(value) => StoredObservation::Safety(StoredSafety {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            action: value.action().as_str(),
+            category: value.category().as_str(),
+            provider_code: value.provider_code(),
+            message: value.message(),
+            model: value.model(),
+        }),
         Observation::Compaction(value) => StoredObservation::Compaction(StoredCompaction {
             tag: observation.tag(),
             id: value.id().as_str(),
@@ -647,6 +701,15 @@ fn stored_observation(observation: &Observation) -> StoredObservation<'_> {
             action: value.action().as_str(),
             lines_added: value.lines_added(),
             lines_deleted: value.lines_deleted(),
+        }),
+        Observation::Image(value) => StoredObservation::Image(StoredImage {
+            tag: observation.tag(),
+            id: value.id().as_str(),
+            sequence: value.sequence().get(),
+            item_id: value.item_id().as_str(),
+            origin: value.origin().as_str(),
+            path: value.path(),
+            caption: value.caption(),
         }),
         Observation::NativeAction(value) => StoredObservation::NativeAction(StoredNativeAction {
             tag: observation.tag(),

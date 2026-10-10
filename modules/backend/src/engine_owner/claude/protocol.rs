@@ -272,10 +272,10 @@ impl ClaudeQuestionRequest {
 /// Typed Claude stream event after bounded boundary decoding.
 ///
 /// Every variant carries only validated identities and text; raw payloads
-/// never leave the boundary. Bookkeeping frames (`compact_boundary`,
-/// `api_retry`, hooks, stream lifecycle, opaque content deltas, `user` tool
-/// results) stay observable as [`ClaudeEvent::Unknown`] without disturbing
-/// the turn; their canonical projections are later packets.
+/// never leave the boundary. Bookkeeping frames (`api_retry`, hooks, stream
+/// lifecycle, opaque content deltas, `user` tool results) stay observable as
+/// [`ClaudeEvent::Unknown`] without disturbing the turn; their canonical
+/// projections are later packets.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ClaudeEvent {
     Init {
@@ -284,10 +284,15 @@ pub(crate) enum ClaudeEvent {
     MessageStart {
         message_id: String,
     },
-    /// The current message's closing delta (`message_delta`): whether it
-    /// ended the turn (`end_turn`) rather than stopping to call a tool.
+    /// The current message's closing delta (`message_delta`): its final
+    /// output-token count, and whether it ended the turn (`end_turn`) rather
+    /// than stopping to call a tool.
     MessageDelta {
+        output_tokens: Option<u64>,
         end_turn: bool,
+        /// The policy area, when the message stopped because Anthropic's
+        /// safety classifiers refused it (`stop_reason: "refusal"`).
+        refusal: Option<artisan_domain::SafetyCategory>,
     },
     /// Streamed assistant text.
     TextDelta {
@@ -298,6 +303,25 @@ pub(crate) enum ClaudeEvent {
     /// Encrypted-thinking estimate: preserved in the tracker, never root text.
     ThinkingTokens {
         estimated_tokens: u64,
+    },
+    /// The CLI's own reply to a `/goal` command: `Goal set: …`, `Goal
+    /// cleared: …`, or a status line. It is bookkeeping, not prose.
+    GoalCommand {
+        text: String,
+    },
+    /// A goal check found the condition not met yet; the CLI keeps going.
+    GoalCheck {
+        condition: String,
+        reason: String,
+    },
+    /// The CLI began compacting the conversation (`status: compacting`).
+    CompactionStarted,
+    /// The CLI finished compacting (`compact_boundary`), with the context it
+    /// held before and after, and how long it took, when disclosed.
+    CompactionCompleted {
+        pre_tokens: Option<u64>,
+        post_tokens: Option<u64>,
+        duration_ms: Option<u64>,
     },
     /// A streamed thinking block opened at this content-block index, with
     /// its newest recognized server title when the block carried
@@ -346,6 +370,8 @@ pub(crate) enum ClaudeEvent {
         /// a measurable sample. Projects best-effort beside settlement and
         /// never disturbs it.
         usage: Option<ClaudeUsageSample>,
+        /// Model turns the result covers (`num_turns`), when disclosed.
+        model_turns: Option<u64>,
     },
     Unknown,
 }
@@ -432,6 +458,7 @@ pub(crate) fn parse_frame(
                     .map(str::to_owned),
                 permission_denials,
                 usage,
+                model_turns: object.get("num_turns").and_then(Value::as_u64),
             });
         }
         return Err(ClaudeFrameError::InvalidEnvelope);
@@ -447,6 +474,9 @@ pub(crate) fn parse_frame(
 }
 
 fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
+    if let Some(goal) = decode_goal(kind, envelope) {
+        return goal;
+    }
     match kind {
         "system" => decode_system(envelope),
         "stream_event" => decode_stream_event(envelope),
@@ -455,6 +485,45 @@ fn decode_typed(kind: &str, envelope: &Value) -> ClaudeEvent {
         "result" => decode_result(envelope),
         "control_request" => decode_control(envelope),
         _ => ClaudeEvent::Unknown,
+    }
+}
+
+/// Recognizes the CLI's goal bookkeeping: the synthetic reply to a `/goal`
+/// command, and the synthetic user frame a failed goal check feeds back
+/// (`Stop hook feedback:\n[<condition>]: <reason>`).
+fn decode_goal(kind: &str, envelope: &Value) -> Option<ClaudeEvent> {
+    let first_text = || {
+        let content = envelope.get("message")?.get("content")?;
+        match content {
+            Value::String(text) => Some(text.clone()),
+            Value::Array(blocks) => blocks
+                .iter()
+                .find_map(|block| block.get("text").and_then(Value::as_str))
+                .map(str::to_owned),
+            _ => None,
+        }
+    };
+    match kind {
+        "assistant" => {
+            let command = envelope
+                .get("local_command_run")
+                .and_then(|run| run.get("command"))
+                .and_then(Value::as_str);
+            (command == Some("goal")).then(|| ClaudeEvent::GoalCommand {
+                text: first_text().unwrap_or_default(),
+            })
+        }
+        "user" if envelope.get("isSynthetic").and_then(Value::as_bool) == Some(true) => {
+            let text = first_text()?;
+            let feedback = text.strip_prefix("Stop hook feedback:")?.trim_start();
+            let rest = feedback.strip_prefix('[')?;
+            let (condition, reason) = rest.split_once("]:")?;
+            Some(ClaudeEvent::GoalCheck {
+                condition: condition.trim().to_owned(),
+                reason: reason.trim().to_owned(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -499,6 +568,18 @@ fn decode_system(envelope: &Value) -> ClaudeEvent {
             Some(estimated_tokens) => ClaudeEvent::ThinkingTokens { estimated_tokens },
             None => ClaudeEvent::Unknown,
         },
+        "status" if envelope.get("status").and_then(Value::as_str) == Some("compacting") => {
+            ClaudeEvent::CompactionStarted
+        }
+        "compact_boundary" => {
+            let metadata = envelope.get("compact_metadata");
+            let count = |field: &str| metadata.and_then(|value| value.get(field)?.as_u64());
+            ClaudeEvent::CompactionCompleted {
+                pre_tokens: count("pre_tokens"),
+                post_tokens: count("post_tokens"),
+                duration_ms: count("duration_ms"),
+            }
+        }
         _ => ClaudeEvent::Unknown,
     }
 }
@@ -563,13 +644,27 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
         }
         "content_block_start" => decode_block_start(event),
         "content_block_stop" => decode_block_stop(event),
-        "message_delta" => ClaudeEvent::MessageDelta {
-            end_turn: event
-                .get("delta")
+        "message_delta" => {
+            let output_tokens = event
+                .get("usage")
+                .and_then(|usage| usage.get("output_tokens"))
+                .and_then(Value::as_u64);
+            let delta = event.get("delta");
+            let stop_reason = delta
                 .and_then(|delta| delta.get("stop_reason"))
-                .and_then(Value::as_str)
-                == Some("end_turn"),
-        },
+                .and_then(Value::as_str);
+            let end_turn = stop_reason == Some("end_turn");
+            let refusal = (stop_reason == Some("refusal"))
+                .then(|| refusal_category(delta.and_then(|delta| delta.get("stop_details"))));
+            if output_tokens.is_none() && !end_turn && refusal.is_none() {
+                return ClaudeEvent::Unknown;
+            }
+            ClaudeEvent::MessageDelta {
+                output_tokens,
+                end_turn,
+                refusal,
+            }
+        }
         "message_start" => match event
             .get("message")
             .and_then(|message| message.get("id"))
@@ -584,6 +679,38 @@ fn decode_stream_event(envelope: &Value) -> ClaudeEvent {
         },
         _ => ClaudeEvent::Unknown,
     }
+}
+
+/// Reads the policy area out of a refusal's `stop_details`. Its shape is not
+/// pinned down, so any string it carries naming an area counts; none means
+/// the area was not disclosed.
+fn refusal_category(details: Option<&Value>) -> artisan_domain::SafetyCategory {
+    use artisan_domain::SafetyCategory;
+    fn strings<'a>(value: &'a Value, found: &mut Vec<&'a str>) {
+        match value {
+            Value::String(text) => found.push(text),
+            Value::Array(items) => items.iter().for_each(|item| strings(item, found)),
+            Value::Object(fields) => fields.values().for_each(|field| strings(field, found)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    if let Some(details) = details {
+        strings(details, &mut found);
+    }
+    for text in found {
+        let text = text.to_ascii_lowercase();
+        if text.contains("cyber") {
+            return SafetyCategory::Cyber;
+        }
+        if text.contains("bio") {
+            return SafetyCategory::Bio;
+        }
+        if text.contains("chem") {
+            return SafetyCategory::Chemical;
+        }
+    }
+    SafetyCategory::Unspecified
 }
 
 fn decode_assistant(envelope: &Value) -> ClaudeEvent {
@@ -660,6 +787,7 @@ fn decode_result(envelope: &Value) -> ClaudeEvent {
             .map(str::to_owned),
         permission_denials,
         usage,
+        model_turns: envelope.get("num_turns").and_then(Value::as_u64),
     }
 }
 

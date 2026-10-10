@@ -317,6 +317,7 @@ async fn replay_lines(lines: &[&str], run: &str, display: ClaudeThinkingDisplay)
         thread_id: &thread,
         model_id: &model,
         provider_session_id: &session,
+        window_cap: None,
     };
     let (sender, mut receiver) = mpsc::channel(4096);
     let mut tracker = ClaudePendingTracker::with_thinking_display(display);
