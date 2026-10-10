@@ -85,6 +85,7 @@ impl Render for HeaderProbe {
                 None,
                 0.0,
                 self.controlled,
+                true,
                 "probe",
                 MotionPolicy::Reduced,
                 false,
@@ -164,6 +165,7 @@ fn run_item(id: &str, ordinal: u64, kind: SceneItemKind) -> SceneItem {
     item(id, ordinal, kind, None).with_provenance(ItemProvenance {
         run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
         lifecycle: Some(ConversationLifecycle::Completed),
+        text_settled: false,
     })
 }
 
@@ -602,6 +604,7 @@ fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
     .with_provenance(ItemProvenance {
         run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
         lifecycle: Some(ConversationLifecycle::Streaming),
+        text_settled: false,
     });
     let scene = ConversationScene::build(
         vec![SceneTurn::new(
@@ -625,6 +628,10 @@ fn a_streaming_reply_keeps_the_section_counting_until_the_turn_ends() {
             .any(|block| matches!(block, TurnBlock::TurnStatus(_))),
         "the streaming reply suppresses the status block"
     );
+    assert!(
+        crate::conversation_host::scene_has_active_work(&scene),
+        "the host clock keeps ticking while the summary streams"
+    );
     assert_eq!(turn_section_title(turn, Some(89_000)), "Working for 1m 28s");
 }
 
@@ -642,6 +649,7 @@ fn replying_section_scene(body: &str, phase: AssistantPhase) -> ConversationScen
     .with_provenance(ItemProvenance {
         run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
         lifecycle: Some(ConversationLifecycle::Streaming),
+        text_settled: false,
     });
     ConversationScene::build(
         vec![SceneTurn::new(

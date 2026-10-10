@@ -215,6 +215,7 @@ fn session_activity_chain_carries_kind_and_detail(cx: &mut TestAppContext) {
             .with_provenance(ItemProvenance {
                 run_id: Some(run),
                 lifecycle: Some(ConversationLifecycle::Active),
+                text_settled: false,
             }),
         ],
         vec![TurnNarrationEntry::new(
@@ -846,6 +847,7 @@ fn session_details_sort_by_stable_ordinal() {
                 body: "first".to_owned(),
                 phase: AssistantPhase::Commentary,
                 ordinal: 2,
+                text_after_sequence: None,
                 provenance: None,
                 disclosure: None,
             },
@@ -862,6 +864,7 @@ fn session_details_sort_by_stable_ordinal() {
                 body: String::new(),
                 phase: AssistantPhase::Unspecified,
                 ordinal: 5,
+                text_after_sequence: None,
                 provenance: None,
                 disclosure: None,
             },
@@ -1342,6 +1345,7 @@ fn prose_followed_by_a_tool_call_is_finished_even_while_its_message_is_live() {
         Some(ItemProvenance {
             run_id: None,
             lifecycle: Some(ConversationLifecycle::Streaming),
+            text_settled: false,
         })
     };
     let prose = |id: &str, ordinal| SessionDetail::Assistant {
@@ -1349,6 +1353,7 @@ fn prose_followed_by_a_tool_call_is_finished_even_while_its_message_is_live() {
         body: "Checking the renderer now".to_owned(),
         phase: AssistantPhase::Unspecified,
         ordinal,
+        text_after_sequence: None,
         provenance: live(),
         disclosure: None,
     };
@@ -1389,5 +1394,289 @@ fn prose_followed_by_a_tool_call_is_finished_even_while_its_message_is_live() {
         streaming,
         vec![false, true],
         "only the newest prose streams"
+    );
+}
+
+#[test]
+fn prose_sorts_among_steps_by_its_first_text() {
+    // The Forge opens a reply's item when the turn starts, so its ordinal
+    // precedes every step even when its words came after them. Its stamp
+    // places it: a reply whose first text followed two edits paints after
+    // them while streaming, not above them.
+    use crate::conversation_observation_projection::DERIVED_FACT_ORDINAL_BASE;
+    use crate::conversation_scene::{ProgressPhase, SessionDetail};
+    let step = |id: &str, sequence: u64| SessionDetail::Activity {
+        id: scene_id(id),
+        body: "Edited a file".to_owned(),
+        kind: None,
+        detail: None,
+        lifecycle: Some(ConversationLifecycle::Completed),
+        ordinal: DERIVED_FACT_ORDINAL_BASE + 2 * sequence,
+        disclosure: None,
+    };
+    let prose =
+        |id: &str, ordinal: u64, text_after_sequence: Option<u64>| SessionDetail::Assistant {
+            id: scene_id(id),
+            body: "The words".to_owned(),
+            phase: AssistantPhase::Unspecified,
+            ordinal,
+            text_after_sequence,
+            provenance: None,
+            disclosure: None,
+        };
+    let group = WorkGroupBlock {
+        items: Vec::new(),
+        label: None,
+        disclosure: None,
+        session: Some(scene_id("session-turn_a")),
+        session_run: None,
+        superseded: false,
+        continuation: None,
+        reasoning_summary: None,
+        progress: ProgressPhase::Work,
+        transition: None,
+        session_details: vec![
+            prose("reply", 250, Some(653)),
+            prose("unstamped", 248, None),
+            step("edit-1", 652),
+            step("edit-2", 653),
+            step("later", 654),
+        ],
+    };
+    let order: Vec<String> = ordered_detail_rows(&group)
+        .iter()
+        .map(|(_, row)| row.scene_id().as_str().to_owned())
+        .collect();
+    assert_eq!(
+        order,
+        ["unstamped", "edit-1", "edit-2", "reply", "later"],
+        "unstamped prose keeps its place ahead of the steps"
+    );
+}
+
+#[test]
+fn questions_sit_in_the_work_history_at_the_step_that_asked_them() {
+    // The reply's item opens with the turn, so it precedes every derived
+    // row by ordinal. A question as its own card followed the reply; inside
+    // the work history it sorts by its delivery sequence among the steps.
+    use crate::conversation_observation_projection::DERIVED_FACT_ORDINAL_BASE;
+    let derived = |sequence: u64| DERIVED_FACT_ORDINAL_BASE + 2 * sequence;
+    let run_item = |id: &str, ordinal: u64, kind: SceneItemKind| {
+        item(id, ordinal, kind, None).with_provenance(ItemProvenance {
+            run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+            lifecycle: Some(ConversationLifecycle::Completed),
+            text_settled: false,
+        })
+    };
+    let step = |id: &str, sequence: u64| {
+        run_item(
+            id,
+            derived(sequence),
+            SceneItemKind::Activity {
+                body: "Read a file".to_owned(),
+                kind: None,
+                detail: None,
+            },
+        )
+    };
+    let items = vec![
+        item(
+            "prompt",
+            1,
+            SceneItemKind::UserMessage {
+                body: "what should we build".to_owned(),
+            },
+            None,
+        ),
+        run_item(
+            "reply",
+            2,
+            SceneItemKind::AssistantMessage {
+                body: "Browser it is.".to_owned(),
+                phase: AssistantPhase::Final,
+            },
+        )
+        .with_text_after_sequence(Some(5)),
+        step("before", 1),
+        run_item(
+            "question",
+            derived(2),
+            SceneItemKind::Question {
+                prompt: "What should we build it with?".to_owned(),
+                answer: Some("Browser".to_owned()),
+            },
+        ),
+        step("after", 3),
+    ];
+    let scene = ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        items,
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Working)
+                .with_active_started_at_ms(1_000)
+                .with_session_disclosure(SceneDisclosure::Open),
+        ],
+        Vec::new(),
+    )
+    .expect("question scene is valid");
+    let blocks = scene.turn_scenes()[0].blocks();
+    assert!(
+        !blocks
+            .iter()
+            .any(|block| matches!(block, TurnBlock::Question(_))),
+        "the question is not a card after the reply"
+    );
+    let group_at = blocks
+        .iter()
+        .position(|block| matches!(block, TurnBlock::WorkGroup(_)))
+        .expect("the session paints a work history");
+    let reply_at = blocks
+        .iter()
+        .position(|block| matches!(block, TurnBlock::AssistantMessage(_)))
+        .expect("the reply paints");
+    assert!(group_at < reply_at, "the work history precedes the reply");
+    let TurnBlock::WorkGroup(group) = &blocks[group_at] else {
+        unreachable!("position matched a work group");
+    };
+    let order: Vec<String> = ordered_detail_rows(group)
+        .iter()
+        .map(|(_, row)| row.scene_id().as_str().to_owned())
+        .collect();
+    assert_eq!(order, ["before", "question", "after"]);
+}
+
+#[test]
+fn held_back_stand_in_sits_just_before_its_first_step() {
+    use crate::conversation_observation_projection::DERIVED_FACT_ORDINAL_BASE;
+    let key = crate::conversation_surface::detail_timeline_key;
+    let stand_in = key(DERIVED_FACT_ORDINAL_BASE + 2 * 652 - 1, None);
+    let first_step = key(DERIVED_FACT_ORDINAL_BASE + 2 * 652, None);
+    let prose_before = key(250, Some(651));
+    assert!(prose_before < stand_in);
+    assert!(stand_in < first_step);
+}
+
+/// A live turn whose work holds a first command, then (with `narrated`)
+/// a paragraph of finished prose and a second command after it.
+fn queued_work_scene(narrated: bool) -> ConversationScene {
+    let run_item = |id: &str, ordinal: u64, kind: SceneItemKind| {
+        item(id, ordinal, kind, None).with_provenance(ItemProvenance {
+            run_id: Some(artisan_domain::RunId::parse("run_a").expect("run id is valid")),
+            lifecycle: Some(ConversationLifecycle::Completed),
+            text_settled: false,
+        })
+    };
+    let command = |id: &str, ordinal: u64| {
+        run_item(
+            id,
+            ordinal,
+            SceneItemKind::Activity {
+                body: "cargo test".to_owned(),
+                kind: Some("terminal_activity".to_owned()),
+                detail: Some("cargo test --locked".to_owned()),
+            },
+        )
+    };
+    let mut items = vec![
+        item(
+            "prompt",
+            1,
+            SceneItemKind::UserMessage {
+                body: "why is the footer wrong".to_owned(),
+            },
+            None,
+        ),
+        command("cmd-a", 2),
+    ];
+    if narrated {
+        items.push(run_item(
+            "narration",
+            3,
+            SceneItemKind::AssistantMessage {
+                body: "checking the footer layout before the next run ".repeat(4),
+                phase: AssistantPhase::Commentary,
+            },
+        ));
+        items.push(command("cmd-b", 4));
+    }
+    ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        items,
+        vec![
+            TurnNarrationEntry::new(turn_id("turn_a"), TurnNarration::Working)
+                .with_active_started_at_ms(1_000)
+                .with_session_disclosure(SceneDisclosure::Open),
+        ],
+        Vec::new(),
+    )
+    .expect("queued work scene is valid")
+}
+
+#[gpui::test]
+fn a_tool_call_waits_for_the_prose_above_it_to_finish_revealing(cx: &mut TestAppContext) {
+    const FIRST_CHAIN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-work-turn_a-trace-0-trigger";
+    const SECOND_CHAIN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-work-turn_a-trace-1-trigger";
+    let (surface, cx) = cx.add_window_view(|_, cx| {
+        ConversationSurface::new(queued_work_scene(false), ThemeMode::Dark, cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx);
+    assert!(
+        cx.debug_bounds(FIRST_CHAIN).is_some(),
+        "the first chain paints"
+    );
+    // Prose and the next tool call land together while the turn is watched:
+    // the prose streams in and the call waits until it has.
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(queued_work_scene(true), cx);
+        });
+    });
+    settle(cx);
+    assert!(
+        cx.debug_bounds(SECOND_CHAIN).is_none(),
+        "the tool call waits behind the revealing prose"
+    );
+    let mut frames = 0;
+    while cx.debug_bounds(SECOND_CHAIN).is_none() {
+        frames += 1;
+        assert!(frames < 400, "the waiting tool call is released");
+        pump_animation_frame_after(cx, Duration::from_millis(16));
+    }
+    assert!(
+        frames > 10,
+        "it waited for the prose, not one frame: {frames} frames"
+    );
+}
+
+#[gpui::test]
+fn reduced_motion_shows_a_tool_call_with_its_prose(cx: &mut TestAppContext) {
+    const SECOND_CHAIN: &str =
+        "artisan-conversation-surface-turn-turn_a-block-work-turn_a-trace-1-trigger";
+    cx.update(|app| app.set_reduce_motion(true));
+    let (surface, cx) = cx.add_window_view(|_, cx| {
+        ConversationSurface::new(queued_work_scene(false), ThemeMode::Dark, cx)
+    });
+    cx.simulate_resize(size(px(720.0), px(720.0)));
+    settle(cx);
+    cx.update(|_, app| {
+        surface.update(app, |surface, cx| {
+            surface.replace_scene(queued_work_scene(true), cx);
+        });
+    });
+    settle(cx);
+    assert!(
+        cx.debug_bounds(SECOND_CHAIN).is_some(),
+        "under reduced motion nothing waits"
     );
 }

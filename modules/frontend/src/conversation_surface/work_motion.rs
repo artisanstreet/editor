@@ -19,6 +19,21 @@
 //!   (150 ms ease-in-out, 4 px, 2 px blur).
 //! - The status line leaves by fading out while its height closes, so
 //!   nothing below it jumps.
+//!
+//! A turn reveals strictly top to bottom through one reveal queue. The row
+//! renders its blocks in paint order, and each frame carries a gate: while
+//! something painted above is still settling (prose with words left to
+//! reveal or a segment not yet halfway faded in, or a row whose entrance
+//! fade has not reached its midpoint), every block below waits. A waiting
+//! block paints nothing, keeps no scroll identity, and starts no entrance
+//! clock; prose below the gate keeps its reveal paused at what it shows.
+//! The row keeps requesting frames while anything waits, so the first frame
+//! the gate clears releases the next block with its normal entrance, and
+//! the blocks after it cascade in at half-fade intervals. While a block
+//! waits, the prose above it drains at a hurried pace. Actionable blocks
+//! (approvals, questions) wait at most [`ACTIONABLE_HOLD_CAP`]. Nothing waits
+//! outside full live motion: history, a first render, a caught-up frame,
+//! and reduced motion paint everything at once, as before.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -26,7 +41,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{FontFeatures, Pixels};
+use artisan_ui::markdown_reveal::stable_reveal_end;
+use gpui::{FontFeatures, Pixels, StyledText};
 
 use super::reply_reveal::ReplyReveal;
 use super::*;
@@ -55,6 +71,16 @@ const SWAP_BLUR_PX: f32 = 2.0;
 const SUMMARY_SWAP: Duration = MotionDuration::Fast.as_duration();
 /// Status line exit: the texts-reveal quiet fade out.
 const STATUS_EXIT: Duration = Duration::from_millis(200);
+/// The longest an actionable block (an approval, a question) waits behind
+/// settling content above it: the run is blocked on the reader, so it must
+/// not sit behind a long drain.
+pub(super) const ACTIONABLE_HOLD_CAP: Duration = Duration::from_millis(300);
+
+/// How long an entering row holds the queue: until its content fade passes
+/// its midpoint, so the blocks after it cascade instead of arriving at once.
+fn entrance_handoff() -> Duration {
+    ENTRANCE_FADE_DELAY + ENTRANCE_FADE / 2
+}
 
 /// One turn row's work motion, retained across its renders.
 #[derive(Default)]
@@ -82,10 +108,36 @@ pub(super) struct WorkMotion {
     status_painted: bool,
     /// A status line on its way out.
     status_exit: Option<StatusExit>,
-    /// The status line's thinking summary and when it last changed.
-    summary: Option<(String, Option<Instant>)>,
+    /// The status line's thinking summary and its swap, if one plays.
+    summary: Option<SummaryState>,
     /// Whether anything still moves; the row then asks for the next frame.
     animating: bool,
+    /// The turn's top-to-bottom reveal queue.
+    queue: RevealQueue,
+    /// Disclosures last painted folded, by selector.
+    folded: HashSet<String>,
+    /// Compaction separators, by scene id.
+    compactions: HashMap<SceneId, super::compaction_separator::CompactionMotion>,
+    /// How many disclosures the reader just opened are rendering their rows
+    /// right now. Their rows already happened, so they paint at rest.
+    opening: u32,
+}
+
+/// One turn's reveal queue (see the module docs).
+#[derive(Default)]
+struct RevealQueue {
+    /// The gate this frame: set once something painted earlier in paint
+    /// order is still settling, so everything after it waits.
+    settling: bool,
+    /// Blocks waiting behind the gate and when each started waiting.
+    waiting: HashMap<String, Instant>,
+    /// Blocks that waited this frame; the rest leave [`Self::waiting`].
+    waited: HashSet<String>,
+    /// Whether this frame held anything back.
+    held: bool,
+    /// Whether the previous frame held anything back: settling prose then
+    /// drains at the hurried pace.
+    hurry: bool,
 }
 
 /// How much a frame of the row may move.
@@ -153,6 +205,8 @@ impl WorkMotion {
             for phrase in self.phrases.values_mut() {
                 phrase.changed = None;
             }
+            self.queue.waiting.clear();
+            self.queue.hurry = false;
         }
         self.pace = match (live, motion) {
             (false, _) => Pace::Settled,
@@ -162,6 +216,9 @@ impl WorkMotion {
         self.animating = false;
         self.touched.clear();
         self.status_painted = false;
+        self.queue.settling = false;
+        self.queue.held = false;
+        self.queue.waited.clear();
     }
 
     /// Ends one render; returns whether the row must render the next frame.
@@ -173,11 +230,124 @@ impl WorkMotion {
         if !self.status_painted {
             self.status = None;
         }
+        let waited = std::mem::take(&mut self.queue.waited);
+        self.queue.waiting.retain(|key, _| waited.contains(key));
+        self.queue.waited = waited;
+        self.queue.hurry = self.queue.held;
         self.animating
     }
 
+    /// Advances one compaction separator to this frame's phase.
+    pub(super) fn compaction(
+        &mut self,
+        id: &SceneId,
+        phase: CompactionPhase,
+    ) -> super::compaction_separator::CompactionFrame {
+        let full = self.full_motion();
+        let now = Instant::now();
+        let motion = self.compactions.entry(id.clone()).or_insert_with(|| {
+            super::compaction_separator::CompactionMotion::first_seen(phase, full, now)
+        });
+        let (frame, moving) = motion.advance(phase, full, now);
+        self.animating |= moving;
+        // Like any entering row, it holds the blocks below it in the reveal
+        // queue until its label is halfway in.
+        if frame.label < 0.5 {
+            self.queue.settling = true;
+        }
+        frame
+    }
+
     fn full_motion(&self) -> bool {
-        self.primed && self.pace == Pace::Full
+        self.fresh() && self.pace == Pace::Full
+    }
+
+    /// Whether what this row has not painted before is new to the reader:
+    /// not on the row's first render, and not rows a disclosure the reader
+    /// just opened reveals.
+    fn fresh(&self) -> bool {
+        self.primed && self.opening == 0
+    }
+
+    /// Notes one disclosure's state before its rows render; returns whether
+    /// the reader just opened it. Rows it reveals then paint at rest until
+    /// [`Self::end_disclosure`]: opening work that already happened never
+    /// replays its entrances or reveals. Only rows that arrive while the
+    /// disclosure stays open enter.
+    pub(super) fn begin_disclosure(&mut self, selector: &str, mounted: bool) -> bool {
+        if !mounted {
+            self.folded.insert(selector.to_owned());
+            return false;
+        }
+        let opened = self.folded.remove(selector);
+        if opened {
+            self.opening += 1;
+        }
+        opened
+    }
+
+    /// Ends the scope [`Self::begin_disclosure`] opened.
+    pub(super) fn end_disclosure(&mut self, opened: bool) {
+        if opened {
+            self.opening = self.opening.saturating_sub(1);
+        }
+    }
+
+    /// Whether the reveal queue holds back what renders next this frame.
+    fn gate_closed(&self) -> bool {
+        self.queue.settling && self.full_motion()
+    }
+
+    /// Whether the block keyed `key` waits behind the reveal queue this
+    /// frame. A waiting block must paint nothing and must not call
+    /// [`Self::entrance`], whose clock starts on its first call; the row
+    /// keeps rendering frames until it is released.
+    ///
+    /// A block already on screen never waits again, so nothing painted
+    /// disappears. An `actionable` block waits at most
+    /// [`ACTIONABLE_HOLD_CAP`], then enters whatever still settles above.
+    pub(super) fn hold(&mut self, key: &str, actionable: bool) -> bool {
+        if !self.gate_closed() || self.entrances.contains_key(key) {
+            self.queue.waiting.remove(key);
+            return false;
+        }
+        let now = Instant::now();
+        let since = *self.queue.waiting.entry(key.to_owned()).or_insert(now);
+        if actionable && now.saturating_duration_since(since) >= ACTIONABLE_HOLD_CAP {
+            self.queue.waiting.remove(key);
+            return false;
+        }
+        self.queue.waited.insert(key.to_owned());
+        self.animating = true;
+        self.queue.held = true;
+        true
+    }
+
+    /// Whether the prose row `id` waits behind the reveal queue this frame.
+    ///
+    /// Prose that has shown nothing yet waits like any block: it paints
+    /// nothing while its reveal stays registered and paused, so it streams
+    /// in from its first word once released. Prose already showing words
+    /// renders on and pauses inside [`Self::reveal`] instead.
+    pub(super) fn hold_prose(&mut self, id: &SceneId) -> bool {
+        if !self.gate_closed() || self.entrances.contains_key(id.as_str()) {
+            return false;
+        }
+        let now = Instant::now();
+        if self.seen_prose.insert(id.clone()) {
+            self.reveals.insert(id.clone(), ReplyReveal::begin(now));
+        }
+        let Some(reveal) = self.reveals.get_mut(id) else {
+            return false;
+        };
+        if !reveal.revealed().is_empty() {
+            return false;
+        }
+        reveal.wait(now);
+        self.touched.insert(id.clone());
+        self.animating = true;
+        self.queue.held = true;
+        true
     }
 
     /// Advances the streaming reveal of one prose body.
@@ -204,29 +374,59 @@ impl WorkMotion {
         };
         let now = Instant::now();
         if self.seen_prose.insert(id.clone()) {
-            if self.primed {
+            if self.fresh() {
                 self.reveals.insert(id.clone(), ReplyReveal::begin(now));
             } else if streaming {
                 self.reveals
                     .insert(id.clone(), ReplyReveal::resume(body, now));
             }
         }
+        let gated = self.gate_closed();
+        let queued = self.full_motion();
+        let hurry = self.queue.hurry;
         let reveal = self.reveals.get_mut(id)?;
         self.touched.insert(id.clone());
+        if gated {
+            // Something above still settles: what shows stays, its fades
+            // finish, and nothing new reveals until the queue clears.
+            reveal.wait(now);
+            self.animating = true;
+            self.queue.held = true;
+            return Some((reveal.revealed().to_owned(), reveal.fade.clone()));
+        }
+        reveal.hurry = hurry;
         if reveal.advance(body, streaming, motion, now) {
             self.animating = true;
         } else if !streaming && reveal.is_complete(body) {
             self.reveals.remove(id);
             return None;
         }
+        if queued && reveal.settling(body, streaming, now) {
+            self.queue.settling = true;
+        }
         Some((reveal.revealed().to_owned(), reveal.fade.clone()))
     }
 
-    /// How many words the reveal of `id` shows, if one runs.
-    pub(super) fn revealed_words(&self, id: &SceneId) -> Option<usize> {
-        self.reveals
-            .get(id)
-            .map(|reveal| reveal.revealed().split_whitespace().count())
+    /// How many words of prose `id` are on screen, read without advancing
+    /// its reveal: the turn decides whether its work folds before the
+    /// reply renders in paint order (see `TurnRowView::advance_reply_reveal`).
+    /// Prose this frame will begin revealing shows nothing yet; prose this
+    /// frame resumes shows what arrived.
+    pub(super) fn shown_words(&self, id: &SceneId, body: &str, streaming: bool) -> usize {
+        let words = |text: &str| text.split_whitespace().count();
+        if let Some(reveal) = self.reveals.get(id) {
+            return words(reveal.revealed());
+        }
+        if self.seen_prose.contains(id) {
+            return words(body);
+        }
+        if self.fresh() {
+            0
+        } else if streaming {
+            words(&body[..stable_reveal_end(body)])
+        } else {
+            words(body)
+        }
     }
 
     /// Records that the row keyed `key` is already on screen, so it never
@@ -238,31 +438,47 @@ impl WorkMotion {
 
     /// How far the status line's thinking summary has swapped in, while a
     /// new one does: it fades in and rises into place, like a text swap.
-    /// The first summary arrives with the status line's own entrance, and
-    /// the counting verb never swaps.
+    /// The status line's first copy arrives with its own entrance, and the
+    /// counting verb never swaps.
+    ///
+    /// Only a genuinely new summary swaps. One that grows or is restated in
+    /// place (the live title settling to its buffered form, a public summary
+    /// streaming its first line) updates without restarting, and a new one
+    /// landing mid-swap continues from the opacity already reached: restarting
+    /// from nothing read as the line fading, then flashing out and in again.
+    /// A summary returning after the verb stood in for it swaps in too, never
+    /// popping in at full opacity.
     pub(super) fn summary_swap(&mut self, summary: Option<&str>) -> Option<f32> {
-        let Some(summary) = summary else {
-            self.summary = None;
+        let animate = self.full_motion();
+        let now = Instant::now();
+        let Some(state) = self.summary.as_mut() else {
+            // The status line's first copy rides its entrance.
+            self.summary = Some(SummaryState {
+                shown: summary.map(str::to_owned),
+                swap: None,
+            });
             return None;
         };
-        let animate = self.full_motion();
-        match &mut self.summary {
-            Some((shown, changed)) if shown != summary => {
-                summary.clone_into(shown);
-                *changed = animate.then(Instant::now);
+        let current = state.progress(now);
+        match (state.shown.as_deref(), summary) {
+            (Some(shown), Some(next)) if shown == next => {}
+            (Some(shown), Some(next)) if summary_restates(shown, next) => {
+                state.shown = Some(next.to_owned());
             }
-            Some(_) => {}
-            None => self.summary = Some((summary.to_owned(), None)),
+            (_, Some(next)) => {
+                state.shown = Some(next.to_owned());
+                state.swap = animate.then(|| SummarySwap {
+                    started: now,
+                    from: current.unwrap_or(0.0),
+                });
+            }
+            // The verb stands in for a summary without swapping.
+            (_, None) => {
+                state.shown = None;
+                state.swap = None;
+            }
         }
-        let changed = self.summary.as_ref().and_then(|(_, changed)| *changed)?;
-        let progress = progress_of(
-            Instant::now().saturating_duration_since(changed),
-            SUMMARY_SWAP,
-            MotionCurve::EaseOut,
-        );
-        if progress >= 1.0 {
-            return None;
-        }
+        let progress = state.progress(now)?;
         self.animating = true;
         Some(progress)
     }
@@ -274,8 +490,20 @@ impl WorkMotion {
         }
     }
 
-    /// The entrance of one work row this frame, `None` at rest.
+    /// The entrance of one row this frame, `None` at rest. Until its fade
+    /// passes its midpoint, an entering row holds the reveal queue for
+    /// everything rendered after it.
     pub(super) fn entrance(&mut self, key: &str) -> Option<Entrance> {
+        self.enter(key, true)
+    }
+
+    /// The status line's entrance. The status line trails the turn and
+    /// narrates it live, so it neither waits in nor holds the reveal queue.
+    pub(super) fn status_entrance(&mut self) -> Option<Entrance> {
+        self.enter("status", false)
+    }
+
+    fn enter(&mut self, key: &str, queued: bool) -> Option<Entrance> {
         let animate = self.full_motion();
         let started = *self
             .entrances
@@ -291,6 +519,9 @@ impl WorkMotion {
             return None;
         }
         self.animating = true;
+        if queued && elapsed < entrance_handoff() {
+            self.queue.settling = true;
+        }
         Some(Entrance {
             grow: progress_of(elapsed, ENTRANCE_GROW, MotionCurve::SmoothOut),
             reveal: progress_of(
@@ -400,6 +631,45 @@ impl WorkMotion {
             eased(MotionCurve::EaseInOut, elapsed, STATUS_EXIT),
         ))
     }
+}
+
+/// The status line's thinking summary and its swap, if one plays.
+#[derive(Debug)]
+struct SummaryState {
+    /// The summary painted, `None` while the verb stands in for it.
+    shown: Option<String>,
+    swap: Option<SummarySwap>,
+}
+
+/// One summary swap: when it began and the opacity it began from.
+#[derive(Clone, Copy, Debug)]
+struct SummarySwap {
+    started: Instant,
+    from: f32,
+}
+
+impl SummaryState {
+    /// The swap's progress at `now`, `None` once it has settled.
+    fn progress(&self, now: Instant) -> Option<f32> {
+        let swap = self.swap?;
+        let eased = progress_of(
+            now.saturating_duration_since(swap.started),
+            SUMMARY_SWAP,
+            MotionCurve::EaseOut,
+        );
+        (eased < 1.0).then(|| swap.from + (1.0 - swap.from) * eased)
+    }
+}
+
+/// Whether `next` restates `shown` rather than replacing it: one grows into
+/// the other, ignoring the trailing ellipsis or stop a live line may carry.
+fn summary_restates(shown: &str, next: &str) -> bool {
+    let trim = |text: &str| {
+        text.trim_end_matches(|c: char| c == '…' || c == '.' || c.is_whitespace())
+            .to_owned()
+    };
+    let (shown, next) = (trim(shown), trim(next));
+    !shown.is_empty() && !next.is_empty() && (next.starts_with(&shown) || shown.starts_with(&next))
 }
 
 /// How `word` moves given the word it replaced at the same position.
@@ -549,15 +819,28 @@ fn word_element(word: &PhraseWord, line_height: Pixels) -> AnyElement {
             .child(word.text.clone())
             .into_any_element(),
         WordMotion::Enter => swap_in(word.text.clone(), word.elapsed),
+        // The word stays one text run while its added letters fade in, the
+        // layout it settles in: split into a kept run and an added run, the
+        // runs measured apart and nudged every later word a pixel or two
+        // until the swap ended (a new clause's comma, "commands" →
+        // "commands,").
         WordMotion::Extend { kept } => {
-            let (kept, added) = word.text.split_at((*kept).min(word.text.len()));
+            let kept = (*kept).min(word.text.len());
             let progress = progress_of(word.elapsed, SWAP, MotionCurve::EaseInOut);
-            div()
-                .flex()
-                .flex_none()
-                .child(kept.to_owned())
-                .child(div().opacity(progress).child(added.to_owned()))
-                .into_any_element()
+            let text = SharedString::from(word.text.clone());
+            let added = kept..text.len();
+            let styled = if added.is_empty() {
+                StyledText::new(text)
+            } else {
+                StyledText::new(text).with_highlights([(
+                    added,
+                    gpui::HighlightStyle {
+                        fade_out: Some(1.0 - progress),
+                        ..Default::default()
+                    },
+                )])
+            };
+            div().flex_none().child(styled).into_any_element()
         }
         WordMotion::Roll { from, up } => odometer(from, &word.text, *up, word.elapsed, line_height),
     }
@@ -742,5 +1025,314 @@ mod tests {
         // Settled history paints at rest.
         motion.begin_frame(false, MotionPolicy::Full, false);
         assert!(motion.entrance("later-row").is_none());
+    }
+
+    #[test]
+    fn a_restated_summary_never_restarts_its_swap() {
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(
+            motion.summary_swap(Some("Checking sums")).is_none(),
+            "first copy rides the entrance"
+        );
+        let first = motion
+            .summary_swap(Some("Planning the layout"))
+            .expect("a new summary swaps");
+        assert!(first < 0.05);
+        age(&mut motion, Duration::from_millis(150));
+        let midway = motion
+            .summary_swap(Some("Planning the layout"))
+            .expect("still swapping");
+        // The live title settling to its fuller buffered form keeps going.
+        let settled = motion
+            .summary_swap(Some("Planning the layout of the card…"))
+            .expect("still swapping");
+        assert!(settled >= midway, "{settled} restarted below {midway}");
+    }
+
+    #[test]
+    fn a_new_summary_mid_swap_continues_from_the_reached_opacity() {
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        motion.summary_swap(Some("Reading the composer"));
+        motion.summary_swap(Some("Planning the layout"));
+        age(&mut motion, Duration::from_millis(150));
+        let reached = motion
+            .summary_swap(Some("Planning the layout"))
+            .expect("swapping");
+        let next = motion
+            .summary_swap(Some("Checking the tests"))
+            .expect("a different summary swaps");
+        assert!(
+            next >= reached - f32::EPSILON,
+            "{next} dropped below {reached}"
+        );
+        age(&mut motion, SUMMARY_SWAP);
+        assert!(
+            motion.summary_swap(Some("Checking the tests")).is_none(),
+            "settles"
+        );
+    }
+
+    #[test]
+    fn a_summary_returning_after_the_verb_swaps_in() {
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        motion.summary_swap(Some("Reading the composer"));
+        assert!(motion.summary_swap(None).is_none(), "the verb never swaps");
+        let back = motion
+            .summary_swap(Some("Planning the layout"))
+            .expect("swaps in instead of popping");
+        assert!(back < 0.05);
+    }
+
+    const LONG: &str = "word word word word word word word word word word word word \
+        word word word word word word word word word word word word word word word ";
+
+    fn prose_id(name: &str) -> SceneId {
+        SceneId::parse(name).expect("scene id")
+    }
+
+    /// Moves every clock the motion holds `by` into the past.
+    fn age(motion: &mut WorkMotion, by: Duration) {
+        let back = |at: Instant| at.checked_sub(by).unwrap_or(at);
+        for started in motion.entrances.values_mut().flatten() {
+            *started = back(*started);
+        }
+        for since in motion.queue.waiting.values_mut() {
+            *since = back(*since);
+        }
+        for reveal in motion.reveals.values_mut() {
+            reveal.age(by);
+        }
+        if let Some(swap) = motion
+            .summary
+            .as_mut()
+            .and_then(|summary| summary.swap.as_mut())
+        {
+            swap.started = back(swap.started);
+        }
+    }
+
+    /// Paints one prose body in paint order, reporting what it showed.
+    fn paint_prose(motion: &mut WorkMotion, id: &SceneId, body: &str) -> Option<String> {
+        let (revealed, _) = motion.reveal(id, body, false)?;
+        motion.reveal_rendered(id, revealed.len());
+        Some(revealed)
+    }
+
+    /// A primed live row with full motion, as after its first render.
+    fn primed() -> WorkMotion {
+        let mut motion = WorkMotion::default();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        motion.end_frame();
+        motion
+    }
+
+    #[test]
+    fn opening_a_folded_section_shows_its_work_at_rest() {
+        let mut motion = primed();
+        // The section paints folded while its work happens.
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(!motion.begin_disclosure("work-a", false));
+        motion.end_frame();
+
+        // The reader opens it: everything inside already happened.
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        let opened = motion.begin_disclosure("work-a", true);
+        assert!(opened);
+        assert!(!motion.hold("chain:tool-1", false), "nothing queues");
+        assert!(
+            motion.entrance("chain:tool-1").is_none(),
+            "no entrance replays"
+        );
+        let prose = prose_id("prose-1");
+        assert!(
+            motion.reveal(&prose, "Done. ", false).is_none(),
+            "finished prose paints whole"
+        );
+        motion.end_disclosure(opened);
+        assert!(!motion.end_frame(), "nothing animates");
+
+        // Work that arrives while it stays open still enters.
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(!motion.begin_disclosure("work-a", true));
+        assert!(motion.entrance("chain:tool-2").is_some());
+        motion.end_frame();
+    }
+
+    #[test]
+    fn a_block_waits_for_the_prose_above_it_then_enters() {
+        let mut motion = primed();
+        let prose = prose_id("prose-1");
+        let body = "Let me check the tests first. ";
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert_eq!(
+            paint_prose(&mut motion, &prose, body).as_deref(),
+            Some("Let ")
+        );
+        assert!(motion.hold("chain:tool-1", false), "the tool waits");
+        assert!(
+            !motion.entrances.contains_key("chain:tool-1"),
+            "a waiting block starts no entrance clock"
+        );
+        assert!(motion.end_frame(), "a waiting block keeps frames coming");
+
+        let mut frames = 0;
+        let released = loop {
+            frames += 1;
+            assert!(frames < 400, "the tool is released");
+            age(&mut motion, Duration::from_millis(16));
+            motion.begin_frame(true, MotionPolicy::Full, false);
+            let shown = paint_prose(&mut motion, &prose, body);
+            if !motion.hold("chain:tool-1", false) {
+                break shown;
+            }
+            assert!(motion.end_frame());
+        };
+        // Released only once every word shows and the last has faded
+        // halfway in (or the reveal has ended).
+        assert!(released.is_none_or(|shown| shown == body));
+        let entrance = motion.entrance("chain:tool-1").expect("it enters now");
+        assert!(entrance.grow < 0.05, "the entrance starts at release");
+        assert!(motion.end_frame());
+    }
+
+    #[test]
+    fn prose_below_waits_paused_and_streams_from_its_first_word() {
+        let mut motion = primed();
+        let (above, below) = (prose_id("prose-above"), prose_id("prose-below"));
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &above, LONG);
+        assert!(motion.hold_prose(&below), "unshown prose waits");
+        assert_eq!(motion.shown_words(&below, "Reply text here. ", false), 0);
+        assert!(motion.end_frame());
+        // However long it waits, nothing banks: release shows one word.
+        age(&mut motion, Duration::from_secs(3));
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &above, LONG);
+        assert!(motion.hold_prose(&below), "it still waits");
+        motion.end_frame();
+        // The prose above finishes.
+        motion.reveals.remove(&above);
+        motion.seen_prose.insert(above.clone());
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(
+            motion.reveal(&above, LONG, false).is_none(),
+            "above is done"
+        );
+        assert!(!motion.hold_prose(&below));
+        let shown = paint_prose(&mut motion, &below, "Reply text here. ");
+        assert_eq!(shown.as_deref(), Some("Reply "));
+    }
+
+    #[test]
+    fn a_waiting_block_hurries_the_prose_above() {
+        let mut motion = primed();
+        let prose = prose_id("prose-1");
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(!motion.reveals[&prose].hurry);
+        assert!(motion.hold("chain:tool-1", false));
+        motion.end_frame();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(motion.reveals[&prose].hurry, "a waiting block hurries it");
+    }
+
+    #[test]
+    fn an_actionable_block_waits_at_most_the_cap() {
+        let mut motion = primed();
+        let prose = prose_id("prose-1");
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(motion.hold("block:approval", true));
+        motion.end_frame();
+        age(&mut motion, ACTIONABLE_HOLD_CAP / 2);
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(
+            motion.hold("block:approval", true),
+            "within the cap it waits"
+        );
+        motion.end_frame();
+        age(&mut motion, ACTIONABLE_HOLD_CAP);
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(
+            paint_prose(&mut motion, &prose, LONG).is_some_and(|shown| shown != LONG),
+            "the prose still settles"
+        );
+        assert!(
+            !motion.hold("block:approval", true),
+            "past the cap it enters"
+        );
+        assert!(motion.entrance("block:approval").is_some());
+        // What follows the approval still waits its turn.
+        assert!(motion.hold("block:plan", false));
+    }
+
+    #[test]
+    fn entering_rows_cascade_at_half_fade() {
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(!motion.hold("first", false));
+        assert!(motion.entrance("first").is_some());
+        assert!(
+            motion.hold("second", false),
+            "it waits for the first's fade"
+        );
+        motion.end_frame();
+        age(&mut motion, entrance_handoff());
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(!motion.hold("first", false), "a painted row never waits");
+        assert!(motion.entrance("first").is_some(), "still entering");
+        assert!(!motion.hold("second", false), "released at the midpoint");
+    }
+
+    #[test]
+    fn nothing_waits_outside_full_live_motion() {
+        let prose = prose_id("prose-1");
+        // A first render paints everything at rest.
+        let mut motion = WorkMotion::default();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(!motion.hold("chain:tool-1", false));
+        assert!(motion.entrance("chain:tool-1").is_none());
+        motion.end_frame();
+        // Reduced motion shows everything at once.
+        let mut motion = WorkMotion::default();
+        motion.begin_frame(true, MotionPolicy::Reduced, false);
+        motion.end_frame();
+        motion.begin_frame(true, MotionPolicy::Reduced, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(!motion.hold("chain:tool-1", false));
+        assert!(!motion.hold_prose(&prose_id("prose-2")));
+        // Settled history never waits.
+        let mut motion = primed();
+        motion.begin_frame(false, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(!motion.hold("chain:tool-1", false));
+        // A caught-up frame shows what waited, at rest.
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        paint_prose(&mut motion, &prose, LONG);
+        assert!(motion.hold("chain:tool-1", false));
+        motion.end_frame();
+        motion.begin_frame(true, MotionPolicy::Full, true);
+        assert!(
+            paint_prose(&mut motion, &prose, LONG).is_none(),
+            "prose at rest"
+        );
+        assert!(!motion.hold("chain:tool-1", false));
+        assert!(motion.entrance("chain:tool-1").is_none(), "no entrance");
+        assert!(!motion.end_frame());
+    }
+
+    #[test]
+    fn the_status_line_neither_waits_nor_holds_the_queue() {
+        let mut motion = primed();
+        motion.begin_frame(true, MotionPolicy::Full, false);
+        assert!(motion.status_entrance().is_some());
+        assert!(!motion.hold("block:after", false));
     }
 }

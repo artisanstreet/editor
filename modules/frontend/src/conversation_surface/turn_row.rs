@@ -444,8 +444,8 @@ impl TurnRowView {
         element
     }
 
-    /// Advances this turn's reply reveal for the frame and reports whether
-    /// the reply is the answer, so the work above it may fold.
+    /// Reports whether this turn's reply is the answer, so the work above it
+    /// may fold.
     ///
     /// Only the engine knows: Codex marks its answer final as it starts, and
     /// Claude's adapter marks the message that ends the turn with no
@@ -453,9 +453,12 @@ impl TurnRowView {
     /// (before a tool call, or while subagents still run), and a live
     /// section carries no toggle to reopen work folded under it, so the work
     /// stays open until the reply is final or the turn settles.
-    /// A reveal starts only for prose that arrives while the row is on
-    /// screen; the reply's own render reads the same reveal for its prefix
-    /// (see [`WorkMotion::reveal`]).
+    ///
+    /// The reply's reveal advances in its own render, in paint order, so it
+    /// waits in the turn's reveal queue behind the work above it (see
+    /// [`WorkMotion::hold_prose`]); this only reads what it shows. A reply
+    /// still waiting shows nothing, so the work it waits behind stays open
+    /// until the reply's first word is on screen.
     pub(super) fn advance_reply_reveal(&self, turn: &TurnScene) -> bool {
         let Some(reply) = turn.blocks().iter().find_map(|block| match block {
             TurnBlock::AssistantMessage(message) => Some(message),
@@ -463,17 +466,11 @@ impl TurnRowView {
         }) else {
             return false;
         };
-        let streaming = reply
-            .provenance
-            .as_ref()
-            .and_then(|provenance| provenance.lifecycle)
-            .is_some_and(lifecycle_is_live);
-        let mut motion = self.motion.borrow_mut();
-        let _ = motion.reveal(&reply.id, &reply.body, streaming);
-        motion.mark_present(reply.id.as_str());
-        let shown = motion
-            .revealed_words(&reply.id)
-            .unwrap_or_else(|| reply.body.split_whitespace().count());
+        let streaming = super::text_is_streaming(reply.provenance.as_ref());
+        let shown = self
+            .motion
+            .borrow()
+            .shown_words(&reply.id, &reply.body, streaming);
         reply.phase == AssistantPhase::Final && shown > 0
     }
 

@@ -409,7 +409,12 @@ fn thinking_text_never_titles_the_header() {
         Some("Thinking for 13s"),
     ));
     // Without an owning group the row is the thinking line's only surface.
-    assert!(turn_status_paints(false, TurnNarration::Thinking, label, None));
+    assert!(turn_status_paints(
+        false,
+        TurnNarration::Thinking,
+        label,
+        None
+    ));
     // Settled outcomes title the header when the turn has a work group.
     for narration in [
         TurnNarration::Failed,

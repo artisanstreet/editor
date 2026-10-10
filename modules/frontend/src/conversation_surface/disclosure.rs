@@ -166,10 +166,10 @@ pub(super) fn disclosure_frame(
 /// `selector` is the owning element's selector; the panel state, content, and
 /// clock identity derive from it, so the session panel and every activity chain
 /// use the same transition
-/// implementation. `controlled` follows the existing work-group policy:
-/// uncontrolled roots paint their content statically, while controlled roots
-/// keep content mounted only while it is visible or a collapse is still
-/// measuring. The caller owns the root and panel debug selectors and the
+/// implementation. `controlled` selects the measured flight path, which every
+/// disclosable work section (live ones too, for their fold-for-reply) and
+/// every chain takes: content stays mounted only while it is visible or a
+/// collapse is still measuring. Other roots paint their content statically. The caller owns the root and panel debug selectors and the
 /// trigger child; this helper owns the content selector and flight.
 #[expect(
     clippy::too_many_arguments,

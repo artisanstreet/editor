@@ -17,7 +17,8 @@ impl ConversationSurface {
     /// toggleable header: a live section passes `false` and its label paints
     /// without a chevron. The caller titles every disclosable section with
     /// its turn's own state, so a chevron never paints without words: a
-    /// header without a label paints no near end at all.
+    /// header without a label paints no near end at all. `divider` is false
+    /// when a compaction separator directly below stands in for the rule.
     #[expect(
         clippy::too_many_arguments,
         reason = "the header row takes the label, transition, disclosure state, motion, and theme it paints as one unit"
@@ -32,6 +33,7 @@ impl ConversationSurface {
         transition: Option<String>,
         fraction: f32,
         controlled: bool,
+        divider: bool,
         selector: &str,
         motion: MotionPolicy,
         mounted_working: bool,
@@ -87,9 +89,7 @@ impl ConversationSurface {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(theme.spacing.steps(6.0))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .letter_spacing(px(ProseTypography::body_tracking_px(
-                ProseTypography::BODY_SIZE_PX,
-            )))
+            .tracking(ProseTypography::TRACKING_EM)
             .text_color(theme.colors.muted_foreground.to_paint())
             // The elapsed label counts every second: tabular figures keep
             // its width steady as digits change.
@@ -110,12 +110,14 @@ impl ConversationSurface {
         // measured label width has no text-measurement primitive here, so no
         // width tween is faked; the rule rides inside the entrance below
         // while one plays.
-        header = header.child(
-            separator(transcript_separator_color(theme), SeparatorAxis::Horizontal)
-                .absolute()
-                .bottom(px(0.0))
-                .left(px(0.0)),
-        );
+        if divider {
+            header = header.child(
+                separator(transcript_separator_color(theme), SeparatorAxis::Horizontal)
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(0.0)),
+            );
+        }
         // Mounted-working entrance only: the reference `status-swap-enter`
         // plays solely for headers mounted while working, and history
         // arriving settled stays static. The frozen flag (retained window

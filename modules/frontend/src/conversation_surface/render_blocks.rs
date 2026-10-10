@@ -87,7 +87,7 @@ impl TurnRowView {
         let summary = status_summary_copy(block.reasoning_summary.as_deref(), block.engine);
         let mut motion = self.motion.borrow_mut();
         motion.status_painted(copy.as_deref().unwrap_or_default(), height);
-        let entrance = motion.entrance("status");
+        let entrance = motion.status_entrance();
         let swap = motion.summary_swap(summary.as_deref());
         drop(motion);
         // A finished thinking trace replacing the last one swaps in.
@@ -142,10 +142,6 @@ impl TurnRowView {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one GPUI builder composes a turn's blocks, their scroll identities, and the leaving status line in paint order"
-    )]
     pub(super) fn render_turn(
         &self,
         turn: &TurnScene,
@@ -187,43 +183,19 @@ impl TurnRowView {
             title: turn_section_title(turn, self.active_now_ms),
             reply_shown: self.advance_reply_reveal(turn),
         };
-        // Identities mirror the children pushed below in block order. A
-        // suppressed status row and an unsettled footer paint no child, so
-        // neither contributes a slot.
-        let turn_has_work_group = turn
-            .blocks()
-            .iter()
-            .any(|block| matches!(block, TurnBlock::WorkGroup(_)));
-        let child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = turn
-            .blocks()
-            .iter()
-            .filter_map(|block| {
-                // Shared paint entry point with render_status, so measured
-                // children and identities stay one-to-one.
-                if let TurnBlock::TurnStatus(status) = block
-                    && !turn_status_block_paints(
-                        Some(turn),
-                        status,
-                        turn_has_work_group,
-                        self.active_now_ms,
-                    )
-                {
-                    return None;
-                }
-                if let TurnBlock::TurnFooter(footer) = block
-                    && !footer_has_content(footer)
-                {
-                    return None;
-                }
-                Some(block_scroll_identity(&turn.turn_id, block))
-            })
-            .collect();
+        // Identities mirror the children pushed below in block order: each
+        // block contributes a slot exactly when it paints a child. A
+        // suppressed status row, an unsettled footer, and a block waiting in
+        // the reveal queue paint none, so they contribute none. The loop
+        // fills the list before prepaint reads it.
+        let child_identities = Rc::new(RefCell::new(Vec::with_capacity(turn.blocks().len())));
         let surface = self.surface.clone();
+        let identities = Rc::clone(&child_identities);
         let turn_element =
             turn_element.on_children_prepainted(move |children_bounds, window, app| {
                 let _ = surface.update(app, |surface, _| {
                     surface.apply_executed_scroll_targets(
-                        &child_identities,
+                        &identities.borrow(),
                         &children_bounds,
                         window,
                     );
@@ -268,6 +240,9 @@ impl TurnRowView {
                         element
                     };
                 turn_element = turn_element.child(element);
+                child_identities
+                    .borrow_mut()
+                    .push(block_scroll_identity(&turn.turn_id, block));
                 previous_was_work_group = matches!(block, TurnBlock::WorkGroup(_));
             }
         }
@@ -279,6 +254,10 @@ impl TurnRowView {
     #[expect(
         clippy::too_many_arguments,
         reason = "one block dispatcher threads the scene row, theme, anchors, window, motion, and turn work context to every block renderer"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match dispatches every block kind, each through the reveal queue where it takes part"
     )]
     pub(super) fn render_block(
         &self,
@@ -294,6 +273,7 @@ impl TurnRowView {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let selector = block_selector(turn_id, block);
+        let queue_key = format!("block:{selector}");
         match block {
             TurnBlock::UserMessage(block) => {
                 let message = user_message_element(
@@ -318,8 +298,11 @@ impl TurnRowView {
                         .into_any_element(),
                 )
             }
+            // The reply streams in rather than entering; it waits in the
+            // reveal queue as prose.
             TurnBlock::AssistantMessage(block) => {
-                Some(self.render_assistant_message(block, selector, theme, anchors))
+                let held = self.motion.borrow_mut().hold_prose(&block.id);
+                (!held).then(|| self.render_assistant_message(block, selector, theme, anchors))
             }
             TurnBlock::WorkGroup(block) => {
                 // Only the owning (latest) group headers the live line, so
@@ -358,32 +341,44 @@ impl TurnRowView {
                     cx,
                 ))
             }
-            TurnBlock::Compaction(block) => {
-                Some(self.render_compaction(block, selector, theme, anchors))
-            }
-            TurnBlock::ChangeSet(block) => {
-                Some(self.render_change_set(block, selector, theme, anchors))
-            }
-            TurnBlock::Plan(block) => Some(self.render_plan(block, selector, theme, anchors)),
-            TurnBlock::Approval(block) => {
-                Some(self.render_approval(block, selector, theme, anchors))
-            }
-            TurnBlock::Question(block) => {
-                Some(self.render_question(block, selector, theme, anchors))
-            }
-            TurnBlock::Error(block) => Some(Self::render_error(block, selector, theme, anchors)),
+            // The separator waits its turn in the queue but plays its own
+            // entrance.
+            TurnBlock::Compaction(block) => (!self.motion.borrow_mut().hold(&queue_key, false))
+                .then(|| self.render_compaction(block, selector, theme, anchors)),
+            TurnBlock::ChangeSet(block) => self.queued_block(&queue_key, false, theme, || {
+                self.render_change_set(block, selector, theme, anchors)
+            }),
+            TurnBlock::Plan(block) => self.queued_block(&queue_key, false, theme, || {
+                self.render_plan(block, selector, theme, anchors)
+            }),
+            TurnBlock::Approval(block) => self.queued_block(&queue_key, true, theme, || {
+                self.render_approval(block, selector, theme, anchors)
+            }),
+            TurnBlock::Question(block) => self.queued_block(&queue_key, true, theme, || {
+                self.render_question(block, selector, theme, anchors)
+            }),
+            TurnBlock::Error(block) => self.queued_block(&queue_key, false, theme, || {
+                Self::render_error(block, selector, theme, anchors)
+            }),
             TurnBlock::UsageInterruption(block) => {
-                Some(self.render_usage_interruption(block, selector, theme, anchors))
+                self.queued_block(&queue_key, false, theme, || {
+                    self.render_usage_interruption(block, selector, theme, anchors)
+                })
             }
             TurnBlock::ModelTransition(block) => {
-                Some(self.render_model_transition(block, selector, theme, anchors))
+                self.queued_block(&queue_key, false, theme, || {
+                    self.render_model_transition(block, selector, theme, anchors)
+                })
             }
-            TurnBlock::NativeFact(block) => {
-                Some(self.render_native_fact(block, selector, theme, anchors))
-            }
-            TurnBlock::SteeringLabel(block) => {
-                Some(Self::render_steering(block, selector, theme, anchors))
-            }
+            TurnBlock::NativeFact(block) => self.queued_block(&queue_key, false, theme, || {
+                self.render_native_fact(block, selector, theme, anchors)
+            }),
+            TurnBlock::Image(block) => self.queued_block(&queue_key, false, theme, || {
+                Self::render_image(block, selector, theme, anchors)
+            }),
+            TurnBlock::SteeringLabel(block) => self.queued_block(&queue_key, false, theme, || {
+                Self::render_steering(block, selector, theme, anchors)
+            }),
             TurnBlock::TurnStatus(block) => {
                 self.render_live_status(turn_id, block, selector, theme, status_motion)
             }
@@ -391,6 +386,25 @@ impl TurnRowView {
                 self.render_footer(turn_id, block, selector, theme, window, status_motion)
             }
         }
+    }
+
+    /// One top-level block through the turn's reveal queue: nothing while
+    /// it waits behind settling content above it, then `render`'s element
+    /// with the standard row entrance (see [`WorkMotion::hold`]). Settled
+    /// history, a first render, and reduced motion paint it at rest.
+    fn queued_block(
+        &self,
+        key: &str,
+        actionable: bool,
+        theme: &ArtisanTheme,
+        render: impl FnOnce() -> AnyElement,
+    ) -> Option<AnyElement> {
+        if self.motion.borrow_mut().hold(key, actionable) {
+            return None;
+        }
+        let element = render();
+        let entrance = self.motion.borrow_mut().entrance(key);
+        Some(with_entrance(element, entrance, theme.spacing.steps(6.0)))
     }
 
     pub(super) fn render_assistant_message(
@@ -409,11 +423,7 @@ impl TurnRowView {
         // budget so one pathological body cannot parse every frame. A
         // streaming reply renders only its revealed prefix, fading fresh
         // units in (see `reply_reveal`).
-        let streaming = block
-            .provenance
-            .as_ref()
-            .and_then(|provenance| provenance.lifecycle)
-            .is_some_and(lifecycle_is_live);
+        let streaming = super::text_is_streaming(block.provenance.as_ref());
         let rendered_body = self.render_streamed_markdown(
             &block.id,
             &block.body,
@@ -421,6 +431,9 @@ impl TurnRowView {
             theme,
             selector.clone(),
         );
+        // On screen now: when the scene moves this prose into the work, it
+        // keeps its place instead of entering there.
+        self.motion.borrow_mut().mark_present(block.id.as_str());
         anchors
             .attach(
                 div()
@@ -559,6 +572,10 @@ impl TurnRowView {
         } else {
             Vec::new()
         };
+        let opened = self
+            .motion
+            .borrow_mut()
+            .begin_disclosure(selector, frame.content_mounted());
         // Consecutive activity rows form one collapsible trace chain, exactly
         // like the reference segmentation: anything else (assistant prose,
         // compaction, native fact) is a seam that ends the chain. Chains keep
@@ -567,6 +584,9 @@ impl TurnRowView {
         let mut child_identities: Vec<(Option<SceneId>, Option<ItemId>)> = Vec::new();
         let mut chain_index = 0usize;
         let mut row_index = 0usize;
+        // A compaction separator painted first replaces the header's divider
+        // instead of stacking a second rule under it.
+        let mut leads_with_compaction = false;
         while row_index < rows.len() {
             let is_activity = matches!(rows[row_index].1, DetailRow::Activity { .. });
             if is_activity {
@@ -577,6 +597,14 @@ impl TurnRowView {
                     row_index += 1;
                 }
                 let chain_rows = &rows[start..row_index];
+                // A chain enters once, when its first step arrives; later
+                // steps count up in its header instead. It waits its turn
+                // behind whatever above it still settles.
+                let chain_key = format!("chain:{}", chain_rows[0].1.scene_id().as_str());
+                if self.motion.borrow_mut().hold(&chain_key, false) {
+                    chain_index += 1;
+                    continue;
+                }
                 let chain = self.render_trace_chain(
                     selector,
                     chain_index,
@@ -588,12 +616,7 @@ impl TurnRowView {
                     window,
                     cx,
                 );
-                // A chain enters once, when its first step arrives; later
-                // steps count up in its header instead.
-                let entrance = self
-                    .motion
-                    .borrow_mut()
-                    .entrance(&format!("chain:{}", chain_rows[0].1.scene_id().as_str()));
+                let entrance = self.motion.borrow_mut().entrance(&chain_key);
                 items = items.child(with_entrance(chain, entrance, theme.spacing.steps(2.0)));
                 // The chain's own prepaint listener resolves its row bounds;
                 // at this level the chain is opaque to row targets so a
@@ -606,6 +629,19 @@ impl TurnRowView {
                 if reply_follows && let DetailRow::Assistant { streaming, .. } = &mut detail {
                     *streaming = false;
                 }
+                // Prose waits paused at its first word; any other row waits
+                // unpainted, with no entrance clock running.
+                let held = {
+                    let mut motion = self.motion.borrow_mut();
+                    match &detail {
+                        DetailRow::Assistant { id, .. } => motion.hold_prose(id),
+                        row => motion.hold(row.scene_id().as_str(), false),
+                    }
+                };
+                if held {
+                    row_index += 1;
+                    continue;
+                }
                 let row = self.render_detail_row(
                     detail,
                     rows[row_index].0,
@@ -614,21 +650,31 @@ impl TurnRowView {
                     anchors,
                     items_mounted,
                 );
-                let entrance = self
-                    .motion
-                    .borrow_mut()
-                    .entrance(rows[row_index].1.scene_id().as_str());
+                // A compaction separator plays its own entrance.
+                let compaction = matches!(rows[row_index].1, DetailRow::Compaction { .. });
+                if compaction && child_identities.is_empty() {
+                    leads_with_compaction = true;
+                }
+                let entrance = if compaction {
+                    None
+                } else {
+                    self.motion
+                        .borrow_mut()
+                        .entrance(rows[row_index].1.scene_id().as_str())
+                };
                 items = items.child(with_entrance(row, entrance, theme.spacing.steps(2.0)));
                 let id = rows[row_index].1.scene_id();
                 child_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
                 row_index += 1;
             }
         }
+        self.motion.borrow_mut().end_disclosure(opened);
         // Whenever the header row paints its divider (a chevron-only
         // controlled group included), the first row keeps the same 8 px seam
         // the rows keep between each other. A continuation paints no header,
         // so its rows start flush and keep the section's row rhythm.
-        if toggle || header.is_some() || transition.is_some() {
+        // A leading separator is that divider, so it sits flush instead.
+        if (toggle || header.is_some() || transition.is_some()) && !leads_with_compaction {
             items = items.pt(theme.spacing.steps(2.0));
         }
         // Identities mirror painted children in order, so executed scroll
@@ -677,6 +723,7 @@ impl TurnRowView {
             transition,
             frame.fraction,
             toggle,
+            !leads_with_compaction,
             selector,
             status_motion,
             mounted_working,
@@ -751,13 +798,19 @@ impl TurnRowView {
             .flex_shrink_0()
             .debug_selector(|| format!("{selector}-disclosure-panel"));
 
+        // Every disclosable section takes the measured height-flight path,
+        // live ones included: a live section never closes by hand, but it
+        // does fold for its reply, and that fold must shrink on the same
+        // accordion clock as a toggle instead of popping to nothing (the
+        // static path has no measured height to fly from). Open and
+        // unfolded, the flight path paints exactly what the static one did.
         let disclosure = disclosure_flight_panel(
             disclosure,
             panel,
             items.into_any_element(),
             selector,
             frame,
-            controlled,
+            disclosable,
             window,
             cx,
         );
@@ -887,7 +940,7 @@ impl TurnRowView {
                     .truncate()
                     .text_size(px(ProseTypography::BODY_SIZE_PX))
                     .font_weight(ProseTypography::BODY_WEIGHT)
-                    .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+                    .tracking(ProseTypography::TRACKING_EM)
                     .line_height(theme.spacing.steps(6.0))
                     .text_color(header_color.to_paint())
                     .font_features(tabular_figures())
@@ -935,7 +988,18 @@ impl TurnRowView {
         // The absolute rail is the first child, so it takes the leading
         // identity slot and the rows line up one-to-one behind it.
         let mut row_identities: Vec<(Option<SceneId>, Option<ItemId>)> = vec![(None, None)];
+        let opened = self
+            .motion
+            .borrow_mut()
+            .begin_disclosure(&selector, frame.content_mounted());
         for (ordinal, row) in rows.iter().filter(|_| frame.content_mounted()) {
+            if self
+                .motion
+                .borrow_mut()
+                .hold(row.scene_id().as_str(), false)
+            {
+                continue;
+            }
             let step =
                 self.render_detail_row(*row, *ordinal, group_selector, theme, anchors, mounted);
             let entrance = self.motion.borrow_mut().entrance(row.scene_id().as_str());
@@ -944,6 +1008,7 @@ impl TurnRowView {
             let id = row.scene_id();
             row_identities.push((Some(id.clone()), item_id_for_scene_id(id)));
         }
+        self.motion.borrow_mut().end_disclosure(opened);
         let surface = self.surface.clone();
         rows_column = rows_column.on_children_prepainted(move |children_bounds, window, app| {
             let _ = surface.update(app, |surface, _| {
@@ -982,8 +1047,8 @@ impl TurnRowView {
     /// Per-row disclosure stays data-only: visibility follows the group
     /// control, matching the reference grouping, which never shows nested
     /// toggles. Assistant details render full markdown like top-level
-    /// replies; compaction and native facts reuse the native card
-    /// presentation statically.
+    /// replies; compaction is a full-width separator, and native facts reuse
+    /// the native card presentation statically.
     #[expect(
         clippy::too_many_lines,
         reason = "one GPUI builder renders every detail-row variant behind the shared disclosure and anchor treatment"
@@ -1000,17 +1065,9 @@ impl TurnRowView {
         let selector = format!("{group_selector}-detail-{ordinal}");
         let row_id = row.scene_id().clone();
         match &row {
-            DetailRow::Compaction { id, summary, .. } => self.render_text_block(
-                TextBlockRender {
-                    id,
-                    disclosure: None,
-                    selector,
-                    title: "Compaction",
-                    body: summary,
-                },
-                theme,
-                anchors,
-            ),
+            DetailRow::Compaction { id, phase, .. } => {
+                self.render_compaction_separator(id, *phase, selector, theme, anchors)
+            }
             DetailRow::NativeFact { id, text, .. } => self.render_text_block(
                 TextBlockRender {
                     id,
@@ -1018,6 +1075,19 @@ impl TurnRowView {
                     selector,
                     title: "Native fact",
                     body: text,
+                },
+                theme,
+                anchors,
+            ),
+            DetailRow::Question {
+                id, prompt, answer, ..
+            } => self.render_question_card(
+                QuestionCardRender {
+                    id,
+                    prompt,
+                    answer: *answer,
+                    disclosure: None,
+                    selector,
                 },
                 theme,
                 anchors,
@@ -1063,6 +1133,7 @@ impl TurnRowView {
                                     .flex_1()
                                     .truncate()
                                     .font_family(theme.typography.mono.family)
+                                    .tracking(0.0)
                                     .text_size(theme.typography.control_text)
                                     .text_color(theme.colors.muted_foreground.to_paint())
                                     .child(row_text)
@@ -1083,9 +1154,7 @@ impl TurnRowView {
                                 .text_size(px(ProseTypography::BODY_SIZE_PX))
                                 .line_height(theme.spacing.steps(6.0))
                                 .font_weight(ProseTypography::BODY_WEIGHT)
-                                .letter_spacing(px(ProseTypography::body_tracking_px(
-                                    ProseTypography::BODY_SIZE_PX,
-                                )))
+                                .tracking(ProseTypography::TRACKING_EM)
                                 .text_color(theme.colors.muted_foreground.to_paint())
                                 .child(
                                     div()
@@ -1109,7 +1178,7 @@ impl TurnRowView {
                             .min_w_0()
                             .text_size(theme.typography.control_text)
                             .font_weight(ProseTypography::BODY_WEIGHT)
-                            .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
+                            .tracking(ProseTypography::TRACKING_EM)
                             .text_color(theme.colors.foreground.to_paint())
                             .child(body.to_string())
                             .into_any_element(),
@@ -1123,11 +1192,13 @@ impl TurnRowView {
                         .text_size(px(ProseTypography::BODY_SIZE_PX))
                         .line_height(theme.spacing.steps(6.0))
                         .font_weight(ProseTypography::BODY_WEIGHT)
-                        .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+                        .tracking(ProseTypography::TRACKING_EM)
                         .text_color(theme.colors.muted_foreground.to_paint())
                         .child(title.to_string())
                         .into_any_element(),
-                    DetailRow::Compaction { .. } | DetailRow::NativeFact { .. } => {
+                    DetailRow::Compaction { .. }
+                    | DetailRow::NativeFact { .. }
+                    | DetailRow::Question { .. } => {
                         unreachable!("card rows render above")
                     }
                 };
@@ -1201,6 +1272,12 @@ pub(super) fn user_message_element(
         // with the reference card shadow beneath), so no duplicate body,
         // glyph, or padding is introduced.
         let body_id = SharedString::from(body_selector.clone());
+        let mentions = cx
+            .try_global::<crate::composer_mentions::SharedMentionCatalog>()
+            .map(|shared| {
+                crate::composer_mentions::mention_highlights(&block.body, &shared.0, theme)
+            })
+            .unwrap_or_default();
         message = message.child(
             div()
                 .max_w(px(576.0))
@@ -1227,14 +1304,14 @@ pub(super) fn user_message_element(
                         .text_size(px(ProseTypography::BODY_SIZE_PX))
                         .line_height(px(ProseTypography::BODY_LINE_PX))
                         .font_weight(ProseTypography::BODY_WEIGHT)
-                        .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+                        .tracking(ProseTypography::TRACKING_EM)
                         .whitespace_normal()
                         .debug_selector(move || body_selector.clone())
                         .child(SelectableText::retained(
                             body_id,
                             block.body.clone(),
                             *theme,
-                            Vec::new(),
+                            mentions,
                         )),
                 ),
         );

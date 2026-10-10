@@ -62,6 +62,19 @@ const RATE_EASE_SECONDS: f64 = 0.5;
 /// The most words the budget may bank, so a pause never ends in a burst.
 const MAX_BANKED_WORDS: f64 = 6.0;
 
+/// The pace cap while a block below waits for this prose (see
+/// [`ReplyReveal::hurry`]): still whole words, just more of them per
+/// segment, so a tool call is not held for seconds behind a backlog.
+const HURRY_MAX_WORDS_PER_MINUTE: f64 = 3600.0;
+
+/// The catch-up window while a block below waits for this prose.
+const HURRY_CATCH_UP_WINDOW_SECONDS: f64 = 0.6;
+
+/// The budget bank while a block below waits for this prose: one segment
+/// may carry this many words, so the hurried pace is reachable at the
+/// segment interval.
+const HURRY_MAX_BANKED_WORDS: f64 = 10.0;
+
 /// What one unit costs at most: a fence or table appears whole, but should
 /// not stall the reveal for as long as reading all of its words.
 const MAX_UNIT_COST: f64 = 6.0;
@@ -94,6 +107,9 @@ pub(super) struct ReplyReveal {
     paced_at: Instant,
     /// The fade resolved by the latest [`Self::advance`].
     pub(super) fade: RevealFade,
+    /// Set while a block below waits for this prose to settle: the pace
+    /// targets a shorter catch-up window under a higher cap.
+    pub(super) hurry: bool,
 }
 
 impl ReplyReveal {
@@ -111,6 +127,7 @@ impl ReplyReveal {
             budget: 1.0,
             paced_at: now,
             fade: RevealFade::default(),
+            hurry: false,
         }
     }
 
@@ -183,18 +200,58 @@ impl ReplyReveal {
         self.revealed.len() < stable || !self.marks.is_empty() || self.pending.is_some()
     }
 
+    /// Holds the reveal where it stands while something above it still
+    /// settles: running fades finish, nothing new is revealed, and no
+    /// budget accrues, so the release starts at the usual pace instead of
+    /// in a burst.
+    pub(super) fn wait(&mut self, now: Instant) {
+        self.paced_at = now;
+        self.fade = self.resolve_fade(now);
+    }
+
+    /// Whether this prose still holds back what follows it: words it can
+    /// show are unrevealed, or its newest segment has not faded halfway
+    /// in. Streaming prose that has caught up with its stable text counts
+    /// as settled, so a block below never waits on the transport.
+    pub(super) fn settling(&self, body: &str, streaming: bool, now: Instant) -> bool {
+        let end = if streaming {
+            stable_reveal_end(body)
+        } else {
+            body.len()
+        };
+        self.revealed.len() < end
+            || self.pending.is_some()
+            || self
+                .marks
+                .last()
+                .is_some_and(|(_, started)| now.saturating_duration_since(*started) < UNIT_FADE / 2)
+    }
+
     /// Eases the rate toward clearing `backlog` words within the catch-up
-    /// window, between [`MIN_WORDS_PER_MINUTE`] and [`MAX_WORDS_PER_MINUTE`],
-    /// and earns budget at it.
+    /// window, between [`MIN_WORDS_PER_MINUTE`] and [`MAX_WORDS_PER_MINUTE`]
+    /// (or the hurried window and cap while a block waits), and earns
+    /// budget at it.
     fn pace(&mut self, backlog: usize, now: Instant) {
+        let (window, cap, banked) = if self.hurry {
+            (
+                HURRY_CATCH_UP_WINDOW_SECONDS,
+                HURRY_MAX_WORDS_PER_MINUTE,
+                HURRY_MAX_BANKED_WORDS,
+            )
+        } else {
+            (
+                CATCH_UP_WINDOW_SECONDS,
+                MAX_WORDS_PER_MINUTE,
+                MAX_BANKED_WORDS,
+            )
+        };
         let elapsed = now.saturating_duration_since(self.paced_at).as_secs_f64();
         self.paced_at = now;
         let backlog = f64::from(u32::try_from(backlog).unwrap_or(u32::MAX));
-        let target = (backlog / CATCH_UP_WINDOW_SECONDS)
-            .clamp(MIN_WORDS_PER_MINUTE / 60.0, MAX_WORDS_PER_MINUTE / 60.0);
+        let target = (backlog / window).clamp(MIN_WORDS_PER_MINUTE / 60.0, cap / 60.0);
         let blend = 1.0 - (-elapsed / RATE_EASE_SECONDS).exp();
         self.rate += (target - self.rate) * blend;
-        self.budget = (self.budget + self.rate * elapsed).min(MAX_BANKED_WORDS);
+        self.budget = (self.budget + self.rate * elapsed).min(banked);
     }
 
     /// Records the visible length the renderer reported for `revealed`, and
@@ -224,6 +281,21 @@ impl ReplyReveal {
     /// Whether the reveal has nothing left to show or fade for `body`.
     pub(super) fn is_complete(&self, body: &str) -> bool {
         self.revealed.len() == body.len() && self.marks.is_empty() && self.pending.is_none()
+    }
+
+    /// Moves every clock of the reveal `by` into the past, as if that much
+    /// time had passed: the test seam for queue timing.
+    #[cfg(test)]
+    pub(super) fn age(&mut self, by: std::time::Duration) {
+        let back = |at: Instant| at.checked_sub(by).unwrap_or(at);
+        for (_, started) in &mut self.marks {
+            *started = back(*started);
+        }
+        if let Some((_, began)) = &mut self.pending {
+            *began = back(*began);
+        }
+        self.next_tick = back(self.next_tick);
+        self.paced_at = back(self.paced_at);
     }
 
     /// Resolves each segment's opacity and drops the fully opaque oldest
@@ -322,6 +394,48 @@ mod tests {
         );
         run(&mut reveal, &body, false, &mut at, 60 * 10);
         assert_eq!(reveal.revealed(), body, "the whole reply drains");
+    }
+
+    #[test]
+    fn a_waiting_block_hurries_the_prose_above_it() {
+        // The same backlog drains markedly faster while a block waits, and
+        // still in whole words.
+        let body = "word ".repeat(200);
+        let start = Instant::now();
+        let (mut calm_at, mut hurried_at) = (start, start);
+        let mut calm = ReplyReveal::begin(start);
+        let mut hurried = ReplyReveal::begin(start);
+        hurried.hurry = true;
+        run(&mut calm, &body, false, &mut calm_at, 120);
+        run(&mut hurried, &body, false, &mut hurried_at, 120);
+        let calm_words = calm.revealed().split_whitespace().count();
+        let hurried_words = hurried.revealed().split_whitespace().count();
+        assert!(
+            hurried_words > calm_words * 3 / 2,
+            "hurried {hurried_words} words vs calm {calm_words}"
+        );
+        assert!(hurried.revealed().ends_with(' '), "whole words only");
+    }
+
+    #[test]
+    fn a_waiting_reveal_shows_nothing_new_and_banks_nothing() {
+        let start = Instant::now();
+        let mut reveal = ReplyReveal::begin(start);
+        let later = start + Duration::from_secs(5);
+        reveal.wait(later);
+        assert_eq!(reveal.revealed(), "");
+        reveal.advance(
+            "one two three four five six seven eight ",
+            false,
+            MotionPolicy::Full,
+            later,
+        );
+        assert_eq!(
+            reveal.revealed(),
+            "one ",
+            "the release starts at the usual pace"
+        );
+        assert!(reveal.settling("one two ", false, later));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use super::super::{
     AnswerSettlement, ApprovalAnswerGate, ConversationSurface, RespondApprovalAction,
 };
-use super::{item, scene};
+use super::{item, live_scene};
 use crate::conversation_scene::SceneItemKind;
 use crate::engine_observation_state::EngineObservationState;
 use artisan_domain::{Command, ObservationId, ReceiptDisposition, RunId, ThreadId};
@@ -32,7 +32,7 @@ fn run_id() -> RunId {
 }
 
 fn approval_scene() -> crate::conversation_scene::ConversationScene {
-    scene(vec![item(
+    live_scene(vec![item(
         "approval-1",
         1,
         SceneItemKind::Approval {
@@ -47,7 +47,7 @@ fn approval_scene() -> crate::conversation_scene::ConversationScene {
 /// A scene whose card id is run-scoped like a projected fact, so it differs
 /// from the engine's approval identity the receipt carries.
 fn projected_approval_scene() -> crate::conversation_scene::ConversationScene {
-    scene(vec![item(
+    live_scene(vec![item(
         "approval-run-answer-provider-7",
         1,
         SceneItemKind::Approval {

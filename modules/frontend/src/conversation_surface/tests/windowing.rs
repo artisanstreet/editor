@@ -31,7 +31,7 @@ fn uniform_offsets(rows: usize, extent: f64) -> Vec<f64> {
 }
 
 /// Builds a transcript with `turns` user/assistant turn pairs.
-fn long_scene(turns: usize) -> ConversationScene {
+pub(super) fn long_scene(turns: usize) -> ConversationScene {
     turn_range_scene(0..turns)
 }
 

@@ -240,6 +240,8 @@ pub enum RenderedBlockKind {
     ModelTransition,
     /// Native fact card.
     NativeFact,
+    /// Image showcase.
+    Image,
     /// Steering label.
     SteeringLabel,
     /// Per-turn status row.
@@ -264,6 +266,7 @@ pub const fn rendered_block_kind(block: &TurnBlock) -> RenderedBlockKind {
         TurnBlock::UsageInterruption(_) => RenderedBlockKind::UsageInterruption,
         TurnBlock::ModelTransition(_) => RenderedBlockKind::ModelTransition,
         TurnBlock::NativeFact(_) => RenderedBlockKind::NativeFact,
+        TurnBlock::Image(_) => RenderedBlockKind::Image,
         TurnBlock::SteeringLabel(_) => RenderedBlockKind::SteeringLabel,
         TurnBlock::TurnStatus(_) => RenderedBlockKind::TurnStatus,
         TurnBlock::TurnFooter(_) => RenderedBlockKind::TurnFooter,
@@ -321,6 +324,7 @@ pub fn block_selector(turn_id: &TurnId, block: &TurnBlock) -> String {
             format!("{turn}-block-model-transition-{}", block.id.as_str())
         }
         TurnBlock::NativeFact(block) => format!("{turn}-block-native-fact-{}", block.id.as_str()),
+        TurnBlock::Image(block) => format!("{turn}-block-image-{}", block.id.as_str()),
         TurnBlock::SteeringLabel(block) => steering_selector(turn_id, &block.id),
         TurnBlock::TurnStatus(_) => status_selector(turn_id),
         TurnBlock::TurnFooter(_) => footer_selector(turn_id),

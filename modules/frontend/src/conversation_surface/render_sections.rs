@@ -1,6 +1,7 @@
 //! Single-kind transcript block rendering for a turn row:
 //! compaction, change sets, plans, approvals, questions, errors, usage
-//! interruptions, model transitions, native facts, steering, footer, and
+//! interruptions, model transitions, native facts, engine images, steering,
+//! footer, and
 //! controlled cards; the status row renders from `render_status.rs`.
 //!
 //! Extracted from `conversation_surface.rs` during the phase-2 module split;
@@ -19,17 +20,7 @@ impl TurnRowView {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
-        self.render_text_block(
-            TextBlockRender {
-                id: &block.id,
-                disclosure: block.disclosure,
-                selector,
-                title: "Compaction",
-                body: &block.summary,
-            },
-            theme,
-            anchors,
-        )
+        self.render_compaction_separator(&block.id, block.phase, selector, theme, anchors)
     }
 
     pub(super) fn render_change_set(
@@ -319,8 +310,36 @@ impl TurnRowView {
         theme: &ArtisanTheme,
         anchors: &mut ScrollAnchorRegistry<'_>,
     ) -> AnyElement {
+        self.render_question_card(
+            QuestionCardRender {
+                id: &block.id,
+                prompt: &block.prompt,
+                answer: block.answer.as_deref(),
+                disclosure: block.disclosure,
+                selector,
+            },
+            theme,
+            anchors,
+        )
+    }
+
+    /// Renders one question's card, at the top level or inside the work
+    /// history at the step that asked it.
+    pub(super) fn render_question_card(
+        &self,
+        params: QuestionCardRender<'_>,
+        theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
+    ) -> AnyElement {
+        let QuestionCardRender {
+            id,
+            prompt,
+            answer,
+            disclosure,
+            selector,
+        } = params;
         let style = CardStyle::resolve(*theme);
-        let (heading, status) = match block.answer.as_deref() {
+        let (heading, status) = match answer {
             None => ("Question", "Answer it above the message box.".to_owned()),
             Some("") => ("Skipped question", "You skipped this question.".to_owned()),
             Some(answer) => ("Answered question", format!("You answered: {answer}")),
@@ -330,7 +349,7 @@ impl TurnRowView {
             .flex()
             .flex_col()
             .gap(theme.spacing.steps(2.0))
-            .child(body_text(&block.prompt, theme))
+            .child(body_text(prompt, theme))
             .child(
                 body_text(&status, theme)
                     .text_color(theme.colors.muted_foreground.to_paint())
@@ -338,9 +357,9 @@ impl TurnRowView {
             );
         self.render_controlled_card(
             ControlledCardOptions {
-                id: block.id.clone(),
-                item_id: item_id_for_scene_id(&block.id),
-                disclosure: block.disclosure,
+                id: id.clone(),
+                item_id: item_id_for_scene_id(id),
+                disclosure,
                 selector,
                 style,
             },
@@ -463,6 +482,33 @@ impl TurnRowView {
         )
     }
 
+    /// One engine-shown image as a plain showcase in the reply flow: no
+    /// card chrome, the image at its own aspect with its caption below.
+    pub(super) fn render_image(
+        block: &ImageBlock,
+        selector: String,
+        theme: &ArtisanTheme,
+        anchors: &mut ScrollAnchorRegistry<'_>,
+    ) -> AnyElement {
+        let mut showcase = artisan_ui::markdown_renderer::ImageShowcase::new(
+            format!("{selector}-image"),
+            block.src.clone(),
+            *theme,
+        );
+        if let Some(caption) = &block.caption {
+            showcase = showcase.caption(caption.clone());
+        }
+        let row = div().w_full().min_w_0().child(showcase);
+        anchors
+            .attach(
+                row,
+                Some(&block.id),
+                item_id_for_scene_id(&block.id).as_ref(),
+            )
+            .debug_selector(move || selector.clone())
+            .into_any_element()
+    }
+
     pub(super) fn render_steering(
         block: &SteeringBlock,
         selector: String,
@@ -582,7 +628,7 @@ impl TurnRowView {
             .gap(theme.spacing.steps(2.5))
             .text_size(theme.typography.control_text)
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .letter_spacing(px(ProseTypography::body_tracking_px(14.0)))
+            .tracking(ProseTypography::TRACKING_EM)
             .text_color(theme.colors.muted_foreground.to_paint())
             .opacity(if focused || self.footer_revealed {
                 1.0

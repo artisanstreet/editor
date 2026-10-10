@@ -254,6 +254,15 @@ impl ConversationSurface {
             NAVIGATOR_PAD_PX * 2.0 + count * NAVIGATOR_TICK_PITCH_PX,
             viewport_height,
         );
+        let animate_ticks = !cx.reduce_motion() && self.navigator_had_active;
+        self.navigator_had_active = navigator_active.is_some();
+        let now = Instant::now();
+        self.navigator_tick_motion.retain(|slug, _| {
+            markers
+                .iter()
+                .any(|marker| navigator_target_slug(&marker.target) == slug)
+        });
+        let mut ticks_moving = false;
         let mut ticks = div()
             .flex()
             .flex_col()
@@ -270,6 +279,29 @@ impl ConversationSurface {
             let slug = navigator_target_slug(&marker.target);
             let control_selector = format!("{TURN_NAVIGATOR_CONTROL_PREFIX}-{slug}");
             let active = navigator_active == Some(slug);
+            // A tick entering or leaving the active range eases between the
+            // two looks; one seen for the first time starts at rest.
+            let entry = self
+                .navigator_tick_motion
+                .entry(slug.to_owned())
+                .or_insert((active, None));
+            if entry.0 != active {
+                *entry = (active, animate_ticks.then_some(now));
+            }
+            let toward = entry.1.map_or(1.0, |changed| {
+                let elapsed = now.saturating_duration_since(changed).as_secs_f32();
+                let total = MotionDuration::Fast.as_duration().as_secs_f32();
+                navigator_smooth_out((elapsed / total).clamp(0.0, 1.0))
+            });
+            ticks_moving |= toward < 1.0;
+            let presence = if active { toward } else { 1.0 - toward };
+            let tick_paint = blend_oklch(
+                theme.colors.muted_foreground.with_alpha(0.5),
+                theme.colors.foreground,
+                presence,
+            )
+            .to_paint();
+            let tick_width = 16.0 + 8.0 * presence;
             let click_surface = navigator_surface.clone();
             let click_target = marker.target.clone();
             let focus_ring_color = theme.interaction.focus_ring_color.to_paint();
@@ -311,18 +343,17 @@ impl ConversationSurface {
                     .child(
                         div()
                             .h(px(1.0))
-                            .w(px(if active { 24.0 } else { 16.0 }))
+                            .w(px(tick_width))
                             .rounded_full()
                             .debug_selector(|| {
                                 format!("{TURN_NAVIGATOR_CONTROL_PREFIX}-{slug}-tick")
                             })
-                            .bg(if active {
-                                theme.colors.foreground.to_paint()
-                            } else {
-                                theme.colors.muted_foreground.with_alpha(0.5).to_paint()
-                            }),
+                            .bg(tick_paint),
                     ),
             );
+        }
+        if ticks_moving {
+            window.request_animation_frame();
         }
         // Viewport geometry converges through the same window-local
         // discipline as end space: measured per window, notified only on
@@ -639,5 +670,22 @@ impl ConversationSurface {
                 .child(region)
                 .into_any_element(),
         )
+    }
+}
+
+/// The colour `fraction` of the way from `from` to `to`, blended in OKLCH
+/// so the step looks even. Both tick colours are near-neutral, so the hue
+/// barely matters and is blended straight.
+fn blend_oklch(
+    from: artisan_ui::theme::Oklch,
+    to: artisan_ui::theme::Oklch,
+    fraction: f32,
+) -> artisan_ui::theme::Oklch {
+    let mix = |a: f32, b: f32| a + (b - a) * fraction;
+    artisan_ui::theme::Oklch {
+        l: mix(from.l, to.l),
+        c: mix(from.c, to.c),
+        h: mix(from.h, to.h),
+        a: mix(from.a, to.a),
     }
 }

@@ -113,7 +113,7 @@ impl TurnRowView {
             .text_size(px(ProseTypography::BODY_SIZE_PX))
             .line_height(px(ProseTypography::BODY_LINE_PX))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+            .tracking(ProseTypography::TRACKING_EM)
             .text_color(theme.colors.muted_foreground.to_paint())
             .child(content);
         status = status.debug_selector(move || selector.clone());
