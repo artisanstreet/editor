@@ -203,6 +203,12 @@ mod impl_sidebar_and_menus;
 #[path = "native_application/impl_rich_links.rs"]
 mod impl_rich_links;
 
+#[path = "native_application/impl_media_files.rs"]
+mod impl_media_files;
+
+#[path = "native_application/impl_rich_blocks.rs"]
+mod impl_rich_blocks;
+
 #[path = "native_application/impl_host_mounting.rs"]
 mod impl_host_mounting;
 
@@ -218,6 +224,12 @@ mod impl_engine_installs;
 #[path = "native_application/impl_extensions.rs"]
 mod impl_extensions;
 
+#[path = "native_application/impl_thread_lifecycle.rs"]
+mod impl_thread_lifecycle;
+
+#[path = "native_application/impl_pointer_menu.rs"]
+mod impl_pointer_menu;
+
 // Phase-5 split submodules (see native_application/).
 
 #[path = "native_application/app_entry.rs"]
@@ -232,6 +244,12 @@ mod impl_route_surface;
 
 #[path = "native_application/impl_render.rs"]
 mod impl_render;
+
+#[path = "native_application/impl_context_meter.rs"]
+mod impl_context_meter;
+
+#[path = "native_application/impl_window_notices.rs"]
+mod impl_window_notices;
 
 #[path = "native_application/impl_failure.rs"]
 mod impl_failure;
@@ -334,7 +352,10 @@ type ProfileTipAnchor = Option<((String, String), HoverRect)>;
 pub struct NativeApplication {
     /// A dismissible window-level error, such as a host that could not be
     /// added or a recent thread that could not be opened.
-    window_error: Option<String>,
+    /// The window's stacked notices.
+    window_notices: crate::window_notice::WindowNotices,
+    /// Wakes the stack when the next notice's lifetime ends.
+    window_notice_timer: Option<Task<()>>,
     machine_home: Option<std::path::PathBuf>,
     machine_label: String,
     machine_menu: impl_machines::MachineMenu,
@@ -363,9 +384,6 @@ pub struct NativeApplication {
     /// The draft scope the model selector last showed; its run error is
     /// that draft's.
     composer_model_scope: Option<artisan_domain::ComposerDraftScope>,
-    /// The Forge's default engine configuration, shown on threads without
-    /// their own until they save one.
-    default_engine_config: Option<artisan_domain::EngineRunConfig>,
     pending_model_preference: Option<artisan_domain::SaveModelPreference>,
     /// Legacy file preferences handed to the Forge, removed once it answers.
     legacy_import: Option<crate::editor_settings::LegacyForgePreferences>,
@@ -381,6 +399,7 @@ pub struct NativeApplication {
     _composer_controls_subscription: Subscription,
     _composer_model_subscription: Subscription,
     message_images: Entity<NativeMessageImages>,
+    media_files: impl_media_files::MediaFiles,
     _message_images_subscription: Subscription,
     /// The open thread's shell jobs and their output dialog.
     thread_terminals: Entity<crate::thread_terminals::ThreadTerminalsView>,
@@ -394,6 +413,10 @@ pub struct NativeApplication {
     profile_usage: NativeProfileUsageState,
     engine_installs: impl_engine_installs::EngineInstallsState,
     extensions: impl_extensions::ExtensionsState,
+    /// Renaming, settling, and archiving threads, and the row menu.
+    thread_lifecycle: impl_thread_lifecycle::ThreadLifecycleState,
+    /// The open right-click menu: a thread row's, or a rich block's copy menu.
+    pointer_menu: impl_pointer_menu::PointerMenuState,
     profile_usage_generation: ProfileUsageGeneration,
     profile_usage_next_seq: u64,
     profile_hover: Rc<RefCell<SlidingHoverState>>,
@@ -404,6 +427,12 @@ pub struct NativeApplication {
     /// after a keyboard move even though the pointer never left; the mode
     /// keeps that recomputation from discarding a keyboard-owned pill.
     profile_hover_keyboard: Cell<bool>,
+    /// When the profile menu last opened or closed, for its trigger
+    /// chevron's flip.
+    profile_chevron_toggled: Cell<Option<std::time::Instant>>,
+    /// Whether the pointer rests on the machine row and since when, for its
+    /// chevron's nudge.
+    profile_host_hover: Rc<Cell<Option<(bool, std::time::Instant)>>>,
     profile_usage_scroll: ScrollHandle,
     profile_usage_scroll_state: PickerScrollState,
     profile_usage_scroll_frame_scheduled: bool,
@@ -423,6 +452,13 @@ pub struct NativeApplication {
     profile_swap_frame_scheduled: Rc<Cell<bool>>,
     profile_menu_motion: Rc<RefCell<PickerMenuMotion>>,
     profile_menu_motion_task: Option<Task<()>>,
+    /// Whether the pointer rests on the titlebar context meter, opening its
+    /// details card.
+    context_card_open: bool,
+    context_card_motion: Rc<RefCell<PickerMenuMotion>>,
+    context_card_task: Option<Task<()>>,
+    /// Where the context meter painted last frame; the card hangs below it.
+    context_meter_bounds: Rc<Cell<gpui::Bounds<gpui::Pixels>>>,
     profile_tip_tween: Rc<RefCell<ProfileTipTween>>,
     command_menu: Entity<NativeCommandMenu>,
     _command_menu_observation: Subscription,
@@ -448,6 +484,15 @@ pub struct NativeApplication {
     picker_subscription: Option<Subscription>,
     home_picker: Option<Entity<HomeProjectPickerView>>,
     home_picker_subscription: Option<Subscription>,
+    /// How far the new-thread screen lifts its composer above the dock to
+    /// centre it, measured each layout; `None` until first measured.
+    new_thread_composer_lift: Rc<Cell<Option<f32>>>,
+    /// The entrance a new-thread send hands to the thread it opens: the
+    /// composer starts at the centred lift and slides into the dock.
+    pending_composer_entrance: Option<(ThreadId, f32)>,
+    /// Set on entering the new-thread screen; its next render focuses the
+    /// composer so typing starts at once, as opening a thread does.
+    new_thread_focus_pending: bool,
     project_navigation: impl_projects::ProjectNavigation,
     project_options: Vec<ProjectOption>,
     selected_project: Option<ProjectId>,
@@ -492,6 +537,8 @@ pub struct NativeApplication {
     retained_switch_listings: Vec<ThreadListing>,
     pending_snapshot: Option<ConversationSnapshot>,
     conversation_host: Option<Entity<ConversationHost>>,
+    /// Where the reader left each thread they switched away from.
+    reading_positions: crate::thread_reading_positions::ThreadReadingPositions,
     conversation_host_subscription: Option<Subscription>,
     conversation_effects: Vec<ConversationHostEffect>,
     /// Paired engine observation rows for the selected thread.
@@ -526,7 +573,10 @@ pub struct NativeApplication {
     route_history: RouteHistory,
     onboarding_screen: Option<Entity<OnboardingScreen>>,
     thread_screen: Option<Entity<ThreadScreen>>,
-    thread_screen_key: Option<(ThreadId, bool)>,
+    /// The thread and host the mounted thread screen paints. A reopened
+    /// thread gets a new host, often in the same pass that retired the old
+    /// one, so the host's identity (not just its presence) keys the screen.
+    thread_screen_key: Option<(ThreadId, Option<gpui::EntityId>)>,
     editor_screen: Option<Entity<EditorScreen>>,
     editor_screen_key: Option<(ProjectId, ThreadId, Option<String>)>,
     settings_screen: Option<Entity<SettingsScreen>>,

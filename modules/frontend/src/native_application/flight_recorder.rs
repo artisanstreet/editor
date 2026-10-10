@@ -100,7 +100,7 @@ impl NativeApplication {
             "pending_thread": self.pending_thread.as_ref().map(ThreadId::as_str),
             "selected_thread": self.selected_thread.as_ref().map(ThreadId::as_str),
             "awaiting_threads": self.project_navigation.awaiting_threads,
-            "window_error_present": self.window_error.is_some(),
+            "window_error_present": !self.window_notices.is_empty(),
             "navigation_admissible": self.project_picker_action_is_admissible()
         });
         let changed = LAST_GATES.with(|last| {

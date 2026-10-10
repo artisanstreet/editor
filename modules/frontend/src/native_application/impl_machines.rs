@@ -91,7 +91,12 @@ impl NativeApplication {
                         "Host import failed: {}",
                         artisan_domain::ErrorChain(&error)
                     );
-                    app.window_error = Some("Could not add this host. Select a valid Forge invitation from a trusted machine.".into());
+                    app.show_notice(
+                        crate::window_notice::NoticeSeverity::Error,
+                        "Could not add this host. Select a valid Forge invitation from a trusted machine."
+                            .into(),
+                        cx,
+                    );
                     cx.notify();
                 }
             });
@@ -280,6 +285,9 @@ impl NativeApplication {
             .items_center()
             .gap(px(12.0))
             .on_hover(cx.listener(|app, hovered: &bool, window, cx| {
+                app.profile_host_hover
+                    .set(Some((*hovered, std::time::Instant::now())));
+                cx.notify();
                 if *hovered {
                     app.profile_hover
                         .borrow_mut()
@@ -292,10 +300,7 @@ impl NativeApplication {
                 }
             }))
             .child(identity)
-            .child(desktop_nav_glyph(
-                AssetId::TABLER_CHEVRON_RIGHT,
-                self.desktop_theme,
-            ))
+            .child(self.machine_row_chevron(cx))
             .child(
                 canvas(
                     |_, _, _| {},
@@ -382,5 +387,47 @@ impl NativeApplication {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+}
+
+impl NativeApplication {
+    /// The machine row's chevron, nudged 2 px toward the submenu while the
+    /// row is hovered: transitions.dev's learn-more hover, 350 ms each way
+    /// on smooth-out.
+    fn machine_row_chevron(&self, cx: &Context<Self>) -> Div {
+        let (hovered, offset) = match self.profile_host_hover.get() {
+            Some((hovered, since)) if !cx.reduce_motion() => {
+                let progress = (std::time::Instant::now()
+                    .saturating_duration_since(since)
+                    .as_secs_f64()
+                    / 0.35)
+                    .min(1.0);
+                let eased = MotionCurve::SmoothOut.sample(progress) as f32;
+                (
+                    progress < 1.0,
+                    2.0 * if hovered { eased } else { 1.0 - eased },
+                )
+            }
+            Some((hovered, _)) => (false, if hovered { 2.0 } else { 0.0 }),
+            None => (false, 0.0),
+        };
+        let glyph = super::impl_profile_menu::chevron_glyph(
+            AssetId::TABLER_CHEVRON_RIGHT,
+            self.desktop_theme,
+            gpui::Transformation::translate(gpui::point(px(offset), px(0.0))),
+        );
+        if hovered {
+            // A paint-time probe keeps frames coming while the nudge runs.
+            glyph.child(
+                canvas(
+                    |_, _, _| {},
+                    |_, (), window, _| window.request_animation_frame(),
+                )
+                .absolute()
+                .size_0(),
+            )
+        } else {
+            glyph
+        }
     }
 }

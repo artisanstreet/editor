@@ -127,7 +127,8 @@ impl NativeApplication {
         let sidebar =
             cx.new(|sidebar_cx| sidebar_view::SidebarView::new(&application_entity, sidebar_cx));
         let mut application = Self {
-            window_error: None,
+            window_notices: crate::window_notice::WindowNotices::default(),
+            window_notice_timer: None,
             machine_home: None,
             machine_label: crate::native_hosts::no_host_label().into(),
             machine_menu: impl_machines::MachineMenu::new(cx),
@@ -146,7 +147,6 @@ impl NativeApplication {
             composer_model_choices: HashMap::new(),
             composer_model_scope: None,
             deferred_composer_policy: None,
-            default_engine_config: None,
             pending_model_preference: None,
             legacy_import: None,
             #[cfg(test)]
@@ -161,6 +161,7 @@ impl NativeApplication {
             _composer_subscription: composer_subscription,
             message_images,
             thread_terminals,
+            media_files: super::impl_media_files::MediaFiles::new(cx),
             _message_images_subscription: message_images_subscription,
             _composer_observation: composer_observation,
             profile_menu: DropdownMenuState::new([
@@ -175,11 +176,15 @@ impl NativeApplication {
             profile_usage: NativeProfileUsageState::default(),
             engine_installs: impl_engine_installs::EngineInstallsState::default(),
             extensions: impl_extensions::ExtensionsState::default(),
+            thread_lifecycle: impl_thread_lifecycle::ThreadLifecycleState::default(),
+            pointer_menu: impl_pointer_menu::PointerMenuState::default(),
             profile_usage_generation: ProfileUsageGeneration::first(),
             profile_usage_next_seq: 0,
             profile_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
             profile_hover_surface_bounds: Rc::new(RefCell::new(None)),
             profile_hover_keyboard: Cell::new(false),
+            profile_chevron_toggled: Cell::new(None),
+            profile_host_hover: Rc::new(Cell::new(None)),
             profile_usage_scroll: ScrollHandle::new(),
             profile_usage_scroll_state: PickerScrollState::default(),
             profile_usage_scroll_frame_scheduled: false,
@@ -191,6 +196,10 @@ impl NativeApplication {
             profile_swap_frame_scheduled: Rc::new(Cell::new(false)),
             profile_menu_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
             profile_menu_motion_task: None,
+            context_card_open: false,
+            context_card_motion: Rc::new(RefCell::new(PickerMenuMotion::default())),
+            context_card_task: None,
+            context_meter_bounds: Rc::new(Cell::new(gpui::Bounds::default())),
             profile_tip_tween: Rc::new(RefCell::new(ProfileTipTween::default())),
             command_menu,
             _command_menu_observation: command_menu_observation,
@@ -210,6 +219,9 @@ impl NativeApplication {
             picker_subscription: None,
             home_picker: None,
             home_picker_subscription: None,
+            new_thread_composer_lift: Rc::new(Cell::new(None)),
+            pending_composer_entrance: None,
+            new_thread_focus_pending: false,
             project_navigation: impl_projects::ProjectNavigation::default(),
             project_options: Vec::new(),
             selected_project: None,
@@ -233,6 +245,7 @@ impl NativeApplication {
             retained_switch_listings: Vec::with_capacity(MAX_RETAINED_SWITCH_LISTINGS),
             pending_snapshot: None,
             conversation_host: None,
+            reading_positions: crate::thread_reading_positions::ThreadReadingPositions::default(),
             conversation_host_subscription: None,
             conversation_effects: Vec::with_capacity(CONVERSATION_HOST_MAX_EFFECTS),
             engine_observations: None,
@@ -322,7 +335,9 @@ impl NativeApplication {
     pub(super) fn navigate(&mut self, route: NativeRoute, cx: &mut Context<Self>) {
         #[cfg(feature = "flight-recorder")]
         artisan_tracing::instant!("navigation", "route.changed", "route" => super::flight_recorder::route_name(&route));
+        self.new_thread_focus_pending = matches!(route, NativeRoute::NewThread { .. });
         self.route_history.navigate(route);
+        self.observe_open_unread();
         self.sync_composer_availability(cx);
         cx.notify();
     }
