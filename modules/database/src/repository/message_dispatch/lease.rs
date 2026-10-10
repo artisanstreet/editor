@@ -110,18 +110,17 @@ impl Repository {
             )
             .await;
         };
-        let transitioned =
-            match renewed_from_row(&row, message_id, lease_expires_at_ms) {
-                Ok(transitioned) => transitioned,
-                Err(error) => {
-                    return rollback_transition(
-                        transaction,
-                        "roll back message-dispatch lease renewal",
-                        error,
-                    )
-                    .await;
-                }
-            };
+        let transitioned = match renewed_from_row(&row, message_id, lease_expires_at_ms) {
+            Ok(transitioned) => transitioned,
+            Err(error) => {
+                return rollback_transition(
+                    transaction,
+                    "roll back message-dispatch lease renewal",
+                    error,
+                )
+                .await;
+            }
+        };
 
         transaction
             .commit()

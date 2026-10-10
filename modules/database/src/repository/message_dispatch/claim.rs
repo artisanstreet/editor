@@ -274,7 +274,7 @@ fn eligible_dispatch_condition(claimed_at_ms: i64) -> Condition {
 }
 
 async fn finish_unclaimed(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: Result<(), RepositoryError>,
 ) -> Result<Option<ClaimedMessageDispatch>, RepositoryError> {
     match result {
@@ -290,7 +290,7 @@ async fn finish_unclaimed(
 }
 
 async fn rollback_claim<T>(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RepositoryError,
 ) -> Result<T, RepositoryError> {
     transaction

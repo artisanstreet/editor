@@ -179,6 +179,7 @@ impl Repository {
         file: &StoredPromptFile,
         at: UnixMillis,
     ) -> Result<(), RepositoryError> {
+        let _write_gate = self.acquire_write_gate().await;
         self.database
             .execute_raw(statement(
                 "INSERT INTO global_prompt_engine_files (engine_id, home_key, written_digest, written_at_ms) VALUES (?, ?, ?, ?) \
@@ -268,7 +269,7 @@ async fn write_version(
 }
 
 async fn finish<T>(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: Result<T, RepositoryError>,
     operation: &'static str,
 ) -> Result<T, RepositoryError> {

@@ -15,9 +15,18 @@ const MEMORY_DATABASE_URL: &str = "sqlite::memory:";
 const FILE_DATABASE_URL: &str = "sqlite:";
 const DEFAULT_MIN_CONNECTIONS: u32 = 1;
 const DEFAULT_MAX_CONNECTIONS: u32 = 4;
+/// File databases serve concurrent reads beside the one queued writer: the
+/// repository's write gate holds at most one connection for writing, so the
+/// rest stay free for reads however slowly the disk commits.
+const FILE_MAX_CONNECTIONS: u32 = 8;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-connection page cache, as SQLite's negative KiB form (8 MiB).
+const PAGE_CACHE_KIB: &str = "-8192";
+/// WAL pages (4 KiB each) after which a committing connection checkpoints
+/// itself; far above what background checkpointing leaves behind.
+const WAL_AUTOCHECKPOINT_BACKSTOP_PAGES: &str = "16384";
 /// Upper bound on the findings a single open-time verification may report,
 /// so a badly damaged image cannot produce unbounded result rows.
 const QUICK_CHECK_FINDING_LIMIT: u32 = 100;
@@ -70,7 +79,7 @@ impl SqliteConfig {
         Self {
             location: Location::File { path: path.into() },
             min_connections: DEFAULT_MIN_CONNECTIONS,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_connections: FILE_MAX_CONNECTIONS,
             sqlx_logging: true,
         }
     }
@@ -159,13 +168,25 @@ impl SqliteConfig {
                     .create_if_missing(true)
                     .foreign_keys(true)
                     .journal_mode(SqliteJournalMode::Wal)
-                    // A receipt must survive host/VM loss, not just a Forge process exit.
-                    .synchronous(SqliteSynchronous::Full)
+                    // Commits do not wait for an fsync: on a disk shared with
+                    // builds one fsync can take seconds, and every write (each
+                    // draft keystroke, each streamed batch) queues behind it.
+                    // WAL keeps the database consistent through any crash; a
+                    // host/VM loss can drop only the newest commits, and a
+                    // Forge process exit drops nothing.
+                    .synchronous(SqliteSynchronous::Normal)
                     .busy_timeout(BUSY_TIMEOUT)
                     .pragma("temp_store", "MEMORY")
-                    .pragma("cache_size", "-65536")
+                    // Each pooled connection keeps a private page cache in
+                    // anonymous memory. Idle ones get swapped out, and using
+                    // or closing one then waits on swap-ins, so it stays
+                    // small and the kernel's shared file cache serves misses.
+                    .pragma("cache_size", PAGE_CACHE_KIB)
                     .pragma("journal_size_limit", "8388608")
-                    .pragma("wal_autocheckpoint", "1000");
+                    // Checkpoints (which fsync the database file) run in the
+                    // background through `checkpoint_wal`; this only catches
+                    // a WAL that background checkpointing let grow past 64 MB.
+                    .pragma("wal_autocheckpoint", WAL_AUTOCHECKPOINT_BACKSTOP_PAGES);
 
                 if initialize_auto_vacuum {
                     sqlite.auto_vacuum(SqliteAutoVacuum::Incremental)
@@ -290,6 +311,22 @@ pub async fn connect(config: SqliteConfig) -> Result<DatabaseConnection, Connect
     }
 
     Ok(connection)
+}
+
+/// Copies committed WAL pages into the database file and syncs it, without
+/// waiting for or blocking readers and writers (`PASSIVE`).
+///
+/// Run periodically off the write path, so the database file's fsync never
+/// lands inside a commit. A memory database has no WAL and returns at once.
+///
+/// # Errors
+///
+/// Returns the `SeaORM` failure of the checkpoint statement.
+pub async fn checkpoint_wal(database: &DatabaseConnection) -> Result<(), DbErr> {
+    database
+        .execute_unprepared("PRAGMA wal_checkpoint(PASSIVE)")
+        .await
+        .map(drop)
 }
 
 /// Rejects a SQLite older than the schema's reversible-migration floor.

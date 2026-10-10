@@ -666,7 +666,7 @@ async fn ensure_launch_identity_vacancy(
 }
 
 async fn rollback_launch<T>(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RunLaunchError,
 ) -> Result<T, RunLaunchError> {
     transaction.rollback().await.map_err(|source| {
@@ -677,7 +677,7 @@ async fn rollback_launch<T>(
 
 /// Rolls back the read-only diagnosis and returns its outcome unchanged.
 async fn finish_diagnosed_launch(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     diagnosed: Result<LaunchClaimedRunOutcome, RunLaunchError>,
 ) -> Result<LaunchClaimedRunOutcome, RunLaunchError> {
     transaction.rollback().await.map_err(|source| {

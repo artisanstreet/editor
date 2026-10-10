@@ -14,7 +14,7 @@ mod repository;
 pub mod sqlite_write_retry;
 
 pub use artisan_domain::WorkspaceId;
-pub use connection::{ConnectError, SqliteConfig, connect};
+pub use connection::{ConnectError, SqliteConfig, checkpoint_wal, connect};
 pub use repository::{
     AssistantChange, AttachProjectInput, AttachProjectResult, AuxiliaryTerminalError,
     BindRunProvider, BindRunProviderOutcome, BoundRunReceipt, CancelRun, CancelRunError,
@@ -81,8 +81,9 @@ pub use repository::{
 pub use repository::{LegacyImport, StoredUserPreferences};
 
 pub use repository::{
-    PriorRunFacts, ProviderSessionId, SessionContinuation, SessionContinuationCheckpoint,
-    SessionContinuationIncompatibility, SessionContinuationIncompatible, SessionContinuationLookup,
-    SessionContinuationQuery, SessionContinuationSequence, SessionContinuationUnavailable,
+    HandoffRole, HandoffTranscript, HandoffTranscriptEntry, PriorRunFacts, ProviderSessionId,
+    SessionContinuation, SessionContinuationCheckpoint, SessionContinuationIncompatibility,
+    SessionContinuationIncompatible, SessionContinuationLookup, SessionContinuationQuery,
+    SessionContinuationSequence, SessionContinuationUnavailable,
     SessionContinuationUnavailableReason,
 };

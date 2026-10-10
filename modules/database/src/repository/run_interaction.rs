@@ -507,6 +507,7 @@ impl Repository {
         &self,
         run_id: &RunId,
     ) -> Result<u64, RunInteractionError> {
+        let _write_gate = self.acquire_write_gate().await;
         let result = pending_run_interaction::Entity::delete_many()
             .filter(pending_run_interaction::Column::RunId.eq(run_id.as_str()))
             .exec(&self.database)
@@ -1159,7 +1160,13 @@ fn requested_snapshot(
             })
         }
         StoredKind::Question => {
-            let input = question_input_from_json(&value)?;
+            // The stored shape is validated under a throwaway identity; the
+            // resolution must carry the question's own, or it pairs with
+            // nothing and the answered question reads as still open.
+            let input = QuestionInput {
+                question_id: interaction_id.clone(),
+                ..question_input_from_json(&value)?
+            };
             Ok(RequestedInteractionSnapshot {
                 thread_id,
                 run_id,

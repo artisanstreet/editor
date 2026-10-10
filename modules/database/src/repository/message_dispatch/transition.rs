@@ -475,7 +475,7 @@ async fn classify_unfenced_transition(
 }
 
 pub(super) async fn rollback_transition<T>(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     operation: &'static str,
     error: RepositoryError,
 ) -> Result<T, RepositoryError> {

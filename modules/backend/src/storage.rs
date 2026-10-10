@@ -7,16 +7,24 @@
 //! [`SqliteConfig`] after its data-directory policy is selected—this boundary
 //! does not guess a source-tree path or silently open a legacy database.
 
-use artisan_database::{ConnectError, Repository, SqliteConfig, connect};
+use std::time::Duration;
+
+use artisan_database::{ConnectError, Repository, SqliteConfig, checkpoint_wal, connect};
 use artisan_migrations::{MigrationError, migrate_to_current};
 use sea_orm::{DatabaseConnection, DbErr};
 use thiserror::Error;
+
+use crate::error_chain::ErrorChain;
+
+/// How often committed WAL pages are moved into the database file.
+const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// An opened, current-schema native database owned exclusively by Forge.
 #[derive(Debug)]
 pub struct ForgeStorage {
     database: DatabaseConnection,
     repository: Repository,
+    checkpointer: Checkpointer,
 }
 
 impl ForgeStorage {
@@ -36,9 +44,11 @@ impl ForgeStorage {
             .await
             .map_err(|source| ForgeStorageOpenError::Migrate { source })?;
         let repository = Repository::new(database.clone());
+        let checkpointer = Checkpointer(tokio::spawn(checkpoint_periodically(database.clone())));
         Ok(Self {
             database,
             repository,
+            checkpointer,
         })
     }
 
@@ -59,12 +69,52 @@ impl ForgeStorage {
         let Self {
             database,
             repository,
+            checkpointer,
         } = self;
+        drop(checkpointer);
         drop(repository);
         database
             .close()
             .await
             .map_err(|source| ForgeStorageCloseError { source })
+    }
+}
+
+/// The background checkpoint task, stopped when the storage closes or drops.
+#[derive(Debug)]
+struct Checkpointer(tokio::task::JoinHandle<()>);
+
+impl Drop for Checkpointer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Checkpoints the WAL on its own pool connection, outside the write gate,
+/// so commits never wait for the database file's fsync. Logs the first
+/// failure of a run of failures and the recovery after it.
+async fn checkpoint_periodically(database: DatabaseConnection) {
+    let mut ticks = tokio::time::interval(CHECKPOINT_INTERVAL);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failing = false;
+    loop {
+        ticks.tick().await;
+        match checkpoint_wal(&database).await {
+            Ok(()) if failing => {
+                failing = false;
+                eprintln!("Forge database checkpoint recovered");
+            }
+            Ok(()) => {}
+            Err(error) if !failing => {
+                failing = true;
+                eprintln!(
+                    "Forge database checkpoint failed (retrying every {} s): {}",
+                    CHECKPOINT_INTERVAL.as_secs(),
+                    ErrorChain(&error)
+                );
+            }
+            Err(_) => {}
+        }
     }
 }
 

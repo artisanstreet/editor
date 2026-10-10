@@ -2,8 +2,7 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction,
-    EntityTrait, QueryFilter,
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
 };
 
 use artisan_domain::{
@@ -208,7 +207,7 @@ async fn insert_queue_receipt(
 }
 
 async fn classify_message_conflict(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     input: QueueFirstMessageInput,
 ) -> Result<QueueFirstMessageResult, RepositoryError> {
     let receipt = lookup_queue_receipt(
@@ -415,7 +414,7 @@ fn required(
 }
 
 async fn rollback_with_error<T>(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RepositoryError,
 ) -> Result<T, RepositoryError> {
     transaction
@@ -426,7 +425,7 @@ async fn rollback_with_error<T>(
 }
 
 async fn rollback_with_lookup(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: Result<Option<QueueFirstMessageResult>, RepositoryError>,
 ) -> Result<QueueFirstMessageResult, RepositoryError> {
     transaction

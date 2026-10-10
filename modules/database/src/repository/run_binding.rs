@@ -676,7 +676,7 @@ async fn diagnose_run_fence(
 }
 
 async fn rollback_bind<T>(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RunBindingError,
 ) -> Result<T, RunBindingError> {
     transaction.rollback().await.map_err(|source| {
@@ -686,7 +686,7 @@ async fn rollback_bind<T>(
 }
 
 async fn finish_diagnosed_bind(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     diagnosed: Result<BindRunProviderOutcome, RunBindingError>,
 ) -> Result<BindRunProviderOutcome, RunBindingError> {
     transaction.rollback().await.map_err(|source| {

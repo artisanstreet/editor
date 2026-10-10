@@ -25,6 +25,7 @@ mod startup_reconciliation;
 mod startup_reconciliation_disposition;
 mod thread_attention;
 mod thread_engine_config;
+mod thread_lifecycle;
 
 use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
 use thiserror::Error;
@@ -37,7 +38,7 @@ use artisan_domain::{
 use crate::entities;
 
 pub(crate) use common::{
-    RepositoryFailure, corrupt_data, database_error, negative_counter, row_value,
+    RepositoryFailure, WriteTransaction, corrupt_data, database_error, negative_counter, row_value,
 };
 
 pub use composer_attachment_upload::ComposerAttachmentChunkOutcome;
@@ -218,15 +219,22 @@ pub enum RepositoryError {
 }
 
 /// Cloneable access to native database repositories.
+///
+/// Clones share one write gate, so every write a process issues through one
+/// repository queues in arrival order before it takes a pool connection.
 #[derive(Clone, Debug)]
 pub struct Repository {
     database: DatabaseConnection,
+    write_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Repository {
     #[must_use]
-    pub const fn new(database: DatabaseConnection) -> Self {
-        Self { database }
+    pub fn new(database: DatabaseConnection) -> Self {
+        Self {
+            database,
+            write_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Reads the persisted project root for a thread without consulting the
@@ -318,6 +326,9 @@ mod global_prompt;
 pub use global_prompt::{
     GLOBAL_PROMPT_VERSIONS_KEPT, GlobalPromptSave, StoredGlobalPrompt, StoredPromptFile,
 };
+
+mod handoff_transcript;
+pub use handoff_transcript::{HandoffRole, HandoffTranscript, HandoffTranscriptEntry};
 
 mod session_continuation;
 pub use session_continuation::{

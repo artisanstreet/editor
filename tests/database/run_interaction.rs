@@ -490,6 +490,11 @@ async fn question_resolves_with_answers_and_replays() {
     let snapshot = applied.requested.question.expect("question snapshot");
     assert_eq!(snapshot.input.text, "Which profile should run?");
     assert_eq!(
+        snapshot.input.question_id,
+        oid(QUESTION_ID),
+        "the resolution pairs with the question asked, not a validation stand-in"
+    );
+    assert_eq!(
         snapshot.input.options.expect("options").len(),
         2,
         "stored options should round-trip"

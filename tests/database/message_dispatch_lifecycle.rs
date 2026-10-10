@@ -58,6 +58,23 @@ async fn seed_foundation(database: &DatabaseConnection) {
     .expect("thread fixture should insert");
 }
 
+/// Adds one more thread to the seeded project.
+async fn seed_thread(database: &DatabaseConnection, thread_id: &str) {
+    entities::thread::ActiveModel {
+        thread_id: Set(thread_id.to_owned()),
+        project_id: Set("project-1".to_owned()),
+        title: Set("Thread".to_owned()),
+        created_at_ms: Set(2),
+        updated_at_ms: Set(2),
+        engine_run_config_version: Set(None),
+        engine_run_config_revision: Set(0),
+        engine_run_config: Set(None),
+    }
+    .insert(database)
+    .await
+    .expect("thread fixture should insert");
+}
+
 async fn seed_dispatch(
     database: &DatabaseConnection,
     message_id: &str,
@@ -66,9 +83,30 @@ async fn seed_dispatch(
     queued_at_ms: i64,
     available_at_ms: i64,
 ) {
+    seed_dispatch_on(
+        database,
+        "thread-1",
+        message_id,
+        correlation_id,
+        ordinal,
+        queued_at_ms,
+        available_at_ms,
+    )
+    .await;
+}
+
+async fn seed_dispatch_on(
+    database: &DatabaseConnection,
+    thread_id: &str,
+    message_id: &str,
+    correlation_id: &str,
+    ordinal: i64,
+    queued_at_ms: i64,
+    available_at_ms: i64,
+) {
     entities::message::ActiveModel {
         message_id: Set(message_id.to_owned()),
-        thread_id: Set("thread-1".to_owned()),
+        thread_id: Set(thread_id.to_owned()),
         ordinal: Set(ordinal),
         body: Set(format!("body-{message_id}")),
         accepted_at_ms: Set(queued_at_ms),
@@ -410,9 +448,13 @@ async fn unfenced_transitions_are_typed_and_leave_the_row_unchanged() {
 async fn transitions_before_the_claim_stamp_are_rejected_as_chronology() {
     let (database, repository) = memory_database().await;
     seed_foundation(&database).await;
+    // A thread runs one message at a time, so the three concurrent claims
+    // this exercises come from three threads.
+    seed_thread(&database, "thread-2").await;
+    seed_thread(&database, "thread-3").await;
     seed_dispatch(&database, "message-1", "request-1", 0, 3, 3).await;
-    seed_dispatch(&database, "message-2", "request-2", 1, 4, 3).await;
-    seed_dispatch(&database, "message-3", "request-3", 2, 5, 3).await;
+    seed_dispatch_on(&database, "thread-2", "message-2", "request-2", 0, 4, 3).await;
+    seed_dispatch_on(&database, "thread-3", "message-3", "request-3", 0, 5, 3).await;
 
     let first = repository
         .claim_next_message_dispatch(claim(0x11, 10, 20))
@@ -487,9 +529,13 @@ async fn transitions_before_the_claim_stamp_are_rejected_as_chronology() {
 async fn operations_equal_to_the_claim_stamp_remain_allowed() {
     let (database, repository) = memory_database().await;
     seed_foundation(&database).await;
+    // A thread runs one message at a time, so the three concurrent claims
+    // this exercises come from three threads.
+    seed_thread(&database, "thread-2").await;
+    seed_thread(&database, "thread-3").await;
     seed_dispatch(&database, "message-1", "request-1", 0, 3, 3).await;
-    seed_dispatch(&database, "message-2", "request-2", 1, 4, 3).await;
-    seed_dispatch(&database, "message-3", "request-3", 2, 5, 3).await;
+    seed_dispatch_on(&database, "thread-2", "message-2", "request-2", 0, 4, 3).await;
+    seed_dispatch_on(&database, "thread-3", "message-3", "request-3", 0, 5, 3).await;
 
     let _first = repository
         .claim_next_message_dispatch(claim(0x11, 10, 20))
@@ -988,5 +1034,8 @@ async fn lease_renewal_survives_a_wall_clock_that_stepped_back() {
     assert_eq!(stepped_back.updated_at, UnixMillis::from_millis(19));
     let persisted = dispatch(&database, "message-1").await;
     assert_eq!(persisted.lease_expires_at_ms, Some(70));
-    assert_eq!(persisted.updated_at_ms, 19, "the stamp never moves backwards");
+    assert_eq!(
+        persisted.updated_at_ms, 19,
+        "the stamp never moves backwards"
+    );
 }

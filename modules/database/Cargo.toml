@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 artisan-domain = { path = "../domain" }
+async-trait = "=0.1.92"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sea-orm.workspace = true
@@ -15,7 +16,7 @@ sha2.workspace = true
 sqlx-sqlite.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 zeroize.workspace = true
 
 [dev-dependencies]
@@ -66,6 +67,10 @@ path = "../../tests/database/conversation_execution_patch_checkpoint_entities.rs
 [[test]]
 name = "project_threads"
 path = "../../tests/database/project_threads.rs"
+
+[[test]]
+name = "thread_lifecycle"
+path = "../../tests/database/thread_lifecycle.rs"
 
 [[test]]
 name = "queue_first_message"

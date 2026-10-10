@@ -196,6 +196,7 @@ impl Repository {
         let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
         let size_bytes = u32::try_from(image.byte_len())
             .map_err(|_| corrupt_data("composer_attachments", "size_bytes", "image too large"))?;
+        let _write_gate = self.acquire_write_gate().await;
         self.database
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,

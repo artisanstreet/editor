@@ -657,7 +657,7 @@ fn do_nothing_on_conflict() -> OnConflict {
 }
 
 async fn rollback_with_error<T>(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RepositoryError,
 ) -> Result<T, RepositoryError> {
     transaction
@@ -668,7 +668,7 @@ async fn rollback_with_error<T>(
 }
 
 async fn rollback_with_result(
-    transaction: sea_orm::DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: Result<Option<SetThreadEngineConfigResult>, RepositoryError>,
 ) -> Result<SetThreadEngineConfigResult, RepositoryError> {
     let result = result;

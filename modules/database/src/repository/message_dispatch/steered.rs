@@ -98,6 +98,7 @@ impl Repository {
         operated_at: UnixMillis,
     ) -> Result<TransitionedMessageDispatch, RepositoryError> {
         let operated_at_ms = millis(operated_at);
+        let _write_gate = self.acquire_write_gate().await;
         let updated = self
             .database
             .execute_raw(Statement::from_sql_and_values(
@@ -149,6 +150,7 @@ impl Repository {
                 reason: "steer refusal reason exceeds its bound",
             })?;
         let operated_at_ms = millis(operated_at);
+        let _write_gate = self.acquire_write_gate().await;
         let updated = self
             .database
             .execute_raw(Statement::from_sql_and_values(
@@ -227,6 +229,7 @@ impl Repository {
                 }
             })?;
         let operated_at_ms = millis(operated_at);
+        let _write_gate = self.acquire_write_gate().await;
         let updated = self
             .database
             .execute_raw(Statement::from_sql_and_values(

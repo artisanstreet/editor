@@ -186,6 +186,7 @@ impl Repository {
         report: &RunUsageReport,
         rate: Option<u32>,
     ) -> Result<(), RunUsageRepositoryError> {
+        let _write_gate = self.acquire_write_gate().await;
         self.database.execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE run_usage SET streaming_millitokens_per_second = ? WHERE run_id = ? AND thread_id = ? AND provider_session_id = ? AND source_sequence = ? AND generation = (SELECT generation FROM assistant_runs WHERE run_id = ?)",
@@ -219,7 +220,7 @@ impl Repository {
             })?;
         let authority = match load_run_authority(&transaction, run_id, thread_id).await {
             Ok(authority) => authority,
-            Err(error) => return rollback_with_error(transaction, error).await,
+            Err(error) => return rollback_read_with_error(transaction, error).await,
         };
         let result = load_current_usage(&transaction, run_id, thread_id, &authority).await;
         match result {
@@ -229,7 +230,7 @@ impl Repository {
                 })?;
                 Ok(usage.map(|stored| stored.report))
             }
-            Err(error) => rollback_with_error(transaction, error).await,
+            Err(error) => rollback_read_with_error(transaction, error).await,
         }
     }
 }
@@ -705,8 +706,19 @@ fn repository_error(error: RepositoryError) -> RunUsageRepositoryError {
     RunUsageRepositoryError::Repository(error)
 }
 
-async fn rollback_with_error<T>(
+async fn rollback_read_with_error<T>(
     transaction: sea_orm::DatabaseTransaction,
+    error: RunUsageRepositoryError,
+) -> Result<T, RunUsageRepositoryError> {
+    transaction
+        .rollback()
+        .await
+        .map_err(|source| repository_error(database_error("roll back run usage read", source)))?;
+    Err(error)
+}
+
+async fn rollback_with_error<T>(
+    transaction: crate::repository::WriteTransaction,
     error: RunUsageRepositoryError,
 ) -> Result<T, RunUsageRepositoryError> {
     transaction.rollback().await.map_err(|source| {
