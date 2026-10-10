@@ -43,6 +43,17 @@ impl NativeApplication {
         false
     }
 
+    /// Drops the link previews still waiting in the transport's preview
+    /// lane once the surface that asked for them is gone. Results arrive
+    /// keyed by URL only and the next surface keeps its own title table, so
+    /// the queued ones would only fetch pages nobody shows, ahead of that
+    /// surface's own links.
+    pub(super) fn discard_queued_rich_links(&self) {
+        if let Some(service) = self.service.as_ref() {
+            service.discard_queued_previews();
+        }
+    }
+
     /// Mirrors one resolved rich-link title into the mounted surface.
     ///
     /// A result for a thread that is no longer mounted is dropped: the title

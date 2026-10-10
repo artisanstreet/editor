@@ -27,14 +27,15 @@ use gpui::{HighlightStyle, RenderImage, SharedString, px};
 
 use crate::markdown::{Block, CodeFence, CodeTokenKind, MarkdownDocument, Span, TableAlignment};
 use crate::markdown_cache::MarkdownWorkCounters;
-use crate::selectable_text::TextRunOverride;
+use crate::selectable_text::{InlineSwatch, TextRunOverride};
 use crate::theme::ArtisanTheme;
 
 use super::code_copy::CODE_COPY_SELECTOR_SUFFIX;
 use super::inline::{
-    FlatInline, InlineChannels, InlineLayer, flatten_inline, resolve_chain, resolve_runs,
-    split_trailing_citations,
+    FlatInline, InlineChannels, InlineLayer, flatten_inline_with_swatches, resolve_chain,
+    resolve_runs, split_trailing_citations,
 };
+use super::rich::{self, RichFence};
 use super::{
     BlockScope, InlineLink, NoRichLinkTitles, RichLinkTitleSource, block_gaps, code_token_style,
     fence_display_source, item_marker, valid_code_range,
@@ -356,7 +357,7 @@ pub(super) struct PreparedLeaf {
 impl PreparedLeaf {
     fn new(spans: &[Span], counters: &MarkdownWorkCounters) -> Self {
         counters.record_inline_flatten();
-        let flat = flatten_inline(spans, &NoRichLinkTitles);
+        let flat = flatten_inline_with_swatches(spans, &NoRichLinkTitles);
         let probes = flat
             .probes
             .iter()
@@ -422,8 +423,9 @@ impl PreparedLeaf {
                         probes: &self.probes,
                         answers: &answers,
                     };
-                    let presentation =
-                        Rc::new(LeafPresentation::from_flat(flatten_inline(spans, &replay)));
+                    let presentation = Rc::new(LeafPresentation::from_flat(
+                        flatten_inline_with_swatches(spans, &replay),
+                    ));
                     *titled = Some((keys, Rc::clone(&presentation)));
                     presentation
                 }
@@ -479,6 +481,16 @@ pub(super) struct LeafPresentation {
     chains: Box<[Box<[InlineLayer]>]>,
     pub(super) link_ranges: Rc<[Range<usize>]>,
     pub(super) link_destinations: Rc<[SharedString]>,
+    /// Color values the text writes, outside links: right-clicking one
+    /// offers it in every notation. Each range covers its swatch, plus the
+    /// value when the value shows.
+    pub(super) color_ranges: Rc<[Range<usize>]>,
+    /// The values of `color_ranges`, as written.
+    pub(super) color_values: Rc<[SharedString]>,
+    /// The squares painted in the swatch slots.
+    pub(super) swatches: Rc<[InlineSwatch]>,
+    /// What each swatch slot copies as in a text selection.
+    pub(super) copies: Rc<[(Range<usize>, SharedString)]>,
     code_ranges: Box<[Range<usize>]>,
     pub(super) icon_offsets: Box<[(usize, String)]>,
     /// Trailing citation attributions, rendered as pills after the text.
@@ -504,9 +516,45 @@ impl LeafPresentation {
             code_ranges: &mut flat.code_ranges,
             icon_offsets: &mut flat.icon_offsets,
         });
+        // Colors past a stripped trailing citation left with it.
+        let end = flat.source.len();
+        let colors: Vec<_> = flat
+            .colors
+            .into_iter()
+            .filter(|color| color.range.end <= end)
+            .collect();
+        let swatches = colors
+            .iter()
+            .filter_map(|color| {
+                Some(InlineSwatch {
+                    offset: color.slot.start + '\u{2060}'.len_utf8(),
+                    color: super::rich::color_paint(&color.value)?,
+                    alone: color.alone,
+                })
+            })
+            .collect();
+        // A lone swatch copies as its value; one beside its value as nothing.
+        let copies = colors
+            .iter()
+            .map(|color| {
+                let copy = if color.alone {
+                    SharedString::from(color.value.clone())
+                } else {
+                    SharedString::default()
+                };
+                (color.slot.clone(), copy)
+            })
+            .collect();
         Self {
             text: SharedString::from(flat.source),
             runs: flat.runs.into_boxed_slice(),
+            color_ranges: colors.iter().map(|color| color.range.clone()).collect(),
+            color_values: colors
+                .into_iter()
+                .map(|color| SharedString::from(color.value))
+                .collect(),
+            swatches,
+            copies,
             chains: flat.chains.into_iter().map(Vec::into_boxed_slice).collect(),
             link_ranges: flat.links.iter().map(|link| link.range.clone()).collect(),
             link_destinations: flat
@@ -606,6 +654,18 @@ pub(super) struct PreparedFence {
     pub(super) source: SharedString,
     /// Whether the displayed body spans more than one line.
     pub(super) multiline: bool,
+    /// Whether the fence is a closed `mermaid` block, drawn as a diagram
+    /// when its source renders.
+    pub(super) diagram: bool,
+    /// The rich block an `artisan-*` fence draws, parsed once here.
+    pub(super) rich: Option<RichFence>,
+    /// The body as drawn: `source` with a swatch slot before each color
+    /// value, the way an editor decorates CSS colors. Token ranges address
+    /// this text; the copy action copies `source`.
+    pub(super) shown: SharedString,
+    /// The fence's color values, their swatches, and what each slot copies
+    /// as, addressing `shown`.
+    pub(super) colors: FenceColors,
     tokens: Box<[(Range<usize>, CodeTokenKind)]>,
     resolved: RefCell<Option<ResolvedFence>>,
 }
@@ -616,20 +676,107 @@ struct ResolvedFence {
     highlights: Rc<[(Range<usize>, HighlightStyle)]>,
 }
 
+/// `display` with a swatch slot before each of `colors`, the fence colors
+/// for the drawn text, and `tokens` moved past the slots inserted before
+/// them. A token starting exactly at a color keeps its start, so the slot
+/// takes the token's style; one ending there keeps its end.
+fn decorate_colors(
+    display: &str,
+    colors: &[Range<usize>],
+    tokens: Vec<(Range<usize>, CodeTokenKind)>,
+) -> (
+    SharedString,
+    FenceColors,
+    Vec<(Range<usize>, CodeTokenKind)>,
+) {
+    if colors.is_empty() {
+        return (
+            SharedString::from(display.to_owned()),
+            FenceColors::default(),
+            tokens,
+        );
+    }
+    let slot = super::inline::SWATCH_SLOT;
+    let shift = |offset: usize| {
+        offset + slot.len() * colors.iter().filter(|color| color.start < offset).count()
+    };
+    let mut shown = String::with_capacity(display.len() + slot.len() * colors.len());
+    let mut ranges = Vec::new();
+    let mut swatches = Vec::new();
+    let mut copies = Vec::new();
+    let mut values = Vec::new();
+    let mut cursor = 0;
+    for color in colors {
+        shown.push_str(&display[cursor..color.start]);
+        let slot_start = shown.len();
+        shown.push_str(slot);
+        let slot_range = slot_start..shown.len();
+        shown.push_str(&display[color.clone()]);
+        ranges.push(slot_start..shown.len());
+        let value = &display[color.clone()];
+        if let Some(paint) = rich::color_paint(value) {
+            swatches.push(InlineSwatch {
+                offset: slot_start + '\u{2060}'.len_utf8(),
+                color: paint,
+                alone: false,
+            });
+        }
+        copies.push((slot_range, SharedString::default()));
+        values.push(SharedString::from(value.to_owned()));
+        cursor = color.end;
+    }
+    shown.push_str(&display[cursor..]);
+    let tokens = tokens
+        .into_iter()
+        .map(|(range, kind)| (shift(range.start)..shift(range.end), kind))
+        .collect();
+    let colors = FenceColors {
+        ranges: ranges.into(),
+        values: values.into(),
+        swatches: swatches.into(),
+        copies: copies.into(),
+    };
+    (SharedString::from(shown), colors, tokens)
+}
+
+/// Color values in a fence's drawn text, ready for the selectable text.
+#[derive(Debug, Default)]
+pub(super) struct FenceColors {
+    pub(super) ranges: Rc<[Range<usize>]>,
+    pub(super) values: Rc<[SharedString]>,
+    pub(super) swatches: Rc<[InlineSwatch]>,
+    pub(super) copies: Rc<[(Range<usize>, SharedString)]>,
+}
+
 impl PreparedFence {
     fn new(fence: &CodeFence) -> Self {
         let display = fence_display_source(&fence.source);
-        let tokens = fence
+        let tokens: Vec<_> = fence
             .tokens
             .as_deref()
             .unwrap_or_default()
             .iter()
             .filter_map(|token| valid_code_range(token, display))
             .collect();
+        let rich = rich::prepare(fence.language.as_deref(), display, fence.closed);
+        let diagram = fence.closed && fence.language.as_deref() == Some("mermaid");
+        // Rich blocks and diagrams draw something else; plain code shows
+        // its colors.
+        let starts = if rich.is_none() && !diagram {
+            let whole = 0..display.len();
+            rich::color_ranges(display, std::slice::from_ref(&whole))
+        } else {
+            Vec::new()
+        };
+        let (shown, colors, tokens) = decorate_colors(display, &starts, tokens);
         Self {
             multiline: display.contains('\n'),
+            diagram,
+            rich,
             source: SharedString::from(display),
-            tokens,
+            shown,
+            colors,
+            tokens: tokens.into_boxed_slice(),
             resolved: RefCell::new(None),
         }
     }
@@ -654,5 +801,45 @@ impl PreparedFence {
             highlights: Rc::clone(&highlights),
         });
         highlights
+    }
+}
+
+#[cfg(test)]
+mod fence_color_tests {
+    use super::{CodeTokenKind, decorate_colors};
+    use crate::markdown_renderer::inline::SWATCH_SLOT;
+
+    #[test]
+    fn a_fence_shows_a_swatch_before_each_color_and_tokens_follow() {
+        let css = "a { color: #fff; border: 1px solid rgb(0 0 0); }";
+        let hex = css.find("#fff").expect("hex");
+        let rgb = css.find("rgb(").expect("rgb");
+        let tokens = vec![
+            (hex..hex + 4, CodeTokenKind::Number),
+            (rgb - 6..rgb - 1, CodeTokenKind::Keyword),
+        ];
+        let (shown, colors, tokens) = decorate_colors(css, &[hex..hex + 4, rgb..rgb + 10], tokens);
+        assert_eq!(
+            shown.as_ref(),
+            format!("a {{ color: {SWATCH_SLOT}#fff; border: 1px solid {SWATCH_SLOT}rgb(0 0 0); }}")
+        );
+        // The hex token now starts at its slot and still ends after `#fff`.
+        let (first, _) = &tokens[0];
+        assert_eq!(&shown[first.clone()], format!("{SWATCH_SLOT}#fff"));
+        // `solid` sits before the second slot, past the first.
+        let (second, _) = &tokens[1];
+        assert_eq!(&shown[second.clone()], "solid");
+        assert_eq!(colors.values.len(), 2);
+        assert_eq!(colors.swatches.len(), 2);
+        assert!(colors.copies.iter().all(|(_, copy)| copy.is_empty()));
+    }
+
+    #[test]
+    fn a_fence_without_colors_is_untouched() {
+        let (shown, colors, tokens) =
+            decorate_colors("let x = 1;", &[], vec![(8..9, CodeTokenKind::Number)]);
+        assert_eq!(shown.as_ref(), "let x = 1;");
+        assert!(colors.ranges.is_empty());
+        assert_eq!(tokens[0].0, 8..9);
     }
 }

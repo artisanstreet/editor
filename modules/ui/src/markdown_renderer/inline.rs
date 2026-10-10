@@ -75,6 +75,29 @@ pub(super) struct FlatInline {
     pub(super) code_ranges: Vec<Range<usize>>,
     pub(super) icon_offsets: Vec<(usize, String)>,
     pub(super) probes: Vec<String>,
+    /// Whether color values become swatches (reply bodies) or stay text
+    /// (the frozen [`super::InlinePresentation`] contract).
+    pub(super) swatches: bool,
+    /// Color values and their swatch slots, in source order.
+    pub(super) colors: Vec<InlineColor>,
+}
+
+/// The em space a swatch paints over, held to its neighbors by word joiners
+/// so it never wraps away from them: `(■)` stays together.
+pub(super) const SWATCH_SLOT: &str = "\u{2060}\u{2003}\u{2060}";
+
+/// One color value a reply wrote, as the flattened text shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct InlineColor {
+    /// What answers a right-click: the slot, plus the value when shown.
+    pub(super) range: Range<usize>,
+    /// The swatch slot within `range`.
+    pub(super) slot: Range<usize>,
+    /// The value as written.
+    pub(super) value: String,
+    /// Whether the swatch stands in for the value (bare in prose, or a code
+    /// span holding only the value) instead of preceding it.
+    pub(super) alone: bool,
 }
 
 impl FlatInline {
@@ -127,6 +150,101 @@ pub(super) fn flatten_inline(spans: &[Span], titles: &dyn RichLinkTitleSource) -
     flat
 }
 
+/// Flattens like [`flatten_inline`], turning color values into swatches: a
+/// bare value in prose, or a code span holding only a value, becomes a
+/// square alone; a value inside longer code gets a square before it, the
+/// way an editor decorates CSS colors.
+pub(super) fn flatten_inline_with_swatches(
+    spans: &[Span],
+    titles: &dyn RichLinkTitleSource,
+) -> FlatInline {
+    let mut flat = FlatInline {
+        swatches: true,
+        ..FlatInline::default()
+    };
+    let mut chain = Vec::new();
+    flatten(spans, &mut chain, &mut flat, titles, false);
+    flat
+}
+
+/// Appends a swatch slot for `value`; `alone` when it stands in for the
+/// value, which is then not written.
+fn push_swatch(flat: &mut FlatInline, value: &str, alone: bool) -> Range<usize> {
+    let start = flat.source.len();
+    flat.source.push_str(SWATCH_SLOT);
+    let slot = start..flat.source.len();
+    if alone {
+        flat.colors.push(InlineColor {
+            range: slot.clone(),
+            slot: slot.clone(),
+            value: value.to_owned(),
+            alone,
+        });
+    }
+    slot
+}
+
+/// Appends prose text, its bare color values as lone swatches.
+fn push_prose(flat: &mut FlatInline, text: &str, chain: &[InlineLayer]) {
+    let colors = if flat.swatches {
+        super::rich::color_ranges(text, &[])
+    } else {
+        Vec::new()
+    };
+    let mut cursor = 0;
+    for color in colors {
+        let start = flat.source.len();
+        flat.source.push_str(&text[cursor..color.start]);
+        let end = flat.source.len();
+        emit(flat, start, end, chain);
+        push_swatch(flat, &text[color.clone()], true);
+        cursor = color.end;
+    }
+    let start = flat.source.len();
+    flat.source.push_str(&text[cursor..]);
+    let end = flat.source.len();
+    emit(flat, start, end, chain);
+}
+
+/// Appends one code span: a lone swatch when it holds only a color value,
+/// else the code with a swatch before each value in it.
+fn push_code(flat: &mut FlatInline, code: &str, chain: &mut Vec<InlineLayer>, in_link: bool) {
+    let colors = if flat.swatches && !in_link {
+        let whole = 0..code.len();
+        super::rich::color_ranges(code, std::slice::from_ref(&whole))
+    } else {
+        Vec::new()
+    };
+    if let [only] = colors.as_slice()
+        && code[only.clone()] == *code.trim()
+    {
+        push_swatch(flat, code.trim(), true);
+        return;
+    }
+    let start = flat.source.len();
+    let mut cursor = 0;
+    for color in colors {
+        flat.source.push_str(&code[cursor..color.start]);
+        let slot = push_swatch(flat, &code[color.clone()], false);
+        flat.source.push_str(&code[color.clone()]);
+        flat.colors.push(InlineColor {
+            range: slot.start..flat.source.len(),
+            slot,
+            value: code[color.clone()].to_owned(),
+            alone: false,
+        });
+        cursor = color.end;
+    }
+    flat.source.push_str(&code[cursor..]);
+    let end = flat.source.len();
+    if start < end {
+        flat.code_ranges.push(start..end);
+    }
+    chain.push(InlineLayer::Code { in_link });
+    emit(flat, start, end, chain);
+    chain.pop();
+}
+
 /// Emits one leaf run, merging into the previous run when it continues the
 /// same chain. An empty chain is the default style and emits nothing.
 fn emit(flat: &mut FlatInline, start: usize, end: usize, chain: &[InlineLayer]) {
@@ -176,22 +294,16 @@ fn flatten(
                     flatten(&linked, chain, flat, titles, true);
                     continue;
                 }
-                let start = flat.source.len();
-                flat.source.push_str(inline);
-                let end = flat.source.len();
-                emit(flat, start, end, chain);
-            }
-            Span::Code(code) => {
-                let start = flat.source.len();
-                flat.source.push_str(code);
-                let end = flat.source.len();
-                if start < end {
-                    flat.code_ranges.push(start..end);
+                if in_link {
+                    let start = flat.source.len();
+                    flat.source.push_str(inline);
+                    let end = flat.source.len();
+                    emit(flat, start, end, chain);
+                } else {
+                    push_prose(flat, inline, chain);
                 }
-                chain.push(InlineLayer::Code { in_link });
-                emit(flat, start, end, chain);
-                chain.pop();
             }
+            Span::Code(code) => push_code(flat, code, chain, in_link),
             Span::Emphasis(inner) => {
                 chain.push(InlineLayer::Emphasis);
                 flatten(inner, chain, flat, titles, in_link);
@@ -236,8 +348,15 @@ fn flatten_link(
         flat.source.push_str("\u{2003}\u{2060}\u{00a0}");
     }
     chain.push(InlineLayer::Link);
+    let label_text = span_label_text(label);
     if let Some(title) = resolved {
-        flat.source.push_str(title.as_ref());
+        flat.source.push_str(&capped_link_text(title.as_ref()));
+        let end = flat.source.len();
+        emit(flat, start, end, chain);
+    } else if label_text.trim() == destination {
+        // A pure link (bare, autolinked, or labelled with its own address)
+        // shows the same capped width as a resolved title.
+        flat.source.push_str(&capped_link_text(label_text.trim()));
         let end = flat.source.len();
         emit(flat, start, end, chain);
     } else {
@@ -255,6 +374,19 @@ fn flatten_link(
         }
         flat.links.push(link);
     }
+}
+
+/// The most characters a resolved link title or a pure link shows; longer
+/// text ends in an ellipsis so one link never runs across the column.
+pub(super) const LINK_TEXT_MAX_CHARS: usize = 48;
+
+/// `text` cut to [`LINK_TEXT_MAX_CHARS`] characters, ending in `…` when cut.
+pub(super) fn capped_link_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.chars().count() <= LINK_TEXT_MAX_CHARS {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let kept: String = text.chars().take(LINK_TEXT_MAX_CHARS - 1).collect();
+    std::borrow::Cow::Owned(format!("{}…", kept.trim_end()))
 }
 
 /// Every channel of one inline presentation that addresses its text, with
@@ -329,4 +461,91 @@ pub(super) fn split_trailing_citations<S>(channels: InlineChannels<'_, S>) -> Ve
     citation_links.retain(|link| link.range.end <= end);
     icon_offsets.retain(|(offset, _)| *offset < end);
     stripped
+}
+
+#[cfg(test)]
+mod link_cap_tests {
+    use super::{LINK_TEXT_MAX_CHARS, capped_link_text};
+
+    #[test]
+    fn long_link_text_ends_in_an_ellipsis_at_the_cap() {
+        assert_eq!(capped_link_text("Short title"), "Short title");
+        let long = "https://github.com/artisanstreet/editor/pull/502/files#diff-0123456789abcdef";
+        let capped = capped_link_text(long);
+        assert_eq!(capped.chars().count(), LINK_TEXT_MAX_CHARS);
+        assert!(capped.ends_with('…'));
+        assert!(long.starts_with(capped.trim_end_matches('…')));
+    }
+}
+
+#[cfg(test)]
+mod swatch_tests {
+    use super::super::NoRichLinkTitles;
+    use super::{SWATCH_SLOT, flatten_inline, flatten_inline_with_swatches};
+    use crate::markdown::Span;
+
+    fn text(value: &str) -> Span {
+        Span::Text(value.to_owned())
+    }
+
+    fn code(value: &str) -> Span {
+        Span::Code(value.to_owned())
+    }
+
+    #[test]
+    fn a_bare_color_in_prose_becomes_a_lone_swatch() {
+        let flat =
+            flatten_inline_with_swatches(&[text("Coral (#FF6B6B) is closest")], &NoRichLinkTitles);
+        assert_eq!(flat.source, format!("Coral ({SWATCH_SLOT}) is closest"));
+        let [color] = flat.colors.as_slice() else {
+            panic!("one color: {:?}", flat.colors);
+        };
+        assert!(color.alone);
+        assert_eq!(color.value, "#FF6B6B");
+        assert_eq!(&flat.source[color.range.clone()], SWATCH_SLOT);
+    }
+
+    #[test]
+    fn a_code_span_of_only_a_color_becomes_a_lone_swatch_without_its_chip() {
+        let flat = flatten_inline_with_swatches(
+            &[text("roughly "), code("oklch(0.711 0.183 22.5)"), text(".")],
+            &NoRichLinkTitles,
+        );
+        assert_eq!(flat.source, format!("roughly {SWATCH_SLOT}."));
+        assert!(
+            flat.code_ranges.is_empty(),
+            "no code chip around a lone swatch"
+        );
+        assert!(flat.colors[0].alone);
+        assert_eq!(flat.colors[0].value, "oklch(0.711 0.183 22.5)");
+    }
+
+    #[test]
+    fn a_color_inside_longer_code_keeps_its_text_after_a_swatch() {
+        let flat = flatten_inline_with_swatches(
+            &[code("color: #333; background: red")],
+            &NoRichLinkTitles,
+        );
+        assert_eq!(
+            flat.source,
+            format!("color: {SWATCH_SLOT}#333; background: red")
+        );
+        assert_eq!(flat.code_ranges.len(), 1);
+        assert_eq!(flat.code_ranges[0], 0..flat.source.len());
+        let color = &flat.colors[0];
+        assert!(!color.alone);
+        assert_eq!(color.value, "#333");
+        assert_eq!(
+            &flat.source[color.range.clone()],
+            format!("{SWATCH_SLOT}#333")
+        );
+        assert_eq!(&flat.source[color.slot.clone()], SWATCH_SLOT);
+    }
+
+    #[test]
+    fn the_plain_flattener_keeps_colors_as_text() {
+        let flat = flatten_inline(&[text("Coral (#FF6B6B)"), code("#333")], &NoRichLinkTitles);
+        assert_eq!(flat.source, "Coral (#FF6B6B)#333");
+        assert!(flat.colors.is_empty());
+    }
 }

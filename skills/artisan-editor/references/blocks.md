@@ -2,36 +2,21 @@
 
 Every kind, its fields, and one working example. `(required)` marks the
 fields a kind cannot draw without; everything else is optional. Every kind
-also accepts the envelope fields `title` and `caption`.
+also accepts the envelope fields `title` (the finding, as a sentence),
+`subtitle` (one line of scope and units under it), and `caption`.
 
 Shared values:
 
 - `tone`: `neutral` · `info` · `success` · `warning` · `danger` · `accent`
-- `status`: `done` · `active` · `pending` · `failed` · `skipped` · `blocked`
-  (also `pass`, `fail`, `skip`, `warn`)
 - `ref`: `"path"`, `"path:42"`, or `"path:42-60"`, relative to the project
 
-Contents: [Structure](#structure-and-narrative) ·
+Contents: [Structure](#structure) ·
 [Code](#code-and-repository) · [Data](#data-and-charts) ·
-[Agent work](#agent-work) · [Media](#media-and-small-pieces)
+[Media](#images-models-and-audio)
 
 ---
 
-## Structure and narrative
-
-### header
-
-Opens a walkthrough. Drawn without a card.
-`title` (required), `eyebrow`, `summary`, `refs: [{ label, ref?, url? }]`.
-
-```artisan-header
-{
-  "eyebrow": "api #5474 · verified against 328b508",
-  "title": "Teach the CLI what dispatch accepts",
-  "summary": "The CLI's broad depot-* classifier cannot prove CI support. This PR derives a policy from backend code.",
-  "refs": [{ "label": "cli #622", "url": "https://github.com/acme/cli/pull/622" }, { "label": "runs-on-labels.ts", "ref": "src/runs-on-labels.ts" }]
-}
-```
+## Structure
 
 ### callout
 
@@ -41,72 +26,6 @@ open). The `title` sits on the callout's label line.
 
 ```artisan-callout
 { "kind": "warning", "title": "Stale copy fails CI", "body": "ci recomputes the policy; --check fails if the committed copy is stale, without writing." }
-```
-
-### cards
-
-Side-by-side cards. `cards: [{ title (required), eyebrow?, body?, code?,
-footer?, tone?, details? }]` (required), `columns` (1–4). Cards with
-`details` expand on click.
-
-```artisan-cards
-{
-  "title": "Two consumers",
-  "cards": [
-    { "eyebrow": "live dispatch", "title": "Resolve, check, dispatch", "body": "Resolve a job's labels, call the shared check, dispatch or throw.", "footer": "size rejection still records architecture first" },
-    { "eyebrow": "static generation", "title": "Iterate the mapping", "body": "Call the same check and emit sorted {label, supported} entries.", "footer": "schema 1 · 138 labels · 99 supported" }
-  ]
-}
-```
-
-### flow
-
-Boxes joined by arrows, ranked by longest path so forks sit side by side.
-`nodes: [{ id, title, body?, code?, ref? }]` (required),
-`edges: [{ from, to, label? }]`, `direction`: `down` (default) · `right`.
-Hovering a node highlights its neighbors.
-
-```artisan-flow
-{
-  "title": "One source, two paths",
-  "nodes": [
-    { "id": "map", "title": "Default label → machine mapping", "code": "runs-on-labels.ts" },
-    { "id": "check", "title": "Shared support check", "code": "ciDispatchMachineSupport(label, machine)" },
-    { "id": "live", "title": "Live dispatch" },
-    { "id": "static", "title": "Static generation" }
-  ],
-  "edges": [{ "from": "map", "to": "check" }, { "from": "check", "to": "live" }, { "from": "check", "to": "static" }]
-}
-```
-
-### steps
-
-A numbered process. `steps: [{ title (required), body?, status?, details? }]`
-(required). Clicking a number marks the step done; steps with `details`
-expand.
-
-```artisan-steps
-{
-  "title": "How a backend change reaches users",
-  "steps": [
-    { "title": "Change labels, mappings, or support gates; regenerate the API json", "status": "done" },
-    { "title": "CI recomputes it", "body": "--check fails if the committed copy is stale." },
-    { "title": "After merge, sync resolves current main", "details": "It reads and validates the file at that exact sha." },
-    { "title": "Review and merge the CLI update, then release" }
-  ]
-}
-```
-
-### before-after
-
-Two states. `before`, `after`: `{ label?, body?, code?, language? }` (both
-required). A toggle switches split and stacked.
-
-```artisan-before-after
-{
-  "before": { "label": "Before", "code": "if (label.startsWith('depot-')) return true;" },
-  "after": { "label": "After", "code": "return ciDispatchMachineSupport(label, machine);" }
-}
 ```
 
 ### compare
@@ -127,65 +46,6 @@ the options). Hovering a column highlights it.
 }
 ```
 
-### decision
-
-A decision record. `choice` (required), `status`: `proposed` · `accepted` ·
-`rejected` · `superseded`, `context`, `options: [{ name, pros?: [string],
-cons?: [string] }]`, `consequences: [string]`.
-
-```artisan-decision
-{
-  "status": "accepted",
-  "context": "Agents want rich output; the Editor is native GPUI.",
-  "options": [
-    { "name": "Embedded web view", "pros": ["Unlimited"], "cons": ["Second visual system", "Sandboxing"] },
-    { "name": "Declarative blocks", "pros": ["Native", "Themed"], "cons": ["Catalog-bound"] }
-  ],
-  "choice": "Declarative blocks",
-  "consequences": ["Each new kind is engineering work", "Replies stay copyable as Markdown"]
-}
-```
-
-### timeline
-
-Events in order. `events: [{ at (required), title (required), body?, tone? }]`
-(required). Hovering an event shows its body.
-
-```artisan-timeline
-{
-  "events": [
-    { "at": "14:02", "title": "Deploy 4812 starts" },
-    { "at": "14:09", "title": "Error rate crosses 2%", "tone": "danger", "body": "Checkout requests time out against the new pool." },
-    { "at": "14:15", "title": "Rolled back", "tone": "success" }
-  ]
-}
-```
-
-### glossary
-
-Terms as chips; hovering one shows its definition.
-`terms: [{ term, definition }]` (required).
-
-```artisan-glossary
-{ "terms": [{ "term": "Dispatch", "definition": "Sending a CI job to a runner machine." }, { "term": "Label", "definition": "The runs-on value a job asks for." }] }
-```
-
-### tabs
-
-One view at a time. `tabs: [{ label, body?, block? }]` (required). `block` is
-a nested rich block whose `type` names its kind.
-
-```artisan-tabs
-{
-  "tabs": [
-    { "label": "Summary", "body": "Turns grew 3x after the launch." },
-    { "label": "Numbers", "block": { "type": "stats", "tiles": [{ "label": "turns", "value": "24.0M" }, { "label": "installs", "value": "85.0k" }] } }
-  ]
-}
-```
-
----
-
 ## Code and repository
 
 ### code-ref
@@ -199,9 +59,9 @@ The excerpt is numbered from the ref's first line; the path opens the file.
 
 ### annotated-code
 
-Code with margin notes. `code` (required), `language`, `path`, `start_line`
-(default 1), `notes: [{ lines: 4 | "3-5", text }]`. Hovering a note
-highlights its lines.
+Code with numbered notes under it. `code` (required), `language`, `path`,
+`start_line` (default 1), `notes: [{ lines: 4 | "3-5", text }]`. Hovering a
+note highlights its lines.
 
 ```artisan-annotated-code
 {
@@ -209,20 +69,6 @@ highlights its lines.
   "start_line": 40,
   "code": "let pool = Pool::new(cfg)?;\nlet conn = pool.get().await?;\nconn.execute(sql).await?;",
   "notes": [{ "lines": 41, "text": "Waits forever when the pool is exhausted." }, { "lines": "40-41", "text": "The pool is rebuilt per request." }]
-}
-```
-
-### diff
-
-A focused change. `path` (required), `summary`, and `patch` (unified diff
-text) or `hunks: [{ header?, lines: [string] }]` with lines starting `+`,
-`-`, or a space.
-
-```artisan-diff
-{
-  "path": "src/pool.rs",
-  "summary": "Share one pool and bound the wait.",
-  "hunks": [{ "header": "@@ -40,3 +40,3 @@", "lines": ["-let pool = Pool::new(cfg)?;", "+let pool = state.pool.clone();", "-let conn = pool.get().await?;", "+let conn = timeout(WAIT, pool.get()).await??;", " conn.execute(sql).await?;"] }]
 }
 ```
 
@@ -234,110 +80,6 @@ deleted · renamed, note? }]` (required). Directories collapse; files open.
 ```artisan-file-tree
 { "entries": [{ "path": "src/pool.rs", "change": "modified" }, { "path": "src/state.rs", "change": "modified", "note": "Holds the shared pool" }, { "path": "tests/pool_timeout.rs", "change": "added" }] }
 ```
-
-### symbol-graph
-
-Calls and dependencies around one symbol. `nodes: [{ id, label?, kind? }]`
-(required), `edges: [{ from, to, label? }]`, `focus` (a node id).
-
-```artisan-symbol-graph
-{
-  "focus": "check",
-  "nodes": [{ "id": "dispatch", "label": "dispatchJob" }, { "id": "generate", "label": "generatePolicy" }, { "id": "check", "label": "ciDispatchMachineSupport" }],
-  "edges": [{ "from": "dispatch", "to": "check" }, { "from": "generate", "to": "check" }]
-}
-```
-
-### architecture
-
-Modules and boundaries. `groups: [{ id, label, nodes: [{ id, label? }] }]`,
-`nodes` (ungrouped), `edges: [{ from, to, label? }]`.
-
-```artisan-architecture
-{
-  "groups": [
-    { "id": "backend", "label": "Backend", "nodes": [{ "id": "api", "label": "API" }, { "id": "policy", "label": "Policy" }] },
-    { "id": "cli", "label": "CLI", "nodes": [{ "id": "sync", "label": "Sync" }] }
-  ],
-  "edges": [{ "from": "api", "to": "policy" }, { "from": "sync", "to": "api", "label": "reads json" }]
-}
-```
-
-### sequence
-
-Messages between actors. `actors: [string]` (required), `messages: [{ from,
-to, text, kind?: sync · async · reply }]` (required).
-
-```artisan-sequence
-{
-  "actors": ["CLI", "API", "Runner"],
-  "messages": [
-    { "from": "CLI", "to": "API", "text": "dispatch(job)" },
-    { "from": "API", "to": "Runner", "text": "start", "kind": "async" },
-    { "from": "API", "to": "CLI", "text": "202 Accepted", "kind": "reply" }
-  ]
-}
-```
-
-### state-machine
-
-States and transitions. `initial` (required), `states: [{ id, label? }]`,
-`final: [id]`, `transitions: [{ from, to, event? }]`.
-
-```artisan-state-machine
-{
-  "initial": "queued",
-  "states": [{ "id": "queued" }, { "id": "running" }, { "id": "done" }, { "id": "failed" }],
-  "final": ["done", "failed"],
-  "transitions": [{ "from": "queued", "to": "running", "event": "claim" }, { "from": "running", "to": "done", "event": "exit 0" }, { "from": "running", "to": "failed", "event": "exit ≠ 0" }]
-}
-```
-
-### schema
-
-Tables or types and their relations. `entities: [{ name, fields: [{ name,
-type, key?: pk · fk, note? }] }]` (required), `relations: [{ from, to,
-cardinality?, label? }]`.
-
-```artisan-schema
-{
-  "entities": [
-    { "name": "thread", "fields": [{ "name": "id", "type": "uuid", "key": "pk" }, { "name": "title", "type": "text" }] },
-    { "name": "turn", "fields": [{ "name": "id", "type": "uuid", "key": "pk" }, { "name": "thread_id", "type": "uuid", "key": "fk" }] }
-  ],
-  "relations": [{ "from": "thread", "to": "turn", "cardinality": "one-to-many" }]
-}
-```
-
-### api
-
-A surface listing. `entries: [{ signature (required), method?, summary?,
-params?: [{ name, type?, required?, doc? }], returns? }]` (required).
-Entries expand; signatures copy on click.
-
-```artisan-api
-{ "entries": [{ "method": "POST", "signature": "/v1/dispatch", "summary": "Queue a job.", "params": [{ "name": "label", "type": "string", "required": true }], "returns": "202 with a job id" }] }
-```
-
-### test-matrix
-
-Cases and results; status chips filter. Either `cases: [{ name, status,
-detail? }]`, or `columns: [string]` with `rows: [{ name, results: [status] }]`.
-
-```artisan-test-matrix
-{ "columns": ["linux", "macos", "windows"], "rows": [{ "name": "dispatch_accepts_ubuntu", "results": ["pass", "pass", "pass"] }, { "name": "rejects_large_machines", "results": ["pass", "fail", "skip"] }] }
-```
-
-### command
-
-A command to run. `command` (required), `cwd`, `description`, `output`,
-`exit_code`. The command copies on click; long output collapses.
-
-```artisan-command
-{ "command": "cargo test -p artisan-ui rich", "description": "Run the rich block tests.", "output": "test result: ok. 42 passed", "exit_code": 0 }
-```
-
----
 
 ## Data and charts
 
@@ -414,6 +156,18 @@ Histogram and cdf modes get a threshold slider.
 { "mode": "cdf", "unit": "s", "threshold": 60, "series": [{ "name": "Claude Code", "values": [12, 20, 33, 41, 45, 60, 75, 120, 300] }, { "name": "Codex", "values": [30, 55, 80, 93, 110, 150, 220, 400] }] }
 ```
 
+### concentration
+
+How lopsided a total is across items: ranks items largest first and draws
+the cumulative share of the total against the share of items, beside the
+even-spread diagonal. Answers "the top 10% of installs send 65% of turns".
+`values: [number]` (required, one per item), `items` (plural noun),
+`total` (plural noun), `highlight` (share of items to call out, default 0.1).
+
+```artisan-concentration
+{ "title": "The top 10% of installs send 65% of turns", "subtitle": "Turns per install, last 28 days.", "items": "installs", "total": "turns", "highlight": 0.1, "values": [900, 420, 310, 120, 80, 60, 45, 30, 22, 18, 15, 12, 10, 9, 7, 6, 5, 4, 3, 2] }
+```
+
 ### funnel
 
 Conversion through steps. `steps: [{ label, value }]` (required).
@@ -431,152 +185,112 @@ Flows between categories. `links: [{ from, to, value }]` (required),
 { "links": [{ "from": "Turns", "to": "Claude", "value": 60 }, { "from": "Turns", "to": "Codex", "value": 40 }, { "from": "Claude", "to": "Completed", "value": 55 }, { "from": "Claude", "to": "Failed", "value": 5 }, { "from": "Codex", "to": "Completed", "value": 36 }, { "from": "Codex", "to": "Failed", "value": 4 }] }
 ```
 
-### table
+### hierarchy
 
-Rows of data. `columns: [{ key, label?, align?: left · right, kind?: text ·
-number }]` (required), `rows: [object]` (required), `page_size` (default 20).
-Headers sort; pages step.
+What a total is made of, nested: disk use, bundle size, time in a profile.
+The spec is the root node, `{ name?, value?, children?: [node] }`, nested to
+any depth; a node's size is its `value` or its children's sum, whichever is
+larger (the difference is its own share, such as self time). `layout`:
+`treemap` (default), `icicle`, or `flame` (an upside-down icicle, for
+profiles). `unit` labels sizes; `depth` sets how many levels show below the
+focus (treemap 2, others 6). The reader clicks a group to zoom in.
 
-```artisan-table
-{
-  "columns": [{ "key": "model", "label": "Model" }, { "key": "turns", "label": "Turns", "kind": "number" }, { "key": "share", "label": "Share", "kind": "number" }],
-  "rows": [{ "model": "Opus 5.5", "turns": 12200000, "share": 51 }, { "model": "GPT-6.x", "turns": 6700000, "share": 28 }, { "model": "Fable 5.x", "turns": 960000, "share": 4 }]
-}
+```artisan-hierarchy
+{ "title": "Charts are a third of the renderer", "subtitle": "Lines of Rust under modules/ui/src/markdown_renderer.", "name": "markdown_renderer", "unit": "lines", "children": [{ "name": "rich", "children": [{ "name": "charts", "children": [{ "name": "chart", "value": 1492 }, { "name": "distribution", "value": 852 }, { "name": "sankey", "value": 765 }, { "name": "frame.rs", "value": 440 }, { "name": "heatmap.rs", "value": 387 }] }, { "name": "media", "children": [{ "name": "color.rs", "value": 720 }, { "name": "image_compare.rs", "value": 560 }] }, { "name": "code", "value": 1100 }, { "name": "narrative", "value": 600 }] }, { "name": "prepared.rs", "value": 900 }, { "name": "table.rs", "value": 520 }, { "name": "inline.rs", "value": 410 }] }
 ```
 
-### perf
-
-Before and after. `unit` (required), `rows: [{ name, before, after }]`
-(required), `lower_is_better` (default true). A toggle shows percent change.
-
-```artisan-perf
-{ "unit": "ms", "rows": [{ "name": "first paint", "before": 182, "after": 121 }, { "name": "scroll frame p99", "before": 14.2, "after": 9.8 }] }
+```artisan-hierarchy
+{ "title": "Most of a turn is waiting on the model", "subtitle": "Wall time of one turn, ms.", "layout": "flame", "name": "turn", "unit": "ms", "value": 4200, "children": [{ "name": "stream", "value": 3600, "children": [{ "name": "first token", "value": 1400 }, { "name": "tokens", "value": 2100 }] }, { "name": "tools", "value": 450, "children": [{ "name": "read", "value": 180 }, { "name": "grep", "value": 220 }] }, { "name": "render", "value": 120 }] }
 ```
 
----
+### spans
 
-## Agent work
+Intervals on a shared time axis. `spans: [{ label, start, end, lane?,
+group? }]` (required); `start`/`end` are numbers in `unit` or ISO dates
+(`"2026-10-07"`), not mixed. Without `lane`s every span gets its own row
+(a request waterfall); with lanes, spans in a lane share its row and
+overlapping ones stack beneath (a Gantt chart, swimlanes, or a flame chart
+of trace spans). Bars color by `group`, else lane. `markers: [{ at, label }]`
+draw labelled rules (a deadline, "today", an incident).
 
-### checklist
-
-Acceptance criteria that tick locally. `items: [{ text, done?, note? }]`
-(required).
-
-```artisan-checklist
-{ "items": [{ "text": "Policy derives from backend code", "done": true }, { "text": "CI fails on a stale copy", "done": true }, { "text": "CLI release notes updated" }] }
+```artisan-spans
+{ "title": "TLS is the slowest step", "subtitle": "One cold request, ms.", "unit": "ms", "spans": [{ "label": "DNS", "start": 0, "end": 24 }, { "label": "Connect", "start": 24, "end": 61 }, { "label": "TLS", "start": 61, "end": 180 }, { "label": "Request", "start": 180, "end": 196 }, { "label": "Wait", "start": 196, "end": 302 }, { "label": "Download", "start": 302, "end": 340 }] }
 ```
 
-### progress
-
-A status snapshot; re-emit to update. `items: [{ label, status, detail?,
-progress?: 0..1 }]` (required).
-
-```artisan-progress
-{ "items": [{ "label": "pull request #5474", "status": "active", "detail": "2 checks running", "progress": 0.6 }, { "label": "pull request #622", "status": "pending" }] }
+```artisan-spans
+{ "title": "Sync ships before the Marketplace UI", "markers": [{ "at": "2026-10-07", "label": "Today" }], "spans": [{ "label": "Store and links", "lane": "Backend", "start": "2026-09-28", "end": "2026-10-03", "group": "Done" }, { "label": "Engine sync", "lane": "Backend", "start": "2026-10-03", "end": "2026-10-10", "group": "In progress" }, { "label": "Marketplace", "lane": "Frontend", "start": "2026-10-06", "end": "2026-10-16", "group": "In progress" }, { "label": "Review", "lane": "Frontend", "start": "2026-10-14", "end": "2026-10-18", "group": "Planned" }] }
 ```
 
-### verification
+## Images, models, and audio
 
-What was checked. `checks: [{ name, status, evidence? }]` (required),
-`subject`, `commit`. Checks with evidence expand.
-
-```artisan-verification
-{ "subject": "api #5474", "commit": "328b508", "checks": [{ "name": "cargo test", "status": "pass", "evidence": "412 passed, 0 failed" }, { "name": "policy json is current", "status": "pass" }, { "name": "manual dispatch on macos", "status": "skip", "evidence": "No macOS runner available." }] }
-```
-
-### risks
-
-Risks and mitigations, sorted by severity. `risks: [{ title, severity: low ·
-medium · high · critical, likelihood?: low · medium · high, mitigation? }]`
-(required).
-
-```artisan-risks
-{ "risks": [{ "title": "Old CLIs reject new labels", "severity": "high", "likelihood": "medium", "mitigation": "Ship the CLI update before the backend flag." }, { "title": "Policy json drifts", "severity": "medium", "likelihood": "low", "mitigation": "CI --check." }] }
-```
-
-### choice
-
-A question the reader answers; picking sends the option's label as their
-reply. Put it last. `question` (required), `options: [{ label (required),
-description?, pros?: [string], cons?: [string], recommended?: bool }]`
-(required).
-
-```artisan-choice
-{
-  "question": "How should agents render rich output?",
-  "options": [
-    { "label": "Native blocks", "description": "Declarative JSON drawn natively.", "pros": ["Themed", "Safe"], "recommended": true },
-    { "label": "Embedded HTML", "description": "A sandboxed web view per artifact.", "cons": ["Second visual system"] }
-  ]
-}
-```
-
-### log
-
-A log excerpt. `text` or `lines: [string]` (one required), `highlight:
-[line number]` (1-based). Level chips filter; long logs collapse.
-
-```artisan-log
-{ "lines": ["INFO pool: created 8 connections", "WARN pool: wait exceeded 5s", "ERROR checkout: timed out after 30s"], "highlight": [3] }
-```
-
----
-
-## Media and small pieces
+Every `src` is a path relative to the project, an absolute path, a
+`file://` URI, or an `http(s)` URL (images only).
 
 ### image
 
-An image with numbered callouts at fractional positions. `src` (required,
-project path or URL), `alt`, `width`/`height` (aspect hints),
-`callouts: [{ x: 0..1, y: 0..1, label?, text }]`.
+Show an image the reply is about: a screenshot you took, a plot you
+rendered, a generated asset. Images keep their own size, capped in height.
+`src` (required unless `images`), `alt`; or `images: [{ src, alt?, caption? }]`
+for a few side by side; `width?`, `height?`: the size hint used until a
+single image loads.
 
 ```artisan-image
-{ "src": "docs/assets/composer.png", "alt": "The composer", "callouts": [{ "x": 0.12, "y": 0.2, "text": "Project tab" }, { "x": 0.5, "y": 0.2, "text": "Goal strip" }] }
+{ "src": "docs/assets/after.png", "alt": "The settings page after the fix" }
 ```
 
 ### image-compare
 
-Drag the divider between two images. `before`, `after`: `{ src, label? }`
-(both required).
+Two images of the same thing: a screenshot before and after a UI change, two
+renders, two plots. Both share one frame at the wider image's ratio. The
+reader can switch between a draggable slider, side by side, a click-to-flip
+toggle, and a blend. `before`, `after`: `{ src, label? }` (both required);
+`mode?`: `slider` (default), `side-by-side`, `toggle`, `blend`; `width?`,
+`height?`: the size hint used until the images load.
 
 ```artisan-image-compare
 { "before": { "src": "docs/assets/before.png", "label": "Before" }, "after": { "src": "docs/assets/after.png", "label": "After" } }
 ```
 
-### swatches
+### model
 
-Colors and tokens; clicking copies the value. `swatches: [{ name, value,
-note? }]` (required), `value` as `#rrggbb`, `#rrggbbaa`, `oklch(l c h)`, or
-`rgb(r, g, b)`.
+A 3D model the reader can turn: a mesh you exported, generated, or are
+discussing. It draws on a transparent canvas in a neutral clay (or the
+file's own material and vertex colours) under studio lighting. The reader
+drags to orbit, Shift-drags to pan, Ctrl-scrolls to zoom, double-clicks to
+reset, and switches between shaded and wireframe. Reads OBJ, binary FBX,
+STL (binary and ASCII), PLY, and glTF: `.glb`, or `.gltf` with its buffers
+embedded. Textures are not drawn. Local files only, at most 12 MiB.
+`src` (required); `name?` (else the file name); `format?`: `obj`, `fbx`,
+`stl`, `ply`, `gltf` (`glb`), when the content is ambiguous; `up?`: `y` or
+`z`, when the model lies on its side (STL defaults to `z`, FBX reads its
+own setting, the rest `y`); `color?`: a CSS colour for uncoloured surfaces;
+`shading?`: `shaded` (default) or `wireframe`; `yaw?`, `pitch?`: the
+opening view in degrees (default 30 and 18); `width?`, `height?`: the
+frame's aspect (default 16:10).
 
-```artisan-swatches
-{ "swatches": [{ "name": "surface-800", "value": "oklch(0.274 0.006 286.033)" }, { "name": "accent", "value": "#7c5cff", "note": "Links and focus" }] }
+```artisan-model
+{ "src": "exports/gearbox.glb", "title": "The redesigned gearbox housing", "up": "z" }
 ```
 
-### math
+### audio
 
-A formula. `tex` (required), `display` (default true): Greek letters,
-operators, arrows, `^`, `_`, `\frac`, `\sqrt`, `\sum`, `\prod`, `\int`,
-`\lim`, `\text`, `\mathbb`, `\mathbf`. Remember JSON escaping: `\\frac`.
+Audio files the reader can play in place: a rendered sound, a recording, a
+text-to-speech take. Each track is a row with a play button and a seekable
+progress line; one track plays at a time. Local files only (mp3, wav, flac,
+ogg). `src` (required unless `tracks`), `name`; or
+`tracks: [{ src, name? }]`.
 
-```artisan-math
-{ "tex": "p_{99} = \\frac{\\sum_{i} w_i x_i}{\\sum_{i} w_i}" }
+```artisan-audio
+{ "tracks": [{ "src": "out/notify.wav", "name": "Notification, v2" }, { "src": "out/notify-old.wav", "name": "Notification, v1" }] }
 ```
 
-### chips
+### Colours are not a block
 
-A row of small labels, drawn without a card. `chips: [{ label, kind?: status
-· kbd · file · commit · person · tag, tone? }]` (required).
-
-```artisan-chips
-{ "chips": [{ "label": "merged", "kind": "status", "tone": "success" }, { "label": "⌘K", "kind": "kbd" }, { "label": "src/pool.rs", "kind": "file" }, { "label": "328b508", "kind": "commit" }] }
-```
-
-### footnotes
-
-Sources and citations; linked notes open. `notes: [{ text, title?, url?,
-id? }]` (required).
-
-```artisan-footnotes
-{ "notes": [{ "text": "Telemetry export, Jul 6 – Oct 2.", "title": "Turn events", "url": "https://example.com/telemetry" }, { "text": "Local time is each user's own time zone." }] }
-```
+Write colour values straight into the reply. A value on its own (in a
+sentence, a table cell, or alone in backticks: `#7c5cff`,
+`oklch(0.7 0.15 250)`) draws as a colour square in place of the text; a
+value inside longer code (`color: #333;`, a CSS fence) gets a square
+before it. The reader right-clicks any of them to copy it as written or as
+HEX, RGB, HSL, OKLCH, OKLab, or Display P3. Because a lone value shows only
+its square, name the colour beside it when the reader needs the value too
+(a palette table with a name column, or the value in a code snippet).

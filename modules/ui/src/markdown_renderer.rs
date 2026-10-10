@@ -26,6 +26,9 @@
 //! surrounding message to raw source, so emphasis, lists, and headings
 //! beside it keep rendering.
 //!
+//! Closed `mermaid` fences draw as diagrams on the same card (see
+//! [`diagram`]); source the diagram renderer rejects stays code.
+//!
 //! Tables render as a native content-sized grid (see [`table`]).
 //!
 //! Lists render as native stacked rows with muted markers (`•` or `1.`)
@@ -83,8 +86,10 @@ use crate::selectable_text::SelectableText;
 use crate::theme::{ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens};
 
 mod code_copy;
+mod diagram;
 mod inline;
 mod prepared;
+mod rich;
 mod table;
 
 use code_copy::CodeCopyButton;
@@ -93,6 +98,10 @@ pub(crate) use prepared::PreparedMarkdown;
 use prepared::{
     LeafPresentation, PreparedBlock, PreparedBlocks, PreparedCode, PreparedKind, PreparedLeaf,
     PreparedList, ROOT_SLOT, Slot,
+};
+pub use rich::{
+    CopyEntry, CopyKind, ImageShowcase, MediaFetch, MediaFetcher, MediaRequest, MediaRoot,
+    OpenReference, ShowCopyMenu,
 };
 
 /// Synchronous renderer for accepted Markdown message bodies.
@@ -121,6 +130,7 @@ impl MarkdownRenderer {
     /// invalid.
     #[must_use]
     pub fn new() -> Self {
+        diagram::warm_up();
         Self {
             engine: MarkdownEngine::new()
                 .expect("the built-in Markdown classifier selectors must remain valid"),
@@ -485,7 +495,7 @@ fn body_container(theme: &ArtisanTheme, tone: MarkdownBodyTone) -> Div {
         .text_size(px(ProseTypography::BODY_SIZE_PX))
         .line_height(px(ProseTypography::BODY_LINE_PX))
         .font_weight(ProseTypography::BODY_WEIGHT)
-        .letter_spacing(px(ProseTypography::BODY_TRACKING_PX))
+        .tracking(ProseTypography::TRACKING_EM)
         .text_color(markdown_body_text_color(tone, *theme).to_paint())
         .whitespace_normal()
 }
@@ -842,10 +852,26 @@ fn selectable_leaf(
     } else {
         Rc::from(apply_reveal_fade(&highlights, fade))
     };
-    let element = SelectableText::retained(id, presentation.text.clone(), *theme, Vec::new())
+    let mut element = SelectableText::retained(id, presentation.text.clone(), *theme, Vec::new())
         .with_shared_highlights(highlights)
         .with_shared_text_run_overrides(overrides)
         .with_inline_images(icons);
+    if !presentation.color_ranges.is_empty() {
+        // A color value the reply wrote shows as a swatch and copies in
+        // every notation.
+        let values = Rc::clone(&presentation.color_values);
+        element = element
+            .with_inline_swatches(Rc::clone(&presentation.swatches))
+            .with_copy_substitutions(Rc::clone(&presentation.copies))
+            .shared_context_ranges(
+                Rc::clone(&presentation.color_ranges),
+                move |index, position, window, cx| {
+                    if let Some(value) = values.get(index) {
+                        rich::show_copy_menu(position, rich::color_copy_entries(value), window, cx);
+                    }
+                },
+            );
+    }
     if presentation.link_ranges.is_empty() {
         return element.into_any_element();
     }
@@ -1034,6 +1060,19 @@ const CODE_COPY_SIZE_PX: f32 = 32.0;
 fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     let theme = render.theme;
     let fence = &code.fence;
+    let note = match &fence.rich {
+        Some(rich::RichFence::Ready(prepared)) => return render_rich(code, prepared, render),
+        Some(rich::RichFence::Pending { kind }) => {
+            // Most blocks draw without a card, so the placeholder has none.
+            return div()
+                .w_full()
+                .py(px(4.0))
+                .child(rich::render_pending(kind, theme))
+                .into_any_element();
+        }
+        Some(rich::RichFence::Invalid { note }) => Some(note.clone()),
+        None => None,
+    };
     let source = fence.source.clone();
     let highlights = fence.highlights(theme);
     let selector = render.id(code.code);
@@ -1073,6 +1112,11 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
         RadiusTokens::nested(radius, px(CODE_COPY_INSET_PX)),
         *theme,
     ));
+    let text_id = render.id(code.text);
+    let diagram = fence
+        .diagram
+        .then(|| diagram::mermaid_diagram(&fence.source, theme))
+        .flatten();
     let mut code = body_container(theme, MarkdownBodyTone::Muted)
         .relative()
         .font_family(theme.typography.mono.family)
@@ -1085,16 +1129,147 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
         .rounded(radius)
         .shadow(glass_card_shadows())
         .p(px(ProseTypography::CODE_PAD_PX))
-        .pr(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
+        .child(glass_material_layer(GlassStrength::Quiet, radius))
+        .child(glass_highlight_layer(GlassStrength::Quiet, radius));
+    code = match diagram {
+        // The diagram centers between gutters as wide as the copy action's,
+        // and claims its laid-out aspect before the image rasterizes, so
+        // the card never resizes under the transcript.
+        Some(diagram) => code
+            .px(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(diagram.width))
+                    .aspect_ratio(diagram.width / diagram.height)
+                    .child(img(Arc::clone(&diagram.image)).size_full()),
+            ),
+        None => code
+            .pr(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
+            .child(fence_text(text_id, fence, highlights, theme)),
+    };
+    code = code.child(copy);
+    code = code.debug_selector(move || selector.to_string());
+    match note {
+        // A rich fence that could not draw says why under its code.
+        Some(note) => div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .child(code)
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(note),
+            )
+            .into_any_element(),
+        None => code.into_any_element(),
+    }
+}
+
+/// A fence's selectable text: its drawn body, a swatch before each color
+/// value that copies in every notation on a right-click.
+fn fence_text(
+    id: SharedString,
+    fence: &prepared::PreparedFence,
+    highlights: Rc<[(Range<usize>, HighlightStyle)]>,
+    theme: &ArtisanTheme,
+) -> SelectableText {
+    let text = SelectableText::retained(id, fence.shown.clone(), *theme, Vec::new())
+        .with_shared_highlights(highlights);
+    let colors = &fence.colors;
+    if colors.ranges.is_empty() {
+        return text;
+    }
+    let values = Rc::clone(&colors.values);
+    text.with_inline_swatches(Rc::clone(&colors.swatches))
+        .with_copy_substitutions(Rc::clone(&colors.copies))
+        .shared_context_ranges(
+            Rc::clone(&colors.ranges),
+            move |index, position, window, cx| {
+                if let Some(value) = values.get(index) {
+                    rich::show_copy_menu(position, rich::color_copy_entries(value), window, cx);
+                }
+            },
+        )
+}
+
+/// A rich block: code on the fence's glass card with its copy action,
+/// everything else on the transcript.
+fn render_rich(
+    code: &PreparedCode,
+    prepared: &rich::Prepared,
+    render: &RenderContext<'_>,
+) -> AnyElement {
+    let cx = rich::BlockContext {
+        theme: render.theme,
+        id: render.id(code.code),
+    };
+    let content = rich::render_content(prepared, &cx);
+    let padding = match prepared.chrome() {
+        rich::Chrome::Card => return rich_card(code, render, content, prepared.copy()),
+        rich::Chrome::Open => 4.0,
+        rich::Chrome::Bare => 0.0,
+    };
+    let selector = render.id(code.code);
+    div()
+        .w_full()
+        .min_w_0()
+        .py(px(padding))
+        .text_color(render.theme.colors.foreground.to_paint())
+        .child(content)
+        .debug_selector(move || selector.to_string())
+        .into_any_element()
+}
+
+/// The fence's glass card around `content`, with the copy action in its
+/// corner when there is something to copy.
+fn rich_card(
+    code: &PreparedCode,
+    render: &RenderContext<'_>,
+    content: AnyElement,
+    copy: Option<SharedString>,
+) -> AnyElement {
+    let theme = render.theme;
+    let selector = render.id(code.code);
+    let radius = RadiusTokens::value(RadiusStep::X2l);
+    let card = div()
+        .relative()
+        .w_full()
+        .min_w_0()
+        .text_color(theme.colors.foreground.to_paint())
+        .bg(glass_foreground_base(theme))
+        .rounded(radius)
+        .shadow(glass_card_shadows())
+        .p(px(ProseTypography::CODE_PAD_PX))
         .child(glass_material_layer(GlassStrength::Quiet, radius))
         .child(glass_highlight_layer(GlassStrength::Quiet, radius))
-        .child(
-            SelectableText::retained(render.id(code.text), source, *theme, Vec::new())
-                .with_shared_highlights(highlights),
-        )
-        .child(copy);
-    code = code.debug_selector(move || selector.to_string());
-    code.into_any_element()
+        .child(div().relative().w_full().min_w_0().child(content));
+    let card = match copy {
+        Some(source) => card
+            .pr(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(CODE_COPY_INSET_PX))
+                    .right(px(CODE_COPY_INSET_PX))
+                    .child(CodeCopyButton::new(
+                        render.id(code.copy),
+                        render.id(code.copy_state),
+                        source,
+                        RadiusTokens::nested(radius, px(CODE_COPY_INSET_PX)),
+                        *theme,
+                    )),
+            ),
+        None => card,
+    };
+    card.debug_selector(move || selector.to_string())
+        .into_any_element()
 }
 
 /// The fence body as displayed: without the line terminator that ends its

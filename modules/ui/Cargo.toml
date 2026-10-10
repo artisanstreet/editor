@@ -7,10 +7,18 @@ version.workspace = true
 
 [dependencies]
 artisan-assets = { path = "../assets" }
+artisan-audio = { path = "../audio" }
+base64.workspace = true
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] } # workspace-absent
 gpui.workspace = true
+image = { version = "=0.25.10", default-features = false } # workspace-absent
+mermaid-rs-renderer.workspace = true
 pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
+unicode-segmentation.workspace = true
 
 [lints]
 workspace = true
@@ -58,6 +66,10 @@ path = "../../tests/ui/button.rs"
 [[test]]
 name = "markdown_seam"
 path = "../../tests/ui/markdown_seam.rs"
+
+[[test]]
+name = "rich_blocks"
+path = "../../tests/ui/rich_blocks.rs"
 
 [[test]]
 name = "markdown_table"

@@ -46,9 +46,7 @@ pub(super) fn render_table(
         .min_w_0()
         .text_size(px(ProseTypography::TABLE_SIZE_PX))
         .line_height(px(ProseTypography::TABLE_LINE_PX))
-        .letter_spacing(px(ProseTypography::body_tracking_px(
-            ProseTypography::TABLE_SIZE_PX,
-        )));
+        .tracking(ProseTypography::TRACKING_EM);
 
     let last_row = prepared.rows.len().saturating_sub(1);
     for (row_index, cells) in prepared.rows.iter().enumerate() {
