@@ -516,6 +516,21 @@ source_path = "svg/tabler/alert-triangle.svg"
 sha256 = "d7ace98a3674411065cd37840d9ba3daaac4d1042d408346dba4b21c8f50d0c0"
 
 [[asset]]
+id = "tabler.archive"
+family = "tabler"
+name = "archive"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/archive.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/archive.svg"
+sha256 = "993279cdd76092ac28d4f4d78963eae8f531b425eaf1977449cea0b130d0b703"
+
+[[asset]]
 id = "tabler.arrow-bar-to-down"
 family = "tabler"
 name = "arrow-bar-to-down"
@@ -951,6 +966,21 @@ source_path = "svg/tabler/file-search.svg"
 sha256 = "c0dc20a657edcc367d7efd141573915e5523b9264e8c5a1e6a1db569771d060a"
 
 [[asset]]
+id = "tabler.file-spark"
+family = "tabler"
+name = "file-spark"
+origin_kind = "package"
+origin_package = "@tabler/icons"
+origin_version = "3.45.0"
+origin_path = "icons/outline/file-spark.svg"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/file-spark.svg"
+sha256 = "6e5cafab7447feba0455b0c12f2852e52fa72ce78f833722bf91ba98b0799872"
+
+[[asset]]
 id = "tabler.file-text"
 family = "tabler"
 name = "file-text"
@@ -1221,6 +1251,21 @@ source_path = "svg/tabler/pencil.svg"
 sha256 = "147c26f269778b9570425da6136db0ea7caa2c818ab61290fdb8a709ded739df"
 
 [[asset]]
+id = "tabler.player-pause-filled"
+family = "tabler"
+name = "player-pause-filled"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-pause-filled.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-pause-filled.svg"
+sha256 = "4ab80046f9dcc69e395a4f73e0342ec8e99998de6c7f3afe7d10c410f8cad057"
+
+[[asset]]
 id = "tabler.player-play"
 family = "tabler"
 name = "player-play"
@@ -1234,6 +1279,21 @@ view_box = "0 0 24 24"
 monochrome = true
 source_path = "svg/tabler/player-play.svg"
 sha256 = "79683cf3e99eb915f56eeb6986a601621c36f38ce6d3129b0d862178ebaaaf6a"
+
+[[asset]]
+id = "tabler.player-play-filled"
+family = "tabler"
+name = "player-play-filled"
+origin_kind = "package"
+origin_package = "@tabler/icons-svelte"
+origin_version = "3.44.0"
+origin_path = "dist/icons/player-play-filled.svelte"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/player-play-filled.svg"
+sha256 = "bb4162af889e937684a71ffa61cf6da29cd594f97deef662b5beed289d80d7ef"
 
 [[asset]]
 id = "tabler.player-stop-filled"
@@ -1279,6 +1339,21 @@ view_box = "0 0 24 24"
 monochrome = true
 source_path = "svg/tabler/player-track-prev.svg"
 sha256 = "252bdeea5234c49a1274a5c6ecea7b09ff7470be5e6c343f8f3c406738752cc9"
+
+[[asset]]
+id = "tabler.plug-connected"
+family = "tabler"
+name = "plug-connected"
+origin_kind = "package"
+origin_package = "@tabler/icons"
+origin_version = "3.45.0"
+origin_path = "icons/outline/plug-connected.svg"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/plug-connected.svg"
+sha256 = "d2ee92955d6b6c3bd19df0a2859c859c90e8b0adc7006ffd8ef2f72fa652ff4d"
 
 [[asset]]
 id = "tabler.question-mark"
@@ -1444,6 +1519,21 @@ view_box = "0 0 24 24"
 monochrome = true
 source_path = "svg/tabler/star-filled.svg"
 sha256 = "e69b19a0b3e1f57652323926ef1b6910f271737d50a42625cfa9f433b1b53f1b"
+
+[[asset]]
+id = "tabler.target-arrow"
+family = "tabler"
+name = "target-arrow"
+origin_kind = "package"
+origin_package = "@tabler/icons"
+origin_version = "3.45.0"
+origin_path = "icons/outline/target-arrow.svg"
+license_spdx = "MIT"
+license_file = "licenses/tabler-MIT.txt"
+view_box = "0 0 24 24"
+monochrome = true
+source_path = "svg/tabler/target-arrow.svg"
+sha256 = "a25714d625da764502cb6351d002a9c029aa09a1258602f18dbd85cb1f72c455"
 
 [[asset]]
 id = "tabler.terminal-2"
@@ -1829,6 +1919,14 @@ sites = ["modules/frontend/src/routes/components/conversation-trace.svelte"]
 assets = ["tabler.file-x"]
 
 [[use]]
+id = "tabler.target-arrow"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/native_composer/goal_strip.rs"]
+assets = ["tabler.target-arrow"]
+
+[[use]]
 id = "tabler.folder"
 channel = "tabler-direct"
 reachability = "shipped"
@@ -1939,6 +2037,14 @@ reachability = "shipped"
 classification = "static-vendored"
 sites = ["modules/frontend/src/routes/components/settings/nav.svelte"]
 assets = ["tabler.palette"]
+
+[[use]]
+id = "tabler.archive"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/native_application/impl_thread_menu.rs"]
+assets = ["tabler.archive"]
 
 [[use]]
 id = "tabler.pencil"
@@ -2315,3 +2421,19 @@ reachability = "dormant"
 classification = "dormant"
 sites = ["modules/frontend/src/routes/components/opencode-icon.svelte"]
 assets = []
+
+[[use]]
+id = "tabler.plug-connected"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/composer_mentions.rs"]
+assets = ["tabler.plug-connected"]
+
+[[use]]
+id = "tabler.file-spark"
+channel = "tabler-direct"
+reachability = "shipped"
+classification = "static-vendored"
+sites = ["modules/frontend/src/composer_mentions.rs"]
+assets = ["tabler.file-spark"]

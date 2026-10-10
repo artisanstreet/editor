@@ -1,3 +1,3 @@
-Test Founders Grotesk Bold, Klim Type Foundry test font.
-User-supplied desktop OTF from KlimTestFonts/Test desktop fonts (Static, OTF)/Test Founders Grotesk Collection/Test Founders Grotesk/TestFoundersGrotesk-Bold.otf.
+Test Founders Grotesk Semibold and Bold, Klim Type Foundry test fonts.
+User-supplied desktop OTF from KlimTestFonts/Test desktop fonts (Static, OTF)/Test Founders Grotesk Collection/Test Founders Grotesk/TestFoundersGrotesk-Semibold.otf and TestFoundersGrotesk-Bold.otf.
 Included for local font evaluation at the user's request. This provenance note does not grant redistribution or production rights.

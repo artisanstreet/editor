@@ -105,11 +105,14 @@ pub const ALL: &[BundledFont] = &[
     BundledFont {
         file_name: "test-founders-grotesk-bold.otf",
         family: "Test Founders Grotesk",
-        weights: (700, 700),
+        weights: (600, 700),
         license_path: "licenses/founders-grotesk-test.txt",
         license_text: include_str!("../licenses/founders-grotesk-test.txt"),
         bytes: include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
-        static_faces: &[include_bytes!("../fonts/test-founders-grotesk-bold.otf")],
+        static_faces: &[
+            include_bytes!("../fonts/test-founders-grotesk-semibold.otf"),
+            include_bytes!("../fonts/test-founders-grotesk-bold.otf"),
+        ],
     },
     BundledFont {
         file_name: "twemoji-mozilla.ttf",
@@ -211,7 +214,11 @@ mod tests {
     #[test]
     fn bundled_fonts_shapes_borrowed_slices_for_add_fonts() {
         let shaped = bundled_fonts();
-        assert_eq!(shaped.len(), 16);
+        assert_eq!(
+            shaped.len(),
+            17,
+            "every static face, Founders Grotesk semibold included"
+        );
         let expected = ALL.iter().flat_map(|font| font.static_faces.iter());
         for (shaped, bytes) in shaped.iter().zip(expected) {
             assert_eq!(shaped.as_ref(), *bytes);
