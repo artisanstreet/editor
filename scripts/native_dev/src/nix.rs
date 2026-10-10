@@ -1,7 +1,8 @@
 //! Building the stages with Nix from the checkout.
 //!
-//! The runner never compiles anything itself: it asks Nix for the stage
-//! outputs of the checkout it was started in, in one `nix build`, so shared
+//! The Production stage, and the Debug stage with `--nix`, build in the Nix
+//! sandbox: the runner asks Nix for the stage outputs of the checkout it was
+//! started in, in one `nix build`, so shared
 //! dependencies build once and every output lands in the store. A dirty tree
 //! builds its working copy of tracked files, which is why an untracked
 //! source file refuses the build instead of silently missing from it.

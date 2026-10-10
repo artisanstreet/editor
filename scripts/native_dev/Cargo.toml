@@ -74,6 +74,10 @@ path = "../../tests/native_dev/dev_nix.rs"
 name = "dev_editor"
 path = "../../tests/native_dev/dev_editor.rs"
 
+[[test]]
+name = "dev_cargo"
+path = "../../tests/native_dev/dev_cargo.rs"
+
 [[bin]]
 name = "forge-host"
 path = "src/forge_host.rs"

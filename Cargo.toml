@@ -122,19 +122,24 @@ debug = "line-tables-only"
 split-debuginfo = "packed"
 strip = "debuginfo"
 
-# Debug: the development loop's build, so it trades Production's last few
-# percent of runtime speed for build time while staying fully optimized (an
-# unoptimized GPUI Editor renders at a small fraction of its frame rate).
-# opt-level 3 with Cargo's default 16 codegen units per crate and only
-# crate-local ThinLTO: no whole-program LTO pass re-optimizing every binary
-# at link time, and each crate's LLVM work runs on every core. Debug adds
-# debugging facilities: debug assertions, overflow checks, full debug info
-# (variables, stepping) for the workspace's own crates and line tables for
-# dependencies, so backtraces and breakpoints reach every frame without
-# linking gigabytes of dependency type information. The Debug stage also
-# enables the `debug-tools` features (GPUI inspector).
+# Debug: the development loop's build, so it trades runtime speed for build
+# time. Dependencies (GPUI, wgpu, and the rest) stay at opt-level 3: they are
+# compiled once and cached, and an unoptimized GPUI Editor renders at a small
+# fraction of its frame rate. The workspace's own crates, recompiled on every
+# change, build at opt-level 1, which keeps them reasonably fast while cutting
+# most of LLVM's time over half a million lines. No whole-program LTO, Cargo's
+# default 16 codegen units per crate, and incremental compilation for Cargo
+# builds with a persistent target directory (`nix run .#dev` builds Debug that
+# way; Nix sandbox builds disable incremental). Debug adds debugging
+# facilities: debug assertions, overflow checks, full debug info (variables,
+# stepping) for the workspace's own crates and line tables for dependencies,
+# so backtraces and breakpoints reach every frame without linking gigabytes of
+# dependency type information. The Debug stage also enables the `debug-tools`
+# features (GPUI inspector).
 [profile.production-debug]
 inherits = "production"
+opt-level = 1
+incremental = true
 lto = false
 codegen-units = 16
 debug = "full"
@@ -144,6 +149,7 @@ debug-assertions = true
 overflow-checks = true
 
 [profile.production-debug.package."*"]
+opt-level = 3
 debug = "line-tables-only"
 
 # Payload integrity hashing covers every binary of a payload, several times

@@ -36,6 +36,15 @@ fn a_bare_run_builds_debug_and_picks_the_platform() {
     assert_eq!(options.root, None);
     assert_eq!(options.keep, DEFAULT_KEEP);
     assert!(!options.attach);
+    assert!(!options.sandboxed);
+}
+
+#[test]
+fn nix_builds_the_debug_stage_in_the_sandbox() {
+    let options = execute(&["--nix"]);
+    assert_eq!(options.stage, Stage::Debug);
+    assert!(options.sandboxed);
+    assert!(usage().contains("--nix"));
 }
 
 #[test]

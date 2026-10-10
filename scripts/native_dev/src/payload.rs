@@ -1,7 +1,8 @@
-//! Installing a Nix-built payload as a dev release.
+//! Installing a staged payload as a dev release.
 //!
-//! Nix builds the payload (`bin/` plus `resources/build-info.json`) and owns
-//! its identity. The runner never copies binaries into an installation
+//! A payload (`bin/` plus `resources/build-info.json`) comes from a Nix stage
+//! build or the runner's Cargo build ([`crate::cargo`]), which records its
+//! identity. The runner never copies binaries into an installation
 //! itself: it signs a tree manifest for the payload with the dev root's local
 //! key, next to (not inside) the read-only payload, and hands both to
 //! `artisan-install`, the same code that installs published releases.
@@ -18,7 +19,7 @@ use artisan_install::{
 
 use crate::{error::DevError, paths::DevPaths};
 
-/// Reads the identity Nix recorded in `payload`.
+/// Reads the identity recorded in `payload`.
 ///
 /// # Errors
 ///
@@ -27,7 +28,7 @@ pub fn payload_identity(payload: &Path) -> Result<BuildInfo, DevError> {
     BuildInfo::read(payload).map_err(|error| DevError::Stage {
         stage: "payload",
         reason: format!(
-            "{} is not a Nix-built payload ({error}); build one with `nix build .#<platform>-<stage>`",
+            "{} is not a staged payload ({error}); build one with `nix run .#dev -- stage`",
             payload.display()
         ),
     })

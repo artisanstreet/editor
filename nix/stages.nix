@@ -272,6 +272,26 @@ let
       }
       // settings.payload
     );
+  # Shells for the dev runner's Cargo builds of the Debug stage
+  # (`nix develop .#cargo-<platform>`): each platform's toolchain, libraries,
+  # fast linker, and cross environment exactly as its payload derivation has
+  # them, outside the sandbox so a persistent target directory compiles
+  # incrementally. The Windows shell builds for its target by default.
+  toolchain = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
+  cargoShells = {
+    linux = pkgs.mkShell (
+      platforms.linux.fastLinker
+      // {
+        nativeBuildInputs = platforms.linux.fastLinker.nativeBuildInputs ++ [ toolchain ];
+      }
+    );
+    windows = windowsPkgs.mkShell (
+      platforms.windows.fastLinker
+      // {
+        nativeBuildInputs = platforms.windows.fastLinker.nativeBuildInputs ++ [ toolchain ];
+      }
+    );
+  };
   # The dev runner installs payloads; a plain release build is enough for a
   # tool. Its installer library compiles as a release build, so it carries
   # the public trust anchor like any release installer. The Linux runner
@@ -322,6 +342,7 @@ in
     binaries
     payload
     runner
+    cargoShells
     ;
   packages = {
     linux-runner = runner "linux";
