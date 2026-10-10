@@ -554,8 +554,10 @@ impl ComposerQueueState {
             return false;
         }
         if self.usage_scope.as_ref() != Some(&next) {
+            // The thread's last reading stays until the new run reports its
+            // own, so the meter never blinks out between runs. Source
+            // sequences are per run, so the new run starts its own count.
             self.usage_scope = Some(next);
-            self.usage = None;
             self.usage_sequence = None;
             self.usage_read_in_flight = None;
             self.next_usage_read_sequence = 0;
@@ -729,23 +731,16 @@ impl ComposerQueueState {
         Ok(UsageResultDisposition::Updated)
     }
 
-    /// Returns the latest reporting-run usage for the requested run.
+    /// Returns the thread's latest reporting-run usage.
     ///
     /// The UI adapter maps `engine_id` to the existing
     /// `NativeContextUsage.reporting_engine_id` field. No selected-model
     /// catalog capacity is consulted.
     #[must_use]
-    pub(crate) fn reporting_usage_for(
-        &self,
-        current_run_id: Option<&str>,
-    ) -> Option<ReportingUsage> {
-        let scope = self.usage_scope.as_ref()?;
+    pub(crate) fn reporting_usage(&self) -> Option<ReportingUsage> {
+        // The thread's latest reading, idle or not: a live run that has not
+        // reported yet still shows the reading before it.
         let usage = self.usage.as_ref()?;
-        // An idle thread keeps showing its last run's reading; a different
-        // live run has not reported into this scope yet.
-        if current_run_id.is_some_and(|run| run != scope.run_id.as_str()) {
-            return None;
-        }
         let report = &usage.report;
         Some(ReportingUsage {
             run_id: report.run_id().as_str().to_owned(),

@@ -53,7 +53,7 @@ pub(crate) fn project_controls_snapshot(
         .map(failed_dispatch_row)
         .collect();
     snapshot.failed_new_chat_ready = failed_new_chat_ready;
-    snapshot.context_usage = native_context_usage_for(state, snapshot.run_id.as_deref());
+    snapshot.context_usage = state.reporting_usage().map(native_context_usage);
     if snapshot.run_id.is_none() {
         snapshot.run_id = snapshot
             .context_usage
@@ -63,14 +63,6 @@ pub(crate) fn project_controls_snapshot(
     if snapshot.context_usage.is_none() {
         snapshot.context_usage_open = false;
     }
-}
-
-fn native_context_usage_for(
-    state: &ComposerQueueState,
-    current_run_id: Option<&str>,
-) -> Option<NativeContextUsage> {
-    let usage = state.reporting_usage_for(current_run_id)?;
-    Some(native_context_usage(usage))
 }
 
 fn native_context_usage(usage: ReportingUsage) -> NativeContextUsage {

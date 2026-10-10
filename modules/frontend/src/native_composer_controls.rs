@@ -1003,7 +1003,7 @@ impl NativeComposerControls {
             .clone()
             .tab_stop(new_thread_event.is_some());
 
-        let mut left = div()
+        let left = div()
             .flex()
             .flex_row()
             .items_center()
@@ -1011,41 +1011,9 @@ impl NativeComposerControls {
             .min_w(px(0.0))
             .child(model_picker);
 
-        if let Some(context_usage) = self.snapshot.context_usage.as_ref() {
-            let context_valid = context_usage
-                .presentation(self.snapshot.run_id.as_deref())
-                .is_some();
-            self.context_focus = self
-                .context_focus
-                .clone()
-                .tab_stop(context_valid && !self.snapshot.disabled);
-            if context_valid {
-                let context_entity = entity.clone();
-                let context_run_id = context_usage.reporting_run_id.clone();
-                if let Some(popover) = context_usage.render_popover(
-                    self.snapshot.run_id.as_deref(),
-                    theme,
-                    self.context_focus.clone(),
-                    self.snapshot.context_usage_open,
-                    self.snapshot.disabled,
-                    move |open, _reason, _window, app| {
-                        context_entity.update(app, |controls, controls_cx| {
-                            controls.emit_if_allowed(
-                                NativeComposerControlsEvent::ContextUsageToggled {
-                                    run_id: context_run_id.clone(),
-                                    open,
-                                },
-                                controls_cx,
-                            );
-                        });
-                    },
-                ) {
-                    left = left.child(popover);
-                }
-            }
-        } else {
-            self.context_focus = self.context_focus.clone().tab_stop(false);
-        }
+        // The context gauge lives in the titlebar; the composer row keeps
+        // only the model picker.
+        self.context_focus = self.context_focus.clone().tab_stop(false);
 
         // Reference (`controls.svelte:116-143`): the right cluster holds
         // only the escape action and the send button; a 4px separation
@@ -1277,8 +1245,7 @@ pub fn native_composer_controls_event_is_allowed(
         | NativeComposerControlsEvent::RetryFailure { .. } => failure_matches(snapshot, event),
         NativeComposerControlsEvent::ContextUsageToggled { run_id, .. } => {
             snapshot.context_usage.as_ref().is_some_and(|usage| {
-                usage.reporting_run_id == *run_id
-                    && usage.presentation(snapshot.run_id.as_deref()).is_some()
+                usage.reporting_run_id == *run_id && usage.presentation(Some(run_id)).is_some()
             })
         }
     }

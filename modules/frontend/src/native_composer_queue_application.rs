@@ -75,13 +75,32 @@ impl NativeApplication {
                 host.accept_footer_usage(&query, Some(footer), cx);
             });
         }
-        let name = usage
-            .report
-            .as_ref()
-            .map(|report| report.model_id().as_str().to_owned())
-            .unwrap_or_default();
+        let name = self.usage_model_name(usage.report.as_ref(), cx);
         let _ = self.composer_queue.state.accept_pushed_usage(usage, name);
         self.sync_composer_availability(cx);
+    }
+
+    /// The catalog's display name for the model a usage report names, so
+    /// the context card says "Opus 5.5" rather than its id; the id itself
+    /// when the catalog does not list the model.
+    fn usage_model_name(
+        &self,
+        report: Option<&artisan_domain::RunUsageReport>,
+        cx: &App,
+    ) -> String {
+        let Some(report) = report else {
+            return String::new();
+        };
+        let model_id = report.model_id().as_str();
+        self.model_selector
+            .read(cx)
+            .state()
+            .snapshot()
+            .manifest
+            .models
+            .iter()
+            .find(|model| model.native_model_id == model_id || model.id == model_id)
+            .map_or_else(|| model_id.to_owned(), |model| model.name.clone())
     }
 
     fn observe_composer_usage_scope(&mut self, cx: &mut Context<Self>) {
@@ -317,11 +336,7 @@ impl NativeApplication {
                         && token.thread_id() == &query.thread_id
                         && token.run_id() == &query.run_id
                 }) {
-                    let name = result
-                        .report
-                        .as_ref()
-                        .map(|report| report.model_id().as_str().to_owned())
-                        .unwrap_or_default();
+                    let name = self.usage_model_name(result.report.as_ref(), cx);
                     let _ = self
                         .composer_queue
                         .state

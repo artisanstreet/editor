@@ -19,19 +19,14 @@
 
 use artisan_ui::{
     flame::{MaterialFace, material_face},
-    popover::{
-        Popover, PopoverAlign, PopoverChangeReason, PopoverSide, PopoverStyle, PopoverVariant,
-        popover_content,
-    },
+    popover::{Popover, PopoverAlign, PopoverChangeReason, PopoverSide, PopoverVariant},
     progress::{ProgressFraction, progress},
     theme::{ArtisanTheme, RadiusStep, RadiusTokens},
 };
-use gpui::prelude::{
-    InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-};
+use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    App, AppContext as _, Bounds, Context, ElementId, FocusHandle, Hsla, IntoElement, Path,
-    PathBuilder, Pixels, Render, Stateful, Window, canvas, div, point, px,
+    App, Bounds, ElementId, FocusHandle, Hsla, Path, PathBuilder, Pixels, Stateful, Window, canvas,
+    div, point, px,
 };
 
 use crate::context_usage_description::{
@@ -351,8 +346,8 @@ pub fn render_details(
 /// Renders the titlebar context meter: a borderless rounded track whose fill
 /// grows from the right edge leftward as the context window fills. The fill
 /// wears Varde's button material, running green → flame → red as the thread
-/// nears the point where the engine compacts. Hovering it shows the same
-/// details card as the composer's ring.
+/// nears the point where the engine compacts. The caller owns hovering it
+/// and shows [`render_context_card`] beside it.
 #[must_use]
 pub fn render_context_meter(
     presentation: &NativeContextUsagePresentation,
@@ -369,7 +364,6 @@ pub fn render_context_meter(
     } else {
         0.0
     };
-    let card = presentation.clone();
     div()
         .id(ElementId::Name(CONTEXT_METER_SELECTOR.into()))
         .debug_selector(|| CONTEXT_METER_SELECTOR.to_owned())
@@ -387,14 +381,92 @@ pub fn render_context_meter(
                 .bottom(px(0.0))
                 .w(px(fill_width))
         }))
-        .tooltip(move |_window, cx| {
-            let card = card.clone();
-            cx.new(|_| ContextUsageHoverCard {
-                presentation: card,
-                theme,
-            })
-            .into()
-        })
+}
+
+/// The context card shown while the titlebar gauge is hovered: the details
+/// card's title, two sentences and progress bar on the profile menu's glass
+/// surface in the app's sans face, the model name in the foreground colour.
+#[must_use]
+pub fn render_context_card(
+    presentation: &NativeContextUsagePresentation,
+    theme: ArtisanTheme,
+) -> Stateful<gpui::Div> {
+    use artisan_ui::hover_card::{glass_hover_card, hover_card_text, hover_card_title};
+    let details = &presentation.details;
+    // The facts (the model, how full its window is, and how large it is)
+    // read in the foreground; the prose around them stays muted.
+    let sentence = |text: &str, model: &str, size: Option<&str>| {
+        let model_range = text
+            .find(model)
+            .filter(|_| !model.is_empty())
+            .map(|start| start..start + model.len());
+        let percent_range = percent_token(text);
+        // Searched after the model so a size inside its name is not matched.
+        let after_model = model_range.as_ref().map_or(0, |range| range.end);
+        let size_range = size.filter(|size| !size.is_empty()).and_then(|size| {
+            text[after_model..]
+                .find(size)
+                .map(|start| after_model + start..after_model + start + size.len())
+        });
+        let facts: Vec<_> = model_range
+            .into_iter()
+            .chain(percent_range)
+            .chain(size_range)
+            .collect();
+        hover_card_text(&theme, text.to_owned(), &facts)
+    };
+    let selector = format!("{CONTEXT_METER_SELECTOR}-card");
+    let content = div()
+        .flex()
+        .flex_col()
+        .gap(px(12.0))
+        .p(px(16.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(hover_card_title(&theme, "Context Window"))
+                .child(sentence(
+                    details.percent().sentence(),
+                    details.percent().model_name(),
+                    None,
+                ))
+                .child(sentence(
+                    details.capacity().sentence(),
+                    details.capacity().model_name(),
+                    Some(details.capacity().compact_window_tokens()),
+                )),
+        )
+        .child(
+            progress(
+                artisan_ui::progress::ProgressStyle::resolve(theme),
+                presentation.progress_fraction(),
+            )
+            .debug_selector(|| format!("{CONTEXT_METER_SELECTOR}-card-progress")),
+        );
+    glass_hover_card(&theme, content)
+        .id(ElementId::Name(selector.clone().into()))
+        .debug_selector(move || selector.clone())
+        .w(px(280.0))
+}
+
+/// The byte range of the first `N%` token in `text`, if any.
+fn percent_token(text: &str) -> Option<std::ops::Range<usize>> {
+    let end = text.find('%')? + 1;
+    let start = text[..end - 1]
+        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .map_or(0, |index| index + 1);
+    (start < end - 1).then_some(start..end)
+}
+
+/// The ring gauge the composer used, as the titlebar's context trigger.
+#[must_use]
+pub fn render_context_ring(
+    presentation: &NativeContextUsagePresentation,
+    theme: ArtisanTheme,
+) -> Stateful<gpui::Div> {
+    render_ring_trigger(presentation, &theme)
 }
 
 /// How close the context is to compaction, `0.0` empty to `1.0` at the
@@ -411,21 +483,6 @@ fn compaction_level(presentation: &NativeContextUsagePresentation) -> f32 {
     (presentation.percent / limit).clamp(0.0, 1.0) as f32
 }
 
-/// The hover card behind the titlebar context meter.
-struct ContextUsageHoverCard {
-    presentation: NativeContextUsagePresentation,
-    theme: ArtisanTheme,
-}
-
-impl Render for ContextUsageHoverCard {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        popover_content(
-            PopoverStyle::default_card(self.theme),
-            render_details(&self.presentation, &self.theme),
-        )
-    }
-}
-
 fn render_ring_trigger(
     presentation: &NativeContextUsagePresentation,
     theme: &ArtisanTheme,
@@ -436,11 +493,21 @@ fn render_ring_trigger(
     let percent = finite_percent(presentation.percent);
     let ring_selector = CONTEXT_USAGE_RING_SELECTOR.to_owned();
 
+    // Track and arc share one centre, radius, and stroke, so the arc lies
+    // exactly on a true circle.
     let arc = canvas(
-        move |bounds, _, _| build_ring_path(bounds, percent),
-        move |_, path: Option<Path<Pixels>>, window, _| {
-            if let Some(path) = path {
-                window.paint_path(path, ring_color);
+        move |bounds, _, _| {
+            (
+                build_ring_path(bounds, 1.0),
+                build_ring_path(bounds, percent),
+            )
+        },
+        move |_, (track, arc): (Option<Path<Pixels>>, Option<Path<Pixels>>), window, _| {
+            if let Some(track) = track {
+                window.paint_path(track, track_color);
+            }
+            if let Some(arc) = arc {
+                window.paint_path(arc, ring_color);
             }
         },
     )
@@ -456,9 +523,6 @@ fn render_ring_trigger(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(RadiusTokens::value(RadiusStep::Sm))
-        .border_2()
-        .border_color(track_color)
         .child(arc);
 
     div()
@@ -612,6 +676,18 @@ mod tests {
         assert_eq!(cloned.reporting_run_id, "run-1");
         assert_eq!(cloned.reporting_engine_id, "codex");
         assert_eq!(cloned.reporting_model_id, "gpt-5.6-luna");
+    }
+
+    #[test]
+    fn the_card_highlights_the_percentage() {
+        let text = "The context window for Opus 5.5 is 24% full.";
+        assert_eq!(
+            super::percent_token(text).map(|range| &text[range]),
+            Some("24%")
+        );
+        assert_eq!(super::percent_token("100% full").map(|r| r.start), Some(0));
+        assert_eq!(super::percent_token("no percent"), None);
+        assert_eq!(super::percent_token("a % sign"), None);
     }
 
     #[test]

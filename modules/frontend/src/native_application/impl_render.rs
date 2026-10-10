@@ -12,6 +12,7 @@ impl Render for NativeApplication {
         self.sync_composer_controls(cx);
         self.sync_model_selector_blocked_engines(cx);
         self.sync_profile_actions();
+        self.sync_media_root(cx);
         // The sidebar fills its shell slot and renders only when notified,
         // so a transcript or composer frame reuses its previous paint.
         let sidebar = crate::view_boundary::cached_view(
@@ -28,27 +29,16 @@ impl Render for NativeApplication {
                 .thread_screen
                 .as_ref()
                 .and_then(|screen| screen.read(cx).visible_inspector_width()),
+            // The new-thread screen paints the same column, empty.
+            NativeRoute::NewThread { .. } => crate::thread_screen::thread_inspector_width(
+                f32::from(window.bounds().size.width)
+                    - f32::from(self.desktop_shell_style(window).sidebar_width),
+            )
+            .map(px),
             _ => None,
         };
-        // The meter shows the same validated reading as the composer's ring:
-        // the controls snapshot was synced at the top of this render.
-        let context_meter = match self.route() {
-            NativeRoute::Thread { .. } => {
-                let snapshot = self.composer_controls.read(cx).snapshot();
-                snapshot
-                    .context_usage
-                    .as_ref()
-                    .and_then(|usage| usage.presentation(snapshot.run_id.as_deref()))
-                    .map(|presentation| {
-                        crate::native_context_usage::render_context_meter(
-                            &presentation,
-                            ArtisanTheme::for_mode(ThemeMode::Dark),
-                        )
-                        .into_any_element()
-                    })
-            }
-            _ => None,
-        };
+        let context_meter = self.desktop_context_meter(cx);
+        let context_card = self.desktop_context_card(cx);
         let brand = self.desktop_brand(cx).into_any_element();
         let header = self
             .desktop_header_cluster()
@@ -75,6 +65,8 @@ impl Render for NativeApplication {
             .on_action(|_: &NextTabStop, window, cx| window.focus_next(cx))
             .on_action(|_: &PreviousTabStop, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(Self::activate_command_menu))
+            .on_action(cx.listener(Self::open_rich_reference))
+            .on_action(cx.listener(Self::open_copy_menu))
             .on_action(
                 cx.listener(|app, _: &OpenMachines, window, cx| app.open_machines(window, cx)),
             )
@@ -89,27 +81,13 @@ impl Render for NativeApplication {
             .debug_selector(|| NATIVE_ROOT_SELECTOR.to_string())
             .relative()
             .child(shell)
+            .children(context_card)
             .child(self.command_menu.clone())
-            .children(self.window_error.clone().map(|message| {
-                div()
-                    .id("window-error")
-                    .debug_selector(|| "window-error".to_owned())
-                    .absolute()
-                    .top_8()
-                    .right_4()
-                    .p_3()
-                    .bg(self.desktop_theme.chrome)
-                    .text_color(self.desktop_theme.foreground)
-                    .child(message)
-                    .child("  ×")
-                    .on_click(cx.listener(|app, _, _, cx| {
-                        app.window_error = None;
-                        cx.notify();
-                    }))
-            }))
+            .children(self.window_notice_stack(window, cx))
             .children(self.host_switch_banner())
             .child(self.thread_terminals.clone())
             .child(self.message_images.clone())
             .child(self.machine_dropdown(window, cx))
+            .children(self.pointer_menu_panel(cx))
     }
 }

@@ -347,9 +347,7 @@ fn stale_usage_is_rejected_without_reinterpreting_the_reporting_model() {
         .accept_usage_result(older, &next_usage_read, "newly selected model".to_owned())
         .expect_err("older source sequence must be rejected");
     assert_eq!(error.reason, UsageRejection::StaleSequence);
-    let usage = state
-        .reporting_usage_for(Some(run_id.as_str()))
-        .expect("last report remains");
+    let usage = state.reporting_usage().expect("last report remains");
     assert_eq!(usage.model_id, "model-a");
     assert_eq!(usage.model_name, "Model A");
     assert_eq!(usage.context_tokens, Some(0));
@@ -374,17 +372,25 @@ fn a_native_run_reports_under_its_own_ids_and_its_reading_outlives_the_run() {
         state.accept_pushed_usage(pushed, "claude-opus-5-5".to_owned()),
         Ok(UsageResultDisposition::Updated)
     );
-    assert!(state.reporting_usage_for(Some(run_id.as_str())).is_some());
+    assert!(state.reporting_usage().is_some());
     // The run settled: the idle thread keeps its last reading.
     assert_eq!(
         state
-            .reporting_usage_for(None)
+            .reporting_usage()
             .expect("the reading outlives its run")
             .run_id,
         "run-a"
     );
-    // Another live run has not reported into this scope.
-    assert!(state.reporting_usage_for(Some("run-b")).is_none());
+    // A new run keeps showing the reading until it reports its own.
+    assert!(state.begin_native_usage_scope(
+        thread_id.clone(),
+        3,
+        RunId::parse("run-b").expect("run id")
+    ));
+    assert_eq!(
+        state.reporting_usage().expect("the reading stays").run_id,
+        "run-a"
+    );
 }
 
 #[test]
@@ -412,7 +418,7 @@ fn absent_usage_fields_remain_absent_and_scope_mismatch_is_rejected() {
         state.accept_usage_result(absent, &usage_read, "Model A".to_owned()),
         Ok(UsageResultDisposition::NoReport)
     );
-    assert!(state.reporting_usage_for(Some(run_id.as_str())).is_none());
+    assert!(state.reporting_usage().is_none());
     let wrong_thread = RunUsageResult {
         thread_id: thread("thread-b"),
         run_id,
@@ -459,5 +465,5 @@ fn pushed_usage_updates_the_live_run_without_a_read_and_keeps_every_fence() {
         .accept_pushed_usage(pushed(3, &other), "Model A".to_owned())
         .expect_err("another run's usage is not this scope's");
     assert_eq!(foreign.reason, UsageRejection::WrongRun);
-    assert!(state.reporting_usage_for(Some(run_id.as_str())).is_some());
+    assert!(state.reporting_usage().is_some());
 }

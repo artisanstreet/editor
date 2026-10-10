@@ -425,7 +425,7 @@ pub const PROFILE_USAGE_ROSTER: [(&str, &str); 5] = [
     ("codex", "Codex"),
     ("claude", "Claude"),
     ("cursor", "Cursor"),
-    ("grok", "Grok Build"),
+    ("grok", "Grok"),
     ("opencode2", "OpenCode"),
 ];
 
