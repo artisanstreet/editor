@@ -25,7 +25,7 @@ use super::autostart::{
     unsupported_lifecycle_control,
 };
 use super::doctor::{doctor, logs};
-use super::lifecycle::{status, stop};
+use super::lifecycle::{restart, status, stop};
 use super::open::{OpenFlow, handle_protocol, open};
 
 #[derive(Debug, Parser)]
@@ -142,20 +142,25 @@ pub enum Commands {
         #[arg(long, value_name = "NAME", requires = "listen")]
         host_name: Option<String>,
     },
+    /// Start the Forge.
     Start {
+        /// Run in this terminal instead of in the background.
         #[arg(long)]
         foreground: bool,
     },
+    /// Stop the running Forge.
     Stop {
-        /// Stop only the authenticated Forge with this readiness process identity.
-        #[arg(long, hide = true, required = true, value_parser = parse_nonzero_u32)]
-        pid: NonZeroU32,
-        /// Refuse shutdown when Forge reports live model work. Intended for
-        /// installer retirement before an update is activated.
-        #[arg(long, hide = true, required = true)]
+        /// Stop only if the running Forge has this process id (installer use).
+        #[arg(long, hide = true, value_parser = parse_nonzero_u32)]
+        pid: Option<NonZeroU32>,
+        /// Accepted for installers that still pass it; it has never changed
+        /// how the Forge stops.
+        #[arg(long, hide = true)]
         if_idle: bool,
     },
+    /// Stop the running Forge and start it again.
     Restart {
+        /// Run the new Forge in this terminal instead of in the background.
         #[arg(long)]
         foreground: bool,
     },
@@ -432,8 +437,9 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop { pid, if_idle } => stop(&layout, pid, if_idle),
-        Commands::Restart { .. } | Commands::Uninstall { .. } => unsupported_lifecycle_control(),
+        Commands::Stop { pid, if_idle: _ } => stop(&layout, pid),
+        Commands::Restart { foreground } => restart(&layout, foreground),
+        Commands::Uninstall { .. } => unsupported_lifecycle_control(),
         Commands::Status { json } => status(&layout, json),
         Commands::Logs { lines, follow } => logs(&layout, lines, follow),
         Commands::Doctor {

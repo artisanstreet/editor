@@ -39,7 +39,7 @@ use autostart::{delegate_installer, setup_native, start, unsupported_lifecycle_c
 #[cfg(test)]
 use doctor::doctor;
 #[cfg(test)]
-use lifecycle::{status, stop};
+use lifecycle::{restart, status, stop};
 #[cfg(test)]
 use open::{OpenFlow, handle_protocol, open};
 
@@ -257,20 +257,27 @@ mod tests {
     }
 
     #[test]
-    fn idle_pid_stop_is_the_only_supported_stop_syntax() {
+    fn stop_and_restart_need_no_arguments() {
+        // One Forge per home: a plain stop and restart are the user syntax.
+        assert!(matches!(
+            Cli::try_parse_from(["ae", "stop"]).unwrap().command,
+            Some(Commands::Stop { pid: None, .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["ae", "restart"]).unwrap().command,
+            Some(Commands::Restart { foreground: false })
+        ));
+        // Installers still name the exact Forge they retire.
         let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--if-idle"]).unwrap();
         assert!(matches!(
             pid_stop.command,
             Some(Commands::Stop {
-                pid,
+                pid: Some(pid),
                 if_idle: true,
             }) if pid.get() == 6172
         ));
-        assert!(Cli::try_parse_from(["ae", "stop"]).is_err());
-        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172"]).is_err());
-        assert!(Cli::try_parse_from(["ae", "stop", "--if-idle"]).is_err());
-        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "0", "--if-idle"]).is_err());
-        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "6172", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--pid", "0"]).is_err());
+        assert!(Cli::try_parse_from(["ae", "stop", "--force"]).is_err());
         assert!(Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).is_err());
         let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
         assert!(matches!(
@@ -340,7 +347,8 @@ mod tests {
             start_until(&layout, false, Instant::now()).map(|_| ()),
             ready_state(&layout).map(|_| ()),
             status(&layout, false),
-            stop(&layout, NonZeroU32::new(1).unwrap(), true),
+            stop(&layout, NonZeroU32::new(1)),
+            restart(&layout, false),
             open(&layout, None, OpenFlow::Editor),
             open(&layout, None, OpenFlow::Browser),
             open(&layout, None, OpenFlow::Handoff),
@@ -543,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_remains_explicitly_unsupported() {
+    fn uninstall_remains_explicitly_unsupported() {
         assert!(matches!(
             unsupported_lifecycle_control(),
             Err(CliError::UnsupportedLifecycleControl)

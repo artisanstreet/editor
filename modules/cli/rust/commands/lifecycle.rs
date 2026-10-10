@@ -99,38 +99,90 @@ pub(super) fn status(layout: &Layout, json: bool) -> Result<()> {
     }
 }
 
-pub(super) fn stop(layout: &Layout, pid: NonZeroU32, if_idle: bool) -> Result<()> {
-    if !if_idle {
-        return Err(CliError::Unsupported("stop requires --if-idle".to_owned()));
-    }
+/// Stops the running Forge and waits until its process has exited.
+///
+/// There is one Forge per Artisan home, so `ae stop` needs no arguments.
+/// The installer still passes `--pid` to retire exactly the Forge it saw and
+/// must not stop a newer one; a mismatch refuses instead of stopping.
+pub(super) fn stop(layout: &Layout, expected_pid: Option<NonZeroU32>) -> Result<()> {
+    let pid = stop_running(layout, expected_pid)?;
+    println!("stopped the Forge (pid {pid})");
+    Ok(())
+}
 
+/// Stops the running Forge if there is one, then starts it again.
+pub(super) fn restart(layout: &Layout, foreground: bool) -> Result<()> {
+    match stop_running(layout, None) {
+        Ok(pid) => println!("stopped the Forge (pid {pid})"),
+        Err(CliError::NotRunning) => println!("the Forge was not running"),
+        Err(error) => return Err(error),
+    }
+    match super::autostart::start(layout, foreground)? {
+        process::StartResult::Spawned { pid } => println!("started the Forge (pid {pid})"),
+        process::StartResult::AlreadyRunning => println!("the Forge is running"),
+        process::StartResult::ForegroundExited => {}
+    }
+    Ok(())
+}
+
+/// Longer than the service's `TimeoutStopSec`, after which systemd kills.
+const STOP_EXIT_TIMEOUT: Duration = Duration::from_secs(40);
+const STOP_EXIT_POLL: Duration = Duration::from_millis(100);
+
+/// Stops the Forge named by the readiness receipt and returns its pid once
+/// it has exited, through its service when one runs it, otherwise through an
+/// authenticated lifecycle stop.
+fn stop_running(layout: &Layout, expected_pid: Option<NonZeroU32>) -> Result<u32> {
     let manifest = require_launchable_installation(layout)?;
     let config = load_lifecycle_instance(layout)?;
-    match process::readiness_status(config.readiness_path(), &manifest.forge_executable()) {
-        process::ForgeReadinessStatus::Missing => Err(CliError::NotRunning),
-        process::ForgeReadinessStatus::Invalid => Err(CliError::LifecycleReadiness {
-            reason: "readiness receipt is invalid or stale",
-        }),
-        process::ForgeReadinessStatus::Ready(readiness) => {
-            if readiness.pid() != pid.get() {
-                return Err(CliError::LifecycleReadiness {
-                    reason: "PID does not match the readiness receipt",
-                });
-            }
-            if super::autostart::stop_service(layout, pid.get())? {
-                println!("stopped the Forge service");
-                return Ok(());
-            }
-            let result =
-                authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Stop)?;
-            let LifecycleResult::Stop(receipt) = result else {
-                return Err(CliError::LifecycleService {
-                    reason: "unexpected lifecycle response",
-                });
-            };
-            print_stop_receipt(&receipt);
-            Ok(())
+    let executable = manifest.forge_executable();
+    let readiness = match process::readiness_status(config.readiness_path(), &executable) {
+        process::ForgeReadinessStatus::Missing => return Err(CliError::NotRunning),
+        process::ForgeReadinessStatus::Invalid => {
+            return Err(CliError::LifecycleReadiness {
+                reason: "readiness receipt is invalid or stale",
+            });
         }
+        process::ForgeReadinessStatus::Ready(readiness) => readiness,
+    };
+    let pid = readiness.pid();
+    if expected_pid.is_some_and(|expected| expected.get() != pid) {
+        return Err(CliError::LifecycleReadiness {
+            reason: "PID does not match the readiness receipt",
+        });
+    }
+    if !super::autostart::stop_service(layout, pid)? {
+        let result =
+            authenticated_lifecycle(layout, &config, &readiness, LifecycleOperation::Stop)?;
+        let LifecycleResult::Stop(receipt) = result else {
+            return Err(CliError::LifecycleService {
+                reason: "unexpected lifecycle response",
+            });
+        };
+        print_stop_receipt(&receipt);
+    }
+    wait_for_exit(&config, &executable, pid)?;
+    Ok(pid)
+}
+
+/// Waits until the readiness receipt no longer names `pid` as a ready Forge.
+fn wait_for_exit(
+    config: &NativeInstanceConfig,
+    executable: &std::path::Path,
+    pid: u32,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + STOP_EXIT_TIMEOUT;
+    loop {
+        match process::readiness_status(config.readiness_path(), executable) {
+            process::ForgeReadinessStatus::Ready(readiness) if readiness.pid() == pid => {}
+            _ => return Ok(()),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(CliError::LifecycleService {
+                reason: "the Forge did not exit after it was asked to stop",
+            });
+        }
+        std::thread::sleep(STOP_EXIT_POLL);
     }
 }
 
