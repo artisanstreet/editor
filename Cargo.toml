@@ -17,6 +17,7 @@ members = [
     "modules/transport",
     "modules/tracing",
     "modules/ui",
+    "modules/audio",
     "scripts/capnp_codegen",
     "scripts/native_dev",
 ]
@@ -34,15 +35,18 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 bytes = { version = "=1.12.1", default-features = false }
 capnp = "=0.27.0"
 capnpc = "=0.27.0"
+cpal = { version = "=0.18.2", default-features = false }
 command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
 fs2 = "=0.4.3"
+futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "8d8c07348532be87463aa666a01c1dbcb28651df" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "8d8c07348532be87463aa666a01c1dbcb28651df", features = ["wgpu"] }
+gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b", features = ["wgpu"] }
 http = { version = "=1.5.0", default-features = false, features = ["std"] }
 http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
 native-dialog = { version = "=0.9.7", default-features = false, features = [
     "windows_dpi_awareness",
@@ -50,6 +54,7 @@ native-dialog = { version = "=0.9.7", default-features = false, features = [
 processkit = { version = "=3.3.4", default-features = false, features = [
     "process-control",
 ] }
+pulseaudio = "=0.3.1"
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 quinn = { version = "=0.11.11", default-features = false, features = [
     "runtime-tokio",
@@ -76,11 +81,22 @@ sea-orm-migration = { version = "=2.0.2", default-features = false, features = [
     "sqlx-sqlite",
     "sqlite-use-returning-for-3_35",
 ] }
+serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
 serde_json = "=1.0.151"
 sqlx-sqlite = { version = "=0.9.0", default-features = false, features = [
     "offline",
 ] }
 statig = "=0.4.1"
+symphonia = { version = "=0.5.5", default-features = false, features = [
+    "aac",
+    "flac",
+    "isomp4",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
 syntect = { version = "=5.3.0", default-features = false, features = [
     "parsing",
     "default-syntaxes",
@@ -92,6 +108,7 @@ sha2 = "=0.11.0"
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
 toml = "=1.1.4"
+unicode-segmentation = "=1.13.3"
 url = "=2.5.8"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }
 winapi-util = "=0.1.11"
