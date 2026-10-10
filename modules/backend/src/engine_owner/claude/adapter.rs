@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use artisan_domain::{
-    MessagePhase, Observation, ObservationId, ObservationSequence, QuestionObservation, RunId,
-    SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
-    TranscriptAgentMessageDelta, TranscriptContent,
+    ApprovalObservation, MessagePhase, Observation, ObservationId, ObservationSequence,
+    QuestionObservation, RunId, SubagentInput, SubagentObservation, SubagentState,
+    SubagentTranscriptObservation, TranscriptAgentMessageDelta, TranscriptContent,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -91,6 +91,27 @@ fn child_transcript_row(
             TranscriptContent::AgentMessageDelta(content),
         ),
     ))
+}
+
+/// Builds the approval row one permission request presents, addressed by
+/// the request id the decision is written back onto. Fails closed (no row)
+/// on an identity or description the domain refuses.
+fn approval_row(
+    run_id: &RunId,
+    frame_sequence: u64,
+    request: &ClaudeApprovalRequest,
+) -> Option<Observation> {
+    let id = ObservationId::parse(format!(
+        "{}:claude:{frame_sequence}:approval",
+        run_id.as_str()
+    ))
+    .ok()?;
+    let sequence = ObservationSequence::new(frame_sequence).ok()?;
+    let target = ObservationId::parse(request.approval_id.clone()).ok()?;
+    let domain = request.to_domain_request().ok()?;
+    ApprovalObservation::requested(id, sequence, target, request.description().to_owned(), domain)
+        .ok()
+        .map(Observation::Approval)
 }
 
 /// Builds the requested question rows for one `AskUserQuestion` request,
@@ -874,8 +895,16 @@ pub(crate) async fn apply_event(
             settle(emit_rows(observations, rows).await)
         }
         ClaudeEvent::ApprovalRequested(request) => {
-            tracker.note_approval(request);
-            ClaudeApplyOutcome::Continue { end_input: false }
+            // The request waits on the user, so it must reach them: a request
+            // tracked without a row suspends the stall clock with nothing on
+            // screen to answer, and the run waits forever.
+            let Some(row) = approval_row(run_id, frame_sequence, &request) else {
+                return continued;
+            };
+            if !tracker.note_approval(request) {
+                return continued;
+            }
+            settle(emit_rows(observations, vec![row]).await)
         }
         ClaudeEvent::QuestionRequested(request) => {
             // The request stays open in the tracker until the user answers
