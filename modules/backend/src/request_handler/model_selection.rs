@@ -214,17 +214,12 @@ impl RequestHandler {
     /// describes on one of the registered profiles, or the field that keeps
     /// the Forge from building it. Nothing is saved.
     pub(super) fn resolve_engine_configuration_outcome(
-        &self,
         request_id: &RequestId,
         query: &ResolveEngineConfiguration,
+        registered: &[EngineProfileId],
     ) -> ServerResponse {
-        let registered = self
-            .registered_engine_profiles
-            .as_ref()
-            .and_then(|reader| reader.list_profiles().ok().flatten())
-            .unwrap_or_default();
         let built =
-            crate::engine_selection::build_manual_config(&query.configuration, &registered)
+            crate::engine_selection::build_manual_config(&query.configuration, registered)
                 .map_err(|error| {
                     refusal(
                         SubmissionRefusalKind::InvalidSelection,

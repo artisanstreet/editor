@@ -8,7 +8,7 @@
 
 use super::*;
 
-use super::interaction::{option_tooltip_key, option_tooltip_text};
+use super::interaction::{engine_tooltip_key, option_tooltip_key, option_tooltip_text};
 use super::state::{fallback_model_view, fallback_model_view_from_state, humanize_variant};
 
 #[path = "render/menu.rs"]

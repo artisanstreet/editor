@@ -1,31 +1,37 @@
 //! The Forge user's preferences and navigation record.
 //!
-//! One singleton row holds the default engine configuration, the last
-//! route, and a revision that grows with every change; `navigation_projects`
-//! holds one row per used project with its recency (the revision at its last
-//! use) and the thread last open in it. Every write runs in one `IMMEDIATE`
+//! One singleton row holds the default engine configuration (the model the
+//! user last chose), the last route, and a revision that grows with every
+//! change; `navigation_projects` holds one row per used project with its
+//! recency (the revision at its last use) and the thread last open in it;
+//! `model_preferences` holds the configuration the user last chose each
+//! model with, and its recency. Every write runs in one `IMMEDIATE`
 //! transaction and bumps the revision only when something changed, so a
 //! repeated report is free.
 
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, Statement, Value};
 
 use artisan_domain::{
-    EngineRunConfig, LegacyImportOutcome, ModelPreferenceSource, NavigationProject,
-    NavigationRecord, NavigationRoute, ProjectId, ThreadId, UnixMillis,
+    EngineRunConfig, LegacyImportOutcome, MODEL_PREFERENCES_MAX, ModelFavoriteId, ModelPreference,
+    ModelPreferenceSource, NavigationProject, NavigationRecord, NavigationRoute, ProjectId,
+    ThreadId, UnixMillis,
 };
 
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
 const PREFERENCES_SELECT: &str = "SELECT revision, default_engine_config, route_project_id, route_thread_id FROM user_preferences WHERE state_id = 1";
 const PROJECTS_SELECT: &str = "SELECT project_id, last_thread_id FROM navigation_projects ORDER BY recency DESC, project_id ASC LIMIT ?";
+const MODELS_SELECT: &str = "SELECT model_id, engine_config FROM model_preferences ORDER BY recency DESC, model_id ASC LIMIT ?";
 
 /// The stored preferences: everything but the live account profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredUserPreferences {
     /// Revision; grows with every change.
     pub revision: u64,
-    /// Configuration new threads start from.
+    /// Configuration new threads start from: the model last chosen.
     pub default_engine_config: Option<EngineRunConfig>,
+    /// The configuration each model was last chosen with, most recent first.
+    pub model_preferences: Vec<ModelPreference>,
     /// Project order, last threads, and route.
     pub navigation: NavigationRecord,
 }
@@ -76,21 +82,29 @@ impl Repository {
         finish(transaction, result, "navigation record").await
     }
 
-    /// Saves a user model preference. Agent and system choices leave the
-    /// stored preference and its revision unchanged.
+    /// Saves a user's choice of `model` with `config`: it becomes the
+    /// last-used model and the options `model` is remembered with. Agent and
+    /// system choices leave every stored preference and the revision
+    /// unchanged.
     ///
     /// # Errors
     ///
     /// Returns an encoding or database failure.
     pub async fn save_model_preference(
         &self,
+        model: &ModelFavoriteId,
         config: &EngineRunConfig,
         source: ModelPreferenceSource,
     ) -> PreferencesResult<StoredUserPreferences> {
         if source != ModelPreferenceSource::User {
             return self.read_user_preferences().await;
         }
-        self.remember_default_engine_config(config).await
+        let transaction = self
+            .begin_write()
+            .await
+            .map_err(|source| database_error("begin model preference", source))?;
+        let result = apply_model_preference(&transaction, model, config).await;
+        finish(transaction, result, "model preference").await
     }
 
     /// Stores a resolved default configuration. Runtime callers should use
@@ -136,7 +150,7 @@ impl Repository {
 }
 
 async fn finish<T>(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: PreferencesResult<T>,
     operation: &'static str,
 ) -> PreferencesResult<T> {
@@ -255,6 +269,48 @@ async fn apply_default(
         return Ok(current);
     }
     write_default(transaction, config, next_revision(current.revision)?).await?;
+    read_preferences(transaction).await
+}
+
+async fn apply_model_preference(
+    transaction: &DatabaseTransaction,
+    model: &ModelFavoriteId,
+    config: &EngineRunConfig,
+) -> PreferencesResult<StoredUserPreferences> {
+    let current = read_preferences(transaction).await?;
+    let unchanged = current.default_engine_config.as_ref() == Some(config)
+        && current
+            .model_preferences
+            .first()
+            .is_some_and(|first| &first.model_id == model && &first.config == config);
+    if unchanged {
+        return Ok(current);
+    }
+    let revision = next_revision(current.revision)?;
+    write_default(transaction, config, revision).await?;
+    let encoded = crate::engine_run_config::encode(config)
+        .map_err(|error| corrupt_data("model_preferences", "engine_config", error))?;
+    execute(
+        transaction,
+        "INSERT INTO model_preferences (model_id, engine_config, recency) VALUES (?, ?, ?) \
+         ON CONFLICT(model_id) DO UPDATE SET engine_config = excluded.engine_config, recency = excluded.recency",
+        [
+            text(model.as_str()),
+            Value::Bytes(Some(encoded)),
+            integer(revision)?,
+        ],
+        "store model preference",
+    )
+    .await?;
+    let keep = i64::try_from(MODEL_PREFERENCES_MAX).unwrap_or(i64::MAX);
+    execute(
+        transaction,
+        "DELETE FROM model_preferences WHERE model_id NOT IN \
+         (SELECT model_id FROM model_preferences ORDER BY recency DESC, model_id ASC LIMIT ?)",
+        [Value::BigInt(Some(keep))],
+        "forget least recent model preferences",
+    )
+    .await?;
     read_preferences(transaction).await
 }
 
@@ -379,11 +435,38 @@ async fn read_preferences(
     });
     let navigation = NavigationRecord::new(projects, route)
         .map_err(|error| corrupt_data("navigation_projects", "project_id", error))?;
+    let limit = i64::try_from(MODEL_PREFERENCES_MAX).unwrap_or(i64::MAX);
+    let model_preferences = database
+        .query_all_raw(statement(MODELS_SELECT, [Value::BigInt(Some(limit))]))
+        .await
+        .map_err(|source| database_error("read model preferences", source))?
+        .iter()
+        .map(read_model_preference)
+        .collect::<PreferencesResult<Vec<_>>>()?;
     Ok(StoredUserPreferences {
         revision,
         default_engine_config,
+        model_preferences,
         navigation,
     })
+}
+
+fn read_model_preference(row: &sea_orm::QueryResult) -> PreferencesResult<ModelPreference> {
+    let model_id = row
+        .try_get_by_index::<String>(0)
+        .map_err(|error| corrupt_data("model_preferences", "model_id", error))
+        .and_then(|value| {
+            ModelFavoriteId::parse(value)
+                .map_err(|error| corrupt_data("model_preferences", "model_id", error))
+        })?;
+    let config = row
+        .try_get_by_index::<Vec<u8>>(1)
+        .map_err(|error| corrupt_data("model_preferences", "engine_config", error))
+        .and_then(|bytes| {
+            crate::engine_run_config::decode(&bytes)
+                .map_err(|error| corrupt_data("model_preferences", "engine_config", error))
+        })?;
+    Ok(ModelPreference { model_id, config })
 }
 
 fn optional_id<T, E: ToString>(

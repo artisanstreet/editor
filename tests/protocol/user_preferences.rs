@@ -8,9 +8,9 @@ use artisan_domain::{
     CountLimit, DisplayName, EngineAgentId, EngineModelId, EnginePermissionPolicy, EngineProfileId,
     EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
     EngineSelection, FilesystemAccess, FiniteMillis, ImportLegacyPreferences, LegacyImportOutcome,
-    LegacyPreferencesImported, ModelFavoriteId, NavigationProject, NavigationRecord,
-    NavigationRoute, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId, Query,
-    ReadUserPreferences, RecordNavigation, RequestId, ThreadId, UnixMillis, UserPreferences,
+    LegacyPreferencesImported, ModelFavoriteId, ModelPreference, NavigationProject,
+    NavigationRecord, NavigationRoute, NetworkAccess, OpenCode2Selection, PermissionId, ProjectId,
+    Query, ReadUserPreferences, RecordNavigation, RequestId, ThreadId, UnixMillis, UserPreferences,
     WebSearchAccess,
 };
 use artisan_protocol::{
@@ -75,6 +75,14 @@ fn preferences(with_config: bool) -> Result<UserPreferences, Box<dyn Error>> {
     Ok(UserPreferences {
         revision: 9,
         default_engine_config: with_config.then(default_config),
+        model_preferences: if with_config {
+            vec![ModelPreference {
+                model_id: ModelFavoriteId::parse("claude-opus")?,
+                config: default_config(),
+            }]
+        } else {
+            Vec::new()
+        },
         navigation: NavigationRecord::new(
             vec![
                 NavigationProject {

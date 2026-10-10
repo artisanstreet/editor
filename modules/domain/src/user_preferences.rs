@@ -2,7 +2,8 @@
 //!
 //! A Forge serves one account (the host user it runs as), so these values
 //! are that user's: the default engine configuration new threads start
-//! from, the projects in most-recently-used order with the thread last open
+//! from (the model the user last chose), the options the user last chose
+//! for each model, the projects in most-recently-used order with the thread last open
 //! in each, and the route (project and thread) the user was last on, so a
 //! restarted or reconnected Editor resumes where the user was. The Editor
 //! renders them and reports navigation; the Forge owns every rule (the
@@ -15,10 +16,24 @@ use crate::bounds::PROJECT_LISTING_MAX_PROJECTS;
 use crate::catalog_selection::CatalogSelection;
 use crate::engine_config::EngineRunConfig;
 use crate::identifiers::{ProjectId, RequestId, ThreadId};
+use crate::model_favorites::ModelFavoriteId;
 use crate::text::DisplayName;
 
 /// Maximum number of projects in a navigation record or a legacy import.
 pub const NAVIGATION_PROJECTS_MAX: usize = PROJECT_LISTING_MAX_PROJECTS;
+
+/// Maximum number of models whose options the Forge remembers; the least
+/// recently chosen are forgotten first.
+pub const MODEL_PREFERENCES_MAX: usize = 256;
+
+/// The options the user last chose one catalog model with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelPreference {
+    /// Catalog model identity.
+    pub model_id: ModelFavoriteId,
+    /// The configuration the user last chose it with.
+    pub config: EngineRunConfig,
+}
 
 /// One project of the navigation record and the thread last open in it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,8 +133,12 @@ pub type UserPreferencesRevision = u64;
 pub struct UserPreferences {
     /// Revision of the stored preferences; grows with every change.
     pub revision: UserPreferencesRevision,
-    /// Configuration new threads start from, once the user chose one.
+    /// Configuration new threads start from: the model the user last chose,
+    /// once the user chose one.
     pub default_engine_config: Option<EngineRunConfig>,
+    /// The options the user last chose for each model, most recent first,
+    /// at most [`MODEL_PREFERENCES_MAX`].
+    pub model_preferences: Vec<ModelPreference>,
     /// Project order, last threads, and last route.
     pub navigation: NavigationRecord,
     /// The account the Forge runs as.
@@ -192,8 +211,9 @@ pub enum ModelPreferenceSource {
     System,
 }
 
-/// Saves the model and its options as the user's default, independently of
-/// a thread or a send. Non-user sources leave the existing preference intact.
+/// Saves the model and its options as the user's last-used model and as
+/// that model's remembered options, independently of a thread or a send.
+/// Non-user sources leave every stored preference intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SaveModelPreference {
     /// Mutation identity.

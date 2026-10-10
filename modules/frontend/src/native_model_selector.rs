@@ -98,6 +98,7 @@ const PICKER_HOVER_MOTION_DURATION_MS: u64 = 250;
 const PICKER_TOOLTIP_SHOW_DELAY_MS: u64 = 500;
 const OPTION_TOOLTIP_WIDTH_PX: f32 = 320.0;
 const OPTION_TOOLTIP_GAP_PX: f32 = 8.0;
+const ENGINE_TOOLTIP_WIDTH_PX: f32 = 240.0;
 
 /// The policy payload emitted after a model or policy control is committed.
 pub type SelectPolicy = NativeModelPolicy;
@@ -227,6 +228,8 @@ pub struct NativeModelSelectorState {
     collapsed_groups: std::collections::HashSet<(String, String)>,
     /// Engines the Forge reports as needing sign-in; their tabs are greyed.
     blocked_engines: Vec<String>,
+    /// The user's remembered model choices, laid over every snapshot.
+    user_preferences: crate::picker_selection::UserModelPreferences,
 }
 
 /// Catalog projections survive animation frames; their inputs change only on interaction.
@@ -246,7 +249,8 @@ struct EngineIndicatorTransition {
     generation: u64,
 }
 
-/// One policy-option tooltip waiting to be shown or already mounted.
+/// One policy-option or engine-tab tooltip waiting to be shown or already
+/// mounted.
 ///
 /// The row bounds are measured in window coordinates by a canvas probe. The
 /// tooltip is then rendered as a deferred anchored element, so the dropdown's
@@ -257,7 +261,17 @@ struct PickerTooltipTarget {
     advisory: Option<String>,
     description: Option<String>,
     row_bounds: Option<Bounds<Pixels>>,
+    placement: PickerTooltipPlacement,
     visible: bool,
+}
+
+/// Where a picker tooltip sits relative to the element it explains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerTooltipPlacement {
+    /// Beside the row, on whichever side has room (policy options).
+    Side,
+    /// Centred above the element, outside the menu (engine tabs).
+    Above,
 }
 
 /// A GPUI entity that paints the model trigger and bounded selector popover.

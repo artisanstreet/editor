@@ -7,8 +7,8 @@ use artisan_domain::{
     ApprovalMode, ByteLimit, CountLimit, EngineAgentId, EngineModelId, EnginePermissionPolicy,
     EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis,
-    LegacyImportOutcome, NavigationRoute, NetworkAccess, OpenCode2Selection, PermissionId,
-    ProjectId, ThreadId, UnixMillis, WebSearchAccess,
+    LegacyImportOutcome, ModelFavoriteId, NavigationRoute, NetworkAccess, OpenCode2Selection,
+    PermissionId, ProjectId, ThreadId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ConnectionTrait, DatabaseConnection};
@@ -265,14 +265,26 @@ async fn legacy_preferences_the_forge_cannot_use_are_refused() {
 
 #[tokio::test]
 async fn model_preference_survives_repository_recreation_and_ignores_agent_choices() {
-    use artisan_domain::ModelPreferenceSource;
+    use artisan_domain::{ModelPreference, ModelPreferenceSource};
     let (database, repository) = repository().await;
+    let model = |id: &str| ModelFavoriteId::parse(id).unwrap();
     let preferred = config("user-model");
     let saved = repository
-        .save_model_preference(&preferred, ModelPreferenceSource::User)
+        .save_model_preference(
+            &model("user-model"),
+            &preferred,
+            ModelPreferenceSource::User,
+        )
         .await
         .unwrap();
     assert_eq!(saved.default_engine_config.as_ref(), Some(&preferred));
+    assert_eq!(
+        saved.model_preferences,
+        [ModelPreference {
+            model_id: model("user-model"),
+            config: preferred.clone(),
+        }]
+    );
     let reopened = Repository::new(database);
     assert_eq!(reopened.read_user_preferences().await.unwrap(), saved);
     for source in [
@@ -282,7 +294,7 @@ async fn model_preference_survives_repository_recreation_and_ignores_agent_choic
     ] {
         assert_eq!(
             reopened
-                .save_model_preference(&config("subagent-model"), source)
+                .save_model_preference(&model("subagent-model"), &config("subagent-model"), source)
                 .await
                 .unwrap(),
             saved
@@ -290,16 +302,83 @@ async fn model_preference_survives_repository_recreation_and_ignores_agent_choic
     }
     assert_eq!(
         reopened
-            .save_model_preference(&preferred, ModelPreferenceSource::User)
+            .save_model_preference(
+                &model("user-model"),
+                &preferred,
+                ModelPreferenceSource::User
+            )
             .await
             .unwrap(),
         saved,
         "retrying the same preference does not bump its revision"
     );
     let next = reopened
-        .save_model_preference(&config("next-user-model"), ModelPreferenceSource::User)
+        .save_model_preference(
+            &model("next-user-model"),
+            &config("next-user-model"),
+            ModelPreferenceSource::User,
+        )
         .await
         .unwrap();
     assert_eq!(next.revision, saved.revision + 1);
     assert_eq!(next.default_engine_config, Some(config("next-user-model")));
+}
+
+#[tokio::test]
+async fn each_model_keeps_the_options_it_was_last_chosen_with() {
+    use artisan_domain::{MODEL_PREFERENCES_MAX, ModelPreferenceSource};
+    let (_database, repository) = repository().await;
+    let model = |id: &str| ModelFavoriteId::parse(id).unwrap();
+    let user = ModelPreferenceSource::User;
+    repository
+        .save_model_preference(&model("sol"), &config("sol-medium"), user)
+        .await
+        .unwrap();
+    repository
+        .save_model_preference(&model("opus"), &config("opus-medium"), user)
+        .await
+        .unwrap();
+    let stored = repository
+        .save_model_preference(&model("sol"), &config("sol-xhigh"), user)
+        .await
+        .unwrap();
+    // The last choice is the default; each model keeps its own options,
+    // most recently chosen first.
+    assert_eq!(stored.default_engine_config, Some(config("sol-xhigh")));
+    let remembered = stored
+        .model_preferences
+        .iter()
+        .map(|preference| (preference.model_id.as_str(), preference.config.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remembered,
+        [
+            ("sol", config("sol-xhigh")),
+            ("opus", config("opus-medium"))
+        ]
+    );
+    // Choosing an already-remembered model again moves it to the front.
+    let stored = repository
+        .save_model_preference(&model("opus"), &config("opus-medium"), user)
+        .await
+        .unwrap();
+    assert_eq!(stored.default_engine_config, Some(config("opus-medium")));
+    assert_eq!(stored.model_preferences[0].model_id, model("opus"));
+
+    for index in 0..MODEL_PREFERENCES_MAX {
+        let id = format!("model-{index}");
+        repository
+            .save_model_preference(&model(&id), &config(&id), user)
+            .await
+            .unwrap();
+    }
+    let stored = repository.read_user_preferences().await.unwrap();
+    assert_eq!(stored.model_preferences.len(), MODEL_PREFERENCES_MAX);
+    assert!(
+        stored
+            .model_preferences
+            .iter()
+            .all(|preference| preference.model_id != model("sol")),
+        "the least recently chosen model is forgotten first"
+    );
 }

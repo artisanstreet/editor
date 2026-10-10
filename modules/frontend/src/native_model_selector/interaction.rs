@@ -81,6 +81,20 @@ impl NativeModelSelector {
         cx.notify();
     }
 
+    /// Replaces the user's remembered model choices. Returns whether they
+    /// changed.
+    pub fn set_user_preferences(
+        &mut self,
+        preferences: crate::picker_selection::UserModelPreferences,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let changed = self.state.set_user_preferences(preferences);
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+
     /// Replaces the owner-authoritative policy.
     pub fn set_policy(&mut self, policy: Option<SelectPolicy>, cx: &mut Context<Self>) {
         if !self.state.set_policy(policy) {
@@ -145,22 +159,69 @@ impl NativeModelSelector {
             return;
         }
 
+        self.schedule_tooltip(
+            PickerTooltipTarget {
+                key,
+                advisory: option.advisory.clone(),
+                description: option.description.clone(),
+                row_bounds: None,
+                placement: PickerTooltipPlacement::Side,
+                visible: false,
+            },
+            move |selector| selector.axis_is_interactive(axis),
+            cx,
+        );
+    }
+
+    /// Whether the engine tabs accept hover and clicks: the menu is open and
+    /// no policy select is open or still animating closed, so a stray pointer
+    /// cannot swap the engine underneath an open select.
+    pub(super) fn engine_tabs_interactive(&self) -> bool {
+        self.menu_is_interactive()
+            && self.state.open_axis.is_none()
+            && self.axis_menu_motion.borrow().phase() == PickerMenuPhase::Hidden
+    }
+
+    /// Explains why a greyed-out engine tab cannot be chosen.
+    pub(super) fn begin_engine_tooltip(
+        &mut self,
+        engine_id: &str,
+        reason: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.schedule_tooltip(
+            PickerTooltipTarget {
+                key: engine_tooltip_key(engine_id),
+                advisory: None,
+                description: Some(reason),
+                row_bounds: None,
+                placement: PickerTooltipPlacement::Above,
+                visible: false,
+            },
+            Self::engine_tabs_interactive,
+            cx,
+        );
+    }
+
+    /// Mounts `target` hidden and reveals it after the hover delay, provided
+    /// it is still the current tooltip and `still_interactive` holds.
+    fn schedule_tooltip(
+        &mut self,
+        target: PickerTooltipTarget,
+        still_interactive: impl Fn(&Self) -> bool + 'static,
+        cx: &mut Context<Self>,
+    ) {
         self.option_tooltip_generation = self.option_tooltip_generation.wrapping_add(1);
         let generation = self.option_tooltip_generation;
-        *self.option_tooltip.borrow_mut() = Some(PickerTooltipTarget {
-            key: key.clone(),
-            advisory: option.advisory.clone(),
-            description: option.description.clone(),
-            row_bounds: None,
-            visible: false,
-        });
+        let key = target.key.clone();
+        *self.option_tooltip.borrow_mut() = Some(target);
         self.option_tooltip_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(PICKER_TOOLTIP_SHOW_DELAY_MS))
                 .await;
             let _ = this.update(cx, |selector, cx| {
                 if selector.option_tooltip_generation == generation
-                    && selector.axis_is_interactive(axis)
+                    && still_interactive(selector)
                     && selector
                         .option_tooltip
                         .borrow()
@@ -694,7 +755,7 @@ impl NativeModelSelector {
     }
 
     pub(super) fn switch_engine(&mut self, engine_id: String, cx: &mut Context<Self>) {
-        if !self.menu_is_interactive() {
+        if !self.engine_tabs_interactive() {
             return;
         }
         let closing_axis = self.axis_menu_motion_axis.or(self.state.open_axis);
@@ -761,6 +822,10 @@ pub(super) fn option_tooltip_text(
 
 pub(super) fn option_tooltip_key(axis: NativePolicyAxis, option_id: &str) -> String {
     format!("{axis:?}:{option_id}")
+}
+
+pub(super) fn engine_tooltip_key(engine_id: &str) -> String {
+    format!("engine:{engine_id}")
 }
 
 fn selector_key_from_event(event: &KeyDownEvent) -> Option<NativeModelSelectorKey> {

@@ -1,8 +1,10 @@
 //! The Forge user's preferences, navigation record, and account profile.
 //!
 //! The Forge owns every rule: a recorded navigation moves its project to the
-//! front and remembers its thread; an explicit user model preference sets
-//! the default new threads start from; a legacy import only
+//! front and remembers its thread; an explicit user model choice becomes
+//! the default new threads start from and the options that model is
+//! remembered with, while agent and system choices change neither; a legacy
+//! import only
 //! fills what the Forge does not have yet. The account profile is the host
 //! account the Forge runs as.
 
@@ -131,7 +133,7 @@ impl RequestHandler {
             .into_config();
         let stored = self
             .repository
-            .save_model_preference(&config, save.source)
+            .save_model_preference(&save.selection.model_id, &config, save.source)
             .await
             .map_err(|error| repository_failure(&error, request_id))?;
         Ok(outcome(

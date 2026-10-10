@@ -5434,7 +5434,11 @@ async fn agent_model_preference_commands_leave_the_user_choice_intact() {
     let preferred = engine_config("user-choice");
     let saved = storage
         .repository()
-        .save_model_preference(&preferred, ModelPreferenceSource::User)
+        .save_model_preference(
+            &ModelFavoriteId::parse("user-choice").unwrap(),
+            &preferred,
+            ModelPreferenceSource::User,
+        )
         .await
         .unwrap();
     let handler = RequestHandler::new(storage.repository().clone());

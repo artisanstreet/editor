@@ -214,9 +214,19 @@ impl NativeModelSelector {
             let indicator_transition = Rc::clone(&self.engine_indicator_transition);
             let animation_generation = Rc::clone(&self.engine_indicator_animation_generation);
             let active_engine = active_engine.clone();
+            let engine_tooltip = Rc::clone(&self.option_tooltip);
+            let measured_tooltip_key = engine_tooltip_key(&harness.id);
             let tab_probe = canvas(
                 |_, _, _| {},
                 move |bounds, (), window, cx| {
+                    let tooltip_changed =
+                        engine_tooltip.borrow_mut().as_mut().is_some_and(|target| {
+                            target.key == measured_tooltip_key
+                                && target.row_bounds.replace(bounds) != Some(bounds)
+                        });
+                    if tooltip_changed {
+                        window.defer(cx, |window, _| window.refresh());
+                    }
                     if measured_engine_id != active_engine {
                         return;
                     }
@@ -277,17 +287,31 @@ impl NativeModelSelector {
             );
             // An engine that cannot offer a model right now (it needs
             // sign-in, reported nothing, or reported an incomplete list) is
-            // greyed out and inert.
-            let usable = self.state.engine_usable(&harness.id);
+            // greyed out and inert; hovering it explains why. Every tab is
+            // inert while a policy select is open.
+            let unavailable_reason = self.state.engine_unavailable_reason(&harness.id);
+            let usable = unavailable_reason.is_none();
+            let interactive = self.engine_tabs_interactive();
+            let hover_engine_id = harness.id.clone();
             let mut tab = div()
                 .id(format!(
                     "{NATIVE_MODEL_SELECTOR_ENGINE_SELECTOR_PREFIX}-{}",
                     harness.id
                 ))
                 .debug_selector(move || selector.clone())
-                .when(usable, |tab| {
+                .when(usable && interactive, |tab| {
                     tab.on_click(cx.listener(move |view: &mut Self, _: &ClickEvent, _, cx| {
                         view.switch_engine(engine_id.clone(), cx);
+                    }))
+                })
+                .when_some(unavailable_reason.clone(), |tab, reason| {
+                    tab.on_hover(cx.listener(move |view: &mut Self, hovered: &bool, _, cx| {
+                        if *hovered && view.engine_tabs_interactive() {
+                            view.begin_engine_tooltip(&hover_engine_id, reason.clone(), cx);
+                        } else {
+                            view.clear_option_tooltip_for(&engine_tooltip_key(&hover_engine_id));
+                        }
+                        cx.notify();
                     }))
                 })
                 .when(!usable, |tab| tab.opacity(0.35))
@@ -296,6 +320,9 @@ impl NativeModelSelector {
                     harness.label.clone()
                 } else {
                     format!("{} (unavailable)", harness.label)
+                })
+                .when_some(unavailable_reason, |tab, reason| {
+                    tab.aria_description(reason)
                 })
                 .flex()
                 .items_center()

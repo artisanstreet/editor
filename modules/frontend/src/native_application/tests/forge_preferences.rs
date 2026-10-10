@@ -1,7 +1,8 @@
 //! The Forge user's preferences as the Editor uses them: a new connection
 //! resumes the Forge's project order and route, navigation is reported to
-//! the Forge, threads without their own configuration show the Forge's
-//! default model, the account comes from the Forge, and preferences an
+//! the Forge, threads without their own configuration show the model the
+//! user last chose, each model starts from the options the user last chose
+//! it with, the account comes from the Forge, and preferences an
 //! older Editor kept in files are handed over once and then removed.
 
 use super::forge_codex_config;
@@ -23,6 +24,7 @@ fn preferences(
     UserPreferences {
         revision: 7,
         default_engine_config,
+        model_preferences: Vec::new(),
         navigation: NavigationRecord::new(
             projects
                 .iter()
@@ -191,6 +193,14 @@ fn threads_without_their_own_configuration_show_the_forge_default(cx: &mut TestA
                 &default,
             )
             .expect("the fixture displays the default");
+            // The picker's own default runs under the catalog scope's profile.
+            let expected = crate::native_model_catalog::NativeModelPolicy {
+                profile_id: application
+                    .served_catalog(cx)
+                    .scope
+                    .map(|scope| scope.profile_id),
+                ..expected
+            };
             let displayed = |application: &NativeApplication,
                              cx: &mut Context<NativeApplication>| {
                 application
@@ -213,6 +223,60 @@ fn threads_without_their_own_configuration_show_the_forge_default(cx: &mut TestA
                 cx,
             );
             assert_eq!(displayed(application, cx), Some(expected));
+        });
+    });
+}
+
+#[gpui::test]
+fn a_picked_model_starts_from_the_options_the_user_last_chose_it_with(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, cx| test_application(window, cx));
+    let (sink, _) = command_sink([]);
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            install_ready_message_surface(
+                application,
+                cx,
+                ThreadId::parse("new-task").unwrap(),
+                "",
+                sink,
+            );
+            let remembered = forge_codex_config(Some(1_050_000));
+            let expected = crate::picker_selection::saved_config_policy(
+                &application.served_catalog(cx),
+                &remembered,
+            )
+            .expect("the fixture displays the remembered options");
+            // The picker's own default runs under the catalog scope's profile.
+            let expected = crate::native_model_catalog::NativeModelPolicy {
+                profile_id: application
+                    .served_catalog(cx)
+                    .scope
+                    .map(|scope| scope.profile_id),
+                ..expected
+            };
+            let picked = |application: &NativeApplication, cx: &mut Context<NativeApplication>| {
+                application
+                    .served_catalog(cx)
+                    .selection_policy_for_model(&expected.model_id)
+                    .expect("the model is selectable")
+            };
+            assert_ne!(picked(application, cx), expected);
+
+            let mut remembered_only = preferences(&[], None, None);
+            remembered_only.model_preferences = vec![artisan_domain::ModelPreference {
+                model_id: ModelFavoriteId::parse(expected.model_id.clone()).unwrap(),
+                config: remembered,
+            }];
+            application.handle_service_event(
+                NativeTransportEvent::HostState(
+                    crate::native_transport_service::HostStateEvent::Preferences(remembered_only),
+                ),
+                cx,
+            );
+            // Picking the model again starts from its remembered options,
+            // without making it the default.
+            assert_eq!(picked(application, cx), expected);
+            assert_eq!(application.served_catalog(cx).default_model_id, None);
         });
     });
 }

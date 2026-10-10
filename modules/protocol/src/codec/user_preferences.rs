@@ -6,8 +6,9 @@ use super::*;
 
 use artisan_domain::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
-    ModelPreferenceSource, NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord,
-    NavigationRoute, ReadUserPreferences, RecordNavigation, SaveModelPreference, UserPreferences,
+    MODEL_PREFERENCES_MAX, ModelFavoriteId, ModelPreference, ModelPreferenceSource,
+    NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord, NavigationRoute,
+    ReadUserPreferences, RecordNavigation, SaveModelPreference, UserPreferences,
 };
 
 use crate::composer_state_codec as leaf;
@@ -208,6 +209,15 @@ pub(crate) fn encode_preferences(
         encoded.set_project_id(route.project_id.as_str());
         encoded.set_thread_id(route.thread_id.as_ref().map_or("", ThreadId::as_str));
     }
+    let field = "userPreferences.modelPreferences";
+    let mut encoded = builder
+        .reborrow()
+        .init_model_preferences(list_length(field, value.model_preferences.len())?);
+    for (index, preference) in value.model_preferences.iter().enumerate() {
+        let mut entry = encoded.reborrow().get(list_index(field, index)?);
+        entry.set_model_id(preference.model_id.as_str());
+        encode_engine_run_config(entry.init_config(), &preference.config);
+    }
     let mut account = builder.init_account();
     account.set_display_name(value.account.display_name.as_str());
     account.set_host_name(value.account.host_name.as_str());
@@ -251,6 +261,20 @@ pub(crate) fn decode_preferences(
     };
     let navigation = NavigationRecord::new(projects, route)
         .map_err(|_| leaf::ComposerStateCodecError::StateValue { field })?;
+    let field = "userPreferences.modelPreferences";
+    let encoded = value.get_model_preferences()?;
+    if encoded.len() as usize > MODEL_PREFERENCES_MAX {
+        return Err(leaf::ComposerStateCodecError::StateValue { field }.into());
+    }
+    let model_preferences = encoded
+        .iter()
+        .map(|entry| {
+            Ok(ModelPreference {
+                model_id: ModelFavoriteId::parse(read_text(entry.get_model_id(), field)?)?,
+                config: decode_engine_run_config(entry.get_config()?)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ProtocolDecodeError>>()?;
     let account = value.get_account()?;
     let name = |text, field: &'static str| {
         DisplayName::parse(read_text(text, field)?)
@@ -259,6 +283,7 @@ pub(crate) fn decode_preferences(
     Ok(UserPreferences {
         revision: value.get_revision(),
         default_engine_config,
+        model_preferences,
         navigation,
         account: AccountProfile {
             display_name: name(

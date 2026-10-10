@@ -354,20 +354,6 @@ impl NativeApplication {
         });
     }
 
-    /// Shows the Forge's default configuration as the catalog row that
-    /// carries it.
-    ///
-    /// Only for threads with no per-thread choice and no saved
-    /// configuration: saved threads never reach this fallback, and the
-    /// result stays non-authoritative until the thread saves its own.
-    fn default_display_policy(
-        &self,
-        snapshot: &crate::native_model_catalog::NativeModelCatalog,
-    ) -> Option<crate::native_model_catalog::NativeModelPolicy> {
-        let config = self.default_engine_config.as_ref()?;
-        crate::picker_selection::saved_config_policy(snapshot, config)
-    }
-
     pub(super) fn sync_composer_model_policy(&mut self, cx: &mut Context<Self>) {
         // A run error belongs to the draft it was shown for; the choice of
         // every draft stays with it.
@@ -407,12 +393,15 @@ impl NativeApplication {
             self.composer_model_choices.remove(&scope);
         }
 
+        // Without a choice or a saved configuration the picker shows its
+        // default: the model the user last chose, with the options the user
+        // last chose it with. It stays non-authoritative until the thread
+        // saves its own.
         let policy = self
             .composer_model_choices
             .get(&scope)
             .and_then(|choice| snapshot.rebase_policy(choice))
-            .or_else(|| saved_policy.clone())
-            .or_else(|| self.default_display_policy(&snapshot));
+            .or_else(|| saved_policy.clone());
         // The displayed choice is authoritative exactly when it is the saved
         // configuration's own display.
         let authoritative = policy.is_some() && policy == saved_policy;

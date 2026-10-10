@@ -528,7 +528,6 @@ impl NativeModelSelector {
         .top_0()
         .left_0()
         .size_full();
-        let axis_open = self.state.is_axis_open(axis);
         let mut control = div()
             .relative()
             .flex()
@@ -557,11 +556,6 @@ impl NativeModelSelector {
                     .shadow(shadows)
             })
             .when(disabled, |trigger| trigger.opacity(0.58))
-            .when(axis_open, |trigger| {
-                let mut shadows = source_card_shadows(&self.theme);
-                shadows.extend(source_focus_ring(&self.theme));
-                trigger.shadow(shadows)
-            })
             .child(
                 icon(IconStyle::resolve(
                     self.theme,
@@ -1056,6 +1050,27 @@ impl NativeModelSelector {
         }
 
         let viewport_width = f32::from(viewport.width).max(1.0);
+        if target.placement == PickerTooltipPlacement::Above {
+            let width = ENGINE_TOOLTIP_WIDTH_PX.min(viewport_width);
+            return Some(
+                deferred(
+                    anchored()
+                        .anchor(Anchor::BottomCenter)
+                        .position(point(row_bounds.center().x, row_bounds.top()))
+                        .offset(point(px(0.0), px(-OPTION_TOOLTIP_GAP_PX)))
+                        .snap_to_window()
+                        .child(render_option_tooltip_surface(
+                            &self.theme,
+                            width,
+                            target.placement,
+                            target.advisory,
+                            target.description,
+                        )),
+                )
+                .with_priority(3)
+                .into_any_element(),
+            );
+        }
         let right_space = viewport_width - f32::from(row_bounds.right()) - OPTION_TOOLTIP_GAP_PX;
         let left_space = f32::from(row_bounds.left()) - OPTION_TOOLTIP_GAP_PX;
         let show_right = right_space >= OPTION_TOOLTIP_WIDTH_PX || right_space >= left_space;
@@ -1083,6 +1098,7 @@ impl NativeModelSelector {
                     .child(render_option_tooltip_surface(
                         &self.theme,
                         width,
+                        target.placement,
                         target.advisory,
                         target.description,
                     )),
@@ -1096,6 +1112,7 @@ impl NativeModelSelector {
 fn render_option_tooltip_surface(
     theme: &ArtisanTheme,
     width: f32,
+    placement: PickerTooltipPlacement,
     advisory: Option<String>,
     description: Option<String>,
 ) -> AnyElement {
@@ -1133,8 +1150,10 @@ fn render_option_tooltip_surface(
     div()
         .id("artisan-native-model-selector-option-tooltip")
         .debug_selector(|| "artisan-native-model-selector-option-tooltip".to_owned())
-        .w(px(width))
-        .max_w(px(OPTION_TOOLTIP_WIDTH_PX))
+        .when(placement == PickerTooltipPlacement::Side, |surface| {
+            surface.w(px(width))
+        })
+        .max_w(px(width))
         .px(px(12.0))
         .py(px(8.0))
         .rounded(px(18.0))
@@ -1219,13 +1238,7 @@ fn dropdown_max_height_for_viewport(
 }
 
 fn source_hover_highlight_shadow(theme: &ArtisanTheme) -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow {
-        color: theme.colors.foreground.with_alpha(0.13).to_paint(),
-        offset: point(px(0.0), px(0.0)),
-        blur_radius: px(0.0),
-        spread_radius: px(0.5),
-        inset: true,
-    }]
+    artisan_ui::hover_card::hover_highlight_shadow(theme)
 }
 
 fn axis_icon(axis: NativePolicyAxis) -> AssetId {

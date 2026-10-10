@@ -217,6 +217,7 @@ impl NativeModelSelectorState {
             model_groups_cache: RefCell::new(None),
             collapsed_groups: std::collections::HashSet::new(),
             blocked_engines: Vec::new(),
+            user_preferences: crate::picker_selection::UserModelPreferences::default(),
         };
         state.refresh_preview_and_highlight();
         state
@@ -227,7 +228,8 @@ impl NativeModelSelectorState {
     /// A current policy is rebased onto the new revision and keeps only
     /// compatible option values. Runtime harness readiness is not consulted
     /// while the picker is open.
-    pub fn set_snapshot(&mut self, snapshot: NativeModelCatalog) {
+    pub fn set_snapshot(&mut self, mut snapshot: NativeModelCatalog) {
+        self.user_preferences.apply_to(&mut snapshot);
         let policy = self
             .policy
             .as_ref()
@@ -280,6 +282,23 @@ impl NativeModelSelectorState {
         self.open_axis = None;
         self.local_error = None;
         self.refresh_preview_and_highlight();
+    }
+
+    /// Replaces the user's remembered model choices: the last-used model
+    /// becomes the default and each model starts from the options it was
+    /// last chosen with. Returns whether they changed; the shown policy is
+    /// the owner's to replace.
+    pub fn set_user_preferences(
+        &mut self,
+        preferences: crate::picker_selection::UserModelPreferences,
+    ) -> bool {
+        if self.user_preferences == preferences {
+            return false;
+        }
+        self.user_preferences = preferences;
+        self.user_preferences.apply_to(&mut self.snapshot);
+        self.model_groups_cache.get_mut().take();
+        true
     }
 
     /// Replaces the owner-authoritative policy.
@@ -420,6 +439,45 @@ impl NativeModelSelectorState {
                 .blocked_engines
                 .iter()
                 .any(|blocked| blocked == engine_id)
+    }
+
+    /// Why `engine_id`'s tab is greyed out, or `None` when it is usable.
+    #[must_use]
+    pub fn engine_unavailable_reason(&self, engine_id: &str) -> Option<String> {
+        if self.engine_usable(engine_id) {
+            return None;
+        }
+        let label = self
+            .snapshot
+            .manifest
+            .harness(engine_id)
+            .map_or(engine_id, |harness| harness.label.as_str());
+        // The Forge drops an engine whose CLI reported it is signed out from
+        // the runnable harnesses; an empty set is a catalog without a runtime.
+        let signed_out = !self.snapshot.runnable_harness_ids.is_empty()
+            && !self
+                .snapshot
+                .runnable_harness_ids
+                .iter()
+                .any(|runnable| runnable == engine_id);
+        if signed_out
+            || self
+                .blocked_engines
+                .iter()
+                .any(|blocked| blocked == engine_id)
+        {
+            return Some(format!("Sign in to {label} to use its models."));
+        }
+        let disabled_reason = self
+            .snapshot
+            .manifest
+            .models
+            .iter()
+            .filter(|model| model.harness == engine_id)
+            .find_map(|model| model.disabled.as_ref())
+            .map(|disabled| disabled.reason.clone())
+            .filter(|reason| !reason.is_empty());
+        Some(disabled_reason.unwrap_or_else(|| format!("{label} hasn't reported any models.")))
     }
 
     /// Replaces the engines that need sign-in. Returns whether the set

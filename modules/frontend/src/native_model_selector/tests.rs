@@ -688,6 +688,57 @@ fn policy_popup_floats_and_accepts_clicks_outside_parent_bounds(cx: &mut gpui::T
 }
 
 #[gpui::test]
+fn engine_tooltip_width_follows_its_text(cx: &mut gpui::TestAppContext) {
+    cx.update(|app| app.set_reduce_motion(true));
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        NativeModelSelector::new(
+            NativeModelCatalog::from_manifest_json(include_str!(
+                "../../../../tests/fixtures/model_catalog.json"
+            ))
+            .expect("real catalog"),
+            None,
+            ThemeMode::Dark,
+            cx,
+        )
+    });
+    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.run_until_parked();
+    let trigger = cx
+        .debug_bounds(NATIVE_MODEL_SELECTOR_TRIGGER_SELECTOR)
+        .unwrap();
+    cx.simulate_click(trigger.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let tab = Bounds::new(point(px(500.0), px(300.0)), gpui::size(px(32.0), px(32.0)));
+    let mut widths = Vec::new();
+    for description in ["Sign in.", "Sign in to Cursor to use its models."] {
+        view.update(cx, |picker, cx| {
+            *picker.option_tooltip.borrow_mut() = Some(PickerTooltipTarget {
+                key: "engine:tooltip-layout-probe".to_owned(),
+                advisory: None,
+                description: Some(description.to_owned()),
+                row_bounds: Some(tab),
+                placement: PickerTooltipPlacement::Above,
+                visible: true,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let bubble = cx
+            .debug_bounds("artisan-native-model-selector-option-tooltip")
+            .unwrap();
+        assert!(bubble.size.width <= px(ENGINE_TOOLTIP_WIDTH_PX));
+        assert!(bubble.size.height >= px(32.0));
+        assert_eq!(bubble.center().x, tab.center().x);
+        assert_eq!(bubble.bottom(), tab.top() - px(OPTION_TOOLTIP_GAP_PX));
+        widths.push(bubble.size.width);
+    }
+    assert!(
+        widths[0] < widths[1],
+        "short messages must have smaller bubbles"
+    );
+}
+
+#[gpui::test]
 fn policy_option_tooltip_is_a_full_side_overlay(cx: &mut gpui::TestAppContext) {
     cx.update(|app| app.set_reduce_motion(true));
     let (view, cx) = cx.add_window_view(|_, cx| {
@@ -1113,12 +1164,33 @@ fn engines_without_models_or_needing_sign_in_cannot_be_chosen() {
     let start = state.active_engine().to_owned();
     assert_ne!(start, "claude");
     assert!(!state.engine_usable("claude"));
+    assert!(
+        state
+            .engine_unavailable_reason("claude")
+            .is_some_and(|reason| reason.ends_with("hasn't reported any models."))
+    );
+    assert_eq!(state.engine_unavailable_reason(&start), None);
+    // A Forge that dropped Claude from the runnable harnesses saw its CLI
+    // signed out, so the reason asks for sign-in instead.
+    let mut signed_out = state.snapshot().clone();
+    signed_out.runnable_harness_ids = vec![start.clone()];
+    state.set_snapshot(signed_out);
+    assert!(
+        state
+            .engine_unavailable_reason("claude")
+            .is_some_and(|reason| reason.starts_with("Sign in to "))
+    );
     state.set_active_engine("claude".to_owned());
     assert_eq!(state.active_engine(), start, "an empty engine stays greyed");
 
     // The active engine needing sign-in moves the tab to a usable engine.
     assert!(state.set_blocked_engines(vec![start.clone()]));
     assert!(!state.engine_usable(&start));
+    assert!(
+        state
+            .engine_unavailable_reason(&start)
+            .is_some_and(|reason| reason.starts_with("Sign in to "))
+    );
     assert_ne!(state.active_engine(), start);
     assert!(state.engine_usable(state.active_engine()));
     assert!(

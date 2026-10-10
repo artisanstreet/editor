@@ -4,10 +4,12 @@
 //! the thread last open in each project, the last route, and the account
 //! the Forge runs as. The Editor reads them as it connects, orders its
 //! projects and resumes its route from them, reports where the user goes,
-//! and shows the default model on threads without their own configuration.
+//! shows the last-used model on threads without their own configuration,
+//! and starts each picked model from the options the user last chose it
+//! with.
 //! Within a session the order and remembered threads follow the user's own
 //! navigation (the Forge applies the same most-recently-used rule to the
-//! reports); pushes and answers refresh only the default model and the
+//! reports); pushes and answers refresh only the model choices and the
 //! account. Preferences an older Editor kept in files are handed to the
 //! Forge once and then removed.
 
@@ -110,7 +112,7 @@ impl NativeApplication {
         }
     }
 
-    /// Shows the account the Forge runs as and the default model it keeps.
+    /// Shows the account the Forge runs as and the model choices it keeps.
     pub(super) fn apply_forge_preferences(
         &mut self,
         preferences: &UserPreferences,
@@ -122,9 +124,10 @@ impl NativeApplication {
         cx.set_global(crate::native_account_identity::ArtisanAccountIdentity {
             display_name: account.display_name.as_str().to_owned(),
         });
-        if self.default_engine_config != preferences.default_engine_config {
-            self.default_engine_config
-                .clone_from(&preferences.default_engine_config);
+        let choices = crate::picker_selection::UserModelPreferences::of(preferences);
+        if self.model_selector.update(cx, |selector, cx| {
+            selector.set_user_preferences(choices, cx)
+        }) {
             self.sync_composer_model_policy(cx);
             self.refresh_settings_engine_snapshot(cx);
         }
