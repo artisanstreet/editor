@@ -112,7 +112,7 @@ impl Repository {
     ) -> Result<FailedMessageRetryOutcome, QueuedMessageRepositoryError> {
         ensure_thread(&self.database, &target.thread_id).await?;
         let transaction = self
-            .begin_write()
+            .begin_write("retry_failed_message")
             .await
             .map_err(|source| database_error("begin failed-message retry", source))?;
         let now = retried_at.as_millis();
@@ -193,7 +193,7 @@ impl Repository {
         new_thread_id: &ThreadId,
         recovered_at: UnixMillis,
     ) -> Result<(), QueuedMessageRepositoryError> {
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("record_failed_message_recovery").await;
         self.database
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,

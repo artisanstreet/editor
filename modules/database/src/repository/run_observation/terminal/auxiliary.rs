@@ -278,7 +278,7 @@ impl Repository {
     ) -> Result<CancelRunOutcome, CancelRunError> {
         let auxiliary = AuxiliaryTerminal::Cancel(&command);
         validate_auxiliary(&auxiliary)?;
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("cancel_run").await.map_err(|source| {
             AuxiliaryTerminalError::Repository(database_error("begin cancel run", source))
         })?;
         match execute_auxiliary(&transaction, &auxiliary).await {
@@ -330,7 +330,7 @@ impl Repository {
     ) -> Result<InterruptRunOutcome, InterruptRunError> {
         let auxiliary = AuxiliaryTerminal::Interrupt(&command);
         validate_auxiliary(&auxiliary)?;
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("interrupt_run").await.map_err(|source| {
             AuxiliaryTerminalError::Repository(database_error("begin interrupt run", source))
         })?;
         match execute_auxiliary(&transaction, &auxiliary).await {

@@ -70,7 +70,7 @@ impl Repository {
         at: UnixMillis,
     ) -> Result<StoredGlobalPrompt, RepositoryError> {
         let transaction = self
-            .begin_write()
+            .begin_write("establish_global_prompt")
             .await
             .map_err(|source| database_error("begin global prompt setup", source))?;
         let result = async {
@@ -115,7 +115,7 @@ impl Repository {
         at: UnixMillis,
     ) -> Result<GlobalPromptSave, RepositoryError> {
         let transaction = self
-            .begin_write()
+            .begin_write("save_global_prompt")
             .await
             .map_err(|source| database_error("begin global prompt save", source))?;
         let result = async {
@@ -179,7 +179,7 @@ impl Repository {
         file: &StoredPromptFile,
         at: UnixMillis,
     ) -> Result<(), RepositoryError> {
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("record_prompt_file").await;
         self.database
             .execute_raw(statement(
                 "INSERT INTO global_prompt_engine_files (engine_id, home_key, written_digest, written_at_ms) VALUES (?, ?, ?, ?) \

@@ -65,7 +65,7 @@ impl Repository {
         title: &ThreadTitle,
     ) -> Result<(), RepositoryError> {
         use sea_orm::sea_query::Expr;
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("record_generated_thread_title").await;
         entities::thread::Entity::update_many()
             .col_expr(entities::thread::Column::Title, Expr::value(title.as_str()))
             .filter(entities::thread::Column::ThreadId.eq(thread.as_str()))
@@ -121,7 +121,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("attach_project")
             .await
             .map_err(|source| database_error("begin attach-project transaction", source))?;
         let inserted = insert_project(&transaction, &input).await?;
@@ -233,7 +233,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("create_thread")
             .await
             .map_err(|source| database_error("begin create-thread transaction", source))?;
         let summary = input.thread_summary();

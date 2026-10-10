@@ -26,6 +26,7 @@ mod startup_reconciliation_disposition;
 mod thread_attention;
 mod thread_engine_config;
 mod thread_lifecycle;
+mod write_gate;
 
 use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
 use thiserror::Error;
@@ -225,7 +226,7 @@ pub enum RepositoryError {
 #[derive(Clone, Debug)]
 pub struct Repository {
     database: DatabaseConnection,
-    write_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    write_gate: std::sync::Arc<write_gate::WriteGate>,
 }
 
 impl Repository {
@@ -233,7 +234,7 @@ impl Repository {
     pub fn new(database: DatabaseConnection) -> Self {
         Self {
             database,
-            write_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            write_gate: std::sync::Arc::default(),
         }
     }
 

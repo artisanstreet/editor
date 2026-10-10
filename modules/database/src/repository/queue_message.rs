@@ -144,7 +144,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("queue_message")
             .await
             .map_err(|source| database_error("begin queue-message transaction", source))?;
         match admit_queue_message(&transaction, &input).await? {

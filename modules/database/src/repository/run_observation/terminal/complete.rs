@@ -204,7 +204,7 @@ impl Repository {
         command: CompleteRun<'_>,
     ) -> Result<CompleteRunOutcome, CompleteRunError> {
         validate_complete(&command)?;
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("complete_run").await.map_err(|source| {
             CompleteRunError::Repository(database_error("begin complete run", source))
         })?;
         match execute_complete(&transaction, &command).await {

@@ -145,7 +145,7 @@ impl Repository {
         command: RecordRunUsage<'_>,
     ) -> Result<RecordRunUsageOutcome, RunUsageRepositoryError> {
         validate_command_scope(&command)?;
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("record_run_usage").await.map_err(|source| {
             repository_error(database_error("begin run usage transaction", source))
         })?;
 
@@ -186,7 +186,7 @@ impl Repository {
         report: &RunUsageReport,
         rate: Option<u32>,
     ) -> Result<(), RunUsageRepositoryError> {
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("record_run_streaming_speed").await;
         self.database.execute_raw(Statement::from_sql_and_values(
             DbBackend::Sqlite,
             "UPDATE run_usage SET streaming_millitokens_per_second = ? WHERE run_id = ? AND thread_id = ? AND provider_session_id = ? AND source_sequence = ? AND generation = (SELECT generation FROM assistant_runs WHERE run_id = ?)",

@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 artisan-domain = { path = "../domain" }
+artisan-tracing = { path = "../tracing" }
 async-trait = "=0.1.92"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json.workspace = true

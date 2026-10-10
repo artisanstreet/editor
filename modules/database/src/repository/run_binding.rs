@@ -242,7 +242,7 @@ impl Repository {
         let receipt = command.receipt;
 
         let encoded_owner = claimed.owner.to_storage();
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("bind_run_provider").await.map_err(|source| {
             RunBindingError::Repository(database_error("begin run binding", source))
         })?;
 

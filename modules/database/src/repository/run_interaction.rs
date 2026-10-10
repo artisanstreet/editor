@@ -507,7 +507,7 @@ impl Repository {
         &self,
         run_id: &RunId,
     ) -> Result<u64, RunInteractionError> {
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("settle_run_interactions").await;
         let result = pending_run_interaction::Entity::delete_many()
             .filter(pending_run_interaction::Column::RunId.eq(run_id.as_str()))
             .exec(&self.database)
@@ -578,7 +578,7 @@ impl Repository {
         requested_at: UnixMillis,
         binding_version: i64,
     ) -> Result<RecordInteractionOutcome, RunInteractionError> {
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("record_request").await.map_err(|source| {
             RunInteractionError::Repository(database_error("begin record interaction", source))
         })?;
         let existing = pending_run_interaction::Entity::find()
@@ -659,7 +659,7 @@ impl Repository {
         answers: &[String],
         scope: &ResolveScope,
     ) -> Result<ResolveInteractionOutcome, RunInteractionError> {
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("resolve_response").await.map_err(|source| {
             RunInteractionError::Repository(database_error("begin resolve interaction", source))
         })?;
         if let Some(row) = run_interaction_receipt::Entity::find_by_id(request_id.as_str())

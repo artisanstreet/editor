@@ -100,7 +100,7 @@ impl Repository {
         input: WithdrawQueuedMessage,
     ) -> Result<WithdrawQueuedMessageResult, QueuedMessageRepositoryError> {
         let transaction = self
-            .begin_write()
+            .begin_write("withdraw_queued_message")
             .await
             .map_err(|source| database_error("begin queued-message withdrawal", source))?;
 

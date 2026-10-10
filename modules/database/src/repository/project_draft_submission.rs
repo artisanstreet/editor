@@ -113,7 +113,7 @@ impl Repository {
         &self,
         input: SubmitProjectDraftInput,
     ) -> Result<ProjectDraftSubmission, DraftSubmissionError> {
-        let transaction = self.begin_write().await.map_err(|source| {
+        let transaction = self.begin_write("submit_project_draft").await.map_err(|source| {
             database_error::<RepositoryError>("begin project-draft submission", source)
         })?;
         let outcome = submit(&transaction, &input).await;

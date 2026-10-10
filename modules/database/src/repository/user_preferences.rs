@@ -75,7 +75,7 @@ impl Repository {
         at: UnixMillis,
     ) -> PreferencesResult<StoredUserPreferences> {
         let transaction = self
-            .begin_write()
+            .begin_write("record_navigation")
             .await
             .map_err(|source| database_error("begin navigation record", source))?;
         let result = apply_navigation(&transaction, project, thread, at).await;
@@ -100,7 +100,7 @@ impl Repository {
             return self.read_user_preferences().await;
         }
         let transaction = self
-            .begin_write()
+            .begin_write("save_model_preference")
             .await
             .map_err(|source| database_error("begin model preference", source))?;
         let result = apply_model_preference(&transaction, model, config).await;
@@ -118,7 +118,7 @@ impl Repository {
         config: &EngineRunConfig,
     ) -> PreferencesResult<StoredUserPreferences> {
         let transaction = self
-            .begin_write()
+            .begin_write("remember_default_engine_config")
             .await
             .map_err(|source| database_error("begin default engine config", source))?;
         let result = apply_default(&transaction, config).await;
@@ -141,7 +141,7 @@ impl Repository {
         at: UnixMillis,
     ) -> PreferencesResult<LegacyImport> {
         let transaction = self
-            .begin_write()
+            .begin_write("import_legacy_preferences")
             .await
             .map_err(|source| database_error("begin legacy preference import", source))?;
         let result = apply_import(&transaction, default, order, at).await;

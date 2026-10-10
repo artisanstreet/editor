@@ -130,7 +130,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("set_thread_engine_config")
             .await
             .map_err(|source| database_error("begin engine-config transaction", source))?;
 
