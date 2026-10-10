@@ -5,8 +5,8 @@
 #![forbid(unsafe_code)]
 
 use artisan_ui::asset_seam::asset_glyph;
+use artisan_ui::hover_card::{glass_hover_card, hover_card_text};
 use artisan_ui::theme::{ArtisanTheme, Oklch};
-use artisan_ui::tooltip::{TooltipStyle, tooltip_content};
 use gpui::prelude::*;
 use gpui::{Context, Div, SharedString, Window, div, px};
 
@@ -65,7 +65,15 @@ struct ChipTooltip {
 
 impl Render for ChipTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        tooltip_content(TooltipStyle::resolve(self.theme), self.text.clone())
+        glass_hover_card(
+            &self.theme,
+            div().px(px(12.0)).py(px(8.0)).child(hover_card_text(
+                &self.theme,
+                self.text.clone(),
+                &[],
+            )),
+        )
+        .max_w(px(280.0))
     }
 }
 

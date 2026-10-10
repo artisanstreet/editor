@@ -61,7 +61,7 @@ use gpui::{
     div, px,
 };
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use crate::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens};
 
 /// The audited 11 px supporting-mono size: the arbitrary length utility
 /// `text-[0.6875rem]` (`project-selector.svelte:201`, 0.6875 rem at the
@@ -149,6 +149,9 @@ pub struct ListRowStyle {
     /// Supporting-line family: `--font-mono` for menu rows, `--font-sans` for
     /// rail rows.
     pub supporting_family: &'static str,
+    /// Supporting-line tracking in em: none for the mono menu line, the
+    /// app's tracking for the sans rail line.
+    pub supporting_tracking: f32,
 }
 
 impl ListRowStyle {
@@ -178,6 +181,7 @@ impl ListRowStyle {
             supporting_size,
             supporting_line_height,
             supporting_family,
+            supporting_tracking,
         ) = match geometry {
             ListRowGeometry::Menu => (
                 theme.spacing.steps(1.5),
@@ -186,6 +190,7 @@ impl ListRowStyle {
                 px(SUPPORTING_MONO_PX),
                 theme.spacing.steps(5.0),
                 theme.typography.mono.family,
+                0.0,
             ),
             ListRowGeometry::Rail => (
                 theme.spacing.steps(2.0),
@@ -194,6 +199,7 @@ impl ListRowStyle {
                 theme.typography.label_text,
                 theme.spacing.steps(4.0),
                 theme.typography.sans.family,
+                ProseTypography::TRACKING_EM,
             ),
         };
 
@@ -213,6 +219,7 @@ impl ListRowStyle {
             supporting_line_height,
             supporting_color: muted_foreground,
             supporting_family,
+            supporting_tracking,
         }
     }
 }
@@ -410,6 +417,7 @@ fn supporting_line(style: &ListRowStyle, supporting: SharedString) -> Div {
         .min_w_0()
         .truncate()
         .font_family(style.supporting_family)
+        .tracking(style.supporting_tracking)
         .text_size(style.supporting_size)
         .line_height(style.supporting_line_height)
         .text_color(style.supporting_color)

@@ -159,44 +159,34 @@ impl ProgressStyle {
 /// component gallery compose the identical element, exactly like
 /// [`crate::card::compact_card_content`].
 ///
-/// Because pinned GPUI 0.2.2 clips children to straight-edged rectangles,
-/// the legacy translated-full-bar geometry is reproduced with an exact
-/// bounded compensation rather than a bare rectangle: the returned element
-/// is an `overflow_hidden` rectangular clip as wide as [`ProgressFraction`]
-/// states, and for nonzero shares it contains one pill-shaped copy of the
-/// whole track (`h_full`, the recipe corner radius, the opaque `--primary`)
-/// whose width is the exact reciprocal share `relative(1.0 / share)` and
-/// which refuses to shrink. The copy always starts flush with the track, so
-/// the clip reveals precisely the leading share of the true pill silhouette
-/// and cuts the remainder at the straight vertical boundary the legacy
-/// `translateX(-(100 - pct)%)` produced. An empty share skips the child
-/// entirely rather than dividing by zero, and a sub-pixel share whose
-/// reciprocal is not finite paints the unclipped sliver directly, which is
-/// visually identical at that scale. Further [`gpui::Styled`] refinements
-/// chain onto the returned element and later values win.
+/// The legacy translated-full-bar geometry (`translateX(-(100 - pct)%)`
+/// inside a rounded track) shows the leading share of the pill: rounded
+/// where it starts, cut straight where it ends. That is drawn directly as
+/// one bar as wide as [`ProgressFraction`] states, rounded on its leading
+/// corners and, when full, on all four. It is deliberately not a clip around
+/// a wider pill: a clip region rounds to device pixels differently from a
+/// painted quad, which let the fill drift a pixel off its track once the
+/// surface around it settled at a fractional position. A share narrower
+/// than the corner radius draws its corners at that width, a sliver the
+/// clip would have curved slightly differently. An empty share is an empty
+/// zero-width element. Further [`gpui::Styled`] refinements chain onto the
+/// returned element and later values win.
 #[must_use]
 pub fn progress_indicator(style: ProgressStyle, fill: ProgressFraction) -> Div {
     let share = fill.value();
     if share <= 0.0 {
         return div().h_full().w(relative(0.0));
     }
-
-    let clip = div().h_full().overflow_hidden();
-    let span = 1.0 / share;
-    if !span.is_finite() {
-        // A sub-pixel share has no expressible reciprocal; the sliver is
-        // visually identical either way at this scale.
-        return clip.w(relative(share)).bg(style.fill_color);
+    let bar = div()
+        .h_full()
+        .w(relative(share))
+        .flex_shrink_0()
+        .bg(style.fill_color);
+    if share >= 1.0 {
+        bar.rounded(style.corner_radius)
+    } else {
+        bar.rounded_l(style.corner_radius)
     }
-
-    clip.w(relative(share)).child(
-        div()
-            .h_full()
-            .w(relative(span))
-            .flex_shrink_0()
-            .rounded(style.corner_radius)
-            .bg(style.fill_color),
-    )
 }
 
 /// Returns the reached progress recipe as a plain GPUI [`Div`].

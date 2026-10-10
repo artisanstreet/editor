@@ -407,6 +407,12 @@ pub struct ColorTokens {
     pub question_from: Oklch,
     /// `--question-to`.
     pub question_to: Oklch,
+    /// A skill named in the composer: purple-pink, apart from links.
+    pub mention_skill: Oklch,
+    /// A connector (MCP server) named in the composer: link blue.
+    pub mention_connector: Oklch,
+    /// A command named in the composer: amber, read as an instruction.
+    pub mention_command: Oklch,
     /// `--border`.
     pub border: Oklch,
     /// `--input`.
@@ -578,12 +584,16 @@ impl ProseTypography {
     pub const BODY_WEIGHT: FontWeight = FontWeight(410.0);
     /// Body tracking: −0.04 em at 16 px.
     pub const BODY_TRACKING_PX: f32 = -0.64;
-    /// Workspace tracking at any size: −0.04 em resolved at `size_px`, so
-    /// 14 px workspace text takes −0.56 px rather than the fixed body
-    /// value. Shell and composer consumers use this for non-prose sizes.
+    /// The app's tracking: −0.04 em. The window root sets it once with
+    /// GPUI's `tracking`, so every sans text inherits it at its own size;
+    /// monospaced code opts out with `tracking(0.0)`.
+    pub const TRACKING_EM: f32 = -0.04;
+    /// Workspace tracking at any size: [`Self::TRACKING_EM`] resolved at
+    /// `size_px`, so 14 px workspace text takes −0.56 px rather than the
+    /// fixed body value.
     #[must_use]
     pub const fn body_tracking_px(size_px: f32) -> f32 {
-        size_px * -0.04
+        size_px * Self::TRACKING_EM
     }
     /// Heading weight 630: request exactly so the vendored 630 static matches.
     pub const HEADING_WEIGHT: FontWeight = FontWeight(630.0);
@@ -904,8 +914,10 @@ impl DensityTokens {
 ///   INVENTORY §2 rows 14/27): 3 px wide, ring color at 50% alpha. Invalid
 ///   controls swap to destructive at 20% (`aria-invalid:ring-destructive/20`,
 ///   row 14).
-/// - Selection: `::selection` paints `var(--selection)` over
-///   `var(--foreground)` (`global.css:63–66`; token at `theme.css:250`).
+/// - Selection: Chrome's default active-selection blue `#1967D2`
+///   (Blink `kDefaultActiveSelectionBgColor`), painted behind the glyphs so
+///   text keeps its own color. Dark mode paints it opaque, as Chrome does;
+///   light mode at 30% so dark text stays legible on it.
 /// - Hover-pill fill: the named vertical gradient face
 ///   (`--hover-surface-fill`, `theme.css:244–248`) resolved against this
 ///   mode's foreground.
@@ -917,10 +929,8 @@ pub struct InteractionTokens {
     pub focus_ring_color: Oklch,
     /// Invalid-state ring color at legacy 20% alpha.
     pub invalid_ring_color: Oklch,
-    /// `::selection` background (`oklch(0.48 0.13 250 / 42%)`).
+    /// Text-selection background: `#1967D2` (`oklch(0.5318 0.1807 258.26)`).
     pub selection_background: Oklch,
-    /// `::selection` text color (this mode's `--foreground`).
-    pub selection_foreground: Oklch,
     /// Hover-pill gradient top stop: foreground at 16% alpha.
     pub hover_fill_top: Oklch,
     /// Hover-pill gradient bottom stop: foreground at 7% alpha.
@@ -1034,8 +1044,10 @@ impl ArtisanTheme {
                 focus_ring_width: px(3.0),
                 focus_ring_color: colors.ring.with_alpha(0.5),
                 invalid_ring_color: colors.destructive.with_alpha(0.2),
-                selection_background: Oklch::new(0.48, 0.13, 250.0).with_alpha(0.42),
-                selection_foreground: colors.foreground,
+                selection_background: Oklch::new(0.5318, 0.1807, 258.26).with_alpha(match mode {
+                    ThemeMode::Light => 0.3,
+                    ThemeMode::Dark => 1.0,
+                }),
                 hover_fill_top: colors.foreground.with_alpha(0.16),
                 hover_fill_bottom: colors.foreground.with_alpha(0.07),
             },
@@ -1071,6 +1083,9 @@ impl ArtisanTheme {
             unread: Oklch::new(0.685, 0.145, 230.318),
             question_from: Oklch::new(0.558, 0.288, 302.321),
             question_to: Oklch::new(0.714, 0.203, 305.504),
+            mention_skill: Oklch::new(0.591, 0.233, 328.0),
+            mention_connector: Oklch::new(0.623, 0.214, 259.815),
+            mention_command: Oklch::new(0.666, 0.179, 58.318),
             border: SurfaceStep::S200.oklch(),
             input: SurfaceStep::S200.oklch(),
             ring: SurfaceStep::S400.oklch(),
@@ -1113,6 +1128,9 @@ impl ArtisanTheme {
             unread: Oklch::new(0.828, 0.111, 230.318),
             question_from: Oklch::new(0.627, 0.265, 303.9),
             question_to: Oklch::new(0.827, 0.119, 306.383),
+            mention_skill: Oklch::new(0.746, 0.17, 328.0),
+            mention_connector: Oklch::new(0.707, 0.165, 254.624),
+            mention_command: Oklch::new(0.828, 0.152, 74.0),
             border: Oklch::new(1.0, 0.0, 0.0).with_alpha(0.10),
             input: Oklch::new(1.0, 0.0, 0.0).with_alpha(0.15),
             ring: SurfaceStep::S500.oklch(),
@@ -1274,8 +1292,6 @@ pub struct DesktopTheme {
     pub popover_line: Hsla,
     /// Keyboard shortcut capsule border (`#3a3a3a`).
     pub shortcut_line: Hsla,
-    /// Slightly brighter crosshair stroke than the surrounding rule.
-    pub crosshair: Hsla,
 }
 
 impl DesktopTheme {
@@ -1296,7 +1312,6 @@ impl DesktopTheme {
             field_line: desktop_color(0x0033_3333),
             popover_line: desktop_color(0x0038_3838),
             shortcut_line: desktop_color(0x003a_3a3a),
-            crosshair: desktop_color(0x0066_6666),
         }
     }
 }

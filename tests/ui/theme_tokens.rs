@@ -448,8 +448,14 @@ fn typography_spacing_density_and_interaction_pin_their_sources() {
         i.invalid_ring_color,
         theme.colors.destructive.with_alpha(0.2)
     );
-    assert_channel_close("selection alpha", i.selection_background.a, 0.42);
-    assert_eq!(i.selection_foreground, theme.colors.foreground);
+    assert_channel_close(
+        "selection alpha",
+        i.selection_background.a,
+        match theme.mode {
+            ThemeMode::Light => 0.3,
+            ThemeMode::Dark => 1.0,
+        },
+    );
     assert_eq!(
         (i.hover_fill_top, i.hover_fill_bottom),
         (
