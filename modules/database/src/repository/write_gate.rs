@@ -75,24 +75,20 @@ impl WriteGate {
     fn report_stalled_wait(&self, operation: &'static str, waiting_since: Instant) {
         let holder = *self.holder.lock().unwrap_or_else(PoisonError::into_inner);
         let waited = waiting_since.elapsed().as_millis();
-        match holder {
-            Some(Holder {
-                operation: held_by,
-                since,
-            }) => {
-                let held = since.elapsed().as_millis();
-                eprintln!(
-                    "database write `{operation}` has waited {waited} ms for the write gate, \
-                     held by `{held_by}` for {held} ms"
-                );
-                artisan_tracing::instant!("database", "write_gate.stalled", "operation" => operation, "waited_ms" => waited, "held_by" => held_by, "held_ms" => held);
-            }
-            None => {
-                eprintln!(
-                    "database write `{operation}` has waited {waited} ms for the write gate"
-                );
-                artisan_tracing::instant!("database", "write_gate.stalled", "operation" => operation, "waited_ms" => waited);
-            }
+        if let Some(Holder {
+            operation: held_by,
+            since,
+        }) = holder
+        {
+            let held = since.elapsed().as_millis();
+            eprintln!(
+                "database write `{operation}` has waited {waited} ms for the write gate, \
+                 held by `{held_by}` for {held} ms"
+            );
+            artisan_tracing::instant!("database", "write_gate.stalled", "operation" => operation, "waited_ms" => waited, "held_by" => held_by, "held_ms" => held);
+        } else {
+            eprintln!("database write `{operation}` has waited {waited} ms for the write gate");
+            artisan_tracing::instant!("database", "write_gate.stalled", "operation" => operation, "waited_ms" => waited);
         }
         artisan_tracing::incident!("database.write_gate.stalled");
     }
