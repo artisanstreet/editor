@@ -1,19 +1,22 @@
-//! Service command loop tests: batch forwarding and connection holds carried
-//! by admitted commands through their handlers.
+//! Service command loop tests: batch forwarding, connection holds carried
+//! by admitted commands through their handlers, and the link-preview lane.
 
 #![forbid(unsafe_code)]
 
 use super::{
     CommandSendError, FrameFactory, NativeTransportCommand, NativeTransportEvent,
-    NativeTransportService, PrivateDelivery, QueuedCommand, ServiceFailure, ServiceRuntime,
-    command_loop_with_delivery,
+    NativeTransportService, PREVIEW_CAPACITY, PreviewLane, PrivateDelivery, QueuedCommand,
+    ServiceFailure, ServiceRuntime, command_loop_with_delivery,
 };
 use artisan_domain::{
     ConversationCursor, ConversationLifecycle, ConversationPatch, PatchBatch, PatchId,
     PatchSequence, RequestId, Revision, ThreadId, TurnId, TurnOrdinal, UnixMillis,
 };
 use std::{
-    sync::mpsc::{Receiver, SyncSender, sync_channel},
+    sync::{
+        Arc,
+        mpsc::{Receiver, SyncSender, sync_channel},
+    },
     time::{Duration, Instant},
 };
 
@@ -74,9 +77,14 @@ fn two_contiguous_batches_publish_before_delayed_ack_without_reconnect() {
         service.deliveries.attach(delivery_rx, event_tx.clone());
         let mut frames = FrameFactory::new();
         let join = tokio::spawn(async move {
-            let outcome =
-                command_loop_with_delivery(&mut command_rx, &mut service, &mut frames, &event_tx)
-                    .await;
+            let outcome = command_loop_with_delivery(
+                &mut command_rx,
+                &PreviewLane::default(),
+                &mut service,
+                &mut frames,
+                &event_tx,
+            )
+            .await;
             (outcome, service.custody)
         });
         delivery_tx
@@ -116,6 +124,7 @@ fn two_contiguous_batches_publish_before_delayed_ack_without_reconnect() {
 /// test receives the event, so "the handler has not returned" is observable.
 fn run_loop(
     commands: tokio::sync::mpsc::Receiver<QueuedCommand>,
+    previews: Arc<PreviewLane>,
     events: SyncSender<NativeTransportEvent>,
 ) -> std::thread::JoinHandle<Result<(), ServiceFailure>> {
     std::thread::spawn(move || {
@@ -125,8 +134,14 @@ fn run_loop(
             let mut runtime = ServiceRuntime::new_for_batch_tests();
             runtime.deliveries.attach(delivery_rx, events.clone());
             let mut frames = FrameFactory::new();
-            let outcome =
-                command_loop_with_delivery(&mut commands, &mut runtime, &mut frames, &events).await;
+            let outcome = command_loop_with_delivery(
+                &mut commands,
+                &previews,
+                &mut runtime,
+                &mut frames,
+                &events,
+            )
+            .await;
             drop(delivery_tx);
             outcome
         })
@@ -157,7 +172,7 @@ fn held_command_keeps_the_connection_busy_until_its_handler_returns() {
     let (service, commands, _finished) = NativeTransportService::pending_for_test();
     let holds = std::sync::Arc::clone(service.holds());
     let (event_tx, event_rx) = sync_channel(0);
-    let service_loop = run_loop(commands, event_tx);
+    let service_loop = run_loop(commands, Arc::clone(&service.previews), event_tx);
 
     service
         .submit(unknown_thread_message("held-first-message"))
@@ -273,5 +288,169 @@ fn a_parked_first_batch_is_forwarded_once_its_subscription_started() {
     assert_eq!(
         service.custody.received_cursor(),
         Some(ConversationCursor::new(6))
+    );
+}
+
+fn preview(url: &str) -> NativeTransportCommand {
+    NativeTransportCommand::ResolveRichLink {
+        url: url.to_owned(),
+    }
+}
+
+/// The URL of the next event, which must be a rich-link failure: the test
+/// runtime has no session and cannot reconnect, so every preview fails.
+fn next_preview_failure(events: &Receiver<NativeTransportEvent>) -> String {
+    match events.recv_timeout(Duration::from_secs(5)) {
+        Ok(NativeTransportEvent::RichLinkFailed { requested_url, .. }) => requested_url,
+        other => panic!("expected a rich-link failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn previews_wait_in_their_own_lane_not_the_command_queue() {
+    let (service, mut commands, _finished) = NativeTransportService::pending_for_test();
+    for index in 0..PREVIEW_CAPACITY {
+        service
+            .submit(preview(&format!("https://example.com/{index}")))
+            .expect("the lane admits a full burst");
+    }
+    assert_eq!(
+        service.submit(preview("https://example.com/overflow")),
+        Err(CommandSendError::Busy),
+        "a full lane pushes back like the command queue"
+    );
+    service
+        .submit(NativeTransportCommand::ListRegisteredProfiles)
+        .expect("a full lane leaves the command queue free");
+    let queued = commands.try_recv().expect("the command was queued");
+    assert!(matches!(
+        queued.command(),
+        NativeTransportCommand::ListRegisteredProfiles
+    ));
+    assert!(
+        commands.try_recv().is_err(),
+        "no preview took a command slot"
+    );
+    assert_eq!(service.previews.len(), PREVIEW_CAPACITY);
+}
+
+#[test]
+fn a_command_waits_only_for_the_preview_already_running() {
+    let (service, commands, _finished) = NativeTransportService::pending_for_test();
+    for index in 1..=5 {
+        service
+            .submit(preview(&format!("https://example.com/{index}")))
+            .expect("admitted");
+    }
+    // Rendezvous bridge: the running preview is parked in `publish` until
+    // its result is received.
+    let (event_tx, event_rx) = sync_channel(0);
+    let service_loop = run_loop(commands, Arc::clone(&service.previews), event_tx);
+    wait_until(|| service.previews.len() == 4);
+    service
+        .submit(NativeTransportCommand::ListRegisteredProfiles)
+        .expect("admitted");
+
+    assert_eq!(next_preview_failure(&event_rx), "https://example.com/1");
+    assert!(
+        matches!(
+            event_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(NativeTransportEvent::RegisteredProfilesFailed(_))
+        ),
+        "the command runs before the four queued previews"
+    );
+    for index in 2..=5 {
+        assert_eq!(
+            next_preview_failure(&event_rx),
+            format!("https://example.com/{index}"),
+            "queued previews then run in admission order"
+        );
+    }
+    service.request_shutdown().expect("shutdown");
+    assert!(service_loop.join().expect("loop thread").is_ok());
+}
+
+#[test]
+fn a_failed_preview_publishes_its_failure_and_the_lane_keeps_serving() {
+    let (service, commands, _finished) = NativeTransportService::pending_for_test();
+    // Refused before any request, then lost to the absent session.
+    service.submit(preview("not a link")).expect("admitted");
+    service
+        .submit(preview("https://example.com/after"))
+        .expect("admitted");
+    let (event_tx, event_rx) = sync_channel(0);
+    let service_loop = run_loop(commands, Arc::clone(&service.previews), event_tx);
+
+    assert_eq!(next_preview_failure(&event_rx), "not a link");
+    assert_eq!(next_preview_failure(&event_rx), "https://example.com/after");
+    service
+        .submit(preview("https://example.com/later"))
+        .expect("the lane still admits");
+    assert_eq!(next_preview_failure(&event_rx), "https://example.com/later");
+    service
+        .submit(NativeTransportCommand::ListRegisteredProfiles)
+        .expect("admitted");
+    assert!(matches!(
+        event_rx.recv_timeout(Duration::from_secs(5)),
+        Ok(NativeTransportEvent::RegisteredProfilesFailed(_))
+    ));
+    service.request_shutdown().expect("shutdown");
+    assert!(
+        service_loop.join().expect("loop thread").is_ok(),
+        "preview failures never end the service"
+    );
+}
+
+#[test]
+fn discarding_drops_only_the_previews_that_have_not_started() {
+    let (service, commands, _finished) = NativeTransportService::pending_for_test();
+    for index in 1..=5 {
+        service
+            .submit(preview(&format!("https://example.com/{index}")))
+            .expect("admitted");
+    }
+    let (event_tx, event_rx) = sync_channel(0);
+    let service_loop = run_loop(commands, Arc::clone(&service.previews), event_tx);
+    wait_until(|| service.previews.len() == 4);
+
+    assert_eq!(service.discard_queued_previews(), 4);
+    assert_eq!(
+        next_preview_failure(&event_rx),
+        "https://example.com/1",
+        "the running preview still publishes"
+    );
+    service
+        .submit(NativeTransportCommand::ListRegisteredProfiles)
+        .expect("admitted");
+    assert!(
+        matches!(
+            event_rx.recv_timeout(Duration::from_secs(5)),
+            Ok(NativeTransportEvent::RegisteredProfilesFailed(_))
+        ),
+        "nothing discarded runs"
+    );
+    service.request_shutdown().expect("shutdown");
+    assert!(service_loop.join().expect("loop thread").is_ok());
+}
+
+#[test]
+fn shutdown_does_not_wait_for_queued_previews() {
+    let (service, commands, _finished) = NativeTransportService::pending_for_test();
+    for index in 0..50 {
+        service
+            .submit(preview(&format!("https://example.com/{index}")))
+            .expect("admitted");
+    }
+    service.request_shutdown().expect("shutdown");
+    let (event_tx, event_rx) = sync_channel(64);
+    let service_loop = run_loop(commands, Arc::clone(&service.previews), event_tx);
+    assert!(service_loop.join().expect("loop thread").is_ok());
+    assert!(
+        event_rx.try_recv().is_err(),
+        "the loop stopped before any queued preview ran"
+    );
+    assert_eq!(
+        service.submit(preview("https://example.com/late")),
+        Err(CommandSendError::Stopped)
     );
 }

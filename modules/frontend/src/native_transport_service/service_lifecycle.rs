@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
+use super::diagnostics::connect_failure_category;
 use super::*;
 use artisan_domain::ErrorChain;
 
@@ -30,6 +31,7 @@ impl NativeTransportService {
                 finished: finished.clone(),
                 shutdown_requested: Arc::new(AtomicBool::new(false)),
                 holds: ConnectionHolds::new(),
+                previews: Arc::default(),
                 join: Arc::new(Mutex::new(None)),
             },
             receiver,
@@ -79,6 +81,8 @@ impl NativeTransportService {
         let (event_tx, event_rx) = sync_channel(EVENT_CAPACITY);
         let finished = Arc::new(AtomicBool::new(false));
         let finished_for_thread = Arc::clone(&finished);
+        let previews = Arc::<PreviewLane>::default();
+        let previews_for_thread = Arc::clone(&previews);
         let join = thread::Builder::new()
             .name("artisan-native-transport".to_owned())
             .spawn(move || {
@@ -92,7 +96,12 @@ impl NativeTransportService {
                     {
                         #[cfg(feature = "flight-recorder")]
                         super::flight_recorder::monitor(&runtime);
-                        runtime.block_on(service_main(command_rx, event_tx, home));
+                        runtime.block_on(service_main(
+                            command_rx,
+                            &previews_for_thread,
+                            event_tx,
+                            home,
+                        ));
                     } else {
                         let _ = event_tx.send(NativeTransportEvent::Failed(
                             ServiceFailure::unavailable(ServiceFailureStage::Handshake),
@@ -111,6 +120,7 @@ impl NativeTransportService {
             finished,
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             holds: ConnectionHolds::new(),
+            previews,
             join: Arc::new(Mutex::new(Some(join))),
         })
     }
@@ -124,16 +134,28 @@ impl NativeTransportService {
     /// Tries to admit one command without waiting for capacity.
     ///
     /// A mutating command takes a connection hold on admission; the hold
-    /// travels with it and releases once its handler has returned.
+    /// travels with it and releases once its handler has returned. A link
+    /// preview goes to the [`PreviewLane`] instead of the command queue, so
+    /// a burst of them never delays, or fills the queue ahead of, any other
+    /// command.
     ///
     /// # Errors
     ///
-    /// Returns [`CommandSendError::Busy`] when the bounded command queue is
-    /// full or the connection is sealed for a host switch or quit, or
-    /// [`CommandSendError::Stopped`] after the service has stopped.
+    /// Returns [`CommandSendError::Busy`] when the bounded command queue (or
+    /// preview lane) is full or the connection is sealed for a host switch
+    /// or quit, or [`CommandSendError::Stopped`] after the service has
+    /// stopped.
     pub fn submit(&self, command: NativeTransportCommand) -> Result<(), CommandSendError> {
         match command {
             NativeTransportCommand::Shutdown => self.request_shutdown(),
+            NativeTransportCommand::ResolveRichLink { url } => {
+                // The command receiver closes when the service loop ends, so
+                // it reports a stopped service for the lane as well.
+                if self.shutdown_requested.load(Ordering::Acquire) || self.commands.is_closed() {
+                    return Err(CommandSendError::Stopped);
+                }
+                self.previews.try_push(url)
+            }
             command => {
                 if self.shutdown_requested.load(Ordering::Acquire) {
                     return Err(CommandSendError::Stopped);
@@ -167,6 +189,13 @@ impl NativeTransportService {
         }
         let hold = command.hold_kind().map(|_| parent.extend());
         try_send_command(&self.commands, QueuedCommand::new(command, hold))
+    }
+
+    /// Drops the link previews that have not started, for a conversation
+    /// that is no longer shown: its title table went with it, and the next
+    /// surface asks for its own links. Returns how many were dropped.
+    pub fn discard_queued_previews(&self) -> usize {
+        self.previews.discard_queued()
     }
 
     /// Requests shutdown once, retaining nonblocking admission semantics.
@@ -542,11 +571,17 @@ async fn start_dev_service(home: &Path) -> Result<(ServiceRuntime, FrameFactory)
         ClientSession::connect(target, certificate, pinned_identity, hello, limits, &cancel)
             .await
             .map_err(|error| {
-                dev_startup_failure(
+                let failure = dev_startup_failure(
                     ServiceFailureStage::Handshake,
                     "connecting and completing the handshake",
                     &error,
-                )
+                );
+                match connect_failure_category(&error) {
+                    ServiceFailureCategory::Unavailable => {
+                        StartupError::Unreachable(ServiceFailureStage::Handshake)
+                    }
+                    _ => failure,
+                }
             })?;
     let reconnect_store = ReconnectCapabilityStore::from_home(home).map_err(|error| {
         dev_startup_failure(
@@ -637,6 +672,7 @@ fn read_dev_readiness(path: &Path) -> Option<ForgeReadiness> {
 
 async fn service_main(
     mut commands: tokio::sync::mpsc::Receiver<QueuedCommand>,
+    previews: &PreviewLane,
     events: SyncSender<NativeTransportEvent>,
     home: Option<std::path::PathBuf>,
 ) {
@@ -704,6 +740,7 @@ async fn service_main(
                     crate::dev_startup_receipt::report_ready();
                     let command_result = command_loop_with_delivery(
                         &mut commands,
+                        previews,
                         &mut runtime,
                         &mut frames,
                         &events,
