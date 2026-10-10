@@ -205,62 +205,61 @@ pub(super) async fn request_envelope_payload(
                 failure: ServiceFailure::local_session(),
                 retryable_local_session_loss: local_session_request_loss_is_retryable(&error),
             })?;
-    let (settled_request_id, outcome) = resolved.into_parts();
-    if !request_id_matches(&expected_request_id, &settled_request_id) {
-        return Err(RequestAttemptError::Retained {
+    match validate_resolved_request(&expected_request_id, resolved, expected) {
+        Ok(payload) => Ok((session, payload)),
+        Err(RequestFailure { failure, peer, .. }) => Err(RequestAttemptError::Retained {
             session: Box::new(session),
-            failure: ServiceFailure::new(
+            failure,
+            peer,
+        }),
+    }
+}
+
+/// Checks one settled request against what was asked: the settled and
+/// answered identities, then the response family. A peer's refusal keeps
+/// its code and retryability.
+pub(super) fn validate_resolved_request(
+    expected_request_id: &RequestId,
+    resolved: ResolvedRequest,
+    expected: ExpectedResponse,
+) -> Result<ResponsePayload, RequestFailure> {
+    let failed = |failure, peer| RequestFailure {
+        failure,
+        peer,
+        retryable_local_session_loss: false,
+    };
+    let integrity = || {
+        failed(
+            ServiceFailure::new(
                 ServiceFailureStage::Request,
                 ServiceFailureCategory::Integrity,
             ),
-            peer: None,
-        });
+            None,
+        )
+    };
+    let (settled_request_id, outcome) = resolved.into_parts();
+    if !request_id_matches(expected_request_id, &settled_request_id) {
+        return Err(integrity());
     }
-
     match outcome {
         RequestOutcome::Failure(failure) => {
-            if !optional_request_id_matches(&expected_request_id, failure.request_id.as_ref()) {
-                return Err(RequestAttemptError::Retained {
-                    session: Box::new(session),
-                    failure: ServiceFailure::new(
-                        ServiceFailureStage::Request,
-                        ServiceFailureCategory::Integrity,
-                    ),
-                    peer: None,
-                });
+            if !optional_request_id_matches(expected_request_id, failure.request_id.as_ref()) {
+                return Err(integrity());
             }
-            let peer = PeerFailure {
-                code: failure.code,
-                retryable: failure.retryable,
-            };
-            Err(RequestAttemptError::Retained {
-                session: Box::new(session),
-                failure: ServiceFailure::new(
-                    ServiceFailureStage::Request,
-                    ServiceFailureCategory::Peer,
-                ),
-                peer: Some(peer),
-            })
+            Err(failed(
+                ServiceFailure::new(ServiceFailureStage::Request, ServiceFailureCategory::Peer),
+                Some(PeerFailure {
+                    code: failure.code,
+                    retryable: failure.retryable,
+                }),
+            ))
         }
         RequestOutcome::Response(response) => {
-            if !request_id_matches(&expected_request_id, &response.request_id) {
-                return Err(RequestAttemptError::Retained {
-                    session: Box::new(session),
-                    failure: ServiceFailure::new(
-                        ServiceFailureStage::Request,
-                        ServiceFailureCategory::Integrity,
-                    ),
-                    peer: None,
-                });
+            if !request_id_matches(expected_request_id, &response.request_id) {
+                return Err(integrity());
             }
-            match validate_response_family(expected, response.payload) {
-                Ok(payload) => Ok((session, payload)),
-                Err(failure) => Err(RequestAttemptError::Retained {
-                    session: Box::new(session),
-                    failure,
-                    peer: None,
-                }),
-            }
+            validate_response_family(expected, response.payload)
+                .map_err(|failure| failed(failure, None))
         }
     }
 }
@@ -524,16 +523,21 @@ pub(super) async fn command_loop_with_delivery(
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
+    // Draft work and sends run beside this loop (see `MutationLane`); the
+    // lane is drained before a requested shutdown and aborted with any
+    // failure that ends the loop.
+    let mut lane = MutationLane::new(frames, events);
     loop {
-        // Commands and deliveries race each other exactly as before; a link
-        // preview is taken only when neither is ready, so the queued ones
-        // never delay either (see `PreviewLane`).
+        // Commands, deliveries, and the lane's settlements race each other;
+        // a link preview is taken only when none is ready, so the queued
+        // ones never delay them (see `PreviewLane`).
         let step = tokio::select! {
             biased;
             step = async {
                 tokio::select! {
                     cmd = commands.recv() => LoopStep::Command(cmd),
                     delivery = runtime.deliveries.next() => LoopStep::Delivery(delivery),
+                    event = lane.next() => LoopStep::Lane(event),
                 }
             } => step,
             preview = previews.next() => LoopStep::Preview(preview),
@@ -546,11 +550,14 @@ pub(super) async fn command_loop_with_delivery(
                     #[cfg(feature = "flight-recorder")]
                     trace,
                     command,
-                    hold: _hold,
+                    hold,
                 }) = cmd
                 else {
-                    return Ok(());
+                    return lane.drain(runtime, frames).await;
                 };
+                // A lane job takes the hold along; any other command's
+                // hold drops when this arm ends.
+                let mut hold = hold;
                 #[cfg(feature = "flight-recorder")]
                 let queue_span = trace.id();
                 #[cfg(feature = "flight-recorder")]
@@ -564,7 +571,7 @@ pub(super) async fn command_loop_with_delivery(
                     runtime.trace_command = _trace.id();
                 }
                 match command {
-                    NativeTransportCommand::Shutdown => return Ok(()),
+                    NativeTransportCommand::Shutdown => return lane.drain(runtime, frames).await,
                     NativeTransportCommand::BeginProjectIntakeAt(path) => {
                         project_intake::begin_project_intake_at(runtime, frames, events, path)
                             .await?;
@@ -605,12 +612,6 @@ pub(super) async fn command_loop_with_delivery(
                     }
                     NativeTransportCommand::ComposerState(command) => {
                         composer_state_operations::handle_composer_state_command(
-                            runtime, frames, events, command,
-                        )
-                        .await?;
-                    }
-                    NativeTransportCommand::ComposerDraft(command) => {
-                        composer_draft_operations::handle_composer_draft_command(
                             runtime, frames, events, command,
                         )
                         .await?;
@@ -735,8 +736,19 @@ pub(super) async fn command_loop_with_delivery(
                         composer_operations::set_model_favorite(runtime, frames, events, *command)
                             .await?;
                     }
+                    NativeTransportCommand::ComposerDraft(command) => {
+                        lane.submit(
+                            LaneJob::Draft(command),
+                            hold.take(),
+                            runtime.session.as_ref(),
+                        );
+                    }
                     NativeTransportCommand::SubmitComposerDraft(command) => {
-                        submit_composer_draft(runtime, frames, events, *command).await?;
+                        let job = LaneJob::Submit(*command);
+                        match handlers::refused_submission(runtime, &job) {
+                            Some(refused) => publish(events, refused)?,
+                            None => lane.submit(job, hold.take(), runtime.session.as_ref()),
+                        }
                     }
                     NativeTransportCommand::ResolveRichLink { url } => {
                         resolve_rich_link(runtime, frames, events, url).await?;
@@ -761,6 +773,7 @@ pub(super) async fn command_loop_with_delivery(
                     runtime.trace_command = 0;
                 }
             }
+            LoopStep::Lane(event) => lane.handle(event, runtime, frames).await?,
             LoopStep::Delivery(delivery) => {
                 let recovery = forward_delivery(&mut runtime.custody, events, delivery)?;
                 if let Some(failure) = recovery {
@@ -800,6 +813,7 @@ pub(super) async fn command_loop_with_delivery(
 
 enum LoopStep {
     Command(Option<QueuedCommand>),
+    Lane(mutation_lane::LaneEvent),
     Delivery(PrivateDelivery),
     Preview(preview_lane::QueuedPreview),
 }

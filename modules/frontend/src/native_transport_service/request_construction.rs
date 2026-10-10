@@ -53,26 +53,31 @@ impl StableMutation {
 }
 
 /// Service-private identity minting. The checked monotonic counter makes
-/// identities unique even when the clock does not advance.
+/// identities unique even when the clock does not advance; clones share it,
+/// so requests minted beside the command loop never repeat its identities.
+#[derive(Clone)]
 pub(super) struct FrameFactory {
     process_id: u32,
-    counter: u64,
+    counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl FrameFactory {
     pub(super) fn new() -> Self {
         Self {
             process_id: std::process::id(),
-            counter: 0,
+            counter: Arc::default(),
         }
     }
 
     pub(super) fn next(&mut self) -> Result<FrameStamp, StartupError> {
         let counter = self
             .counter
-            .checked_add(1)
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |counter| {
+                counter.checked_add(1)
+            })
+            .ok()
+            .and_then(|previous| previous.checked_add(1))
             .ok_or(StartupError::Stage(ServiceFailureStage::Request))?;
-        self.counter = counter;
         let sent_at = real_unix_millis()?;
         let text = format!(
             "native-{}-{}-{}",

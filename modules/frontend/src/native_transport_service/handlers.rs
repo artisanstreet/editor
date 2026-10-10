@@ -465,13 +465,33 @@ pub(super) async fn list_registered_profiles(
     publish(events, NativeTransportEvent::RegisteredProfiles(result))
 }
 
+/// The refusal of a send for a thread this connection does not know, which
+/// never reaches the Forge; `None` for every other lane job.
+pub(super) fn refused_submission(
+    runtime: &ServiceRuntime,
+    job: &LaneJob,
+) -> Option<NativeTransportEvent> {
+    let LaneJob::Submit(command) = job else {
+        return None;
+    };
+    let artisan_domain::ComposerDraftScope::Thread(thread_id) = &command.scope else {
+        return None;
+    };
+    known_thread_for_queue(&runtime.known_threads, thread_id)
+        .err()
+        .map(|failure| NativeTransportEvent::MessageFailed {
+            scope: command.scope.clone(),
+            request_id: command.request_id.clone(),
+            failure,
+        })
+}
+
 /// Sends one composer draft at the revision its body was stored under: a
 /// thread's, or a project's new-task draft whose send creates its thread.
 /// The Forge's answer names the thread and message (the first submission's
 /// when this revision was already sent) or refuses a stale revision.
 pub(super) async fn submit_composer_draft(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     events: &SyncSender<NativeTransportEvent>,
     command: SubmitComposerDraft,
 ) -> Result<(), ServiceFailure> {
@@ -482,14 +502,6 @@ pub(super) async fn submit_composer_draft(
         request_id: request_id.clone(),
         failure,
     };
-    if let artisan_domain::ComposerDraftScope::Thread(thread_id) = &scope
-        && known_thread_for_queue(&runtime.known_threads, thread_id).is_err()
-    {
-        return publish(
-            events,
-            failed(ServiceFailure::invalid(ServiceFailureStage::Request)),
-        );
-    }
     let mutation = match draft_submission_mutation(command) {
         Ok(mutation) => mutation,
         Err(failure) => return publish(events, failed(failure)),
@@ -498,7 +510,7 @@ pub(super) async fn submit_composer_draft(
         scope: scope.clone(),
         request_id: request_id.clone(),
     };
-    let submitted = match durable_save_request(runtime, frames, &mutation, expected).await {
+    let submitted = match requests.durable(&mutation, expected).await {
         Ok(ResponsePayload::ComposerDraftSubmitted(submitted)) => submitted,
         Ok(_) => {
             return publish(
