@@ -52,7 +52,7 @@ pub use request_lifecycle::{
 };
 pub use server_dispatch::{
     IncomingRequest, ReplyValidationError, ServerDispatchError, dispatch_server_request,
-    dispatch_server_request_with_receipt,
+    dispatch_server_request_with_receipt, receive_server_request, send_server_reply,
 };
 
 mod session_target;
