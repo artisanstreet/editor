@@ -413,11 +413,24 @@ impl ConversationScene {
             // promotes phaseless prose while current; settled-last promotes
             // the completed last reply of a completed turn. Exactly one reply
             // id per turn at most.
+            //
+            // A steer supersedes every reply before it: the run went on, so
+            // a message the engine marked final (Codex marks its answer as it
+            // starts) was not the answer after all. Promoting it would fold
+            // the live work after the steer under it, out of sight.
+            let answer_floor = turn_items
+                .iter()
+                .filter(|item| is_user_message(item))
+                .skip(1)
+                .map(|item| item.ordinal)
+                .max();
+            let superseded =
+                |item: &SceneItem| answer_floor.is_some_and(|floor| item.ordinal < floor);
             let mut latest_reply: Option<(u64, SceneId)> = None;
             let mut latest_final: Option<(u64, SceneId)> = None;
             for item in &turn_items {
                 if let SceneItemKind::AssistantMessage { body, phase } = &item.kind {
-                    if *phase == AssistantPhase::Commentary || body.is_empty() {
+                    if *phase == AssistantPhase::Commentary || body.is_empty() || superseded(item) {
                         continue;
                     }
                     if latest_reply
@@ -441,7 +454,9 @@ impl ConversationScene {
             for item in &turn_items {
                 match &item.kind {
                     SceneItemKind::AssistantMessage { body, phase }
-                        if *phase != AssistantPhase::Commentary && !body.is_empty() =>
+                        if *phase != AssistantPhase::Commentary
+                            && !body.is_empty()
+                            && !superseded(item) =>
                     {
                         newest_reply_ord = Some(
                             newest_reply_ord.map_or(item.ordinal, |ord| ord.max(item.ordinal)),
@@ -529,7 +544,8 @@ impl ConversationScene {
                         SceneItemKind::ReasoningSummary { .. }
                         | SceneItemKind::Activity { .. }
                         | SceneItemKind::Compaction { .. }
-                        | SceneItemKind::NativeFact { .. } => {
+                        | SceneItemKind::NativeFact { .. }
+                        | SceneItemKind::Question { .. } => {
                             detail_ids.insert(item.id.as_str().to_owned());
                             track_anchor(item.ordinal);
                         }
@@ -678,7 +694,9 @@ impl ConversationScene {
             let mut change_id = None;
             let mut change_disclosure = None;
             let mut change_files = Vec::new();
-            let mut top_level_compaction = false;
+            // Engine-shown images, in item order. Like the change card they
+            // render after the turn's reply, never inside the work section.
+            let mut images: Vec<ImageBlock> = Vec::new();
             let mut group_index: Option<usize> = None;
             let mut pending_transition: Option<ModelTransitionBlock> = None;
             let mut summary_all: Option<(u64, String)> = None;
@@ -779,7 +797,7 @@ impl ConversationScene {
                                     .provenance
                                     .as_ref()
                                     .and_then(|provenance| provenance.lifecycle),
-                                ordinal: item.ordinal,
+                                ordinal: item.source_ordinal,
                                 disclosure: item.disclosure,
                             });
                         }
@@ -822,7 +840,8 @@ impl ConversationScene {
                                 id: item.id,
                                 body,
                                 phase,
-                                ordinal: item.ordinal,
+                                ordinal: item.source_ordinal,
+                                text_after_sequence: item.text_after_sequence,
                                 provenance: item.provenance,
                                 disclosure: item.disclosure,
                             });
@@ -831,7 +850,13 @@ impl ConversationScene {
                             group.session_details.push(SessionDetail::Compaction {
                                 id: item.id,
                                 summary,
-                                ordinal: item.ordinal,
+                                phase: CompactionPhase::settle(
+                                    item.provenance
+                                        .as_ref()
+                                        .and_then(|provenance| provenance.lifecycle),
+                                    turn.lifecycle,
+                                ),
+                                ordinal: item.source_ordinal,
                                 disclosure: item.disclosure,
                             });
                         }
@@ -839,7 +864,16 @@ impl ConversationScene {
                             group.session_details.push(SessionDetail::NativeFact {
                                 id: item.id,
                                 text,
-                                ordinal: item.ordinal,
+                                ordinal: item.source_ordinal,
+                                disclosure: item.disclosure,
+                            });
+                        }
+                        SceneItemKind::Question { prompt, answer } => {
+                            group.session_details.push(SessionDetail::Question {
+                                id: item.id,
+                                prompt,
+                                answer,
+                                ordinal: item.source_ordinal,
                                 disclosure: item.disclosure,
                             });
                         }
@@ -876,6 +910,16 @@ impl ConversationScene {
                             pending_transition = Some(block);
                         }
                     }
+                    continue;
+                }
+                // Images are no barrier: the work around them stays one
+                // section, and they show in the reply flow below it.
+                if let SceneItemKind::Image { src, caption } = item.kind {
+                    images.push(ImageBlock {
+                        id: item.id,
+                        src,
+                        caption,
+                    });
                     continue;
                 }
                 // Change facts are a barrier even though the card is rendered
@@ -1015,10 +1059,15 @@ impl ConversationScene {
                         }));
                     }
                     SceneItemKind::Compaction { summary } => {
-                        top_level_compaction = true;
                         blocks.push(TurnBlock::Compaction(CompactionBlock {
                             id: item.id,
                             summary,
+                            phase: CompactionPhase::settle(
+                                item.provenance
+                                    .as_ref()
+                                    .and_then(|provenance| provenance.lifecycle),
+                                turn.lifecycle,
+                            ),
                             disclosure: item.disclosure,
                         }));
                     }
@@ -1030,6 +1079,11 @@ impl ConversationScene {
                             disclosure: item.disclosure,
                         }));
                     }
+                    // An approval nobody answered before its turn ended can
+                    // no longer be answered: its run is gone, so the prompt
+                    // clears instead of offering choices that would fail.
+                    SceneItemKind::Approval { decision: None, .. }
+                        if turn.lifecycle.is_terminal() => {}
                     SceneItemKind::Approval {
                         prompt,
                         approval_id,
@@ -1091,8 +1145,9 @@ impl ConversationScene {
                     | SceneItemKind::Activity { .. }
                     | SceneItemKind::WorkSession { .. }
                     | SceneItemKind::ChangeSet { .. }
-                    | SceneItemKind::FileChange { .. } => {
-                        unreachable!("all work and change variants were handled above")
+                    | SceneItemKind::FileChange { .. }
+                    | SceneItemKind::Image { .. } => {
+                        unreachable!("all work, change, and image variants were handled above")
                     }
                 }
             }
@@ -1165,6 +1220,8 @@ impl ConversationScene {
                 }
             }
 
+            blocks.extend(images.into_iter().map(TurnBlock::Image));
+
             if let Some(change_id) = change_id
                 && !change_files.is_empty()
             {
@@ -1183,12 +1240,6 @@ impl ConversationScene {
                         card,
                     });
                 }
-            }
-
-            if top_level_compaction
-                && matches!(narration, TurnNarration::Thinking | TurnNarration::Working)
-            {
-                return Err(SceneBuildError::CompactionNarrationConflict { narration });
             }
 
             // A genuine live reply is its own status: the block goes, and

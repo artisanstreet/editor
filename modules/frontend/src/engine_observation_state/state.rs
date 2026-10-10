@@ -90,6 +90,12 @@ pub struct EngineObservationState {
     /// strictly increasing sequence plus the stable observation identity,
     /// never on the wire cursor.
     seen_delivery_sequences: HashSet<u64>,
+    /// Where the thread's goal stands, as its latest report said, with the
+    /// delivery order of that report.
+    goal: Option<((u64, u64), Option<TurnId>, artisan_domain::GoalObservation)>,
+    /// The provider safety system's latest word on the thread's runs, with
+    /// the delivery order of that report and the run it came from.
+    safety: Option<((u64, u64), Option<RunId>, artisan_domain::SafetyObservation)>,
     /// What the thread's live run is thinking right now, as the Forge last
     /// pushed it. Thinking summaries are never stored or replayed: there is
     /// at most this one block, and it goes when the run moves on.
@@ -130,6 +136,10 @@ pub struct EngineObservationState {
     /// displace the run the thread is actually on. Legacy deliveries carry
     /// no run and never set it.
     latest_run: Option<(u64, RunId)>,
+    /// Per run, the delivery sequence of its newest completed provider
+    /// turn. A run can outlive a turn (a background agent reports back in a
+    /// follow-up turn); text committed before that completion is whole.
+    completed_turns: BTreeMap<RunId, u64>,
     timeline: Vec<TimelineRow>,
 }
 
@@ -143,6 +153,8 @@ impl EngineObservationState {
             seen_ids: HashSet::new(),
             seen_delivery_sequences: HashSet::new(),
             live_thinking: None,
+            goal: None,
+            safety: None,
             held_back: BTreeMap::new(),
             work_loaded: BTreeMap::new(),
             tools: HashMap::new(),
@@ -158,8 +170,15 @@ impl EngineObservationState {
             summary_title: None,
             latest_plan: None,
             latest_run: None,
+            completed_turns: BTreeMap::new(),
             timeline: Vec::new(),
         }
+    }
+
+    /// Per run, the delivery sequence of its newest completed provider turn.
+    #[must_use]
+    pub const fn completed_turns(&self) -> &BTreeMap<RunId, u64> {
+        &self.completed_turns
     }
 
     /// Returns the thread whose subscription events this state pairs.
@@ -437,6 +456,31 @@ impl EngineObservationState {
         }
     }
 
+    /// Where the thread's goal stands, from its latest report.
+    #[must_use]
+    pub fn goal(&self) -> Option<&artisan_domain::GoalObservation> {
+        self.goal.as_ref().map(|(_, _, goal)| goal)
+    }
+
+    /// What a provider safety system last did to the thread's current run.
+    ///
+    /// A report from an earlier run no longer applies once a newer run has
+    /// started, so it is hidden then.
+    #[must_use]
+    pub fn safety(&self) -> Option<&artisan_domain::SafetyObservation> {
+        let (_, run, safety) = self.safety.as_ref()?;
+        match (run, self.latest_run()) {
+            (Some(run), Some(latest)) if run != latest => None,
+            _ => Some(safety),
+        }
+    }
+
+    /// The turn the goal's latest report came from, when attributed.
+    #[must_use]
+    pub fn goal_turn(&self) -> Option<&TurnId> {
+        self.goal.as_ref().and_then(|(_, turn, _)| turn.as_ref())
+    }
+
     /// Returns discrete timeline rows in cursor application order.
     #[must_use]
     pub fn timeline(&self) -> &[TimelineRow] {
@@ -621,6 +665,8 @@ impl EngineObservationState {
             attribution: None,
             first_committed_at: None,
             first_delivery_sequence: None,
+            compaction: None,
+            image: None,
         });
         ApplyOutcome::Applied {
             tag: "unknown",
@@ -648,8 +694,54 @@ impl EngineObservationState {
             Observation::Compaction(value) => {
                 self.push_compaction(cursor, sequence, observation.tag(), value, attribution)
             }
+            Observation::Goal(value) => {
+                // Reports can arrive out of order when older turns are read
+                // late; the latest by delivery order stands.
+                let order = (attribution.map_or(0, |attr| attr.delivery_sequence), cursor);
+                if self
+                    .goal
+                    .as_ref()
+                    .is_none_or(|(current, _, _)| order >= *current)
+                {
+                    let turn = attribution.map(|attr| attr.turn_id.clone());
+                    self.goal = Some((order, turn, value.clone()));
+                }
+                (observation.tag(), false)
+            }
+            Observation::Safety(value) => {
+                let order = (attribution.map_or(0, |attr| attr.delivery_sequence), cursor);
+                if self
+                    .safety
+                    .as_ref()
+                    .is_none_or(|(current, _, _)| order >= *current)
+                {
+                    let run = attribution.map(|attr| attr.run_id.clone());
+                    self.safety = Some((order, run, value.clone()));
+                }
+                (observation.tag(), false)
+            }
             Observation::File(value) => {
                 self.pair_file(cursor, sequence, value, attribution);
+                (observation.tag(), false)
+            }
+            // Only an image the engine generated is shown. One it looked at
+            // (a read picture, a screenshot tool) is a step of its work;
+            // agents show images explicitly with an `artisan-image` block.
+            // Older runs recorded those too, so they are skipped here.
+            Observation::Image(value)
+                if value.origin() != artisan_domain::ImageOrigin::Generated =>
+            {
+                (observation.tag(), false)
+            }
+            Observation::Image(value) => {
+                let summary = value.caption().unwrap_or(value.path()).to_owned();
+                self.push_timeline(cursor, sequence, "image", summary, attribution);
+                if let Some(row) = self.timeline.last_mut() {
+                    row.image = Some(TimelineImage {
+                        src: value.path().to_owned(),
+                        caption: value.caption().map(str::to_owned),
+                    });
+                }
                 (observation.tag(), false)
             }
             Observation::NativeAction(value) => {
@@ -727,8 +819,49 @@ impl EngineObservationState {
         value: &artisan_domain::CompactionObservation,
         attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
-        let summary = format!("compaction {}", value.state().as_str());
+        let completed = value.state() == artisan_domain::CompactionState::Completed;
+        let key = value.compaction_id().map(|id| id.as_str().to_owned());
+        let summary = value.summary().map_or_else(
+            || String::from(if completed { "Compacted" } else { "Compacting" }),
+            str::to_owned,
+        );
+        // Start and completion of one compaction are one separator: the
+        // later event settles the row the earlier one opened, keeping its
+        // place and identity. Rows can arrive out of order when a settled
+        // turn's section is read late.
+        let existing = key.as_ref().and_then(|key| {
+            self.timeline.iter_mut().find(|row| {
+                row.compaction
+                    .as_ref()
+                    .is_some_and(|mark| mark.key.as_ref() == Some(key))
+            })
+        });
+        if let Some(row) = existing {
+            if arrives_out_of_order(row.attribution.as_ref(), attribution) {
+                row.sequence = Some(sequence);
+                note_earlier_start(
+                    &mut row.first_committed_at,
+                    &mut row.first_delivery_sequence,
+                    attribution,
+                );
+            } else {
+                row.cursor = cursor;
+                row.attribution = attribution.cloned();
+            }
+            let mark = row.compaction.get_or_insert(TimelineCompaction {
+                key: None,
+                completed: false,
+            });
+            if completed {
+                mark.completed = true;
+                row.summary = summary;
+            }
+            return (tag, false);
+        }
         self.push_timeline(cursor, sequence, tag, summary, attribution);
+        if let Some(row) = self.timeline.last_mut() {
+            row.compaction = Some(TimelineCompaction { key, completed });
+        }
         (tag, false)
     }
 
@@ -894,6 +1027,15 @@ impl EngineObservationState {
         value: &artisan_domain::TurnStateObservation,
         attribution: Option<&EngineObservationAttribution>,
     ) -> (&'static str, bool) {
+        if value.state() == artisan_domain::TurnState::Completed
+            && let Some(attribution) = attribution
+        {
+            let newest = self
+                .completed_turns
+                .entry(attribution.run_id.clone())
+                .or_default();
+            *newest = (*newest).max(attribution.delivery_sequence);
+        }
         let summary = format!(
             "turn {} {}",
             value.turn_id().as_str(),
@@ -1176,6 +1318,8 @@ impl EngineObservationState {
             attribution: attribution.cloned(),
             first_committed_at: attribution.map(|attr| attr.committed_at),
             first_delivery_sequence: attribution.map(|attr| attr.delivery_sequence),
+            compaction: None,
+            image: None,
         });
     }
 }

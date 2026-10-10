@@ -222,6 +222,13 @@ pub(super) fn validate_item_kind(kind: &SceneItemKind) -> Result<(), SceneBuildE
             validate_general_text(to_model)
         }
         SceneItemKind::NativeFact { text } => validate_native_fact(text),
+        SceneItemKind::Image { src, caption } => {
+            validate_display_path(src)?;
+            match caption {
+                Some(caption) => validate_general_text(caption),
+                None => Ok(()),
+            }
+        }
     }
 }
 
@@ -313,9 +320,6 @@ pub enum SceneBuildError {
     /// An engine display label exceeded its conservative ceiling.
     #[error("engine label is {length} UTF-8 bytes; the maximum is {maximum} (bytes)")]
     EngineLabelTooLong { length: usize, maximum: usize },
-    /// A compaction card was paired with a generic active-work narration.
-    #[error("compaction card cannot coexist with {narration:?} narration")]
-    CompactionNarrationConflict { narration: TurnNarration },
     /// An active-work clock basis accompanied a narration that is not active
     /// work. Only live-work narrations may carry a basis; quiet and terminal
     /// narrations render no ticking row or carry their own settled durations.

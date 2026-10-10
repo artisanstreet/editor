@@ -12,10 +12,11 @@ use artisan_domain::{
     ProtocolDiagnosticObservation, QuestionInput, QuestionObservation, QuestionOption,
     ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation, RetryAttemptState,
     RetryObservation, RunState, RunStateObservation, RunTerminalObservation, RunTerminalState,
-    SearchObservation, SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
-    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
-    TerminalActivityState, ThreadId, ToolAction, ToolObservation, TranscriptContent,
-    TranscriptTool, TurnState, TurnStateObservation, UnixMillis,
+    SafetyAction, SafetyCategory, SafetyObservation, SearchObservation, SearchScope, SearchState,
+    SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
+    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, ThreadId,
+    ToolAction, ToolObservation, TranscriptContent, TranscriptTool, TurnState,
+    TurnStateObservation, UnixMillis,
 };
 use artisan_frontend::conversation_surface::SummaryLinePolicy;
 use artisan_frontend::engine_observation_state::{
@@ -231,7 +232,7 @@ fn reasoning_deltas_accumulate_and_empty_completion_keeps_text() {
         )
         .expect("fixture reasoning delta is valid"),
     );
-    presentation.apply(1, &event(delta));
+    let _ = presentation.apply(1, &event(delta));
     let completed = Observation::ReasoningSummaryCompleted(
         ReasoningSummaryCompletedObservation::new(
             observation_id("obs-reasoning-completed"),
@@ -325,7 +326,7 @@ fn tool_file_search_and_terminal_rows_pair() {
         )
         .expect("fixture tool row is valid"),
     );
-    presentation.apply(1, &event(started));
+    let _ = presentation.apply(1, &event(started));
     let completed = Observation::Tool(
         ToolObservation::new(
             observation_id("obs-tool-completed"),
@@ -337,7 +338,7 @@ fn tool_file_search_and_terminal_rows_pair() {
         )
         .expect("fixture tool row is valid"),
     );
-    presentation.apply(2, &event(completed));
+    let _ = presentation.apply(2, &event(completed));
     let row = presentation.tool("tool-1").expect("tool row pairs");
     assert_eq!(row.action(), ToolAction::Completed);
     assert_eq!(row.detail(), Some("read 42 lines"));
@@ -353,7 +354,7 @@ fn tool_file_search_and_terminal_rows_pair() {
         )
         .expect("fixture file row is valid"),
     );
-    presentation.apply(3, &event(file));
+    let _ = presentation.apply(3, &event(file));
     let search = Observation::Search(
         SearchObservation::new(
             observation_id("obs-search"),
@@ -617,6 +618,42 @@ fn unknown_arms_degrade_to_diagnostic_rows() {
     assert_eq!(presentation.timeline().len(), 1);
 }
 
+fn compaction(id: &str, seq: u64, state: artisan_domain::CompactionState) -> Observation {
+    Observation::Compaction(
+        artisan_domain::CompactionObservation::new(
+            observation_id(id),
+            sequence(seq),
+            state,
+            Some(observation_id("compaction-1")),
+            None,
+            (state == artisan_domain::CompactionState::Completed)
+                .then(|| String::from("967K → 11K")),
+        )
+        .expect("fixture compaction is valid"),
+    )
+}
+
+/// A compaction's start and completion are one separator: the completion
+/// settles the row the start opened, keeping its place.
+#[test]
+fn compaction_start_and_completion_share_one_row() {
+    use artisan_domain::CompactionState;
+
+    let mut presentation = state();
+    let _ = presentation.apply(1, &event(compaction("start", 4, CompactionState::Started)));
+    let rows = presentation.timeline();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tag(), "compaction");
+    assert!(!rows[0].compaction().expect("compaction row").completed());
+
+    let _ = presentation.apply(2, &event(compaction("end", 9, CompactionState::Completed)));
+    let rows = presentation.timeline();
+    assert_eq!(rows.len(), 1, "completion settles the same row");
+    assert_eq!(rows[0].sequence(), Some(4), "the row keeps its start");
+    assert!(rows[0].compaction().expect("compaction row").completed());
+    assert_eq!(rows[0].summary(), "967K → 11K");
+}
+
 #[test]
 fn approval_kinds_map_to_exact_presentations() {
     let mut presentation = state();
@@ -686,21 +723,21 @@ fn turn_run_and_terminal_states_pair() {
         observation_id("turn-1"),
         TurnState::Started,
     ));
-    presentation.apply(1, &event(turn_started));
+    let _ = presentation.apply(1, &event(turn_started));
     let turn_completed = Observation::TurnState(TurnStateObservation::new(
         observation_id("obs-turn-completed"),
         sequence(17),
         observation_id("turn-1"),
         TurnState::Completed,
     ));
-    presentation.apply(2, &event(turn_completed));
+    let _ = presentation.apply(2, &event(turn_completed));
 
     let run_state = Observation::RunState(RunStateObservation::new(
         observation_id("obs-run-state"),
         sequence(18),
         RunState::Waiting,
     ));
-    presentation.apply(3, &event(run_state));
+    let _ = presentation.apply(3, &event(run_state));
     assert_eq!(presentation.run_state(), Some(RunState::Waiting));
 
     let run_terminal = Observation::RunTerminal(
@@ -746,7 +783,7 @@ fn subagent_retry_and_diagnostic_rows_pair() {
         )
         .expect("fixture subagent row is valid"),
     );
-    presentation.apply(1, &event(subagent));
+    let _ = presentation.apply(1, &event(subagent));
     let transcript = Observation::SubagentTranscript(SubagentTranscriptObservation::new(
         observation_id("obs-subagent-transcript"),
         sequence(22),
@@ -762,7 +799,7 @@ fn subagent_retry_and_diagnostic_rows_pair() {
             .expect("fixture transcript tool is valid"),
         ),
     ));
-    presentation.apply(2, &event(transcript));
+    let _ = presentation.apply(2, &event(transcript));
 
     let diagnostic = Observation::ProcessDiagnostic(
         ProcessDiagnosticObservation::new(
@@ -774,7 +811,7 @@ fn subagent_retry_and_diagnostic_rows_pair() {
         )
         .expect("fixture process diagnostic is valid"),
     );
-    presentation.apply(3, &event(diagnostic));
+    let _ = presentation.apply(3, &event(diagnostic));
     let protocol_diagnostic = Observation::ProtocolDiagnostic(
         ProtocolDiagnosticObservation::new(
             observation_id("obs-protocol-diagnostic"),
@@ -955,4 +992,85 @@ fn an_earlier_event_read_later_never_rewinds_its_activity() {
         .expect("tool row pairs");
     assert_eq!(row.action(), ToolAction::Completed);
     assert_eq!(row.first_delivery_sequence(), Some(20));
+}
+
+#[test]
+fn completed_turns_record_each_runs_newest_completion() {
+    let mut presentation = state();
+    let turn = |id: &str, state: TurnState| {
+        Observation::TurnState(TurnStateObservation::new(
+            observation_id(id),
+            sequence(1),
+            observation_id("claude-turn-1"),
+            state,
+        ))
+    };
+    let _ = presentation.apply(1, &attributed(turn("obs-started", TurnState::Started), 3));
+    assert!(presentation.completed_turns().is_empty());
+    let _ = presentation.apply(2, &attributed(turn("obs-later", TurnState::Completed), 9));
+    // A completion read late never moves the record back.
+    let _ = presentation.apply(3, &attributed(turn("obs-earlier", TurnState::Completed), 6));
+    let run = artisan_domain::RunId::parse("run-order").expect("fixture run id is valid");
+    assert_eq!(presentation.completed_turns().get(&run), Some(&9));
+}
+
+fn safety_event(
+    id: &str,
+    action: SafetyAction,
+    run: &str,
+    delivery_sequence: u64,
+) -> EngineObservationEvent {
+    let mut event = attributed(
+        Observation::Safety(
+            SafetyObservation::new(
+                observation_id(id),
+                sequence(delivery_sequence),
+                action,
+                SafetyCategory::Cyber,
+                None,
+                None,
+                None,
+            )
+            .expect("fixture safety is valid"),
+        ),
+        delivery_sequence,
+    );
+    if let Some(attribution) = event.attribution.as_mut() {
+        attribution.run_id = artisan_domain::RunId::parse(run).expect("fixture run id is valid");
+    }
+    event
+}
+
+#[test]
+fn a_safety_report_stands_for_its_run_until_a_newer_run_starts() {
+    let mut presentation = state();
+    presentation.apply(
+        1,
+        &safety_event("safety-1", SafetyAction::Holding, "run-a", 1),
+    );
+    presentation.apply(
+        2,
+        &safety_event("safety-2", SafetyAction::Refused, "run-a", 2),
+    );
+    assert_eq!(
+        presentation.safety().map(SafetyObservation::action),
+        Some(SafetyAction::Refused),
+        "the latest report on the run stands"
+    );
+    // A report read late never displaces a newer one.
+    presentation.apply(
+        3,
+        &safety_event("safety-0", SafetyAction::Holding, "run-a", 0),
+    );
+    assert_eq!(
+        presentation.safety().map(SafetyObservation::action),
+        Some(SafetyAction::Refused)
+    );
+    // Any row of a newer run moves the thread on, and the refusal goes.
+    presentation.apply(4, &{
+        let mut next = safety_event("safety-3", SafetyAction::Released, "run-b", 3);
+        next.observation = message_delta("obs-next", "item-next", MessagePhase::Commentary, "hi");
+        next
+    });
+    assert_eq!(presentation.safety(), None);
 }

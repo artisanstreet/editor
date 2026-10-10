@@ -193,6 +193,7 @@ fn make_assistant(id: &str, turn: &str, ordinal: u64, run: &str) -> Conversation
         phase: AssistantMessagePhase::Final,
         created_at: stamp(1_100),
         updated_at: stamp(5_000),
+        text_after_sequence: None,
     })
 }
 
@@ -1565,4 +1566,62 @@ fn held_back_work_projects_one_stand_in_until_its_rows_are_read() {
         turns: vec![held_back_turn(TURN_A, RUN_A, 3, 10)],
     }));
     assert!(state.holds_back(&turn_id(TURN_A)));
+}
+
+/// Live work merges durable messages and derived steps into one dense scene
+/// order, but a turn's work timeline still places a step by its delivery
+/// sequence: prose written before a step stays above it.
+#[test]
+fn live_steps_keep_their_delivery_place_against_stamped_prose() {
+    let mut state = EngineObservationState::new(thread_id());
+    let _ = state.apply(
+        7,
+        &attributed_event(
+            tool_observation("obs-tool-1", 1, "tool-1", ToolAction::Started),
+            RUN_A,
+            TURN_A,
+            2_000,
+            1551,
+        ),
+    );
+    let mut prose = make_assistant("prose", TURN_A, 2, RUN_A);
+    if let ConversationItem::AssistantMessage(message) = &mut prose {
+        message.phase = AssistantMessagePhase::Commentary;
+        message.lifecycle = ConversationLifecycle::Streaming;
+        message.text_after_sequence = Some(1550);
+    }
+    let snapshot = snapshot(
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Active)],
+        vec![make_user("user_a", TURN_A, 1), prose],
+    );
+    let projection = project_activities(&state, &snapshot);
+    let projected = projection.facts[0].ordinal;
+    let mut controller = controller_with_snapshot(snapshot);
+    upsert_all(&mut controller, projection.facts);
+    let scene = controller.scene().expect("scene builds");
+    let turn_scene = scene
+        .turn_scene(&turn_id(TURN_A))
+        .expect("turn scene exists");
+    let details: Vec<_> = turn_scene
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            TurnBlock::WorkGroup(group) => Some(&group.session_details),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let step = details
+        .iter()
+        .find_map(|detail| match detail {
+            artisan_frontend::conversation_scene::SessionDetail::Activity { ordinal, .. } => {
+                Some(*ordinal)
+            }
+            _ => None,
+        })
+        .expect("the step is a session detail");
+    assert_eq!(
+        step, projected,
+        "the step keeps its delivery-sequence ordinal"
+    );
 }

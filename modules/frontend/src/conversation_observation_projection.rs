@@ -45,7 +45,8 @@ use artisan_domain::{
 };
 
 use crate::conversation_scene::{
-    SCENE_ID_MAX_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_TEXT_BYTES, SceneId,
+    SCENE_ID_MAX_BYTES, SCENE_MAX_DISPLAY_PATH_BYTES, SCENE_MAX_ITEMS, SCENE_MAX_TEXT_BYTES,
+    SceneId,
 };
 use crate::conversation_state_machine::{SceneFact, SceneFactKind};
 use crate::engine_observation_state::{EngineObservationState, TimelineRow};
@@ -482,9 +483,16 @@ pub fn project_activities(
                 row.first_delivery_sequence().unwrap_or(delivery_sequence),
                 false,
             ),
-            // Timeline rows carry no lifecycle report: unknown never means
-            // live, so these facts never count as tool progress.
-            activity_lifecycle: None,
+            // Timeline rows carry no lifecycle report, except a compaction,
+            // which runs until it reports completion. Unknown never means
+            // live, so the others never count as tool progress.
+            activity_lifecycle: row.compaction().map(|compaction| {
+                if compaction.completed() {
+                    ConversationLifecycle::Completed
+                } else {
+                    ConversationLifecycle::Active
+                }
+            }),
             kind,
         });
     }
@@ -555,6 +563,7 @@ pub fn project_activities(
                 SceneFactKind::Question { prompt, answer }
             }
             CandidateKind::Compaction { summary } => SceneFactKind::Compaction { summary },
+            CandidateKind::Image { src, caption } => SceneFactKind::Image { src, caption },
         };
         let Ok(fact) = SceneFact::new(candidate.id, candidate.turn, ordinal, kind) else {
             rejected += 1;
@@ -642,6 +651,17 @@ fn timeline_kind(row: &TimelineRow) -> Option<CandidateKind> {
         "file" | "search" | "subagent" | "subagent_transcript" | "native_action" | "plan" => {
             Some(timeline_activity(row))
         }
+        // A path the scene cannot hold shows nothing rather than a broken
+        // image.
+        "image" => row
+            .image()
+            .filter(|image| image.src().len() <= SCENE_MAX_DISPLAY_PATH_BYTES)
+            .map(|image| CandidateKind::Image {
+                src: image.src().to_owned(),
+                caption: image
+                    .caption()
+                    .map(|caption| truncate_bounded(caption, MAX_ACTIVITY_BODY_BYTES)),
+            }),
         "compaction" => Some(CandidateKind::Compaction {
             summary: truncate_bounded(row.summary(), MAX_ACTIVITY_BODY_BYTES),
         }),
@@ -684,6 +704,10 @@ enum CandidateKind {
     Compaction {
         summary: String,
     },
+    Image {
+        src: String,
+        caption: Option<String>,
+    },
 }
 
 struct Candidate {
@@ -708,10 +732,10 @@ mod tests {
     use artisan_domain::{
         ApprovalObservation, ApprovalRequest, ConversationCursor, ConversationLifecycle,
         ConversationSnapshot, ConversationTurn, EngineObservationAttribution,
-        EngineObservationEvent, FileAction, FileObservation, Observation, ObservationId,
-        ObservationSequence, Revision, RunId, TerminalActivityInput, TerminalActivityObservation,
-        TerminalActivityState, ThreadId, ToolAction, ToolObservation, TurnId, TurnOrdinal,
-        UnixMillis,
+        EngineObservationEvent, FileAction, FileObservation, ImageObservation, ImageOrigin,
+        Observation, ObservationId, ObservationSequence, Revision, RunId, TerminalActivityInput,
+        TerminalActivityObservation, TerminalActivityState, ThreadId, ToolAction, ToolObservation,
+        TurnId, TurnOrdinal, UnixMillis,
     };
 
     fn observation_id(value: &str) -> ObservationId {
@@ -935,6 +959,76 @@ mod tests {
                 assert_eq!(detail.as_deref(), Some("modified src/main.rs (+10/-2)"));
             }
             other => panic!("expected an activity fact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn images_the_engine_only_looked_at_project_nothing() {
+        let thread = ThreadId::parse("thread-viewed").expect("thread");
+        let turn = TurnId::parse("turn-viewed").expect("turn");
+        let run = RunId::parse("run-viewed").expect("run");
+        let mut state = EngineObservationState::new(thread.clone());
+        for (index, origin) in [ImageOrigin::Viewed, ImageOrigin::ToolResult]
+            .into_iter()
+            .enumerate()
+        {
+            let event = attributed_event(
+                &thread,
+                &run,
+                &turn,
+                u64::try_from(index + 1).expect("small"),
+                Observation::Image(
+                    ImageObservation::new(
+                        observation_id(&format!("obs-viewed-{index}")),
+                        sequence(6 + u64::try_from(index).expect("small")),
+                        observation_id(&format!("read-{index}")),
+                        origin,
+                        String::from("/work/preview.png"),
+                        Some(String::from("preview.png")),
+                    )
+                    .expect("fixture image observation is valid"),
+                ),
+            );
+            let _ = state.apply(u64::try_from(index + 1).expect("small"), &event);
+        }
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert!(projection.facts.is_empty(), "{:?}", projection.facts);
+    }
+
+    #[test]
+    fn images_project_as_image_facts_with_path_and_caption() {
+        let thread = ThreadId::parse("thread-image").expect("thread");
+        let turn = TurnId::parse("turn-image").expect("turn");
+        let run = RunId::parse("run-image").expect("run");
+        let event = attributed_event(
+            &thread,
+            &run,
+            &turn,
+            1,
+            Observation::Image(
+                ImageObservation::new(
+                    observation_id("obs-image"),
+                    sequence(6),
+                    observation_id("gen-1"),
+                    ImageOrigin::Generated,
+                    String::from("/state/engine-images/abc.png"),
+                    Some(String::from("a lighthouse at dusk")),
+                )
+                .expect("fixture image observation is valid"),
+            ),
+        );
+        let mut state = EngineObservationState::new(thread.clone());
+        let _ = state.apply(1, &event);
+
+        let projection = project_activities(&state, &snapshot(&thread, &turn));
+        assert_eq!(projection.facts.len(), 1);
+        match &projection.facts[0].kind {
+            SceneFactKind::Image { src, caption } => {
+                assert_eq!(src, "/state/engine-images/abc.png");
+                assert_eq!(caption.as_deref(), Some("a lighthouse at dusk"));
+            }
+            other => panic!("expected an image fact, got {other:?}"),
         }
     }
 }

@@ -92,6 +92,14 @@ pub enum SceneItemKind {
     },
     /// Bounded native event/fallback fact.
     NativeFact { text: String },
+    /// One image the engine showed, rendered as an image showcase in the
+    /// reply flow, never inside the work section.
+    Image {
+        /// Absolute path, `file://` URI, or http(s) URL.
+        src: String,
+        /// Bounded caption, when disclosed.
+        caption: Option<String>,
+    },
 }
 
 /// Caller-supplied durable attribution for one scene item.
@@ -107,6 +115,10 @@ pub struct ItemProvenance {
     /// Renderer-visible lifecycle for assistant items; `None` for
     /// fact-derived cards, which are never treated as live.
     pub lifecycle: Option<ConversationLifecycle>,
+    /// Whether the provider turn that wrote this item's text has ended, so
+    /// no more of it can arrive even while the item's lifecycle stays live
+    /// (its run outlives the turn).
+    pub text_settled: bool,
 }
 
 /// One renderer input record with stable identity, owning turn, and ordinal.
@@ -126,6 +138,15 @@ pub struct SceneItem {
     /// Durable attribution for session derivation; `None` selects the legacy
     /// positional layout for unattributed inputs.
     pub provenance: Option<ItemProvenance>,
+    /// For assistant prose, the thread's highest observation delivery
+    /// sequence when its first text was committed: where the prose falls
+    /// among the turn's tool steps. `None` keeps it ahead of every step.
+    pub text_after_sequence: Option<u64>,
+    /// The ordinal the item carried in its own ordinal space, before the
+    /// scene merged durable messages and derived work into one dense order.
+    /// A turn's work timeline places steps by it: a derived step's source
+    /// ordinal encodes its delivery sequence.
+    pub source_ordinal: u64,
 }
 
 impl SceneItem {
@@ -151,7 +172,19 @@ impl SceneItem {
             kind,
             disclosure,
             provenance: None,
+            text_after_sequence: None,
+            source_ordinal: ordinal,
         })
+    }
+
+    /// Places assistant prose among its turn's tool steps by when its first
+    /// text arrived (see [`Self::text_after_sequence`]).
+    #[must_use]
+    pub fn with_text_after_sequence(self, text_after_sequence: Option<u64>) -> Self {
+        Self {
+            text_after_sequence,
+            ..self
+        }
     }
 
     /// Attaches durable attribution for session derivation.
@@ -281,6 +314,8 @@ pub enum TurnBlock {
     ModelTransition(ModelTransitionBlock),
     /// Native fact card.
     NativeFact(NativeFactBlock),
+    /// Image showcase.
+    Image(ImageBlock),
     /// Steering label anchored to a user message.
     SteeringLabel(SteeringBlock),
     /// One per-turn status row unless streaming suppression applies.
@@ -333,8 +368,12 @@ pub enum SessionDetail {
         body: String,
         /// Preserved disclosed phase, never inferred.
         phase: AssistantPhase,
-        /// Stable ordinal for merge order.
+        /// Source ordinal (see [`SceneItem::source_ordinal`]): the work
+        /// timeline's merge order.
         ordinal: u64,
+        /// Where the prose's first text falls among the turn's tool steps;
+        /// see [`SceneItem::text_after_sequence`].
+        text_after_sequence: Option<u64>,
         /// Durable attribution when the caller supplied it.
         provenance: Option<ItemProvenance>,
         /// Explicit disclosure.
@@ -352,7 +391,8 @@ pub enum SessionDetail {
         detail: Option<String>,
         /// Durable liveness for the chain's live/failed default-open rule.
         lifecycle: Option<ConversationLifecycle>,
-        /// Stable ordinal for merge order.
+        /// Source ordinal (see [`SceneItem::source_ordinal`]): the work
+        /// timeline's merge order.
         ordinal: u64,
         /// Explicit disclosure.
         disclosure: Option<SceneDisclosure>,
@@ -363,7 +403,10 @@ pub enum SessionDetail {
         id: SceneId,
         /// Bounded summary.
         summary: String,
-        /// Stable ordinal for merge order.
+        /// Whether the compaction runs, finished, or stopped with its turn.
+        phase: CompactionPhase,
+        /// Source ordinal (see [`SceneItem::source_ordinal`]): the work
+        /// timeline's merge order.
         ordinal: u64,
         /// Explicit disclosure.
         disclosure: Option<SceneDisclosure>,
@@ -374,7 +417,22 @@ pub enum SessionDetail {
         id: SceneId,
         /// Bounded native fact text.
         text: String,
-        /// Stable ordinal for merge order.
+        /// Source ordinal (see [`SceneItem::source_ordinal`]): the work
+        /// timeline's merge order.
+        ordinal: u64,
+        /// Explicit disclosure.
+        disclosure: Option<SceneDisclosure>,
+    },
+    /// Agent question folded into the session at the step that asked it.
+    Question {
+        /// Scene identity.
+        id: SceneId,
+        /// Bounded prompt.
+        prompt: String,
+        /// The answer once given; see [`QuestionBlock::answer`].
+        answer: Option<String>,
+        /// Source ordinal (see [`SceneItem::source_ordinal`]): the work
+        /// timeline's merge order.
         ordinal: u64,
         /// Explicit disclosure.
         disclosure: Option<SceneDisclosure>,
@@ -442,13 +500,55 @@ pub struct WorkGroupBlock {
     pub session_details: Vec<SessionDetail>,
 }
 
-/// Compaction card.
+/// Where a compaction stands, settled against its turn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompactionPhase {
+    /// The engine is compacting the conversation.
+    Running,
+    /// The compaction finished.
+    Done,
+    /// The turn ended before the compaction reported completion.
+    Stopped,
+}
+
+impl CompactionPhase {
+    /// Settles a compaction's own lifecycle against its turn's: an open
+    /// compaction in a turn that ended stopped with it, and one with no
+    /// lifecycle report predates the report and reads as finished.
+    #[must_use]
+    pub fn settle(compaction: Option<ConversationLifecycle>, turn: ConversationLifecycle) -> Self {
+        match compaction {
+            Some(lifecycle) if super::validation::is_live_lifecycle(lifecycle) => {
+                if turn.is_terminal() {
+                    Self::Stopped
+                } else {
+                    Self::Running
+                }
+            }
+            _ => Self::Done,
+        }
+    }
+
+    /// The separator's label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "Compacting",
+            Self::Done => "Compacted",
+            Self::Stopped => "Compaction stopped",
+        }
+    }
+}
+
+/// Compaction separator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionBlock {
     /// Scene identity.
     pub id: SceneId,
     /// Bounded summary.
     pub summary: String,
+    /// Whether the compaction runs, finished, or stopped with its turn.
+    pub phase: CompactionPhase,
     /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
 }
@@ -553,6 +653,17 @@ pub struct NativeFactBlock {
     pub text: String,
     /// Explicit disclosure.
     pub disclosure: Option<SceneDisclosure>,
+}
+
+/// Image showcase block for one engine-shown image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageBlock {
+    /// Scene identity.
+    pub id: SceneId,
+    /// Absolute path, `file://` URI, or http(s) URL.
+    pub src: String,
+    /// Bounded caption, when disclosed.
+    pub caption: Option<String>,
 }
 
 /// Steering label block.

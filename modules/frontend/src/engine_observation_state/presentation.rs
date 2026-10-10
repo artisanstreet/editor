@@ -572,6 +572,46 @@ pub struct TimelineRow {
     pub(super) attribution: Option<EngineObservationAttribution>,
     pub(super) first_committed_at: Option<UnixMillis>,
     pub(super) first_delivery_sequence: Option<u64>,
+    /// The compaction this row reports, for `compaction` rows.
+    pub(super) compaction: Option<TimelineCompaction>,
+    /// The image this row shows, for `image` rows.
+    pub(super) image: Option<TimelineImage>,
+}
+
+/// One engine-shown image: where it lives and its caption.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineImage {
+    pub(super) src: String,
+    pub(super) caption: Option<String>,
+}
+
+impl TimelineImage {
+    /// The absolute image path on the engine host.
+    #[must_use]
+    pub fn src(&self) -> &str {
+        &self.src
+    }
+
+    /// The caption, when disclosed.
+    #[must_use]
+    pub fn caption(&self) -> Option<&str> {
+        self.caption.as_deref()
+    }
+}
+
+/// Where one compaction stands: its start and completion share a row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineCompaction {
+    pub(super) key: Option<String>,
+    pub(super) completed: bool,
+}
+
+impl TimelineCompaction {
+    /// Whether the compaction reported completion.
+    #[must_use]
+    pub const fn completed(&self) -> bool {
+        self.completed
+    }
 }
 
 impl TimelineRow {
@@ -597,6 +637,18 @@ impl TimelineRow {
     #[must_use]
     pub fn summary(&self) -> &str {
         &self.summary
+    }
+
+    /// Returns the compaction this row reports, for `compaction` rows.
+    #[must_use]
+    pub const fn compaction(&self) -> Option<&TimelineCompaction> {
+        self.compaction.as_ref()
+    }
+
+    /// Returns the image this row shows, for `image` rows.
+    #[must_use]
+    pub const fn image(&self) -> Option<&TimelineImage> {
+        self.image.as_ref()
     }
 
     /// Returns the full delivery attribution, when the delivery carried one.

@@ -74,6 +74,7 @@ fn provenance(run: &str, lifecycle: ConversationLifecycle) -> ItemProvenance {
     ItemProvenance {
         run_id: Some(run_id(run)),
         lifecycle: Some(lifecycle),
+        text_settled: false,
     }
 }
 
@@ -182,6 +183,23 @@ fn approval_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
         SceneItemKind::Approval {
             prompt: "approve?".to_owned(),
             approval_id: ObservationId::parse(id).expect("approval id"),
+            decision: None,
+        },
+        None,
+    )
+    .expect("approval item valid")
+}
+
+/// An approval already answered: it stays as the record once its turn ends.
+fn decided_approval_item(id: &str, turn: &str, ordinal: u64) -> SceneItem {
+    SceneItem::new(
+        scene_id(id),
+        turn_id(turn),
+        ordinal,
+        SceneItemKind::Approval {
+            prompt: "approve?".to_owned(),
+            approval_id: ObservationId::parse(id).expect("approval id"),
+            decision: Some(true),
         },
         None,
     )
@@ -420,25 +438,64 @@ fn active_compaction_has_one_card_and_compacting_narration_no_duplicate() {
     ));
 }
 
+/// A compaction separator marks a point in the turn, not the turn's status:
+/// the turn keeps thinking and working past it.
 #[test]
-fn compaction_cannot_be_paired_with_generic_thinking_or_working_status() {
+fn compaction_sits_beside_generic_thinking_or_working_status() {
     use conversation_scene::ConversationScene;
 
-    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
-    let items = vec![compaction_item("compact", "turn_a", 1, "summary")];
-    let err = ConversationScene::build(
-        turns,
-        items,
-        vec![narration("turn_a", TurnNarration::Thinking)],
-        Vec::new(),
-    )
-    .expect_err("generic active narration conflicts with compaction");
-    assert!(matches!(
-        err,
-        SceneBuildError::CompactionNarrationConflict {
-            narration: TurnNarration::Thinking
-        }
-    ));
+    for status in [TurnNarration::Thinking, TurnNarration::Working] {
+        let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)];
+        let items = vec![compaction_item("compact", "turn_a", 1, "summary")];
+        let scene =
+            ConversationScene::build(turns, items, vec![narration("turn_a", status)], Vec::new())
+                .expect("compaction and active narration build together");
+        assert!(
+            scene.turn_scenes()[0]
+                .blocks
+                .iter()
+                .any(|block| matches!(block, TurnBlock::Compaction(_)))
+        );
+    }
+}
+
+/// An approval left unanswered when its turn ended clears: its run is gone,
+/// so its choices could only fail. An answered one stays as the record.
+#[test]
+fn unanswered_approvals_clear_once_their_turn_ends() {
+    use conversation_scene::ConversationScene;
+
+    let approvals = |lifecycle| {
+        let scene = ConversationScene::build(
+            vec![scene_turn("turn_a", 0, lifecycle)],
+            vec![
+                approval_item("open", "turn_a", 1),
+                decided_approval_item("answered", "turn_a", 2),
+            ],
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("builds");
+        scene.turn_scenes()[0]
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                TurnBlock::Approval(approval) => Some(approval.id.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        approvals(ConversationLifecycle::Active),
+        ["open", "answered"]
+    );
+    for ended in [
+        ConversationLifecycle::Cancelled,
+        ConversationLifecycle::Failed,
+        ConversationLifecycle::Completed,
+    ] {
+        assert_eq!(approvals(ended), ["answered"]);
+    }
 }
 
 // ---- 4. streaming reply suppresses only quiet status row ----
@@ -631,7 +688,7 @@ fn terminal_change_card_follows_interactive_cards_before_status_and_footer() {
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
     let items = vec![
         assistant_item("reply", "turn_a", 1, "done", AssistantPhase::Final),
-        approval_item("approval", "turn_a", 2),
+        decided_approval_item("approval", "turn_a", 2),
         file_change_item("file", "turn_a", 3, "changed.rs"),
     ];
     let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
@@ -651,6 +708,55 @@ fn terminal_change_card_follows_interactive_cards_before_status_and_footer() {
         kinds,
         vec!["assistant", "approval", "change", "status", "footer"]
     );
+}
+
+#[test]
+fn engine_images_show_after_the_reply_without_splitting_the_work() {
+    use conversation_scene::ConversationScene;
+
+    let image = |id: &str, ordinal: u64, caption: Option<&str>| {
+        SceneItem::new(
+            scene_id(id),
+            turn_id("turn_a"),
+            ordinal,
+            SceneItemKind::Image {
+                src: format!("/state/engine-images/{id}.png"),
+                caption: caption.map(str::to_owned),
+            },
+            None,
+        )
+        .expect("image item valid")
+    };
+    let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Completed)];
+    let items = vec![
+        activity_item("read", "turn_a", 1, "read a file"),
+        image("img1", 2, Some("a lighthouse at dusk")),
+        activity_item("edit", "turn_a", 3, "edited a file"),
+        assistant_item("reply", "turn_a", 4, "done", AssistantPhase::Final),
+        image("img2", 5, None),
+    ];
+    let scene = ConversationScene::build(turns, items, Vec::new(), Vec::new()).expect("builds");
+    let blocks = &scene.turn_scenes()[0].blocks;
+    let kinds: Vec<&str> = blocks
+        .iter()
+        .map(|block| match block {
+            TurnBlock::WorkGroup(_) => "work",
+            TurnBlock::AssistantMessage(_) => "assistant",
+            TurnBlock::Image(_) => "image",
+            TurnBlock::TurnStatus(_) => "status",
+            TurnBlock::TurnFooter(_) => "footer",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["work", "assistant", "image", "image", "status", "footer"]
+    );
+    let TurnBlock::Image(first) = &blocks[2] else {
+        panic!("the first image follows the reply");
+    };
+    assert_eq!(first.src, "/state/engine-images/img1.png");
+    assert_eq!(first.caption.as_deref(), Some("a lighthouse at dusk"));
 }
 
 // ---- 6. completed reasoning-only work renders Thought for, ordinary work renders Worked for, never both ----
@@ -1094,7 +1200,7 @@ fn interrupted_failed_cancelled_and_interactive_error_cards_remain_ordered_disti
 
     let turns = vec![scene_turn("turn_a", 0, ConversationLifecycle::Failed)];
     let items = vec![
-        approval_item("ap1", "turn_a", 1),
+        decided_approval_item("ap1", "turn_a", 1),
         question_item("q1", "turn_a", 2),
         error_item("e1", "turn_a", 3),
         SceneItem::new(
@@ -1666,7 +1772,8 @@ fn detail_ids(group: &WorkGroupBlock) -> Vec<&str> {
             SessionDetail::Assistant { id, .. }
             | SessionDetail::Activity { id, .. }
             | SessionDetail::Compaction { id, .. }
-            | SessionDetail::NativeFact { id, .. } => id.as_str(),
+            | SessionDetail::NativeFact { id, .. }
+            | SessionDetail::Question { id, .. } => id.as_str(),
         })
         .collect()
 }
@@ -2602,6 +2709,81 @@ fn the_promoted_final_reply_can_acknowledge_a_steer() {
     assert!(
         groups[1].label.is_none(),
         "only the first segment is titled"
+    );
+}
+
+#[test]
+fn a_steer_supersedes_the_final_reply_before_it() {
+    use conversation_scene::ConversationScene;
+
+    // Codex marks its answer final as it starts. When that answer asks a
+    // question and the user steers the answer in, the run goes on: the
+    // question was not the answer, so it joins the work and nothing folds
+    // the live work after the steer under it.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "crawl it"),
+            run_commentary("look", 2, "Looking"),
+            provenanced(
+                assistant_item(
+                    "question",
+                    "turn_a",
+                    4,
+                    "Desktop or Linux?",
+                    AssistantPhase::Final,
+                ),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            user_item("steer", "turn_a", 5, "Desktop"),
+            run_commentary("ack", 6, "Continuing"),
+            run_activity("tool", 7, ConversationLifecycle::Active),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(scene.promoted_reply_id(&turn_id("turn_a")), None);
+    let blocks = &scene.turn_scenes()[0].blocks;
+    assert!(
+        !steer_layout(blocks).contains(&"assistant"),
+        "no reply stands apart while the run goes on: {:?}",
+        steer_layout(blocks)
+    );
+    let groups = work_groups(blocks);
+    assert_eq!(detail_ids(groups[0]), vec!["look", "question"]);
+    let after: Vec<&str> = groups[1..]
+        .iter()
+        .flat_map(|group| detail_ids(group))
+        .collect();
+    assert_eq!(after, vec!["ack", "tool"]);
+
+    // A final reply after the steer is the answer again.
+    let scene = ConversationScene::build(
+        vec![scene_turn("turn_a", 0, ConversationLifecycle::Active)],
+        vec![
+            user_item("prompt", "turn_a", 1, "crawl it"),
+            provenanced(
+                assistant_item("question", "turn_a", 2, "Desktop?", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Completed,
+            ),
+            user_item("steer", "turn_a", 3, "Desktop"),
+            run_activity("tool", 4, ConversationLifecycle::Completed),
+            provenanced(
+                assistant_item("answer", "turn_a", 5, "Here it is", AssistantPhase::Final),
+                "run_a",
+                ConversationLifecycle::Streaming,
+            ),
+        ],
+        vec![narration("turn_a", TurnNarration::Working)],
+        Vec::new(),
+    )
+    .expect("builds");
+    assert_eq!(
+        scene.promoted_reply_id(&turn_id("turn_a")),
+        Some(scene_id("answer"))
     );
 }
 

@@ -4,28 +4,32 @@
 //! split; visibility was widened to `pub(super)` for parent-owned methods.
 
 use super::*;
+use crate::native_composer::{ComposerGoal, ComposerGoalState, ComposerTab};
+use crate::thread_screen::{
+    COLUMN_PAD_X_PX, PROSE_WIDTH_PX, composer_pad_bottom, inspector_column, thread_inspector_width,
+};
+use artisan_domain::{GoalState, SafetyAction, SafetyCategory};
+use gpui::{canvas, prelude::FluentBuilder as _};
 
 impl NativeApplication {
-    /// Renders the home headline surface: a muted emblem, the centered
-    /// "What should we buildâ€¦?" heading with the inline project switcher,
-    /// and nothing else â€” the editable composer lives in the shell footer.
-    /// The Failure branch keeps the actionable offline error; every other
-    /// branch drops the old "Start a task" copy and subtitle.
+    /// Renders what sits above the new-thread composer: nothing while the
+    /// Forge is reachable, since the composer and its project tab say it all.
+    /// The reconnecting, add-a-host, and offline branches keep their emblem
+    /// and actionable copy.
     pub(super) fn new_thread_surface_section(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
-        let root = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .px(px(24.0))
-            .pb(px(24.0))
-            .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
-            .child(self.home_emblem());
+        let section = || {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .debug_selector(|| DESKTOP_HOME_SELECTOR.to_string())
+        };
+        // Status branches only: the emblem, and room before the composer.
+        let root = section().pb(px(32.0)).child(self.home_emblem());
         if self.connection_retry_pending {
             return root.child(self.home_heading("Reconnecting to Forge…"));
         }
@@ -107,21 +111,7 @@ impl NativeApplication {
                         })),
                 );
         }
-        match self.selected_project_name() {
-            Some(name) => root.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .child(self.home_heading("What should we build in\u{a0}"))
-                    .child(self.home_project_trigger(&name, window, cx))
-                    .child(self.home_heading("?")),
-            ),
-            None => root
-                .child(self.home_heading("What should we build?"))
-                .child(self.home_project_trigger(HOME_CHOOSE_PROJECT_LABEL, window, cx)),
-        }
+        section()
     }
 
     /// Centered large regular home heading line.
@@ -140,28 +130,6 @@ impl NativeApplication {
                 .size(px(HOME_EMBLEM_SIZE_PX))
                 .text_color(self.desktop_theme.secondary),
         )
-    }
-
-    /// The inline project switcher for the home heading: the live picker
-    /// when installed, otherwise the static label (before the first project
-    /// listing arrives). Text styling inherits from the heading container.
-    pub(super) fn home_project_trigger(
-        &mut self,
-        label: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(home) = self.home_picker.clone() else {
-            return div()
-                .text_size(px(HOME_HEADLINE_TEXT_PX))
-                .font_weight(FontWeight::NORMAL)
-                .text_color(self.desktop_theme.foreground)
-                .child(label.to_owned())
-                .into_any_element();
-        };
-        home.update(cx, |picker, picker_cx| {
-            picker.render_inline_trigger(label, window, picker_cx)
-        })
     }
 
     pub(super) fn selected_project_name(&self) -> Option<String> {
@@ -240,40 +208,39 @@ impl NativeApplication {
     /// workspace header naming the open project and conversation lives in the
     /// titlebar's content section, anchored to the primary card's left edge.
     pub(super) fn desktop_brand(&self, cx: &Context<Self>) -> Div {
+        // Wordmark at the start, build id at the end, both centred on the
+        // titlebar's height.
         let brand = div()
+            .w_full()
             .flex()
-            .flex_col()
-            .items_start()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0))
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
                 div()
                     .id("artisan-brand-home")
                     .block_mouse_except_scroll()
-                    .line_height(px(22.0))
+                    .line_height(px(28.0))
                     .cursor_pointer()
                     .on_click(cx.listener(|app, _, _, cx| app.go_home(cx)))
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .flex_shrink_0()
-                    .text_size(px(20.0))
+                    .text_size(px(26.0))
                     .font_family("Test Founders Grotesk")
-                    .font_weight(FontWeight::BOLD)
-                    // -0.025em tracking at 20px matches the Founders specimen.
-                    .letter_spacing(px(-0.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    // -0.025em tracking matches the Founders specimen.
+                    .letter_spacing(px(-0.65))
                     .text_color(self.desktop_theme.foreground)
                     .child("Artisan Editor"),
             );
+        // The build id as a glass badge, without its separator.
         match artisan_build_info::BuildIdentity::current().badge() {
             Some(badge) => brand.child(
-                div()
-                    .debug_selector(|| "artisan-brand-build".to_owned())
-                    .min_w(px(0.0))
-                    .truncate()
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .font_family(self.theme.typography.mono.family)
-                    .text_color(self.theme.colors.muted_foreground.to_paint())
-                    .child(badge),
+                self.glass_badge(badge.replace('-', ""))
+                    .debug_selector(|| "artisan-brand-build".to_owned()),
             ),
             None => brand,
         }
@@ -356,9 +323,10 @@ impl NativeApplication {
                 .items_center()
                 .gap(px(6.0))
                 .flex_shrink_0()
-                // The folder fallback is workspace context: icon and label
-                // both carry the muted context tone, never the foreground.
-                .text_color(titlebar_context_tone(&self.theme))
+                // The folder fallback has no link to tint, so its label
+                // carries the foreground; the icon keeps the muted context
+                // tone.
+                .text_color(theme.colors.foreground.to_paint())
                 .debug_selector(|| TITLEBAR_PROJECT_FOLDER_SELECTOR.to_owned())
                 .child(
                     asset_glyph(AssetId::TABLER_FOLDER)
@@ -679,8 +647,9 @@ impl NativeApplication {
     ) -> AnyElement {
         let route = self.route().clone();
         let route_selector = route.selector_suffix();
+        self.sync_composer_tab(&route, cx);
         let content = self.route_surface(window, cx);
-        let mut body = div()
+        let body = div()
             .size_full()
             .min_w(px(0.0))
             .min_h(px(0.0))
@@ -689,22 +658,298 @@ impl NativeApplication {
             .bg(shell_black())
             .debug_selector(move || route_selector.clone());
         if matches!(route, NativeRoute::NewThread { .. }) {
-            body = body.child(div().flex_1().min_w(px(0.0)).min_h(px(0.0)).child(content));
-            body = body.child(
+            // Typed text reaches only the focused surface: entering the
+            // screen focuses the composer once, later renders never steal it.
+            if std::mem::take(&mut self.new_thread_focus_pending) {
+                let focus = self.composer.read(cx).focus_handle(cx);
+                window.focus(&focus, cx);
+            }
+            body.child(self.new_thread_layout(content, window))
+                .into_any_element()
+        } else {
+            body.child(content).into_any_element()
+        }
+    }
+
+    /// Points the composer's tab at the route: the project picker on the
+    /// new-thread screen, the thread's own project inside a thread.
+    fn sync_composer_tab(&mut self, route: &NativeRoute, cx: &mut Context<Self>) {
+        let tab = match route {
+            NativeRoute::NewThread { .. } => {
+                let label: SharedString = self
+                    .selected_project_name()
+                    .unwrap_or_else(|| HOME_CHOOSE_PROJECT_LABEL.to_owned())
+                    .into();
+                Some(match self.home_picker.clone() {
+                    Some(picker) => ComposerTab::Picker { picker, label },
+                    None => ComposerTab::Project(label),
+                })
+            }
+            NativeRoute::Thread { project, .. } => self
+                .project_options
+                .iter()
+                .find(|option| &option.id == project)
+                .map(|option| ComposerTab::Project(option.name.to_string().into())),
+            _ => None,
+        };
+        let goal = match route {
+            NativeRoute::Thread { .. } => self.composer_goal(cx),
+            _ => None,
+        };
+        self.ensure_extensions_read();
+        let mentions = self.composer_mention_catalog(cx);
+        if cx
+            .try_global::<crate::composer_mentions::SharedMentionCatalog>()
+            .is_none_or(|shared| shared.0 != mentions)
+        {
+            cx.set_global(crate::composer_mentions::SharedMentionCatalog(
+                mentions.clone(),
+            ));
+        }
+        self.composer.update(cx, |composer, composer_cx| {
+            composer.set_tab(tab, composer_cx);
+            composer.set_goal(goal, composer_cx);
+            composer.set_mention_catalog(mentions, composer_cx);
+        });
+    }
+
+    /// The engine the composer's displayed model runs on.
+    fn composer_engine_id(&self, cx: &App) -> Option<String> {
+        self.composer_model_choice(cx)
+            .or_else(|| self.model_selector.read(cx).state().policy())
+            .map(|policy| policy.engine_id.clone())
+    }
+
+    /// What the composer can name: the skills the Forge reports in the
+    /// displayed model's engine, and the commands that engine reads.
+    fn composer_mention_catalog(&self, cx: &App) -> crate::composer_mentions::MentionCatalog {
+        let engine = self.composer_engine_id(cx);
+        let project = match self.route() {
+            NativeRoute::Thread { project, .. } => Some(project.clone()),
+            _ => self.selected_project.clone(),
+        };
+        crate::composer_mentions::catalog_for_engine(
+            self.extensions_catalog(),
+            engine.as_deref(),
+            project.as_ref().map(artisan_domain::ProjectId::as_str),
+        )
+    }
+
+    /// The open thread's goal as the composer shows it: only a goal that
+    /// still stands. One met, given up, or cleared simply goes.
+    ///
+    /// A provider safety system acting on the current run takes the strip
+    /// first, naming the engine: the reader must learn why the turn stopped
+    /// or changed model before what it was working toward.
+    fn composer_goal(&self, cx: &App) -> Option<ComposerGoal> {
+        let observations = self.engine_observations.as_ref()?;
+        if let Some(safety) = observations.safety() {
+            let engine = self.composer_engine_id(cx);
+            let engine =
+                crate::marketplace_presentation::engine_name(engine.as_deref().unwrap_or(""));
+            if let Some(notice) = composer_safety_notice(engine, safety) {
+                return Some(notice);
+            }
+        }
+        let goal = observations.goal()?;
+        let state = match goal.state() {
+            GoalState::Active => ComposerGoalState::Active,
+            GoalState::Paused => ComposerGoalState::Paused,
+            GoalState::Met | GoalState::Abandoned | GoalState::Cleared => return None,
+        };
+        Some(ComposerGoal {
+            objective: goal.objective().unwrap_or("Goal").to_owned().into(),
+            state,
+            detail: None,
+        })
+    }
+
+    /// The new-thread screen in the thread screen's own geometry: the
+    /// conversation column beside an empty inspector column, the composer
+    /// docked exactly where a thread docks it but lifted to the column's
+    /// vertical centre, with the heading above it. The lift is measured each
+    /// layout and handed to the thread a send opens, which slides the
+    /// composer from here into its dock.
+    fn new_thread_layout(&self, heading: AnyElement, window: &Window) -> Div {
+        let viewport_width = f32::from(window.bounds().size.width);
+        let shell = self.desktop_shell_style(window);
+        let pad_bottom = composer_pad_bottom(viewport_width);
+        let lift_cell = Rc::clone(&self.new_thread_composer_lift);
+        let lift = lift_cell.get();
+        let column_height = Rc::new(Cell::new(0.0_f32));
+        let column_probe = Rc::clone(&column_height);
+
+        let overlay = div()
+            .absolute()
+            .left(px(0.0))
+            .right(px(0.0))
+            .bottom(px(lift.unwrap_or(0.0)))
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(COLUMN_PAD_X_PX))
+            .pb(px(pad_bottom))
+            // Unmeasured, the composer would flash at the dock for a frame.
+            .when(lift.is_none(), |overlay| overlay.opacity(0.0))
+            .on_children_prepainted(move |children, window, app| {
+                let Some(card) = children.last() else {
+                    return;
+                };
+                let centred = (column_height.get() - f32::from(card.size.height)) / 2.0;
+                let next = (centred - pad_bottom).max(0.0);
+                if lift_cell
+                    .get()
+                    .is_none_or(|current| (current - next).abs() > 0.5)
+                {
+                    lift_cell.set(Some(next));
+                    window.defer(app, |window, _| window.refresh());
+                }
+            })
+            .child(heading)
+            .child(
                 div()
                     .w_full()
-                    .flex_shrink_0()
-                    .px(px(24.0))
-                    .pt(px(12.0))
-                    .pb(px(18.0))
-                    .flex()
-                    .justify_center()
+                    .max_w(px(PROSE_WIDTH_PX))
                     .debug_selector(|| DESKTOP_COMPOSER_SELECTOR.to_string())
-                    .child(div().w_full().max_w(px(768.0)).child(self.composer.clone())),
+                    .child(self.composer.clone()),
             );
-        } else {
-            body = body.child(content);
-        }
-        body.into_any_element()
+        let conversation = div()
+            .relative()
+            .flex_1()
+            .min_w(px(0.0))
+            .min_h(px(0.0))
+            .child(
+                canvas(
+                    move |bounds, _, _| column_probe.set(f32::from(bounds.size.height)),
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(overlay);
+        let content_width = viewport_width - f32::from(shell.sidebar_width);
+        div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h(px(0.0))
+            .child(conversation)
+            .children(
+                thread_inspector_width(content_width)
+                    .map(|width| inspector_column(width, shell.one_device_pixel)),
+            )
+    }
+}
+
+/// The strip's notice for a provider safety report; `None` once the check
+/// released the response.
+fn composer_safety_notice(
+    engine: &str,
+    safety: &artisan_domain::SafetyObservation,
+) -> Option<ComposerGoal> {
+    let area = match safety.category() {
+        SafetyCategory::Cyber => Some("cybersecurity"),
+        SafetyCategory::Bio => Some("biology"),
+        SafetyCategory::Chemical => Some("chemistry"),
+        SafetyCategory::Policy => Some("usage policy"),
+        SafetyCategory::Unspecified => None,
+    };
+    let (headline, state) = match safety.action() {
+        SafetyAction::Released => return None,
+        SafetyAction::Holding => (
+            format!("{engine} is running a safety check on this request"),
+            ComposerGoalState::SafetyHolding,
+        ),
+        SafetyAction::Rerouted => (
+            match safety.model() {
+                Some(model) => format!("{engine} moved this request to {model}"),
+                None => format!("{engine} moved this request to a fallback model"),
+            },
+            ComposerGoalState::SafetyRerouted,
+        ),
+        SafetyAction::Refused => (
+            format!("{engine} refused to serve this request"),
+            ComposerGoalState::SafetyRefused,
+        ),
+    };
+    let headline = match area {
+        Some(area) => format!("{headline} ({area})"),
+        None => headline,
+    };
+    Some(ComposerGoal {
+        objective: headline.into(),
+        state,
+        detail: safety.message().map(|message| message.to_owned().into()),
+    })
+}
+
+#[cfg(test)]
+mod safety_notice_tests {
+    use super::*;
+    use artisan_domain::{ObservationId, ObservationSequence, SafetyObservation};
+
+    fn safety(
+        action: SafetyAction,
+        category: SafetyCategory,
+        model: Option<&str>,
+    ) -> SafetyObservation {
+        SafetyObservation::new(
+            ObservationId::parse("safety-1").expect("valid id"),
+            ObservationSequence::new(1).expect("valid sequence"),
+            action,
+            category,
+            None,
+            Some("Flagged for review.".to_owned()),
+            model.map(str::to_owned),
+        )
+        .expect("valid safety row")
+    }
+
+    #[test]
+    fn a_refusal_names_the_engine_and_the_area() {
+        let notice = composer_safety_notice(
+            "Codex",
+            &safety(SafetyAction::Refused, SafetyCategory::Cyber, None),
+        )
+        .expect("a refusal shows");
+        assert_eq!(
+            notice.objective.as_ref(),
+            "Codex refused to serve this request (cybersecurity)"
+        );
+        assert_eq!(notice.state, ComposerGoalState::SafetyRefused);
+        assert_eq!(notice.detail.as_deref(), Some("Flagged for review."));
+    }
+
+    #[test]
+    fn a_reroute_names_the_fallback_model_and_a_release_shows_nothing() {
+        let notice = composer_safety_notice(
+            "Codex",
+            &safety(
+                SafetyAction::Rerouted,
+                SafetyCategory::Cyber,
+                Some("gpt-5.2"),
+            ),
+        )
+        .expect("a reroute shows");
+        assert_eq!(
+            notice.objective.as_ref(),
+            "Codex moved this request to gpt-5.2 (cybersecurity)"
+        );
+        let unspecified = composer_safety_notice(
+            "Grok",
+            &safety(SafetyAction::Refused, SafetyCategory::Unspecified, None),
+        )
+        .expect("a refusal shows");
+        assert_eq!(
+            unspecified.objective.as_ref(),
+            "Grok refused to serve this request"
+        );
+        assert_eq!(
+            composer_safety_notice(
+                "Codex",
+                &safety(SafetyAction::Released, SafetyCategory::Cyber, None)
+            ),
+            None
+        );
     }
 }
