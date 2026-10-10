@@ -77,6 +77,8 @@ pub(crate) struct StreamState {
     durable_cursor: Option<u64>,
     local_sequence: u64,
     adapter: Option<OpenCodeEventAdapter>,
+    /// The turn's generation speed on OpenCode's own clock.
+    steps: super::opencode_speed::OpenCodeStepClock,
 }
 
 #[allow(dead_code)]
@@ -86,6 +88,7 @@ impl StreamState {
             durable_cursor: after,
             local_sequence: 0,
             adapter: None,
+            steps: super::opencode_speed::OpenCodeStepClock::default(),
         }
     }
 
@@ -100,6 +103,7 @@ impl StreamState {
             durable_cursor: after,
             local_sequence: 0,
             adapter: Some(adapter),
+            steps: super::opencode_speed::OpenCodeStepClock::default(),
         })
     }
 
@@ -453,12 +457,15 @@ async fn deliver_events(
             text_reconciliation,
         } = result;
         state.remember_provider_cursor(provider_cursor);
+        state.steps.observe(event.data());
         let mut observations = observations;
         if recognized_event_kind.usage
             && let Some(context) = input.usage_context.as_ref()
-            && let Some(observation) = parse_usage_observation(event, input.session, context)
+            && let Some(report) = parse_usage_report(event, input.session, context)
         {
-            observations.push(observation);
+            observations.push(EngineObservation::Usage(UsageObservation::new(
+                report.with_streaming_speed(state.steps.rate()),
+            )));
         }
         if let Some(reconciliation) = text_reconciliation {
             let sequence = provider_cursor.map_or_else(|| state.next_local_sequence(), Ok)?;
@@ -493,7 +500,9 @@ async fn deliver_events(
             | EngineObservation::Subagent(_)
             | EngineObservation::SubagentTranscript(_)
             // Shell job changes go to the terminal board, never the receipt.
-            | EngineObservation::Shell(_) => None,
+            | EngineObservation::Shell(_)
+            // Engine reports update the Forge's inventory, never the run.
+            | EngineObservation::Inventory(_) => None,
         };
         deliver_observation(
             observation,
@@ -546,11 +555,11 @@ fn current_unix_millis() -> Option<UnixMillis> {
     Some(UnixMillis::from_millis(millis))
 }
 
-fn parse_usage_observation(
+fn parse_usage_report(
     event: &SseEvent,
     session: &str,
     context: &StreamUsageContext,
-) -> Option<EngineObservation> {
+) -> Option<artisan_domain::RunUsageReport> {
     let observed_at = current_unix_millis()?;
     let usage_context = OpenCode2UsageContext::new(
         &context.run_id,
@@ -561,11 +570,7 @@ fn parse_usage_observation(
         context.variant_id.as_ref(),
         observed_at,
     );
-    parse_opencode2_usage(event, &usage_context)
-        .ok()
-        .flatten()
-        .map(UsageObservation::new)
-        .map(EngineObservation::Usage)
+    parse_opencode2_usage(event, &usage_context).ok().flatten()
 }
 
 fn reconciliation_observation(

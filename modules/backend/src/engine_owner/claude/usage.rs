@@ -165,6 +165,9 @@ pub(crate) struct ClaudeUsageContext<'a> {
 pub(crate) struct ClaudeUsageAttribution {
     pub thread_id: ThreadId,
     pub model_id: EngineModelId,
+    /// The selection's auto-compact window, which the CLI compacts at
+    /// instead of the model's own window.
+    pub window_cap: Option<u64>,
 }
 
 /// Borrowed usage scope for one pump loop.
@@ -176,6 +179,7 @@ pub(crate) struct ClaudeUsageScope<'a> {
     pub thread_id: &'a ThreadId,
     pub model_id: &'a EngineModelId,
     pub provider_session_id: &'a str,
+    pub window_cap: Option<u64>,
 }
 
 /// Builds the cumulative usage report for one sample.
@@ -231,9 +235,15 @@ pub(crate) async fn project_usage_sample(
     scope: Option<&ClaudeUsageScope<'_>>,
     source_sequence: u64,
     sample: &ClaudeUsageSample,
+    generation_speed: Option<u32>,
 ) -> Option<TerminalState> {
     let scope = scope?;
     let observed_at = current_unix_millis()?;
+    // A capped session compacts at the cap, so the gauge reads against it.
+    let mut sample = *sample;
+    if let Some(cap) = scope.window_cap {
+        sample.window = Some(sample.window.map_or(cap, |window| window.min(cap)));
+    }
     let report = claude_usage_report(
         &ClaudeUsageContext {
             run_id,
@@ -243,8 +253,9 @@ pub(crate) async fn project_usage_sample(
             observed_at,
         },
         source_sequence,
-        sample,
-    )?;
+        &sample,
+    )?
+    .with_streaming_speed(generation_speed);
     if observations
         .send(EngineObservation::Usage(UsageObservation::new(report)))
         .await

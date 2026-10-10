@@ -117,8 +117,10 @@ pub struct RunUsageReport {
 }
 
 impl RunUsageReport {
-    /// Adds a backend-observed visible-text rate using the o200k reference
-    /// tokenizer. This estimate is independent of provider billing counters.
+    /// Adds the run's streaming speed in tokens per second times 1000: the
+    /// engine's own generation speed where it measures one (Claude), else a
+    /// backend-observed visible-text rate using the o200k reference
+    /// tokenizer.
     #[must_use]
     pub fn with_streaming_speed(mut self, rate: Option<u32>) -> Self {
         self.streaming_millitokens_per_second = rate.filter(|rate| *rate > 0);

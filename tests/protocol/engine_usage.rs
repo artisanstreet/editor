@@ -98,12 +98,12 @@ fn snapshot_fixture() -> EngineUsageSnapshot {
         None,
         EngineUsageAuth::new(
             EngineUsageAuthentication::Unknown,
-            Some("Grok Build exposes no account-usage surface.".to_owned()),
+            Some("Grok exposes no account-usage surface.".to_owned()),
         )
         .expect("auth is valid"),
-        "Grok Build".to_owned(),
+        "Grok".to_owned(),
         "grok".to_owned(),
-        Some("Grok Build exposes no account-usage surface.".to_owned()),
+        Some("Grok exposes no account-usage surface.".to_owned()),
         Some(QuotaSurface::Unsupported),
         Vec::new(),
     )

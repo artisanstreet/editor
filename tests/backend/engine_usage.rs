@@ -1172,8 +1172,8 @@ async fn usage_service_enforces_per_engine_timeout() {
 fn unsupported_readers_report_honest_surfaces() {
     let grok = UnsupportedAccountUsageReader::new(
         "grok",
-        "Grok Build",
-        "Grok Build exposes no account-usage surface.",
+        "Grok",
+        "Grok exposes no account-usage surface.",
     );
     let failure = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1182,10 +1182,7 @@ fn unsupported_readers_report_honest_surfaces() {
         .block_on(grok.read())
         .expect_err("unsupported should fail");
     assert_eq!(failure.quota_surface, QuotaSurface::Unsupported);
-    assert_eq!(
-        failure.failure,
-        "Grok Build exposes no account-usage surface."
-    );
+    assert_eq!(failure.failure, "Grok exposes no account-usage surface.");
 }
 
 #[test]
