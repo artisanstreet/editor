@@ -65,7 +65,13 @@ impl ConversationSurface {
             pending_viewport_extent_change: false,
             follow_bottom_pending: false,
             followed_tail,
-            tail_follow_settling: false,
+            bottom_glide: None,
+            landing: Some(follow_motion::Landing::default()),
+            bottom_glide_frame_scheduled: false,
+            natural_max_offset: None,
+            release_scroll_hold: false,
+            scroll_anchor_row: None,
+            pending_reading_position: None,
             last_viewport_geometry: None,
             viewport_observation_scheduled: false,
             viewport_next_frame_scheduled: false,
@@ -78,6 +84,8 @@ impl ConversationSurface {
             scroll_anchor_paint_token: None,
             navigator_focus: HashMap::new(),
             navigator_rail_hovered: false,
+            navigator_tick_motion: HashMap::new(),
+            navigator_had_active: false,
             navigator_menu_hovered: false,
             navigator_scroll: ScrollHandle::new(),
             navigator_hover: Rc::new(RefCell::new(SlidingHoverState::default())),
@@ -206,30 +214,30 @@ impl ConversationSurface {
         tail_identity(&self.scene, &self.pending_messages)
     }
 
-    /// Requests the existing GPUI scroll handle to move to the transcript end.
+    /// Glides the transcript to its end (jump-to-latest).
     ///
-    /// Completion is intentionally not synthesized here. The next physical
-    /// viewport observation is the controller's completion signal.
+    /// The glide is the same eased motion automatic follow uses; reduced
+    /// motion makes it a snap. Completion is reported when it settles (see
+    /// `step_bottom_glide`), or by the next physical viewport observation.
     pub fn smooth_scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
-        if cx.reduce_motion() {
-            self.scroll_to_bottom(cx);
-        } else {
-            self.smooth_bottom_pending = true;
-            cx.notify();
-        }
+        self.smooth_bottom_pending = true;
+        cx.notify();
     }
 
     /// Follow streaming growth after layout, once reserved anchor space is
-    /// exhausted. Explicit jumps still use the unconditional bottom path.
+    /// exhausted, by gliding to the end on the next render.
     pub fn follow_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.follow_bottom_pending = true;
         cx.notify();
     }
 
-    /// Immediately follows the tail for automatic viewport updates.
+    /// Immediately snaps to the end of the next layout.
     pub fn scroll_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.smooth_bottom_pending = false;
-        self.smooth_bottom_active = false;
+        self.cancel_bottom_glide();
+        // The snap lands on GPUI's laid-out end; without the column hold
+        // that is the natural end, not wherever the reader sits now.
+        self.release_scroll_hold = true;
         self.transcript_scroll.cancel_to(
             f32::from(self.scroll_handle.offset().y),
             f32::from(self.scroll_handle.max_offset().y),
@@ -321,10 +329,22 @@ impl ConversationSurface {
             clippy::cast_possible_truncation,
             reason = "planned heights originate from GPUI's f32 pixel bounds"
         )]
-        let held = f32::from(offset.y) - added as f32;
+        let added = added as f32;
+        let held = f32::from(offset.y) - added;
         self.scroll_handle.set_offset(point(offset.x, px(held)));
         self.transcript_scroll = PickerScrollState::default();
-        self.smooth_bottom_active = false;
+        // An automatic glide keeps going over the taller transcript: its
+        // position, its end and the reader's anchor all moved down by the
+        // same amount, so nothing on screen shifts and nothing restarts.
+        if let Some(glide) = self.bottom_glide.as_mut() {
+            glide.shift(-added);
+        }
+        if let Some(natural) = self.natural_max_offset.as_mut() {
+            *natural += added;
+        }
+        if let Some(row) = self.scroll_anchor_row.as_mut() {
+            row.top += added;
+        }
     }
 
     /// Mirrors one host clock sample for live Thinking/Working elapsed paint.
@@ -879,6 +899,11 @@ impl ConversationSurface {
         if self.pending_scroll_targets.len() >= CONVERSATION_SURFACE_MAX_SCROLL_TARGETS {
             return false;
         }
+        // Explicit navigation owns the offset from here; an automatic glide
+        // would pull the reader back off the target.
+        if self.cancel_bottom_glide() {
+            self.enqueue_action(ConversationSurfaceAction::BottomScrollInterrupted);
+        }
         // Explicit navigation to a tool row reveals its local chain. The
         // default remains closed for every chain the reader has not targeted.
         for turn in self.scene.turn_scenes() {
@@ -934,10 +959,16 @@ impl ConversationSurface {
         let offset = self.scroll_handle.offset();
         let current = f32::from(offset.y);
         let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
-        if self.smooth_bottom_active || self.smooth_bottom_pending {
+        // The reader's wheel always wins over automatic motion. Only an
+        // interrupted jump-to-latest is reported; a follow glide just ends,
+        // and the wheel destination decides whether the reader detached.
+        let gliding = self.bottom_glide.is_some();
+        let jump_interrupted = self.cancel_bottom_glide() || self.smooth_bottom_pending;
+        if jump_interrupted {
             self.enqueue_action(ConversationSurfaceAction::BottomScrollInterrupted);
-            self.smooth_bottom_active = false;
             self.smooth_bottom_pending = false;
+        }
+        if gliding || jump_interrupted {
             self.transcript_scroll.cancel_to(current, maximum);
         }
         if event.delta.precise() || cx.reduce_motion() {
@@ -999,25 +1030,9 @@ impl ConversationSurface {
         self.transcript_scroll_frame_scheduled = false;
         let offset = self.scroll_handle.offset();
         let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
-        if self.smooth_bottom_active {
-            // Follow updated measured extent while virtualized rows settle.
-            self.transcript_scroll.push(
-                f32::from(offset.y),
-                -maximum - self.transcript_scroll.target(),
-                maximum,
-            );
-        }
         if let Some(next) = self.transcript_scroll.step(f32::from(offset.y), maximum) {
             self.scroll_handle.set_offset(point(offset.x, px(next)));
             cx.notify();
-        }
-        if self.smooth_bottom_active && !self.transcript_scroll.active() {
-            // The jump settled at the end. Say so regardless of the last
-            // report: the controller is in its scrolling state until it
-            // hears the reader arrive, and a geometry observation may never
-            // differ from what was reported before the jump began.
-            self.smooth_bottom_active = false;
-            self.report_reached_end(cx);
         }
         self.schedule_transcript_scroll_frame(window, cx);
     }
@@ -1328,6 +1343,18 @@ impl ConversationSurface {
         );
     }
 
+    /// Queues one action as a click or scroll would, for app-level tests.
+    #[cfg(test)]
+    pub(crate) fn enqueue_action_for_test(
+        &mut self,
+        action: ConversationSurfaceAction,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let queued = self.enqueue_action(action);
+        cx.notify();
+        queued
+    }
+
     pub(super) fn enqueue_action(&mut self, action: ConversationSurfaceAction) -> bool {
         if self.actions.len() >= CONVERSATION_SURFACE_MAX_ACTIONS {
             return false;
@@ -1341,10 +1368,12 @@ impl ConversationSurface {
 
         let offset = self.scroll_handle.offset();
         let bounds = self.scroll_handle.bounds();
-        let max_offset = self.scroll_handle.max_offset();
+        // The natural range, not the laid-out one: the column hold's extra
+        // room is not transcript the reader could be short of.
+        let max_offset = self.natural_scroll_max();
         let scroll_top = -f64::from(offset.y);
         let viewport_height = f64::from(bounds.size.height);
-        let scroll_height = viewport_height + f64::from(max_offset.y);
+        let scroll_height = viewport_height + f64::from(max_offset);
         let geometry = ViewportGeometry {
             scroll_top,
             viewport_height,
@@ -1378,9 +1407,15 @@ impl ConversationSurface {
             }
             return;
         }
-        if self.transcript_scroll.active() && !self.smooth_bottom_active {
+        if self.transcript_scroll.active() {
             // Wheel intent already reports its destination. Intermediate
             // smoothing frames must not re-arm following within the leeway.
+            return;
+        }
+        if self.bottom_glide.is_some() && !self.smooth_bottom_active {
+            // An automatic follow is on its way to the end: its intermediate
+            // frames are not the reader scrolling away, and reporting them
+            // would detach a reader who is being followed.
             return;
         }
         let observation = ViewportObservation {
@@ -1404,7 +1439,7 @@ impl ConversationSurface {
         if !self.earlier_turns_available
             || viewport_height <= 0.0
             || self.follow_bottom_pending
-            || self.tail_follow_settling
+            || self.bottom_glide.is_some()
             || self.smooth_bottom_pending
         {
             return;

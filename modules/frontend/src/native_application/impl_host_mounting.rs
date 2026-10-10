@@ -71,6 +71,9 @@ impl NativeApplication {
             self.state = NativeViewState::Ready;
             self.acknowledge_host_cursor(host, cx);
             self.pump_host_boundary(host, cx);
+            // After the pump: the snapshot's own follow to the end has
+            // reached the surface, and a restore supersedes it.
+            self.restore_reading_position(host, cx);
             self.sync_composer_availability(cx);
             // The canonical turn may have arrived after retained observations;
             // replay them now that the snapshot exists.
@@ -228,6 +231,9 @@ impl NativeApplication {
         self.engine_settings.select_thread(Some(&thread_id));
         self.reset_composer_catalog(cx);
         self.request_engine_settings_for_selected(cx);
+        // The previous surface's queued link previews would only run ahead
+        // of this one's; its title table goes with it.
+        self.discard_queued_rich_links();
         let Ok(host) = ConversationHost::mount(thread_id.clone(), ThemeMode::Dark, &mut *cx) else {
             self.set_failure(invalid_service_failure(), cx);
             return;
@@ -310,7 +316,11 @@ impl NativeApplication {
         self.retain_message_flight(cx);
         self.clear_message_presentation();
         let Some(host) = self.conversation_host.clone() else {
+            // Nothing local is left to retire, so the stop ack cannot finish
+            // anything; once another thread mounts it reads as stale and
+            // would leave navigation gated forever.
             self.selected_thread = None;
+            self.ordinary_unsubscribe_thread = None;
             self.standalone_snapshot_thread = None;
             self.engine_settings.select_thread(None);
             self.reset_composer_catalog(cx);
@@ -321,8 +331,9 @@ impl NativeApplication {
         };
         self.pump_host_boundary(&host, cx);
         if self.conversation_effects.is_empty() && host.read(cx).total_pending_effect_count() == 0 {
-            Self::release_transient_scroll_custody(&host, cx);
+            self.release_host_surface(&host, cx);
             self.conversation_host = None;
+            self.discard_queued_rich_links();
             drop(self.conversation_host_subscription.take());
             self.selected_thread = None;
             self.ordinary_unsubscribe_thread = None;
@@ -336,13 +347,54 @@ impl NativeApplication {
         }
     }
 
-    pub(super) fn release_transient_scroll_custody(
+    /// Releases a retiring host's surface, first remembering where the
+    /// reader left its thread so reopening it puts them back.
+    pub(super) fn release_host_surface(
+        &mut self,
         host: &Entity<ConversationHost>,
         cx: &mut Context<Self>,
     ) {
-        let surface = host.read(cx).surface().clone();
+        let (thread_id, cursor, surface) = {
+            let host = host.read(cx);
+            (
+                host.thread_id().clone(),
+                host.controller_view().delivery.cursor,
+                host.surface().clone(),
+            )
+        };
+        if let Some(cursor) = cursor {
+            let position = surface.read(cx).reading_position();
+            self.reading_positions
+                .remember(&thread_id, cursor, position);
+        }
         surface.update(cx, |surface, _| {
             surface.release_transient_scroll_custody();
+        });
+    }
+
+    /// Puts the reader back where they left this thread, if nothing in it
+    /// has moved since.
+    fn restore_reading_position(
+        &mut self,
+        host: &Entity<ConversationHost>,
+        cx: &mut Context<Self>,
+    ) {
+        let (thread_id, cursor, surface) = {
+            let host = host.read(cx);
+            (
+                host.thread_id().clone(),
+                host.controller_view().delivery.cursor,
+                host.surface().clone(),
+            )
+        };
+        let Some(cursor) = cursor else {
+            return;
+        };
+        let Some(position) = self.reading_positions.take_current(&thread_id, cursor) else {
+            return;
+        };
+        surface.update(cx, |surface, surface_cx| {
+            surface.restore_reading_position(position, surface_cx);
         });
     }
 
@@ -469,6 +521,8 @@ impl NativeApplication {
                         self.note_reader_near_start(cx);
                     }
                     _ => {
+                        #[cfg(feature = "flight-recorder")]
+                        artisan_tracing::instant!("ui", "host_effect.unhandled", "effect" => host_effect_kind(&effect));
                         self.set_failure(invalid_service_failure(), cx);
                         return;
                     }
@@ -559,4 +613,23 @@ fn suppress_conversation_tab_stops(
     };
     transcript_focus.tab_stop(false);
     disclosure_focus.tab_stop(false);
+}
+
+/// The variant of a host effect, without its payload, for the flight
+/// recorder.
+#[cfg(feature = "flight-recorder")]
+fn host_effect_kind(effect: &ConversationHostEffect) -> String {
+    match effect {
+        ConversationHostEffect::Refused { refusal } => format!("Refused: {refusal:?}"),
+        ConversationHostEffect::Controller(ConversationStateEffect::Delivery(delivery)) => {
+            format!("Delivery: {delivery:?}")
+        }
+        ConversationHostEffect::Controller(ConversationStateEffect::Disclosure {
+            scene_id,
+            effect,
+        }) => {
+            format!("Disclosure {scene_id}: {effect:?}")
+        }
+        other => format!("{other:?}").chars().take(120).collect(),
+    }
 }

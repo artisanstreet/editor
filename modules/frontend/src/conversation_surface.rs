@@ -74,11 +74,12 @@ use std::time::{Duration, Instant};
 
 use crate::approval_presentation::ApprovalKind as PresentationApprovalKind;
 use crate::conversation_scene::{
-    ActivityCategory, ChangeSetBlock, CompactionBlock, ConversationScene, ErrorBlock,
-    FileChangeStatus, ModelTransitionBlock, NativeFactBlock, PlanBlock, QuestionBlock,
-    SceneDisclosure, SceneFileChange, SceneId, SessionDetail, SteeringBlock, TurnBlock,
-    TurnFooterBlock, TurnFooterSettlement, TurnNarration, TurnScene, UsageInterruptionBlock,
-    UserMessageBlock, WorkGroupBlock, WorkItem, activity_category, activity_presentation_label,
+    ActivityCategory, ChangeSetBlock, CompactionBlock, CompactionPhase, ConversationScene,
+    ErrorBlock, FileChangeStatus, ImageBlock, ModelTransitionBlock, NativeFactBlock, PlanBlock,
+    QuestionBlock, SceneDisclosure, SceneFileChange, SceneId, SessionDetail, SteeringBlock,
+    TurnBlock, TurnFooterBlock, TurnFooterSettlement, TurnNarration, TurnScene,
+    UsageInterruptionBlock, UserMessageBlock, WorkGroupBlock, WorkItem, activity_category,
+    activity_presentation_label,
 };
 use crate::conversation_scroll_position::conversation_is_following;
 use crate::conversation_turn_footer_policy::{COPY_RESPONSE_LABEL, TURN_ACTIONS_LABEL};
@@ -115,6 +116,8 @@ pub use transcript_helpers::*;
 
 // Phase-2 split submodules (see conversation_surface/).
 
+#[path = "conversation_surface/compaction_separator.rs"]
+mod compaction_separator;
 #[path = "conversation_surface/interactions.rs"]
 mod interactions;
 #[path = "conversation_surface/pending_rows.rs"]
@@ -151,6 +154,16 @@ mod transcript_window;
 #[path = "conversation_surface/turn_row.rs"]
 mod turn_row;
 
+// Programmatic scroll motion (see conversation_surface/).
+
+#[path = "conversation_surface/bottom_glide.rs"]
+mod bottom_glide;
+#[path = "conversation_surface/follow_motion.rs"]
+mod follow_motion;
+#[path = "conversation_surface/reading_position.rs"]
+mod reading_position;
+
+pub use reading_position::TranscriptReadingPosition;
 pub use transcript_window::{TranscriptShapeLedger, TranscriptWindowReport};
 
 use disclosure::{disclosure_flight_panel, disclosure_frame};
@@ -230,14 +243,34 @@ pub struct ConversationSurface {
     /// for the same tail is growth of that turn, which the reserved space
     /// absorbs until it is exhausted; only then does the follow scroll.
     followed_tail: Option<String>,
-    /// A new tail was just followed and its end space has not been measured
-    /// yet: the follow repeats once after that measurement lands.
+    /// The eased move to the transcript end in flight, for a follow, a
+    /// jump-to-latest (`smooth_bottom_active`), or a reader left past the
+    /// natural end by shrinking content.
     ///
-    /// The end space is measured in prepaint and sized into the next frame,
-    /// so the scroll that follows a new tail lands one measurement short of
-    /// where the reserve finally puts the transcript end. One more follow,
-    /// past the reserve gate, settles the tail exactly.
-    tail_follow_settling: bool,
+    /// It re-reads the natural end every frame, so a new tail whose end
+    /// space is measured a frame late glides on into place instead of
+    /// needing a second snap.
+    bottom_glide: Option<bottom_glide::BottomGlide>,
+    /// Whether a glide frame is already scheduled.
+    bottom_glide_frame_scheduled: bool,
+    /// The surface's opening placement, until it lands (see
+    /// [`follow_motion::Landing`]).
+    landing: Option<follow_motion::Landing>,
+    /// The scroll range the transcript has once the latest end-space
+    /// measurement lands, measured in prepaint without the column hold.
+    ///
+    /// The glide travels to it and the controller's geometry reports
+    /// against it, so neither sees the hold's temporary extra room.
+    natural_max_offset: Option<f32>,
+    /// Lay out the next frame without the column hold, so an explicit
+    /// snap to the end lands on the natural end rather than on the hold.
+    release_scroll_hold: bool,
+    /// The row under the viewport top in the last prepaint, which the next
+    /// frame keeps in place when rows above it change height.
+    scroll_anchor_row: Option<follow_motion::ScrollAnchorRow>,
+    /// Where a reopened thread puts the reader back, written by the first
+    /// frame whose viewport has a size.
+    pending_reading_position: Option<reading_position::PendingReadingPosition>,
     last_viewport_geometry: Option<ViewportGeometry>,
     /// The oldest loaded turn the surface last asked for older turns above.
     ///
@@ -290,6 +323,12 @@ pub struct ConversationSurface {
     /// the transcript. The floating menu is open while the pointer is over
     /// the rail or the menu, or while a tick holds keyboard focus.
     navigator_rail_hovered: bool,
+    /// Each tick's active state and when it last changed, so a tick entering
+    /// or leaving the active range eases its length and colour.
+    navigator_tick_motion: HashMap<String, (bool, Option<Instant>)>,
+    /// Whether the rail had an active tick last frame. Until it has, ticks
+    /// settle at rest: the first active tick is the rail's starting state.
+    navigator_had_active: bool,
     /// Whether the pointer is over the navigator's floating menu, including
     /// the gap between the menu and the rail.
     navigator_menu_hovered: bool,
@@ -407,6 +446,14 @@ struct TextBlockRender<'a> {
     body: &'a str,
 }
 
+struct QuestionCardRender<'a> {
+    id: &'a SceneId,
+    prompt: &'a str,
+    answer: Option<&'a str>,
+    disclosure: Option<SceneDisclosure>,
+    selector: String,
+}
+
 struct ControlledCardOptions {
     id: SceneId,
     item_id: Option<ItemId>,
@@ -457,25 +504,31 @@ impl Render for ConversationSurface {
         // Pure read of the live reduced-motion signal: no state writes, so
         // no notification can loop out of render.
         let status_motion = effective_status_motion(self.status_motion, cx.reduce_motion());
+        self.apply_pending_reading_position(window);
         // End-space height lives in framework window-local state, not on the
         // entity: two windows showing one surface measure different
         // viewports, and a shared scalar could never converge for both.
         if self.smooth_bottom_pending {
             self.smooth_bottom_pending = false;
+            // Jump-to-latest takes over from a wheel glide: the reader asked
+            // for the end, so their in-flight wheel target is superseded.
             let current = f32::from(self.scroll_handle.offset().y);
             let maximum = f32::from(self.scroll_handle.max_offset().y).max(0.0);
             self.transcript_scroll.cancel_to(current, maximum);
-            self.transcript_scroll
-                .push(current, -maximum - current, maximum);
-            // Nothing to travel (already at the end, or nothing overflows):
-            // the jump is complete now. An armed flag with no frames to
-            // clear it would report the next wheel tick as an interrupted
-            // jump and detach a reader who never left the end.
-            self.smooth_bottom_active = self.transcript_scroll.active();
-            if self.smooth_bottom_active {
-                self.schedule_transcript_scroll_frame(window, cx);
-            } else {
+            if (current + self.natural_scroll_max()).abs() <= 0.5 {
+                // Nothing to travel (already at the end, or nothing
+                // overflows): the jump is complete now. An armed flag with
+                // no frames to clear it would report the next wheel tick as
+                // an interrupted jump and detach a reader who never left the
+                // end.
+                self.cancel_bottom_glide();
                 self.report_reached_end(cx);
+            } else {
+                // The reader asked for the end: the opening is theirs now,
+                // and the jump travels.
+                self.landing = None;
+                self.smooth_bottom_active = true;
+                self.start_bottom_glide(window, cx);
             }
         }
         let end_space = window.use_state(cx, |_, _| 0.0_f32);
@@ -485,7 +538,12 @@ impl Render for ConversationSurface {
                 .copied()
                 .unwrap_or(0.0),
         );
-        if self.follow_bottom_pending {
+        // A follow that arrives during the reader's own wheel glide waits
+        // for it rather than being dropped: the glide's last frame renders
+        // again and the follow runs then. A wheel that leaves the end clears
+        // it (see `observe_wheel_destination`), so only a glide that ends at
+        // the bottom is followed.
+        if self.follow_bottom_pending && !self.transcript_scroll.active() {
             self.follow_bottom_pending = false;
             // A new tail (a sent row, a delivered turn) is always brought
             // into view: the reserved end space aligns it at the top. For
@@ -500,18 +558,32 @@ impl Render for ConversationSurface {
             );
             let tail = self.tail_identity();
             let new_tail = tail != self.followed_tail;
-            if !self.transcript_scroll.active()
-                && (new_tail || self.tail_follow_settling || end_space_px <= floor)
-            {
-                // The measurement that lands after a new tail's first layout
-                // re-renders this surface; the follow stays armed for that
-                // frame so the tail settles where its reserve puts it.
-                self.follow_bottom_pending = new_tail;
-                self.tail_follow_settling = new_tail;
+            if new_tail || end_space_px <= floor {
+                // The glide re-reads the natural end every frame, so the new
+                // tail's end space, measured a frame after its first layout,
+                // retargets this same motion rather than needing a second
+                // snap. Its first sample waits for the display frame after
+                // this layout: the growth that asked for the follow may be
+                // laid out only now, and a sample against the previous end
+                // would find nothing to travel and settle at once.
                 self.followed_tail = tail;
-                self.scroll_handle.scroll_to_bottom();
+                self.start_bottom_glide(window, cx);
             }
         }
+        // The column never lays out shorter than the reader's viewport
+        // bottom. A last turn that shrinks this frame would otherwise drop
+        // the scroll range before its end space (measured in prepaint)
+        // grows back, and GPUI would clamp the offset: a visible jump that
+        // left the reader short of the end. A reader left past the natural
+        // end glides back (see `observe_natural_end`).
+        let scroll_hold = if std::mem::take(&mut self.release_scroll_hold) {
+            0.0
+        } else {
+            follow_motion::scroll_hold_height(
+                -f32::from(self.scroll_handle.offset().y),
+                f32::from(self.scroll_handle.bounds().size.height),
+            )
+        };
         // The reader's current navigator marker is geometry-derived like
         // end space, so it lives in the same window-local state: two
         // windows sharing one surface converge independently.
@@ -525,6 +597,7 @@ impl Render for ConversationSurface {
             .flex_col()
             .gap(theme.spacing.steps(8.0))
             .pt(px(TRANSCRIPT_PAD_TOP_PX))
+            .min_h(px(scroll_hold))
             .on_scroll_wheel(move |event, window, cx| {
                 let _ = wheel_surface.update(cx, |surface, surface_cx| {
                     surface.handle_transcript_wheel(event, window, surface_cx);
@@ -536,7 +609,21 @@ impl Render for ConversationSurface {
         let built = self.plan_transcript_build();
         self.sync_footer_focus(&built, cx);
         let rows = self.render_turn_rows(&built, status_motion, cx);
-        transcript = transcript.children(rows);
+        // Probe the first row and the reader's anchor row so the column can
+        // compare their laid-out distance with the last frame's before it
+        // prepaints (see `AnchoredTranscript`).
+        let anchor_index = self.scroll_anchor_index();
+        let first_probe = Rc::new(Cell::new(None));
+        let anchor_probe = Rc::new(Cell::new(None));
+        transcript = transcript.children(rows.into_iter().enumerate().map(|(index, row)| {
+            if index == 0 {
+                follow_motion::LayoutProbe::new(row, first_probe.clone()).into_any_element()
+            } else if Some(index) == anchor_index {
+                follow_motion::LayoutProbe::new(row, anchor_probe.clone()).into_any_element()
+            } else {
+                row
+            }
+        }));
         {
             self.finish_transcript_window(&built);
             for (index, row) in self.pending_messages.iter().enumerate() {
@@ -626,13 +713,38 @@ impl Render for ConversationSurface {
         // The viewport inherits the thread-screen shell (black): no opaque fill
         // here, so the transcript never paints over its parent. Cards,
         // bubbles, panels, and popovers keep their own faces.
+        // Navigation to a painted target owns the offset until it lands; an
+        // anchor correction on top would move the reader off the target.
+        let navigating = !self.pending_scroll_targets.is_empty()
+            || !self.executed_scroll_targets.is_empty()
+            || self.anchor_scrolls_in_flight > 0;
+        let anchor_probes = self
+            .scroll_anchor_row
+            .as_ref()
+            .filter(|_| anchor_index.is_some() && !navigating)
+            .map(|row| follow_motion::AnchorProbes {
+                first: first_probe,
+                anchor: anchor_probe,
+                recorded_top: row.top,
+            });
+        let transcript = follow_motion::AnchoredTranscript::new(
+            transcript.into_any_element(),
+            entity.downgrade(),
+            anchor_probes,
+        );
         let scroll_area = ScrollArea::new(self.scroll_handle.clone(), theme)
             .focus_handle(self.transcript_focus.clone())
             .debug_selector(CONVERSATION_SURFACE_SELECTOR)
             .size_full()
             .child(transcript);
 
+        // A transcript still landing on its opening place paints nothing,
+        // so the reader never sees it start at the top and move.
+        let landing_hidden = self.note_landing_frame();
         let mut root = div().relative().size_full().child(scroll_area);
+        if landing_hidden {
+            root = root.opacity(0.0);
+        }
         if self.jump_to_latest_visible {
             let surface = entity.downgrade();
             if let Ok(button) = Button::new(
@@ -708,7 +820,7 @@ impl Render for ConversationSurface {
 /// One paintable transcript detail row with its durable ordinal.
 ///
 /// Session mode carries the single ordered `session_details` list
-/// (assistant prose, activities, compactions, native facts); legacy
+/// (assistant prose, activities, compactions, native facts, questions); legacy
 /// positional groups carry `items` in vec order, which is durable by
 /// construction. The builder guarantees never both, so no interleave can
 /// scramble chronology. Reasoning maps to nothing: it is stripped from
@@ -733,10 +845,20 @@ enum DetailRow<'a> {
         /// Durable liveness for the chain's live/failed default-open rule.
         lifecycle: Option<ConversationLifecycle>,
     },
-    /// Compaction summary folded into the session.
-    Compaction { id: &'a SceneId, summary: &'a str },
+    /// Compaction separator folded into the session.
+    Compaction {
+        id: &'a SceneId,
+        summary: &'a str,
+        phase: CompactionPhase,
+    },
     /// Native fact folded into the session.
     NativeFact { id: &'a SceneId, text: &'a str },
+    /// Agent question folded into the session at the step that asked it.
+    Question {
+        id: &'a SceneId,
+        prompt: &'a str,
+        answer: Option<&'a str>,
+    },
     /// Legacy work-session title (fixture-only in production: no shipped
     /// producer emits session titles; the variant stays matched).
     SessionTitle { id: &'a SceneId, title: &'a str },
@@ -750,6 +872,7 @@ impl DetailRow<'_> {
             | Self::Activity { id, .. }
             | Self::Compaction { id, .. }
             | Self::NativeFact { id, .. }
+            | Self::Question { id, .. }
             | Self::SessionTitle { id, .. } => id,
         }
     }
@@ -803,7 +926,7 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
             })
             .collect()
     } else {
-        let mut rows: Vec<(u64, DetailRow<'_>)> = block
+        let mut timeline: Vec<(u64, Option<u64>, DetailRow<'_>)> = block
             .session_details
             .iter()
             .filter(|detail| {
@@ -814,14 +937,16 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
                     id,
                     body,
                     ordinal,
+                    text_after_sequence,
                     provenance,
                     ..
                 } => (
                     *ordinal,
+                    *text_after_sequence,
                     DetailRow::Assistant {
                         id,
                         body: body.as_str(),
-                        streaming: provenance_is_live(provenance.as_ref()),
+                        streaming: text_is_streaming(provenance.as_ref()),
                     },
                 ),
                 SessionDetail::Activity {
@@ -834,6 +959,7 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
                     ..
                 } => (
                     *ordinal,
+                    None,
                     DetailRow::Activity {
                         id,
                         body: body.as_str(),
@@ -845,27 +971,54 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
                 SessionDetail::Compaction {
                     id,
                     summary,
+                    phase,
                     ordinal,
                     ..
                 } => (
                     *ordinal,
+                    None,
                     DetailRow::Compaction {
                         id,
                         summary: summary.as_str(),
+                        phase: *phase,
                     },
                 ),
                 SessionDetail::NativeFact {
                     id, text, ordinal, ..
                 } => (
                     *ordinal,
+                    None,
                     DetailRow::NativeFact {
                         id,
                         text: text.as_str(),
                     },
                 ),
+                SessionDetail::Question {
+                    id,
+                    prompt,
+                    answer,
+                    ordinal,
+                    ..
+                } => (
+                    *ordinal,
+                    None,
+                    DetailRow::Question {
+                        id,
+                        prompt: prompt.as_str(),
+                        answer: answer.as_deref(),
+                    },
+                ),
             })
             .collect();
-        rows.sort_by_key(|(ordinal, _)| *ordinal);
+        // One timeline for prose and steps: prose sorts by where its first
+        // text fell among the steps, not by the ordinal its item got when
+        // the turn opened it, so a step that ran before the reply's words
+        // stays above them while they stream and after the turn settles.
+        timeline.sort_by_key(|(ordinal, text_after, _)| detail_timeline_key(*ordinal, *text_after));
+        let mut rows: Vec<(u64, DetailRow<'_>)> = timeline
+            .into_iter()
+            .map(|(ordinal, _, row)| (ordinal, row))
+            .collect();
         // Prose followed by any later row is finished, whatever its message
         // lifecycle says: a message can stay live until its turn ends, and a
         // body still counted as streaming keeps its last word held back.
@@ -876,6 +1029,26 @@ fn ordered_detail_rows(block: &WorkGroupBlock) -> Vec<(u64, DetailRow<'_>)> {
             }
         }
         rows
+    }
+}
+
+/// Sort key placing one detail row on its turn's shared timeline.
+///
+/// A step derived from the observation ledger sits at its first delivery
+/// sequence `s` (its ordinal is `BASE + 2s`); the row standing in for
+/// held-back steps sits just before the first one it stands for
+/// (`BASE + 2s - 1`). Prose whose first text was committed after sequence
+/// `m` follows every step up to `m`. Rows without a stamp (older prose,
+/// compaction, durable facts) keep their place ahead of every step, since
+/// sequences start at 1; ties keep ordinal order.
+fn detail_timeline_key(ordinal: u64, text_after: Option<u64>) -> (u64, u8, u64) {
+    use crate::conversation_observation_projection::DERIVED_FACT_ORDINAL_BASE;
+    if let Some(after) = text_after {
+        return (after, 2, ordinal);
+    }
+    match ordinal.checked_sub(DERIVED_FACT_ORDINAL_BASE) {
+        Some(place) => ((place + 1) / 2, u8::from(place % 2 == 0), ordinal),
+        None => (0, 2, ordinal),
     }
 }
 
@@ -894,9 +1067,14 @@ pub(super) fn lifecycle_is_live(lifecycle: ConversationLifecycle) -> bool {
     )
 }
 
-/// Whether an item's durable attribution says it is still arriving.
-fn provenance_is_live(provenance: Option<&crate::conversation_scene::ItemProvenance>) -> bool {
-    provenance
-        .and_then(|provenance| provenance.lifecycle)
-        .is_some_and(lifecycle_is_live)
+/// Whether more of an item's text may still arrive: its lifecycle is live
+/// and the provider turn that writes it has not ended. A run can outlive
+/// its turn, so a live lifecycle alone would hold a whole reply's last word
+/// back until the run ends.
+pub(super) fn text_is_streaming(
+    provenance: Option<&crate::conversation_scene::ItemProvenance>,
+) -> bool {
+    provenance.is_some_and(|provenance| {
+        !provenance.text_settled && provenance.lifecycle.is_some_and(lifecycle_is_live)
+    })
 }

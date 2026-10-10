@@ -404,6 +404,35 @@ impl TranscriptHeightTable {
         &self.offsets
     }
 
+    /// Every remembered measurement, keyed by turn identity.
+    pub(super) fn measured_heights(&self) -> HashMap<String, f64> {
+        self.measured.clone()
+    }
+
+    /// Adopts measurements remembered from an earlier surface for turns of
+    /// this scene that have not been measured here yet.
+    ///
+    /// Placeholders then stand in at the heights the reader last saw, so an
+    /// offset recorded against those heights lands on the same content.
+    pub(super) fn seed(&mut self, heights: &HashMap<String, f64>) {
+        let mut seeded = false;
+        for id in &self.order {
+            let Some(&height) = heights.get(id) else {
+                continue;
+            };
+            if !height.is_finite() || height < 0.0 || self.measured.contains_key(id) {
+                continue;
+            }
+            self.measured_sum += estimate_share(height);
+            self.measured_count = self.measured_count.saturating_add(1);
+            self.measured.insert(id.clone(), height);
+            seeded = true;
+        }
+        if seeded {
+            self.rebuild_offsets();
+        }
+    }
+
     /// The height for one turn identity, measured or estimated.
     fn height_for(&self, id: &str) -> f64 {
         self.measured
@@ -482,6 +511,31 @@ impl TranscriptWindowState {
     /// above it, measured or estimated, gaps included.
     pub(super) fn top_of(&self, index: usize) -> Option<f64> {
         self.table.offsets().get(index).copied()
+    }
+
+    /// The turn containing one content offset (relative to the first turn's
+    /// top), with how far into that turn the offset lies.
+    ///
+    /// An offset above the first turn belongs to it with a negative depth;
+    /// gaps belong to the turn above them.
+    pub(super) fn turn_at(&self, top: f64) -> Option<(usize, f64)> {
+        let offsets = self.table.offsets();
+        let rows = offsets.len().checked_sub(1).filter(|rows| *rows > 0)?;
+        let index = offsets[..rows]
+            .partition_point(|turn_top| *turn_top <= top)
+            .saturating_sub(1);
+        Some((index, top - offsets[index]))
+    }
+
+    /// Every remembered row measurement, keyed by turn identity.
+    pub(super) fn measured_heights(&self) -> HashMap<String, f64> {
+        self.table.measured_heights()
+    }
+
+    /// Adopts remembered measurements for rows not measured here yet.
+    pub(super) fn seed(&mut self, scene: &ConversationScene, heights: &HashMap<String, f64>) {
+        self.table.ensure_current(scene);
+        self.table.seed(heights);
     }
 
     /// Starts one render pass: loads heights if needed.
@@ -856,6 +910,17 @@ impl ConversationSurface {
                 window.defer(cx, |window, _| window.refresh());
             }
         }
+        // The end the next frame lays out, from the same measurement: the
+        // glide travels to it and a reader the column hold left past it
+        // glides back.
+        let next_end_space = (*end_space_state.read(cx)).max(
+            self.composer_clearance
+                .get(&window.window_handle().window_id())
+                .copied()
+                .unwrap_or(0.0),
+        );
+        self.observe_natural_end(children_bounds, next_end_space, window, cx);
+        self.record_scroll_anchor_row(children_bounds);
 
         // Reader-position tracking rides the same prepaint boundary into the
         // same window-local state discipline: per-window geometry in,

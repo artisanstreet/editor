@@ -318,6 +318,14 @@ fn navigator_active_tracks_the_reader_not_the_tail(cx: &mut TestAppContext) {
     // the geometry-derived active marker rides on.
     cx.update(|_, app| surface.update(app, |_, cx| cx.notify()));
     settle(cx);
+    // The handoff eases: the tick leaving the range has not snapped short.
+    let first_tick = cx.debug_bounds(FIRST_TICK).expect("first tick paints");
+    assert!(
+        first_tick.size.width > px(16.0),
+        "the tick leaving the range shrinks over time, got {:?}",
+        first_tick.size.width
+    );
+    pump_animation_frame_after(cx, Duration::from_millis(300));
     let first_tick = cx.debug_bounds(FIRST_TICK).expect("first tick paints");
     let second_tick = cx.debug_bounds(SECOND_TICK).expect("second tick paints");
     assert_eq!(first_tick.size.width, px(16.0));
@@ -832,9 +840,7 @@ fn jump_to_latest_interpolates_and_reaches_the_bottom(cx: &mut TestAppContext) {
     for frame in 0..80 {
         std::thread::sleep(Duration::from_millis(16));
         cx.update(|window, app| {
-            surface.update(app, |surface, cx| {
-                surface.advance_transcript_scroll(window, cx)
-            })
+            surface.update(app, |surface, cx| surface.advance_bottom_glide(window, cx));
         });
         cx.run_until_parked();
         let (position, maximum, active) = cx.update(|_, app| {
@@ -888,9 +894,7 @@ fn a_travelling_jump_reports_the_end_when_it_settles(cx: &mut TestAppContext) {
     for _ in 0..80 {
         std::thread::sleep(Duration::from_millis(16));
         cx.update(|window, app| {
-            surface.update(app, |surface, cx| {
-                surface.advance_transcript_scroll(window, cx);
-            });
+            surface.update(app, |surface, cx| surface.advance_bottom_glide(window, cx));
         });
         cx.run_until_parked();
         let active = cx.update(|_, app| surface.read(app).smooth_bottom_active);
@@ -975,7 +979,9 @@ fn a_new_tail_turn_is_brought_into_view_through_its_reserved_space(cx: &mut Test
         });
     });
     settle(cx);
-    settle(cx);
+    // The follow glides: its end space lands a frame after the new turn's
+    // first layout and the same glide retargets onto it.
+    run_bottom_glide(&surface, cx);
     cx.update(|_, app| {
         let handle = surface.read(app).scroll_handle();
         assert!(handle.max_offset().y > px(0.0));
@@ -1033,7 +1039,7 @@ fn a_sent_row_is_a_new_tail_to_follow(cx: &mut TestAppContext) {
         });
     });
     settle(cx);
-    settle(cx);
+    run_bottom_glide(&surface, cx);
     cx.update(|_, app| {
         let handle = surface.read(app).scroll_handle();
         assert!(handle.max_offset().y > px(0.0));
@@ -1208,6 +1214,10 @@ fn content_that_stops_overflowing_reports_the_end_again(cx: &mut TestAppContext)
         })
     });
     settle(cx);
+    // The column hold keeps the detached offset in range for the shrinking
+    // frame (no clamp jump); the reader left past the natural end then
+    // glides back to it.
+    run_bottom_glide(&surface, cx);
     let actions = cx.update(|_, app| surface.update(app, |surface, _| surface.take_actions()));
     cx.update(|_, app| assert_eq!(surface.read(app).scroll_handle().max_offset().y, px(0.0)));
     assert!(actions.contains(&ConversationSurfaceAction::ViewportExtentChanged));
@@ -1263,6 +1273,7 @@ fn streaming_resize_requests_follow_without_detaching_the_reader(cx: &mut TestAp
     );
     cx.update(|_, app| surface.update(app, |surface, cx| surface.follow_to_bottom(cx)));
     settle(cx);
+    run_bottom_glide(&surface, cx);
     cx.update(|_, app| {
         let handle = surface.read(app).scroll_handle();
         assert!((handle.offset().y + handle.max_offset().y).abs() < px(0.5));

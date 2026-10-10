@@ -301,6 +301,7 @@ pub(super) fn work_group_has_visible_details(block: &WorkGroupBlock) -> bool {
         }
         DetailRow::Compaction { summary, .. } => !summary.trim().is_empty(),
         DetailRow::NativeFact { text, .. } => !text.trim().is_empty(),
+        DetailRow::Question { .. } => true,
         DetailRow::SessionTitle { .. } => false,
     })
 }
@@ -473,6 +474,7 @@ pub(super) fn block_scroll_identity(
         TurnBlock::UsageInterruption(block) => text_block_scroll_identity(&block.id),
         TurnBlock::ModelTransition(block) => text_block_scroll_identity(&block.id),
         TurnBlock::NativeFact(block) => text_block_scroll_identity(&block.id),
+        TurnBlock::Image(block) => text_block_scroll_identity(&block.id),
         TurnBlock::SteeringLabel(block) => (Some(block.id.clone()), None),
         TurnBlock::TurnStatus(_) | TurnBlock::TurnFooter(_) => (None, None),
     }

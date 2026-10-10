@@ -57,6 +57,25 @@ fn scene(items: Vec<SceneItem>) -> ConversationScene {
     .expect("conversation scene is valid")
 }
 
+/// A scene of one turn still running, for cards that are only answerable
+/// while their run is live.
+fn live_scene(items: Vec<SceneItem>) -> ConversationScene {
+    ConversationScene::build(
+        vec![SceneTurn::new(
+            turn_id("turn_a"),
+            0,
+            ConversationLifecycle::Active,
+        )],
+        items,
+        vec![TurnNarrationEntry::new(
+            turn_id("turn_a"),
+            TurnNarration::Working,
+        )],
+        Vec::new(),
+    )
+    .expect("conversation scene is valid")
+}
+
 fn scroll_target_scene(disclosure: SceneDisclosure) -> ConversationScene {
     let mut items = (0..8)
         .map(|index| {
@@ -88,6 +107,7 @@ fn scroll_target_scene(disclosure: SceneDisclosure) -> ConversationScene {
         .with_provenance(ItemProvenance {
             run_id: None,
             lifecycle: Some(ConversationLifecycle::Active),
+            text_settled: false,
         }),
     ]);
     scene(items)
@@ -182,6 +202,22 @@ fn pump_animation_frame_after(cx: &mut VisualTestContext, wait: Duration) {
     settle(cx);
 }
 
+/// Delivers real-time display frames until the surface's bottom glide has
+/// settled.
+///
+/// The harness never runs `on_next_frame` callbacks by itself, and the glide
+/// samples the wall clock, so each frame waits out real motion time first.
+fn run_bottom_glide(surface: &Entity<ConversationSurface>, cx: &mut VisualTestContext) {
+    for _ in 0..64 {
+        if cx.update(|_, app| surface.read(app).bottom_glide.is_none()) {
+            settle(cx);
+            return;
+        }
+        pump_animation_frame_after(cx, Duration::from_millis(16));
+    }
+    panic!("the bottom glide did not settle");
+}
+
 fn tall_navigator_scene() -> ConversationScene {
     // Turn ordinals (0, 1) share the global ordinal namespace with
     // items, so item ordinals continue after them.
@@ -250,6 +286,12 @@ mod approve_submit;
 
 #[path = "tests/answer_receipts.rs"]
 mod answer_receipts;
+
+#[path = "tests/scroll_motion.rs"]
+mod scroll_motion;
+
+#[path = "tests/reading_position.rs"]
+mod reading_position;
 
 #[path = "tests/status.rs"]
 mod status;

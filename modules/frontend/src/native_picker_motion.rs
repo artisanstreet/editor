@@ -348,6 +348,17 @@ impl PickerScrollState {
         self.last_frame = None;
     }
 
+    /// Moves an outstanding target with content that moved under it.
+    ///
+    /// Scroll anchoring shifts the offset when rows above the reader change
+    /// height; a wheel glide in flight must land on the same content it was
+    /// aimed at, not on the same number. The next step clamps as usual.
+    pub(crate) fn shift(&mut self, delta: f32) {
+        if self.active {
+            self.target += delta;
+        }
+    }
+
     /// Clamps a target after content or viewport geometry changes.
     pub(crate) fn clamp_to_max(&mut self, max: f32) {
         self.target = self.target.clamp(-max.max(0.0), 0.0);
