@@ -18,6 +18,8 @@ pub(super) struct ProjectNavigation {
     /// The navigation last reported to the Forge.
     pub(super) reported: Option<(ProjectId, Option<ThreadId>)>,
     pub(super) last_threads: HashMap<ProjectId, ThreadId>,
+    /// Each listed project's root folder, as the Forge describes it.
+    pub(super) roots: HashMap<ProjectId, std::path::PathBuf>,
     pub(super) restore_draft: bool,
     pub(super) awaiting_threads: bool,
     /// A thread the user chose to open. Mounting it shows it even from a
@@ -70,6 +72,14 @@ impl NativeApplication {
                 .unwrap_or_default()
         };
         self.project_navigation.loaded_order = true;
+        self.project_navigation.roots = listing
+            .projects()
+            .iter()
+            .map(|project| {
+                let root = std::path::PathBuf::from(project.root_path.as_str());
+                (project.project_id.clone(), root)
+            })
+            .collect();
         let mut options = project_options_from_listing(listing);
         // Stable sorting leaves projects without a saved position in catalog order.
         options.sort_by_key(|project| {

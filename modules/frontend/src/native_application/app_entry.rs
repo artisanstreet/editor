@@ -150,6 +150,11 @@ pub fn run() -> ExitCode {
                         appears_transparent: true,
                         ..Default::default()
                     }),
+                    // An unfocused window still on screen (a second monitor)
+                    // renders at full rate. Minimized and hidden windows get
+                    // no frames from the platform at all, so no focus-based
+                    // throttle is needed on top.
+                    inactive_frame_interval: None,
                     ..Default::default()
                 },
                 move |window, cx| {
@@ -173,14 +178,16 @@ pub fn run() -> ExitCode {
                 },
             );
 
-            if opened.is_ok() {
-                launch_flag.set(true);
-                if let Ok(handle) = &opened {
+            match opened {
+                Ok(handle) => {
+                    launch_flag.set(true);
                     let _ = handle.update(cx, |_, window, _| report_renderer(window));
+                    cx.activate(true);
                 }
-                cx.activate(true);
-            } else {
-                request_app_shutdown(cx, service.clone(), &shutdown_started);
+                Err(error) => {
+                    eprintln!("artisan editor: opening the main window failed: {error:#}");
+                    request_app_shutdown(cx, service.clone(), &shutdown_started);
+                }
             }
         });
 

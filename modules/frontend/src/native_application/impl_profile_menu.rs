@@ -179,6 +179,8 @@ impl NativeApplication {
     }
 
     pub(super) fn begin_profile_menu_open(&mut self, cx: &mut Context<Self>) {
+        self.profile_chevron_toggled
+            .set(Some(std::time::Instant::now()));
         let generation = self.profile_menu_motion.borrow_mut().begin_open();
         if cx.reduce_motion() {
             self.profile_menu_motion
@@ -191,6 +193,8 @@ impl NativeApplication {
     }
 
     pub(super) fn begin_profile_menu_close(&mut self, cx: &mut Context<Self>) {
+        self.profile_chevron_toggled
+            .set(Some(std::time::Instant::now()));
         let generation = self.profile_menu_motion.borrow_mut().begin_close();
         if cx.reduce_motion() {
             self.profile_menu_motion
@@ -1149,13 +1153,32 @@ impl NativeApplication {
                     )
             }))
             .children((!self.sidebar_collapsed).then(|| {
-                desktop_nav_glyph(
-                    if self.profile_menu.is_open() {
-                        AssetId::TABLER_CHEVRON_DOWN
-                    } else {
-                        AssetId::TABLER_CHEVRON_UP
-                    },
+                // The chevron flips as the menu opens and closes, on the
+                // accordion chevron's 250 ms smooth-out (transitions.dev).
+                let open = self.profile_menu.is_open();
+                let eased = self
+                    .profile_chevron_toggled
+                    .get()
+                    .filter(|_| !cx.reduce_motion())
+                    .map(|toggled| {
+                        let total = MotionDuration::Fast.as_duration().as_secs_f64();
+                        (std::time::Instant::now()
+                            .saturating_duration_since(toggled)
+                            .as_secs_f64()
+                            / total)
+                            .min(1.0)
+                    })
+                    .filter(|progress| *progress < 1.0)
+                    .map(|progress| MotionCurve::SmoothOut.sample(progress) as f32);
+                if eased.is_some() {
+                    window.request_animation_frame();
+                }
+                let settled = if open { 1.0 } else { 0.0 };
+                let turn = eased.map_or(settled, |eased| if open { eased } else { 1.0 - eased });
+                chevron_glyph(
+                    AssetId::TABLER_CHEVRON_UP,
                     theme,
+                    gpui::Transformation::rotate(gpui::radians(turn * std::f32::consts::PI)),
                 )
             }))
             .on_click(cx.listener(|app, _, window, cx| {
@@ -1592,4 +1615,27 @@ impl NativeApplication {
         }
         root
     }
+}
+
+/// A 16 px chevron slot in the shell's secondary colour, its glyph drawn
+/// under `transform`.
+pub(super) fn chevron_glyph(
+    asset: AssetId,
+    theme: DesktopTheme,
+    transform: gpui::Transformation,
+) -> Div {
+    div()
+        .w(px(16.0))
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(
+            gpui::svg()
+                .path(asset.as_str())
+                .size(px(15.0))
+                .text_color(theme.secondary)
+                .with_transformation(transform),
+        )
 }

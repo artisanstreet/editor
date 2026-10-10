@@ -32,6 +32,7 @@ artisan-protocol = { path = "../protocol" }
 artisan-transport = { path = "../transport" }
 artisan-ui = { path = "../ui" }
 base64.workspace = true
+futures.workspace = true
 # The profiler backs the Settings FPS overlay and ARTISAN_FRAME_CAPTURE.
 gpui = { workspace = true, features = ["profiler"] }
 gpui_platform.workspace = true

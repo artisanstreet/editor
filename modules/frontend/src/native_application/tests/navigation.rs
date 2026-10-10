@@ -203,6 +203,78 @@ fn thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn new_thread_open_focuses_composer_for_immediate_typing(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let project = ProjectId::parse("new-thread-focus-project").expect("fixture project");
+    cx.update(|window, app| {
+        view.update(app, |application, application_cx| {
+            let projects =
+                ProjectListing::new(vec![super::project(project.as_str(), "focus")]).unwrap();
+            application.handle_projects(&projects, application_cx);
+            application.selected_project = Some(project.clone());
+            // Focus sits elsewhere, as after clicking "New thread".
+            window.focus(&application.profile_focus, application_cx);
+            application.navigate(
+                NativeRoute::NewThread {
+                    project: Some(project.clone()),
+                },
+                application_cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    cx.simulate_input("hello");
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            assert_eq!(application.composer.read(application_cx).draft(), "hello");
+        });
+    });
+}
+
+#[gpui::test]
+fn new_thread_composer_click_focuses_for_typing(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    let project = ProjectId::parse("new-thread-click-project").expect("fixture project");
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            // Listed as the Forge lists them, so the home picker mounts and
+            // the composer's tab is the live ghost select.
+            let projects =
+                ProjectListing::new(vec![super::project(project.as_str(), "click")]).unwrap();
+            application.handle_projects(&projects, application_cx);
+            application.selected_project = Some(project.clone());
+            assert!(application.home_picker.is_some(), "the picker mounts");
+            application.navigate(
+                NativeRoute::NewThread {
+                    project: Some(project.clone()),
+                },
+                application_cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, app| {
+        view.update(app, |application, cx| {
+            window.focus(&application.profile_focus, cx);
+        });
+    });
+    cx.run_until_parked();
+    let editor = cx
+        .debug_bounds(crate::native_composer::NATIVE_COMPOSER_EDITOR_SELECTOR)
+        .expect("composer editor paints");
+    cx.simulate_click(editor.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+
+    cx.simulate_input("hello");
+    cx.update(|_, app| {
+        view.update(app, |application, application_cx| {
+            assert_eq!(application.composer.read(application_cx).draft(), "hello");
+        });
+    });
+}
+
+#[gpui::test]
 fn thread_composer_click_focuses_for_typing_after_other_control(cx: &mut TestAppContext) {
     let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
     let project = ProjectId::parse("thread-click-project").expect("fixture project");
@@ -821,7 +893,7 @@ fn titlebar_workspace_context_paints_muted_instead_of_foreground() {
     assert_eq!(
         context,
         theme.colors.muted_foreground.to_paint(),
-        "the folder fallback and thread subject inherit muted foreground"
+        "the thread subject inherits muted foreground"
     );
     assert_ne!(
         context,
@@ -1303,18 +1375,18 @@ fn inspector_junction_follows_the_thread_inspector_across_resizes(cx: &mut TestA
         cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(900.0)));
         cx.run_until_parked();
         let inspector = cx.debug_bounds(crate::thread_screen::THREAD_SCREEN_INSPECTOR_SELECTOR);
-        let junction = cx.debug_bounds(crate::desktop_shell::DESKTOP_INSPECTOR_JUNCTION_SELECTOR);
+        let divider =
+            cx.debug_bounds(crate::desktop_shell::DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR);
         assert_eq!(inspector.is_some(), visible, "inspector at width={width}");
-        assert_eq!(junction.is_some(), visible, "junction at width={width}");
-        if let (Some(inspector), Some(junction)) = (inspector, junction) {
+        assert_eq!(divider.is_some(), visible, "titlebar rule at width={width}");
+        if let (Some(inspector), Some(divider)) = (inspector, divider) {
             assert_eq!(
                 inspector.size.width,
                 gpui::px(crate::desktop_shell::DESKTOP_SIDEBAR_WIDTH_PX)
             );
             assert_eq!(
-                junction.center().x,
-                inspector.origin.x,
-                "the junction centers on the inspector's left rule"
+                divider.origin.x, inspector.origin.x,
+                "the titlebar rule continues the inspector's left rule"
             );
         }
     }

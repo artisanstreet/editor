@@ -9,7 +9,7 @@
 
 use artisan_assets::AssetId;
 use artisan_ui::asset_seam::asset_glyph;
-use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
+use artisan_ui::theme::{ArtisanTheme, DesktopTheme, ProseTypography, ThemeMode};
 use gpui::prelude::{
     InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
 };
@@ -44,9 +44,6 @@ pub const DESKTOP_EMPTY_SELECTOR: &str = "artisan-desktop-empty";
 pub const DESKTOP_OFFLINE_SELECTOR: &str = "artisan-desktop-offline";
 /// Sidebar collapse control selector.
 pub const DESKTOP_COLLAPSE_SELECTOR: &str = "artisan-desktop-collapse";
-/// Junction crosshair where the right inspector column's left rule meets the
-/// titlebar's bottom rule.
-pub const DESKTOP_INSPECTOR_JUNCTION_SELECTOR: &str = "artisan-desktop-inspector-junction";
 /// Stable selector for the inspector rule's titlebar continuation.
 pub const DESKTOP_INSPECTOR_TITLEBAR_DIVIDER_SELECTOR: &str =
     "artisan-desktop-inspector-titlebar-divider";
@@ -79,8 +76,6 @@ pub const DESKTOP_COLUMN_INSET_PX: f32 = 10.0;
 pub const DESKTOP_COLUMN_ROW_INSET_PX: f32 = 8.0;
 /// Compact sidebar width when labels are collapsed.
 pub const DESKTOP_SIDEBAR_COLLAPSED_WIDTH_PX: f32 = 58.0;
-/// Crosshair arm length.
-pub const DESKTOP_CROSSHAIR_SIZE_PX: f32 = 12.0;
 /// Native titlebar control width.
 pub const DESKTOP_TITLEBAR_CONTROL_WIDTH_PX: f32 = 46.0;
 
@@ -153,41 +148,6 @@ impl DesktopShellStyle {
     }
 }
 
-/// Paints the small crosshair used where the shell's major rules meet.
-///
-/// This is intentionally a plain layout element: it has no id, focus handle,
-/// or pointer listener, so it cannot intercept a click meant for a nearby
-/// control. The stroke thickness is supplied by the display-aware shell
-/// style so it remains one physical pixel on scaled Windows displays.
-#[must_use]
-pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
-    let crosshair_offset = px((DESKTOP_CROSSHAIR_SIZE_PX - f32::from(stroke)) / 2.0);
-    div()
-        .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .w(px(DESKTOP_CROSSHAIR_SIZE_PX))
-        .h(px(DESKTOP_CROSSHAIR_SIZE_PX))
-        .child(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(crosshair_offset)
-                .w(px(DESKTOP_CROSSHAIR_SIZE_PX))
-                .h(stroke)
-                .bg(theme.crosshair),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(crosshair_offset)
-                .top(px(0.0))
-                .w(stroke)
-                .h(px(DESKTOP_CROSSHAIR_SIZE_PX))
-                .bg(theme.crosshair),
-        )
-}
-
 /// Compose the complete native desktop frame around application-owned
 /// surfaces.
 ///
@@ -199,10 +159,7 @@ pub fn junction_crosshair(theme: DesktopTheme, stroke: Pixels) -> Div {
 /// contrast.
 ///
 /// `inspector_width` is the width of the thread screen's right inspector
-/// column while it is on screen (`None` when the route shows none). The
-/// shell owns every junction of its rules, so it paints a second
-/// [`junction_crosshair`] where that column's one-device-pixel left rule
-/// meets the titlebar's bottom rule, mirroring the sidebar junction. Like
+/// column while it is on screen (`None` when the route shows none). Like
 /// the sidebar rule, the inspector rule continues up through the titlebar.
 ///
 /// `context_meter` is the thread's context-window meter. It sits at the
@@ -274,12 +231,17 @@ pub fn desktop_shell(
         .px(px(14.0))
         .overflow_hidden()
         .debug_selector(|| DESKTOP_TITLEBAR_BRAND_SELECTOR.to_owned())
-        .child(brand)
+        // The brand fills the section and its empty space drags the window;
+        // the clickable wordmark inside keeps its clicks.
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.0))
                 .h_full()
-                .window_control_area(WindowControlArea::Drag),
+                .flex()
+                .items_center()
+                .window_control_area(WindowControlArea::Drag)
+                .child(brand),
         );
 
     // The content section carries the workspace header at its leading end,
@@ -345,15 +307,14 @@ pub fn desktop_shell(
         .child(search)
         .child(controls)
         .children(sidebar_visible.then(|| {
-            // One-physical-pixel continuation of the sidebar's right rule
-            // above the junction. The sidebar border paints the rightmost
-            // logical pixel inside `sidebar_width` ([sw-1, sw], border-box
-            // inset), and the junction crosshair centers its vertical arm on
-            // x = sw, so a rule at [sw-1dp, sw] extends exactly that line
-            // through the full header height in the same `theme.line` paint.
-            // Absolute, so the drag/command-menu/control flex layout is
-            // untouched; a plain element with no pointer listener, so like the
-            // crosshair it cannot intercept drags or clicks.
+            // One-physical-pixel continuation of the sidebar's right rule.
+            // The sidebar border paints the rightmost logical pixel inside
+            // `sidebar_width` ([sw-1, sw], border-box inset), so a rule at
+            // [sw-1dp, sw] extends exactly that line through the full header
+            // height in the same `theme.line` paint. Absolute, so the
+            // drag/command-menu/control flex layout is untouched; a plain
+            // element with no pointer listener, so it cannot intercept drags
+            // or clicks.
             div()
                 .absolute()
                 .left(style.sidebar_width - style.one_device_pixel)
@@ -427,18 +388,6 @@ pub fn desktop_shell(
                 ),
         );
 
-    // Right junction: the inspector column is flush with the window's right
-    // edge, so its left rule sits at `window − inspector_width`. The mark is
-    // anchored from the right (left inset released) with its center on that
-    // edge, the mirror of the sidebar junction centered on `sidebar_width`.
-    let inspector_junction = inspector_width.map(|inspector_width| {
-        junction_crosshair(theme, style.one_device_pixel)
-            .left_auto()
-            .right(inspector_width - px(DESKTOP_CROSSHAIR_SIZE_PX / 2.0))
-            .top(style.titlebar_height - px(DESKTOP_CROSSHAIR_SIZE_PX / 2.0))
-            .debug_selector(|| DESKTOP_INSPECTOR_JUNCTION_SELECTOR.to_owned())
-    });
-
     div()
         .relative()
         .size_full()
@@ -453,15 +402,11 @@ pub fn desktop_shell(
                 .family,
         )
         .text_size(px(14.0))
+        // One tracking for every text in the window, at each text's own size.
+        .tracking(ProseTypography::TRACKING_EM)
         .debug_selector(|| DESKTOP_ROOT_SELECTOR.to_string())
         .child(titlebar)
         .child(main)
-        .children(sidebar_visible.then(|| {
-            junction_crosshair(theme, style.one_device_pixel)
-                .left(style.sidebar_width - px(DESKTOP_CROSSHAIR_SIZE_PX / 2.0))
-                .top(style.titlebar_height - px(DESKTOP_CROSSHAIR_SIZE_PX / 2.0))
-        }))
-        .children(inspector_junction)
 }
 
 /// Windows maximize/restore glyph follows the actual window state.
@@ -583,7 +528,6 @@ mod tests {
         assert_eq!(DESKTOP_TITLEBAR_HEIGHT_PX, 48.0);
         assert_eq!(DESKTOP_TITLEBAR_CONTENT_INSET_PX, 14.0);
         assert_eq!(DESKTOP_SIDEBAR_WIDTH_PX, 327.0);
-        assert_eq!(DESKTOP_CROSSHAIR_SIZE_PX, 12.0);
 
         let expanded = DesktopShellStyle::resolve(false, 1.0);
         let collapsed = DesktopShellStyle::resolve(true, 1.0);
@@ -602,14 +546,14 @@ mod tests {
     }
 
     /// Minimal host mounting the production shell with empty regions, so
-    /// the junction marks can be measured in a real layout.
-    struct ShellJunctionProbe {
+    /// its rules and meter can be measured in a real layout.
+    struct ShellRuleProbe {
         inspector_width: Option<Pixels>,
         collapsed: bool,
         meter: bool,
     }
 
-    impl gpui::Render for ShellJunctionProbe {
+    impl gpui::Render for ShellRuleProbe {
         fn render(
             &mut self,
             window: &mut gpui::Window,
@@ -637,68 +581,13 @@ mod tests {
         }
     }
 
-    /// A visible inspector column gets its own 12 px crosshair centered where
-    /// its left rule (`window − inspector_width`) meets the titlebar's bottom
-    /// rule, whatever the sidebar state: the column stays 327 px wide even
-    /// with the rail collapsed.
-    #[gpui::test]
-    fn inspector_junction_marks_the_right_rule_on_the_titlebar_rule(cx: &mut gpui::TestAppContext) {
-        for collapsed in [false, true] {
-            let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
-                inspector_width: Some(px(DESKTOP_SIDEBAR_WIDTH_PX)),
-                collapsed,
-                meter: false,
-            });
-            cx.simulate_resize(gpui::size(px(1800.0), px(900.0)));
-            cx.run_until_parked();
-            let root = cx
-                .debug_bounds(DESKTOP_ROOT_SELECTOR)
-                .expect("shell root lays out");
-            let junction = cx
-                .debug_bounds(DESKTOP_INSPECTOR_JUNCTION_SELECTOR)
-                .expect("visible inspector gets a junction mark");
-            assert_eq!(
-                junction.size,
-                gpui::size(px(DESKTOP_CROSSHAIR_SIZE_PX), px(DESKTOP_CROSSHAIR_SIZE_PX))
-            );
-            let rule_x = root.right() - px(DESKTOP_SIDEBAR_WIDTH_PX);
-            assert!(
-                (junction.center().x - rule_x).abs() < px(0.01),
-                "junction {junction:?} must center on the inspector rule at {rule_x:?} (collapsed={collapsed})"
-            );
-            assert!(
-                (junction.center().y - (root.top() + px(DESKTOP_TITLEBAR_HEIGHT_PX))).abs()
-                    < px(0.01),
-                "junction {junction:?} must center on the titlebar's bottom rule"
-            );
-        }
-    }
-
-    /// No inspector on screen, no right junction: the mark vanishes with the
-    /// column instead of floating over the titlebar.
-    #[gpui::test]
-    fn inspector_junction_disappears_without_an_inspector(cx: &mut gpui::TestAppContext) {
-        let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
-            inspector_width: None,
-            collapsed: false,
-            meter: false,
-        });
-        cx.run_until_parked();
-        assert!(cx.debug_bounds(DESKTOP_ROOT_SELECTOR).is_some());
-        assert!(
-            cx.debug_bounds(DESKTOP_INSPECTOR_JUNCTION_SELECTOR)
-                .is_none(),
-            "a hidden inspector must not leave its junction mark behind"
-        );
-    }
-
     /// The inspector's left rule continues up through the titlebar, and the
     /// context meter sits just left of it, vertically centred in the bar.
     #[gpui::test]
     fn inspector_rule_runs_through_the_titlebar_with_the_meter_beside_it(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
+        let (_view, cx) = cx.add_window_view(|_, _| ShellRuleProbe {
             inspector_width: Some(px(DESKTOP_SIDEBAR_WIDTH_PX)),
             collapsed: false,
             meter: true,
@@ -727,7 +616,7 @@ mod tests {
     /// titlebar divider is left behind.
     #[gpui::test]
     fn meter_clears_the_controls_without_an_inspector(cx: &mut gpui::TestAppContext) {
-        let (_view, cx) = cx.add_window_view(|_, _| ShellJunctionProbe {
+        let (_view, cx) = cx.add_window_view(|_, _| ShellRuleProbe {
             inspector_width: None,
             collapsed: false,
             meter: true,
