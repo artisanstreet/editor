@@ -14,6 +14,7 @@ use std::time::Instant;
 use artisan_domain::{RecentThread, RecentThreadListing};
 
 use super::*;
+use crate::window_notice::NoticeSeverity;
 
 /// How long a chosen recent thread may wait for its project to be listed or
 /// for the view to settle before the window reports it could not open.
@@ -58,6 +59,9 @@ impl NativeApplication {
     ) {
         #[cfg(feature = "flight-recorder")]
         let _trace = artisan_tracing::span!("ui", "apply_recent_threads");
+        // The listing being replaced may be the last to show the open
+        // thread's unread outcome.
+        self.observe_open_unread();
         let threads = &mut self.sidebar_threads;
         if threads.recent.as_ref() != Some(&listing) {
             threads.recent = Some(listing);
@@ -142,7 +146,7 @@ impl NativeApplication {
             } else {
                 "the Forge's projects could not be listed"
             };
-            self.fail_recent_open(&awaited, reason, cx);
+            self.fail_recent_open(&awaited, reason, NoticeSeverity::Error, cx);
         }
     }
 
@@ -182,7 +186,13 @@ impl NativeApplication {
             return;
         };
         if Instant::now() >= awaited.deadline {
-            self.fail_recent_open(&awaited, "the Editor is still busy", cx);
+            // Busy is transient: trying again shortly works.
+            self.fail_recent_open(
+                &awaited,
+                "the Editor is still busy",
+                NoticeSeverity::Warning,
+                cx,
+            );
             return;
         }
         if !self.project_is_listed(&awaited.project) {
@@ -191,7 +201,12 @@ impl NativeApplication {
                     .submit_command(NativeTransportCommand::ReadProjects)
                     .is_err()
                 {
-                    self.fail_recent_open(&awaited, "the Forge is not connected", cx);
+                    self.fail_recent_open(
+                        &awaited,
+                        "the Forge is not connected",
+                        NoticeSeverity::Error,
+                        cx,
+                    );
                     return;
                 }
                 awaited.catalog_requested = true;
@@ -206,7 +221,13 @@ impl NativeApplication {
         self.open_known_recent_thread(awaited.project, awaited.thread, cx);
     }
 
-    fn fail_recent_open(&mut self, awaited: &AwaitedOpen, reason: &str, cx: &mut Context<Self>) {
+    fn fail_recent_open(
+        &mut self,
+        awaited: &AwaitedOpen,
+        reason: &str,
+        severity: NoticeSeverity,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(feature = "flight-recorder")]
         artisan_tracing::instant!("navigation", "recent_thread.failed", "thread_id" => awaited.thread.as_str(), "reason" => reason);
         #[cfg(feature = "flight-recorder")]
@@ -227,8 +248,7 @@ impl NativeApplication {
                 || String::from("this thread"),
                 |row| format!("\u{201c}{}\u{201d}", row.thread.title.as_str()),
             );
-        self.window_error = Some(format!("Couldn't open {title}: {reason}."));
-        cx.notify();
+        self.show_notice(severity, format!("Couldn't open {title}: {reason}."), cx);
     }
 
     /// Opens a recent thread of a listed project: at once when the selected
@@ -394,6 +414,7 @@ mod tests {
             thread,
             subtitle: DisplayName::parse("owner/repo").unwrap(),
             project_icon: Default::default(),
+            placement: artisan_domain::ThreadPlacement::Inbox,
         }
     }
 

@@ -5,7 +5,7 @@ use super::*;
 
 use artisan_domain::{
     RECENT_PROJECT_ICON_MAX_BYTES, RECENT_THREADS_MAX, ReadRecentThreads, RecentProjectIcon,
-    RecentThread, RecentThreadListing,
+    RecentThread, RecentThreadListing, ThreadPlacement,
 };
 
 /// Encodes the recent-threads read.
@@ -26,17 +26,28 @@ pub(crate) fn encode_recent_threads(
     let field = "recentThreads.threads";
     let mut threads = builder.init_threads(list_length(field, value.threads().len())?);
     for (index, row) in value.threads().iter().enumerate() {
-        let mut encoded = threads.reborrow().get(list_index(field, index)?);
-        encode_thread(encoded.reborrow().init_thread(), &row.thread);
-        encoded.set_subtitle(row.subtitle.as_str());
-        if let Some(host) = &row.project_icon.host {
-            encoded.set_repository_host(host.as_str());
-            if row.project_icon.png.len() <= RECENT_PROJECT_ICON_MAX_BYTES {
-                encoded.set_project_icon_png(&row.project_icon.png);
-            }
-        }
+        encode_recent_thread(threads.reborrow().get(list_index(field, index)?), row);
     }
     Ok(())
+}
+
+/// Encodes one recent row, shared with the archived listing.
+pub(crate) fn encode_recent_thread(
+    mut encoded: artisan_capnp::recent_thread::Builder<'_>,
+    row: &RecentThread,
+) {
+    encode_thread(encoded.reborrow().init_thread(), &row.thread);
+    encoded.set_subtitle(row.subtitle.as_str());
+    if let Some(host) = &row.project_icon.host {
+        encoded.set_repository_host(host.as_str());
+        if row.project_icon.png.len() <= RECENT_PROJECT_ICON_MAX_BYTES {
+            encoded.set_project_icon_png(&row.project_icon.png);
+        }
+    }
+    encoded.set_placement(match row.placement {
+        ThreadPlacement::Inbox => artisan_capnp::ThreadPlacement::Inbox,
+        ThreadPlacement::History => artisan_capnp::ThreadPlacement::History,
+    });
 }
 
 /// Decodes one recent-threads listing after checking its bound.
@@ -53,35 +64,44 @@ pub(crate) fn decode_recent_threads(
             },
         });
     }
-    let field = "recentThreads.subtitle";
     let rows = threads
         .iter()
-        .map(|row| {
-            let host = read_text(row.get_repository_host(), "recentThreads.repositoryHost")?;
-            let png = row.get_project_icon_png()?;
-            Ok(RecentThread {
-                thread: decode_thread(row.get_thread()?)?,
-                subtitle: DisplayName::parse(read_text(row.get_subtitle(), field)?)
-                    .map_err(|source| ProtocolDecodeError::DisplayName { field, source })?,
-                project_icon: RecentProjectIcon {
-                    host: if host.is_empty() {
-                        None
-                    } else {
-                        Some(DisplayName::parse(&host).map_err(|source| {
-                            ProtocolDecodeError::DisplayName {
-                                field: "recentThreads.repositoryHost",
-                                source,
-                            }
-                        })?)
-                    },
-                    png: if !host.is_empty() && png.len() <= RECENT_PROJECT_ICON_MAX_BYTES {
-                        png.into()
-                    } else {
-                        Default::default()
-                    },
-                },
-            })
-        })
+        .map(decode_recent_thread)
         .collect::<Result<Vec<_>, ProtocolDecodeError>>()?;
     RecentThreadListing::new(rows).map_err(|source| ProtocolDecodeError::ThreadListing { source })
+}
+
+/// Decodes one recent row, shared with the archived listing.
+pub(crate) fn decode_recent_thread(
+    row: artisan_capnp::recent_thread::Reader<'_>,
+) -> Result<RecentThread, ProtocolDecodeError> {
+    let field = "recentThreads.subtitle";
+    let host = read_text(row.get_repository_host(), "recentThreads.repositoryHost")?;
+    let png = row.get_project_icon_png()?;
+    Ok(RecentThread {
+        thread: decode_thread(row.get_thread()?)?,
+        subtitle: DisplayName::parse(read_text(row.get_subtitle(), field)?)
+            .map_err(|source| ProtocolDecodeError::DisplayName { field, source })?,
+        project_icon: RecentProjectIcon {
+            host: if host.is_empty() {
+                None
+            } else {
+                Some(DisplayName::parse(&host).map_err(|source| {
+                    ProtocolDecodeError::DisplayName {
+                        field: "recentThreads.repositoryHost",
+                        source,
+                    }
+                })?)
+            },
+            png: if !host.is_empty() && png.len() <= RECENT_PROJECT_ICON_MAX_BYTES {
+                png.into()
+            } else {
+                std::sync::Arc::default()
+            },
+        },
+        placement: match row.get_placement()? {
+            artisan_capnp::ThreadPlacement::Inbox => ThreadPlacement::Inbox,
+            artisan_capnp::ThreadPlacement::History => ThreadPlacement::History,
+        },
+    })
 }

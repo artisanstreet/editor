@@ -1149,3 +1149,77 @@ async fn renewed_running_lease_allows_progress_and_completion_past_original_expi
         .await
         .expect("completion uses renewed lease");
 }
+
+/// Erasing an archived thread removes every row of its conversation —
+/// message, dispatch, run, turn, items, patches, checkpoints, and receipts —
+/// under the database's own foreign keys.
+#[tokio::test]
+async fn erasing_an_archived_thread_removes_its_whole_conversation() {
+    use sea_orm::ConnectionTrait;
+    let (pair, assistant_item, _, _) = seeded_with_item().await;
+    let final_body = assistant_body("final completed body");
+    pair.repository
+        .complete_run(CompleteRun {
+            scope: terminal_scope(&pair),
+            operated_at: UnixMillis::from_millis(TERMINAL_AT_MS),
+            item_id: &assistant_item,
+            expected_revision: Revision::new(0),
+            body: &final_body,
+            phase: AssistantMessagePhase::Final,
+            item_patch_id: &PatchId::parse("patch-item-complete").expect("p"),
+            turn_patch_id: &PatchId::parse("patch-turn-complete").expect("p"),
+        })
+        .await
+        .expect("complete");
+    let thread = ThreadId::parse(THREAD_ID).expect("tid");
+    pair.repository
+        .update_thread(
+            &thread,
+            &artisan_domain::ThreadChange::Archive,
+            UnixMillis::from_millis(TERMINAL_AT_MS),
+        )
+        .await
+        .expect("archive");
+    let expired = UnixMillis::from_millis(TERMINAL_AT_MS + artisan_domain::ARCHIVE_RETENTION_MS);
+    assert_eq!(
+        pair.repository
+            .erase_expired_archived_threads(expired, 10)
+            .await
+            .expect("erase"),
+        [thread]
+    );
+    let after = persisted_rows(&pair.database).await;
+    assert_eq!(
+        after,
+        PersistedRows {
+            dispatches: Vec::new(),
+            runs: Vec::new(),
+            items: Vec::new(),
+            turns: Vec::new(),
+            patches: Vec::new(),
+            states: Vec::new(),
+            checkpoints: Vec::new(),
+            receipts: Vec::new(),
+        }
+    );
+    for table in [
+        "threads",
+        "messages",
+        "conversation_ordinals",
+        "command_receipts",
+        "run_usage",
+    ] {
+        let count: i64 = pair
+            .database
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DbBackend::Sqlite,
+                format!("SELECT COUNT(*) FROM {table}"),
+            ))
+            .await
+            .expect("count")
+            .expect("row")
+            .try_get_by_index(0)
+            .expect("count");
+        assert_eq!(count, 0, "{table} keeps no row of the erased thread");
+    }
+}

@@ -2,14 +2,15 @@
 //!
 //! Rows are the Forge's recent-threads listing (`impl_recent_threads.rs`):
 //! the title, and beneath it the repository or project the thread works
-//! in. Only threads with something unseen show outright; running threads
-//! collapse into `Working` and read idle ones into `History`, which keeps
-//! its age groups inside ([`crate::recent_thread_groups`]). Rows regroup
-//! when one crosses an age boundary. Choosing a row opens the thread in its
-//! own project.
+//! in. A thread stays at the top until it is settled into `History` (from
+//! its row's context menu, or by the Forge after a quiet day), which keeps
+//! its age groups inside ([`crate::recent_thread_groups`]); reading it never
+//! moves it. Rows regroup when one crosses an age boundary. Choosing a row
+//! opens the thread in its own project; right-clicking it opens its menu
+//! (`impl_pointer_menu.rs`).
 
 use super::*;
-use crate::desktop_shell::{DESKTOP_COLUMN_ROW_INSET_PX, desktop_section_label};
+use crate::desktop_shell::{desktop_nav_glyph, desktop_section_label};
 use crate::recent_thread_groups::{
     RecentThreadGroup, SidebarSections, next_regrouping, section_recent_threads,
 };
@@ -35,8 +36,6 @@ const SIDEBAR_WORKING_PULSE_FLOOR: f32 = 0.4;
 /// A collapsible sidebar group.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum SidebarGroup {
-    /// Threads the Forge is running with nothing waiting on the reader.
-    Working,
     /// Read, idle threads, in age groups.
     History,
 }
@@ -44,16 +43,26 @@ pub(super) enum SidebarGroup {
 impl SidebarGroup {
     const fn label(self) -> &'static str {
         match self {
-            Self::Working => "Working",
             Self::History => "History",
         }
     }
 
     const fn id(self) -> &'static str {
         match self {
-            Self::Working => "working",
             Self::History => "history",
         }
+    }
+
+    const fn glyph(self) -> AssetId {
+        match self {
+            Self::History => AssetId::TABLER_ARCHIVE,
+        }
+    }
+
+    /// The header's key in the thread rows' hover pill; the `group:`
+    /// prefix keeps it apart from thread ids.
+    fn hover_id(self) -> String {
+        format!("group:{}", self.id())
     }
 }
 
@@ -64,6 +73,9 @@ struct SidebarGroupDisclosure {
     /// When the reader last toggled it, for the chevron flip and reveal.
     toggled: Option<Instant>,
     focus: Option<FocusHandle>,
+    /// The content's natural height, measured each frame it paints, so the
+    /// panel can grow to and shrink from it.
+    content_height: Rc<Cell<gpui::Pixels>>,
 }
 
 impl SidebarGroupDisclosure {
@@ -140,7 +152,7 @@ impl SidebarThreadIndicator {
 
 #[derive(Default)]
 pub(super) struct SidebarThreadsState {
-    focus: HashMap<ThreadId, FocusHandle>,
+    pub(super) focus: HashMap<ThreadId, FocusHandle>,
     project_icons: super::project_icon::ProjectIconCache,
     hover: Rc<RefCell<SlidingHoverState>>,
     bounds: Rc<RefCell<Option<Bounds<gpui::Pixels>>>>,
@@ -148,8 +160,8 @@ pub(super) struct SidebarThreadsState {
     selection_frame_pending: bool,
     /// The open thread and the unread outcome it had when opened or that
     /// arrived while open. The Forge marks a thread read the moment it
-    /// opens; the row keeps its dot and its place among unread rows until
-    /// the reader leaves the thread, so opening never pulls it away.
+    /// opens; the row keeps its dot, and with it its place in view, until
+    /// the reader leaves the thread.
     held_unread: Option<(ThreadId, ThreadAttention)>,
     /// The recent threads the Forge served or last pushed.
     pub(super) recent: Option<RecentThreadListing>,
@@ -329,6 +341,7 @@ impl NativeApplication {
             .map(|row| row.thread.thread_id.clone())
             .collect::<Vec<_>>();
         self.animate_sidebar_selection(&ids, window, cx);
+        self.observe_open_unread();
         let listing = self.hold_open_unread(listing);
         self.sidebar_threads.focus.retain(|id, _| ids.contains(id));
         // The pill reads its target while this render builds it, so stale
@@ -383,44 +396,67 @@ impl NativeApplication {
         self.desktop_sidebar_sections(container, &sections, window, cx)
     }
 
-    /// Presents the open thread with the unread outcome it held when the
-    /// reader opened it, until they leave it. Starting a new run there acts
-    /// on the outcome and releases it.
-    fn hold_open_unread(&mut self, listing: RecentThreadListing) -> RecentThreadListing {
-        let open = self.sidebar_threads.selection.target.clone();
-        let held = &mut self.sidebar_threads.held_unread;
-        if held.as_ref().map(|(id, _)| id) != open.as_ref() {
-            *held = open.map(|id| (id, ThreadAttention::None));
-        }
-        let Some((id, attention)) = held.as_mut() else {
-            return listing;
+    /// Notes the open thread's unread outcome in the listing the sidebar
+    /// holds now. Called when the route opens a thread and before a newer
+    /// listing replaces this one, not only when the sidebar paints: the
+    /// Forge's listing marking the thread read can land before the first
+    /// frame that shows it open. Starting a new run there acts on the
+    /// outcome and releases it.
+    pub(super) fn observe_open_unread(&mut self) {
+        let open = match self.route() {
+            NativeRoute::Thread { thread, .. } | NativeRoute::Editor { thread, .. } => {
+                Some(thread.clone())
+            }
+            _ => None,
         };
-        let Some(row) = listing
-            .threads()
-            .iter()
-            .find(|row| &row.thread.thread_id == id)
-        else {
-            return listing;
+        let threads = &mut self.sidebar_threads;
+        if threads.held_unread.as_ref().map(|(id, _)| id) != open.as_ref() {
+            threads.held_unread = open.map(|id| (id, ThreadAttention::None));
+        }
+        let Some((id, attention)) = threads.held_unread.as_mut() else {
+            return;
+        };
+        let Some(row) = threads.recent.as_ref().and_then(|listing| {
+            listing
+                .threads()
+                .iter()
+                .find(|row| &row.thread.thread_id == id)
+        }) else {
+            return;
         };
         let current = &row.thread;
         if current.has_active_work || current.attention == ThreadAttention::AwaitingAnswer {
             *attention = ThreadAttention::None;
-            return listing;
-        }
-        if current.attention != ThreadAttention::None {
+        } else if current.attention != ThreadAttention::None {
             *attention = current.attention;
+        }
+    }
+
+    /// Presents the open thread with the unread outcome it holds (see
+    /// [`Self::observe_open_unread`]) until the reader leaves it.
+    fn hold_open_unread(&self, listing: RecentThreadListing) -> RecentThreadListing {
+        let Some((id, held)) = self.sidebar_threads.held_unread.clone() else {
+            return listing;
+        };
+        if held == ThreadAttention::None {
             return listing;
         }
-        if *attention == ThreadAttention::None {
+        let Some(row) = listing
+            .threads()
+            .iter()
+            .find(|row| row.thread.thread_id == id)
+        else {
+            return listing;
+        };
+        if row.thread.attention != ThreadAttention::None {
             return listing;
         }
-        let held = *attention;
         let rows = listing
             .threads()
             .iter()
             .cloned()
             .map(|mut row| {
-                if &row.thread.thread_id == id {
+                if row.thread.thread_id == id {
                     row.thread.attention = held;
                 }
                 row
@@ -429,24 +465,26 @@ impl NativeApplication {
         RecentThreadListing::new(rows).unwrap_or(listing)
     }
 
-    /// The thread rows this render builds: unread rows, plus the rows of
+    /// The thread rows this render builds: rows in view, plus the rows of
     /// each open group. A row hidden in a collapsed group, or moved into
     /// one, still has its thread in the listing but no row to hover.
     fn sidebar_rendered_rows(&self, sections: &SidebarSections<'_>) -> Vec<String> {
-        let mut rows = sections.unread.clone();
-        if self.sidebar_group_open(SidebarGroup::Working) {
-            rows.extend(&sections.working);
-        }
-        if self.sidebar_group_open(SidebarGroup::History) {
+        let mut rows = sections.inbox.clone();
+        if self.sidebar_group_shown(SidebarGroup::History) {
             rows.extend(sections.history.iter().flat_map(|group| &group.threads));
         }
-        rows.iter()
+        let mut ids: Vec<String> = rows
+            .iter()
             .map(|row| row.thread.thread_id.as_str().to_owned())
-            .collect()
+            .collect();
+        if !sections.history.is_empty() {
+            ids.push(SidebarGroup::History.hover_id());
+        }
+        ids
     }
 
-    /// Appends the unread rows, then the `Working` and `History` groups,
-    /// each only when it holds a row.
+    /// Keeps the rows in view at the top and pushes the `History` group to
+    /// the bottom when it holds a row.
     fn desktop_sidebar_sections(
         &mut self,
         mut container: Stateful<Div>,
@@ -454,39 +492,22 @@ impl NativeApplication {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        if !sections.unread.is_empty() {
-            let mut unread = div()
+        if !sections.inbox.is_empty() {
+            let mut inbox = div()
                 .w_full()
                 .flex_none()
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
                 .debug_selector(|| "artisan-sidebar-threads-unread".to_owned());
-            for thread in &sections.unread {
-                unread = unread.child(self.desktop_sidebar_thread(thread, cx));
+            for thread in &sections.inbox {
+                inbox = inbox.child(self.desktop_sidebar_thread(thread, cx));
             }
-            container = container.child(unread);
-        }
-        if !sections.working.is_empty() {
-            let rows = if self.sidebar_group_open(SidebarGroup::Working) {
-                sections
-                    .working
-                    .iter()
-                    .map(|thread| self.desktop_sidebar_thread(thread, cx).into_any_element())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            container = container.child(self.desktop_sidebar_collapsible(
-                SidebarGroup::Working,
-                sections.working.len(),
-                rows,
-                window,
-                cx,
-            ));
+            container = container.child(inbox);
         }
         if !sections.history.is_empty() {
-            let groups = if self.sidebar_group_open(SidebarGroup::History) {
+            container = container.child(div().flex_1().min_h(px(0.0)));
+            let groups = if self.sidebar_group_shown(SidebarGroup::History) {
                 sections
                     .history
                     .iter()
@@ -509,11 +530,25 @@ impl NativeApplication {
         container
     }
 
-    fn sidebar_group_open(&self, group: SidebarGroup) -> bool {
+    /// Whether a group's content paints: while open, and while it closes.
+    fn sidebar_group_shown(&self, group: SidebarGroup) -> bool {
         self.sidebar_threads
             .groups
             .get(&group)
-            .is_some_and(|disclosure| disclosure.open)
+            .is_some_and(|disclosure| {
+                disclosure.open || disclosure.progress(Instant::now(), false).is_some()
+            })
+    }
+
+    /// Opens `History` already settled, as a reader who opened it earlier
+    /// left it: tests then read its rows without waiting out the reveal.
+    #[cfg(test)]
+    pub(super) fn open_sidebar_history(&mut self) {
+        self.sidebar_threads
+            .groups
+            .entry(SidebarGroup::History)
+            .or_default()
+            .open = true;
     }
 
     fn toggle_sidebar_group(&mut self, group: SidebarGroup, cx: &mut Context<Self>) {
@@ -523,8 +558,9 @@ impl NativeApplication {
         cx.notify();
     }
 
-    /// One collapsible group: a header in the age-group label style with a
-    /// count and a chevron that turns down when open, then its content.
+    /// One collapsible group: a header row shaped like the sidebar's
+    /// navigation rows (glyph, label, a muted count and a chevron that turns
+    /// down when open) sharing the thread rows' hover pill, then its content.
     ///
     /// Opening flips the chevron and fades the content in over the fast
     /// motion token; closing flips the chevron and removes the content.
@@ -540,6 +576,7 @@ impl NativeApplication {
         let disclosure = self.sidebar_threads.groups.entry(group).or_default();
         let open = disclosure.open;
         let progress = disclosure.progress(Instant::now(), reduced);
+        let disclosure_height = Rc::clone(&disclosure.content_height);
         let focus = disclosure
             .focus
             .get_or_insert_with(|| cx.focus_handle())
@@ -552,6 +589,9 @@ impl NativeApplication {
         let selector = format!("artisan-sidebar-threads-{}", group.id());
         let header_selector = format!("{selector}-header");
         let chevron_selector = format!("{selector}-chevron");
+        let hover_id = group.hover_id();
+        let mut glyph_theme = self.desktop_theme;
+        glyph_theme.secondary = self.theme.colors.muted_foreground.to_paint();
         let muted = self.theme.colors.muted_foreground.to_paint();
         let focus_fill = self.theme.colors.muted.to_paint();
         let label = SharedString::from(format!("{}, {count} threads", group.label()));
@@ -562,20 +602,51 @@ impl NativeApplication {
             .role(gpui::Role::Button)
             .aria_label(label)
             .aria_expanded(open)
+            .relative()
             .w_full()
+            .h(px(34.0))
+            .flex_none()
             .flex()
             .items_center()
-            .gap(px(4.0))
-            .px(px(DESKTOP_COLUMN_ROW_INSET_PX))
-            .pb(self.theme.spacing.steps(1.0))
+            .gap(px(8.0))
+            .px(px(8.0))
             .rounded(px(6.0))
-            .text_size(self.theme.typography.label_text)
-            .text_color(muted)
             .cursor_pointer()
             .focus_visible(move |style| style.bg(focus_fill))
             .debug_selector(move || header_selector.clone())
-            .child(div().flex_none().child(group.label()))
-            .child(div().flex_none().opacity(0.7).child(count.to_string()))
+            .on_hover(cx.listener({
+                let hover_id = hover_id.clone();
+                move |app, hovered: &bool, _, cx| {
+                    let mut hover = app.sidebar_threads.hover.borrow_mut();
+                    if *hovered {
+                        hover.set_active(hover_id.clone());
+                    } else if hover.active_id() == Some(hover_id.as_str()) {
+                        hover.hide();
+                    }
+                    cx.notify();
+                }
+            }))
+            .child(sidebar_hover_probe(
+                Rc::clone(&self.sidebar_threads.hover),
+                Rc::clone(&self.sidebar_threads.bounds),
+                hover_id,
+            ))
+            .child(desktop_nav_glyph(group.glyph(), glyph_theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(14.0))
+                    .text_color(self.desktop_theme.foreground)
+                    .child(group.label()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(self.theme.typography.label_text)
+                    .text_color(muted)
+                    .child(SharedString::from(count.to_string())),
+            )
             .child(
                 gpui::svg()
                     .path(AssetId::TABLER_CHEVRON_RIGHT.as_str())
@@ -605,19 +676,81 @@ impl NativeApplication {
             .gap(px(2.0))
             .debug_selector(move || selector.clone())
             .child(header);
-        if open && !content.is_empty() {
+        // Accordion (transitions.dev): the panel's height tweens between 0
+        // and the content's measured height over 250 ms smooth-out, and the
+        // content fades with it; closing keeps the rows painted until the
+        // panel has shut. The tween runs only to the height the window can
+        // show: a long history is thousands of pixels tall, and tweening
+        // all of it would fill the sidebar in the first frames and read as
+        // instant.
+        let visible_height = window.viewport_size().height;
+        if (open || progress.is_some()) && !content.is_empty() {
+            let measured = Rc::clone(&disclosure_height);
             let body = div()
                 .w_full()
                 .flex()
                 .flex_col()
                 .gap(self.theme.spacing.steps(3.0))
                 .children(content);
+            let inner = div()
+                .w_full()
+                .flex_none()
+                .child(body)
+                .on_children_prepainted(move |children, _, _| {
+                    if let Some(first) = children.first() {
+                        measured.set(first.size.height);
+                    }
+                });
+            let panel_selector = format!("artisan-sidebar-threads-{}-panel", group.id());
+            let panel = div()
+                .w_full()
+                .debug_selector(move || panel_selector.clone());
             section = section.child(match progress {
-                Some(eased) => body.opacity(eased),
-                None => body,
+                Some(_) => panel
+                    .overflow_hidden()
+                    .h(disclosure_height.get().min(visible_height) * turn)
+                    .opacity(turn)
+                    .child(inner),
+                None => panel.child(inner),
             });
         }
         section
+    }
+
+    /// Short text in a small glass pill: a group's row count, the build id.
+    pub(super) fn glass_badge(&self, text: String) -> Div {
+        use artisan_ui::glass::{
+            GlassStrength, glass_blur_radius, glass_foreground_base, glass_highlight_layer,
+            glass_material_layer,
+        };
+        let radius = px(8.0);
+        div()
+            .relative()
+            .flex_none()
+            .h(px(16.0))
+            .min_w(px(16.0))
+            .px(px(5.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(radius)
+            .overflow_hidden()
+            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
+            .bg(glass_foreground_base(&self.theme))
+            .child(glass_material_layer(GlassStrength::Quiet, radius))
+            .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+            .child(
+                div()
+                    .relative()
+                    .text_size(px(10.0))
+                    .line_height(px(16.0))
+                    .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                        "tnum".into(),
+                        1,
+                    )])))
+                    .text_color(self.theme.colors.foreground.to_paint())
+                    .child(text),
+            )
     }
 
     fn desktop_sidebar_thread_group(
@@ -689,6 +822,7 @@ impl NativeApplication {
         let pulse = !cx.reduce_motion();
         let click_target = (thread.project_id.clone(), thread.thread_id.clone());
         let key_target = click_target.clone();
+        let menu_target = thread.thread_id.clone();
         let color = self.theme.colors.muted.to_paint();
         let hover_id = thread.thread_id.as_str().to_owned();
         div()
@@ -793,15 +927,22 @@ impl NativeApplication {
                     row.child(dot)
                 }
             })
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |app, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    app.open_thread_menu(menu_target.clone(), event.position, window, cx);
+                }),
+            )
             .on_click(cx.listener(move |app, _, window, cx| {
                 window.focus(&focus, cx);
                 let (project, thread) = click_target.clone();
                 app.open_recent_thread(project, thread, cx);
             }))
             .on_key_down(cx.listener(move |app, event: &gpui::KeyDownEvent, _, cx| {
+                let (project, thread) = key_target.clone();
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                     cx.stop_propagation();
-                    let (project, thread) = key_target.clone();
                     app.open_recent_thread(project, thread, cx);
                 }
             }))

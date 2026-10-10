@@ -272,6 +272,11 @@ pub enum SettingsScreenEvent {
     },
     /// Settle global prompt setup or a drifted engine.
     ResolveGlobalPrompt(artisan_domain::GlobalPromptResolution),
+    /// Restore one archived thread to the sidebar.
+    UnarchiveThread {
+        /// The thread to restore.
+        thread_id: artisan_domain::ThreadId,
+    },
 }
 
 impl EventEmitter<SettingsScreenEvent> for SettingsScreen {}
@@ -345,6 +350,7 @@ impl SettingsScreen {
             engines: Vec::new(),
             global_prompt: (section == SettingsRoute::GlobalPrompt)
                 .then(|| super::global_prompt::GlobalPromptPage::new(cx)),
+            archived_threads: super::archived_threads::ArchivedThreadsPage::default(),
         }
     }
 

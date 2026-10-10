@@ -130,6 +130,7 @@ fn a_recent_threads_push_renders_the_sidebar(cx: &mut TestAppContext) {
                 thread: summary,
                 subtitle: DisplayName::parse("Varde").expect("subtitle"),
                 project_icon: Default::default(),
+                placement: artisan_domain::ThreadPlacement::Inbox,
             }])
             .expect("recent threads");
             application.handle_service_event(
@@ -151,4 +152,191 @@ fn a_recent_threads_push_renders_the_sidebar(cx: &mut TestAppContext) {
         cx.debug_bounds("artisan-sidebar-thread-thread-b").is_some(),
         "the pushed row paints"
     );
+}
+
+#[gpui::test]
+fn a_delivered_message_renders_the_transcript(cx: &mut TestAppContext) {
+    let (view, cx) = mount_live_thread(cx);
+    let thread = ThreadId::parse("thread-a").expect("thread");
+    // Frames elsewhere (the sidebar's working dot) reuse the transcript's
+    // previous paint before anything is delivered.
+    for _ in 0..3 {
+        cx.update(|_, app| {
+            let sidebar = view.read(app).sidebar.clone();
+            sidebar.update(app, |_, cx| cx.notify());
+        });
+        cx.run_until_parked();
+    }
+    let (_, host_before) = render_counts(&view, cx);
+
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(
+                NativeTransportEvent::PatchBatch(echo_batch(
+                    &thread,
+                    1,
+                    "item-user",
+                    None,
+                    "turn-live",
+                    0,
+                    1,
+                    "hello",
+                )),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    let (_, host_after) = render_counts(&view, cx);
+    assert!(
+        host_after > host_before,
+        "a delivered message re-renders the cached transcript ({host_before} -> {host_after})"
+    );
+    let row_renders = cx.update(|_, app| {
+        let host = view.read(app).conversation_host.clone().expect("host");
+        let surface = host.read(app).surface().clone();
+        surface
+            .read(app)
+            .turn_row_renders(&TurnId::parse("turn-live").expect("turn"))
+    });
+    assert!(
+        row_renders.is_some_and(|renders| renders > 0),
+        "the delivered turn's row painted"
+    );
+}
+
+#[gpui::test]
+fn reopening_the_same_thread_paints_the_new_host(cx: &mut TestAppContext) {
+    let (view, cx) = mount_live_thread(cx);
+    let thread = ThreadId::parse("thread-a").expect("thread");
+
+    // Reopening the thread retires its host and mounts a fresh one in the
+    // same pass (`try_mount_pending_thread`): no frame ever sees the thread
+    // without a host.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.retire_host(cx);
+            let (sink, _commands) = command_sink([]);
+            install_ready_message_surface(application, cx, thread.clone(), "", sink);
+            // The fresh subscription's start carries the snapshot.
+            let host = application.conversation_host.clone().expect("new host");
+            application.dispatch_snapshot(&host, snapshot_for(&thread, 1), cx);
+            application.handle_service_event(history_current_event(&thread), cx);
+        });
+    });
+    cx.run_until_parked();
+
+    let (live, painted) = cx.update(|_, app| {
+        let application = view.read(app);
+        let live = application.conversation_host.clone().expect("live host");
+        let painted = application
+            .thread_screen
+            .as_ref()
+            .expect("thread screen")
+            .read(app)
+            .host()
+            .clone();
+        (live, painted)
+    });
+    assert_eq!(
+        painted, live,
+        "the thread screen paints the host that receives the thread's patches"
+    );
+
+    // A message sent after reopening paints on that host.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(
+                NativeTransportEvent::PatchBatch(echo_batch(
+                    &thread,
+                    1,
+                    "item-user",
+                    None,
+                    "turn-live",
+                    0,
+                    1,
+                    "hello",
+                )),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    let row_renders = cx.update(|_, app| {
+        let application = view.read(app);
+        let screen = application.thread_screen.as_ref().expect("thread screen");
+        let surface = screen.read(app).host().read(app).surface().clone();
+        surface
+            .read(app)
+            .turn_row_renders(&TurnId::parse("turn-live").expect("turn"))
+    });
+    assert!(
+        row_renders.is_some_and(|renders| renders > 0),
+        "the sent message paints in the reopened thread"
+    );
+}
+
+#[gpui::test]
+fn a_refused_surface_gesture_leaves_the_thread_live(cx: &mut TestAppContext) {
+    let (view, cx) = mount_live_thread(cx);
+    let thread = ThreadId::parse("thread-a").expect("thread");
+
+    // A toggle on a section the scene no longer holds: the click raced the
+    // scene that removed it, and the controller refuses it.
+    cx.update(|_, app| {
+        let host = view.read(app).conversation_host.clone().expect("host");
+        let surface = host.read(app).surface().clone();
+        surface.update(app, |surface, cx| {
+            assert!(surface.enqueue_action_for_test(
+                crate::conversation_surface::ConversationSurfaceAction::DisclosureToggleRequested {
+                    id: crate::conversation_scene::SceneId::parse("gone-section").expect("id"),
+                    requested_open: true,
+                },
+                cx,
+            ));
+        });
+    });
+    cx.run_until_parked();
+    // What the application's host observation does on every host notify.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            let host = application.conversation_host.clone().expect("host");
+            application.pump_host_boundary(&host, cx);
+        });
+    });
+    cx.update(|_, app| {
+        assert!(
+            !matches!(view.read(app).state, NativeViewState::Failure(_)),
+            "a stale gesture is not a broken thread"
+        );
+    });
+
+    // The thread keeps taking deliveries.
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(
+                NativeTransportEvent::PatchBatch(echo_batch(
+                    &thread,
+                    1,
+                    "item-user",
+                    None,
+                    "turn-live",
+                    0,
+                    1,
+                    "hello",
+                )),
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    let row_renders = cx.update(|_, app| {
+        let host = view.read(app).conversation_host.clone().expect("host");
+        let surface = host.read(app).surface().clone();
+        surface
+            .read(app)
+            .turn_row_renders(&TurnId::parse("turn-live").expect("turn"))
+    });
+    assert!(row_renders.is_some_and(|renders| renders > 0));
 }

@@ -43,6 +43,8 @@ pub struct RecentThread {
     pub subtitle: DisplayName,
     /// Project icon, resolved outside the listing and UI render paths.
     pub project_icon: RecentProjectIcon,
+    /// Whether the thread is in view or settled into History.
+    pub placement: crate::ThreadPlacement,
 }
 
 impl RecentThread {

@@ -500,6 +500,13 @@ impl NativeApplication {
             SettingsScreenEvent::ResolveGlobalPrompt(resolution) => {
                 self.resolve_global_prompt(resolution.clone(), cx);
             }
+            SettingsScreenEvent::UnarchiveThread { thread_id } => {
+                self.change_thread(
+                    thread_id.clone(),
+                    artisan_domain::ThreadChange::Unarchive,
+                    cx,
+                );
+            }
         }
     }
 

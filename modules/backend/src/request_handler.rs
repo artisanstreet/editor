@@ -390,7 +390,7 @@ pub struct RequestHandler {
     live_thinking: Option<crate::live_thinking::LiveThinkingBoard>,
     terminals: Option<crate::thread_terminals::TerminalBoard>,
     directory_picker: Option<DirectoryPicker>,
-    registered_engine_profiles: Option<Box<dyn RegisteredEngineProfilesReader>>,
+    registered_engine_profiles: Option<Arc<dyn RegisteredEngineProfilesReader>>,
     run_cancellation: Option<RunCancellationRegistry>,
     run_interaction: Option<RunInteractionRegistry>,
     composer_catalog: Option<crate::composer_catalog_service::ComposerCatalogService>,
@@ -808,8 +808,23 @@ impl RequestHandler {
         mut self,
         reader: impl RegisteredEngineProfilesReader + 'static,
     ) -> Self {
-        self.registered_engine_profiles = Some(Box::new(reader));
+        self.registered_engine_profiles = Some(Arc::new(reader));
         self
+    }
+
+    /// Lists the registered engine profiles on the blocking pool, since the
+    /// reader reads the registry file; `None` when no reader is configured.
+    async fn list_registered_engine_profiles(
+        &self,
+    ) -> Option<Result<Option<Vec<EngineProfileId>>, RegisteredEngineProfilesError>> {
+        let reader = Arc::clone(self.registered_engine_profiles.as_ref()?);
+        Some(
+            match tokio::task::spawn_blocking(move || reader.list_profiles()).await {
+                Ok(listed) => listed,
+                Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+                Err(_) => Err(RegisteredEngineProfilesError),
+            },
+        )
     }
 
     /// Resolves one correlated application request to its typed outcome.
@@ -1176,6 +1191,7 @@ impl RequestHandler {
             | Command::ResolveGlobalPrompt(_) => {
                 self.extension_command_outcome(request_id, command).await
             }
+            Command::UpdateThread(update) => self.update_thread_outcome(request_id, update).await,
         };
         if response.is_ok() {
             self.wake_message_outbox(command);
@@ -1438,6 +1454,12 @@ mod queries;
 
 #[path = "request_handler/recent_threads.rs"]
 mod recent_threads;
+
+#[path = "request_handler/thread_lifecycle.rs"]
+mod thread_lifecycle;
+
+#[path = "request_handler/media_file.rs"]
+mod media_file;
 
 #[path = "request_handler/failures.rs"]
 mod failures;

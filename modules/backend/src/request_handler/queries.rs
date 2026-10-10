@@ -356,6 +356,8 @@ impl RequestHandler {
                 self.extension_query_outcome(request_id, query)
             }
             Query::ReadRecentThreads(_) => self.recent_threads_outcome(request_id).await,
+            Query::ReadArchivedThreads(_) => self.archived_threads_outcome(request_id).await,
+            Query::ReadMediaFile(read) => self.media_file_outcome(read, request_id).await,
             Query::ReadEngineInstalls(_)
             | Query::ListEngineVersions(_)
             | Query::ChangeEngineVersion(_) => {
@@ -367,7 +369,16 @@ impl RequestHandler {
                 .await
             }
             Query::ResolveEngineConfiguration(query) => {
-                Ok(self.resolve_engine_configuration_outcome(request_id, query))
+                let registered = self
+                    .list_registered_engine_profiles()
+                    .await
+                    .and_then(|listed| listed.ok().flatten())
+                    .unwrap_or_default();
+                Ok(Self::resolve_engine_configuration_outcome(
+                    request_id,
+                    query,
+                    &registered,
+                ))
             }
             Query::ReadModelFavorites(_) => {
                 crate::composer_catalog_handler::read_model_favorites(&self.repository, request_id)
@@ -382,7 +393,7 @@ impl RequestHandler {
                 .await
             }
             Query::ListRegisteredEngineProfiles(_) => {
-                let Some(reader) = self.registered_engine_profiles.as_ref() else {
+                let Some(listed) = self.list_registered_engine_profiles().await else {
                     return Err(typed_failure(
                         ErrorCode::UnsupportedFeature,
                         "registered engine profiles are not supported",
@@ -390,7 +401,7 @@ impl RequestHandler {
                         request_id,
                     ));
                 };
-                match reader.list_profiles() {
+                match listed {
                     Ok(None) => Ok(outcome(
                         request_id,
                         ResponsePayload::RegisteredEngineProfiles(

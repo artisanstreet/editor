@@ -5,37 +5,44 @@ use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement, Value,
 };
 
-use artisan_domain::ThreadSummary;
+use std::collections::HashMap;
+
+use artisan_domain::{ThreadPlacement, ThreadSummary};
 
 use crate::entities;
 
 use super::project_threads::thread_summary;
 use super::{Repository, RepositoryError, corrupt_data, database_error};
 
-/// Saved threads by last activity, newest first. A thread is saved once the
-/// user sent a message in it, assistant text started, or a run is live: a
-/// running thread whose engine has only called tools so far is listed with
-/// its work, not lost until the first reply. Only a provisional draft (none
-/// of those) stays out.
+/// Saved threads by last activity, newest first, with whether each sits in
+/// History: filed there at or after its latest activity. A thread is saved
+/// once the user sent a message in it, assistant text started, or a run is
+/// live: a running thread whose engine has only called tools so far is
+/// listed with its work, not lost until the first reply. Only a provisional
+/// draft (none of those) and archived threads stay out.
 const RECENT_THREAD_IDS_SQL: &str = r"
 SELECT t.thread_id,
        COALESCE((SELECT MAX(m.accepted_at_ms) FROM messages AS m WHERE m.thread_id = t.thread_id),
-                t.updated_at_ms) AS activity
+                t.updated_at_ms) AS activity,
+       COALESCE(l.history_at_ms, -1) AS history_at
 FROM threads AS t
-WHERE EXISTS (SELECT 1 FROM messages AS m WHERE m.thread_id = t.thread_id)
+LEFT JOIN thread_lifecycle AS l ON l.thread_id = t.thread_id
+WHERE l.archived_at_ms IS NULL
+  AND (EXISTS (SELECT 1 FROM messages AS m WHERE m.thread_id = t.thread_id)
    OR EXISTS (SELECT 1 FROM conversation_items AS c
               WHERE c.thread_id = t.thread_id AND c.item_kind = 'assistant_message'
                 AND c.body <> '')
    OR EXISTS (SELECT 1 FROM assistant_runs AS r
               WHERE r.thread_id = t.thread_id
-                AND r.lifecycle IN ('queued', 'launching', 'running', 'waiting', 'cancel_requested'))
+                AND r.lifecycle IN ('queued', 'launching', 'running', 'waiting', 'cancel_requested')))
 ORDER BY activity DESC, t.thread_id ASC
 LIMIT ?
 ";
 
 /// Cheap aggregate over every input of the recent-threads listing: the
 /// project and thread catalogs, titles, messages, started threads, live and
-/// settled runs, open approvals and questions, and the reader's last opens.
+/// settled runs, open approvals and questions, the reader's last opens, and
+/// which threads are in History or archived.
 /// Any change the listing shows changes at least one component.
 const RECENT_THREADS_FINGERPRINT_SQL: &str = r"
 SELECT (SELECT COUNT(*) FROM attached_projects),
@@ -54,20 +61,23 @@ SELECT (SELECT COUNT(*) FROM attached_projects),
        (SELECT COUNT(*) FROM assistant_runs
           WHERE lifecycle IN ('completed', 'failed', 'interrupted', 'cancelled')),
        (SELECT COUNT(*) FROM pending_run_interactions WHERE state = 'requested'),
-       (SELECT COUNT(*) + COALESCE(SUM(read_at_ms % 1000003), 0) FROM thread_reads)
+       (SELECT COUNT(*) + COALESCE(SUM(read_at_ms % 1000003), 0) FROM thread_reads),
+       (SELECT COUNT(*) + COALESCE(SUM(COALESCE(history_at_ms, 7) % 1000003
+                                       + COALESCE(archived_at_ms, 11) % 1000033), 0)
+          FROM thread_lifecycle)
 ";
 
 /// Opaque summary of the recent-threads inputs; equal fingerprints mean the
 /// listing has not changed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RecentThreadsFingerprint([i64; 11]);
+pub struct RecentThreadsFingerprint([i64; 12]);
 
 impl Repository {
     /// Lists the most recently active saved threads across every project,
-    /// newest first: by the latest message, else by the last update. A
-    /// thread is saved by a sent message, started assistant text, or a live
-    /// run; provisional drafts with none of those are not listed. Ties order
-    /// by thread id.
+    /// newest first: by the latest message, else by the last update, each
+    /// with where it sits. A thread is saved by a sent message, started
+    /// assistant text, or a live run; provisional drafts with none of those
+    /// and archived threads are not listed. Ties order by thread id.
     ///
     /// # Errors
     ///
@@ -75,9 +85,9 @@ impl Repository {
     pub async fn list_recent_threads(
         &self,
         limit: usize,
-    ) -> Result<Vec<ThreadSummary>, RepositoryError> {
+    ) -> Result<Vec<(ThreadSummary, ThreadPlacement)>, RepositoryError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let ids = self
+        let listed = self
             .database
             .query_all_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,
@@ -88,15 +98,26 @@ impl Repository {
             .map_err(|source| database_error("list recent threads", source))?
             .iter()
             .map(|row| {
-                row.try_get_by_index::<String>(0)
-                    .map_err(|source| database_error("read recent thread id", source))
+                let read = |index| {
+                    row.try_get_by_index::<i64>(index)
+                        .map_err(|source| database_error("read recent thread placement", source))
+                };
+                let id = row
+                    .try_get_by_index::<String>(0)
+                    .map_err(|source| database_error("read recent thread id", source))?;
+                let placement = if read(2)? >= read(1)? {
+                    ThreadPlacement::History
+                } else {
+                    ThreadPlacement::Inbox
+                };
+                Ok((id, placement))
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        if ids.is_empty() {
+            .collect::<Result<HashMap<_, _>, RepositoryError>>()?;
+        if listed.is_empty() {
             return Ok(Vec::new());
         }
         let rows = entities::thread::Entity::find()
-            .filter(entities::thread::Column::ThreadId.is_in(ids.iter().map(String::as_str)))
+            .filter(entities::thread::Column::ThreadId.is_in(listed.keys().map(String::as_str)))
             .all(&self.database)
             .await
             .map_err(|source| database_error("read recent threads", source))?;
@@ -112,7 +133,16 @@ impl Repository {
                 .cmp(&activity(left))
                 .then_with(|| left.thread_id.as_str().cmp(right.thread_id.as_str()))
         });
-        Ok(summaries)
+        Ok(summaries
+            .into_iter()
+            .map(|summary| {
+                let placement = listed
+                    .get(summary.thread_id.as_str())
+                    .copied()
+                    .unwrap_or_default();
+                (summary, placement)
+            })
+            .collect())
     }
 
     /// Summarizes everything the recent-threads listing shows, so delivery
@@ -139,7 +169,7 @@ impl Repository {
                     "recent threads fingerprint returned no row",
                 )
             })?;
-        let mut parts = [0_i64; 11];
+        let mut parts = [0_i64; 12];
         for (index, part) in parts.iter_mut().enumerate() {
             *part = row
                 .try_get_by_index::<i64>(index)

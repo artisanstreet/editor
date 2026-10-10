@@ -67,6 +67,47 @@ fn automatic_recovery_does_not_override_integrity_failure_or_quit(cx: &mut TestA
 }
 
 #[gpui::test]
+fn retiring_a_thread_without_a_host_leaves_navigation_admissible(cx: &mut TestAppContext) {
+    let (service, mut commands, _) = NativeTransportService::pending_for_test();
+    let service = Arc::new(service);
+    let (workspace, cx) = connected_workspace(cx, &service, vec![]);
+    let view = selected(&workspace, cx);
+    let source = ThreadId::parse("recovered-thread").unwrap();
+    let mounted = ThreadId::parse("next-thread").unwrap();
+    cx.update(|_, cx| {
+        view.update(cx, |app, cx| {
+            // Failure recovery released the host but the Forge subscription
+            // is still open.
+            app.selected_thread = Some(source.clone());
+            app.retire_host(cx);
+            assert!(app.selected_thread.is_none());
+            assert!(app.ordinary_unsubscribe_thread.is_none());
+            assert!(app.project_picker_action_is_admissible());
+
+            // Another thread mounts before the Forge acknowledges the stop.
+            app.selected_thread = Some(mounted.clone());
+            app.handle_service_event(
+                NativeTransportEvent::ConversationSubscriptionStopped {
+                    thread_id: source.clone(),
+                    request_id: RequestId::parse("late-stop-ack").unwrap(),
+                    stopped: artisan_protocol::ConversationSubscriptionStopped {
+                        thread_id: source.clone(),
+                    },
+                },
+                cx,
+            );
+            assert_eq!(app.selected_thread.as_ref(), Some(&mounted));
+            assert!(app.ordinary_unsubscribe_thread.is_none());
+            assert!(app.project_picker_action_is_admissible());
+        })
+    });
+    assert!(
+        commands.try_recv().is_ok(),
+        "the Forge subscription is still stopped"
+    );
+}
+
+#[gpui::test]
 fn connection_loss_releases_navigation_waits_and_ignores_old_receipts(cx: &mut TestAppContext) {
     let (service, _commands, _) = NativeTransportService::pending_for_test();
     let service = Arc::new(service);

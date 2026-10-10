@@ -667,7 +667,13 @@ async fn run_with_handler(
             .await;
         }
     };
+    // Inline images engines show land beside the database. Set before the
+    // dispatcher starts, since its workers may run a turn right away.
+    if let Some(state_root) = database.parent() {
+        crate::engine_owner::engine_image::set_state_root(state_root);
+    }
     let notifier = native_run.conversation_commit_notifier();
+    let engine_inventory = native_run.engine_inventory();
     let native_dispatcher = NativeRunDispatcher::start_with_registry(
         app.repository().clone(),
         database.clone(),
@@ -702,7 +708,15 @@ async fn run_with_handler(
         Arc::clone(&cancel),
     ));
     let handler = handler.with_shared_account_usage_service(usage);
-    let (handler, extension_keeper) = ExtensionSync::start(handler, &database, &notifier, &cancel);
+    let (handler, extension_keeper) =
+        ExtensionSync::start(handler, &database, &notifier, &cancel, engine_inventory);
+    // Quiet threads move into History and expired archived threads are
+    // erased while the Forge serves.
+    let thread_keeper = tokio::spawn(crate::thread_upkeep::keep_threads_tidy(
+        app.repository().clone(),
+        notifier.clone(),
+        Arc::clone(&cancel),
+    ));
     // Subtitles resolve from startup on and follow repository changes; each
     // change is pushed to the Editors that read the recent threads.
     let subtitle_keeper = handler.project_subtitles().cloned().map(|subtitles| {
@@ -727,6 +741,7 @@ async fn run_with_handler(
         keeper.abort();
     }
     extension_keeper.abort();
+    thread_keeper.abort();
     // `serve_until_cancel` consumes the listener on every path. No listener
     // owner or endpoint custody remains to pass into the cleanup tail.
     finish(

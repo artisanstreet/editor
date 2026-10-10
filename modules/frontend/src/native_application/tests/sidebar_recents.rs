@@ -16,6 +16,8 @@ fn recent_row(id: &str, project: &str, title: &str, subtitle: &str, age_ms: i64)
         thread: summary,
         subtitle: DisplayName::parse(subtitle).expect("subtitle"),
         project_icon: Default::default(),
+        // These rows were settled: idle ones read from `History`.
+        placement: artisan_domain::ThreadPlacement::History,
     }
 }
 
@@ -28,6 +30,9 @@ fn push_recent(
     listing: RecentThreadListing,
     cx: &mut Context<NativeApplication>,
 ) {
+    // Settled, idle threads live in the collapsed `History` group; these
+    // tests read and click its rows, so it starts open.
+    application.open_sidebar_history();
     application.handle_service_event(
         NativeTransportEvent::HostState(
             crate::native_transport_service::HostStateEvent::RecentThreads(listing),
@@ -70,7 +75,7 @@ fn sidebar_lists_recent_threads_by_age_without_a_project_switcher(cx: &mut TestA
             );
         });
     });
-    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
     cx.run_until_parked();
 
     for removed in [
@@ -135,7 +140,7 @@ fn sidebar_lists_recent_threads_by_age_without_a_project_switcher(cx: &mut TestA
             .is_some()
     );
 
-    cx.simulate_resize(gpui::size(px(1000.0), px(200.0)));
+    cx.simulate_resize(gpui::size(px(1400.0), px(200.0)));
     cx.run_until_parked();
     let sidebar = cx
         .debug_bounds(DESKTOP_SIDEBAR_SELECTOR)
@@ -191,7 +196,7 @@ fn choosing_a_recent_thread_opens_it_in_its_own_project(cx: &mut TestAppContext)
             );
         });
     });
-    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
     cx.run_until_parked();
 
     // A thread of the selected project opens directly.
@@ -327,7 +332,7 @@ fn click_recent_row_from(origin: ClickOrigin, cx: &mut TestAppContext) {
             }
         });
     });
-    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
     cx.run_until_parked();
 
     let row = cx
@@ -642,7 +647,7 @@ fn a_thread_in_a_project_attached_elsewhere_opens_on_first_click(cx: &mut TestAp
             );
         });
     });
-    cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
+    cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
     cx.run_until_parked();
     let row = cx
         .debug_bounds("artisan-sidebar-thread-over-there")
@@ -659,7 +664,7 @@ fn a_thread_in_a_project_attached_elsewhere_opens_on_first_click(cx: &mut TestAp
                 .any(|command| matches!(command, NativeTransportCommand::ReadProjects)),
             "an unknown project is listed again rather than ignored"
         );
-        assert!(application.window_error.is_none());
+        assert!(application.window_notices.is_empty());
     });
 
     // The Forge pushes the catalog with the project another client attached.
@@ -695,7 +700,7 @@ fn a_thread_in_a_project_attached_elsewhere_opens_on_first_click(cx: &mut TestAp
                 NativeTransportEvent::ProjectCatalog(Ok(catalog(&["here", "there"]))),
                 cx,
             );
-            assert!(application.window_error.is_none());
+            assert!(application.window_notices.is_empty());
         });
     });
 }
@@ -719,14 +724,18 @@ fn a_thread_whose_project_is_gone_reports_why_it_did_not_open(cx: &mut TestAppCo
                 cx,
             );
             assert!(
-                application.window_error.is_none(),
+                application.window_notices.is_empty(),
                 "it waits for the listing"
             );
             application.handle_service_event(
                 NativeTransportEvent::ProjectCatalog(Ok(catalog(&["here"]))),
                 cx,
             );
-            let error = application.window_error.clone().expect("a visible error");
+            let error = application
+                .window_notices
+                .front_message()
+                .expect("a visible error")
+                .to_owned();
             assert!(error.contains("Lost work") && error.contains("no longer attached"));
         });
     });
@@ -748,26 +757,26 @@ fn working_threads_show_the_state_dot_until_their_work_ends(cx: &mut TestAppCont
             push_recent(application, listing(true), cx)
         });
     });
-    cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(800.0)));
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(800.0)));
     cx.run_until_parked();
+    // Live work stays in the main list with its dot; the idle thread waits
+    // in the collapsed history.
     let dot = cx
         .debug_bounds("artisan-sidebar-thread-busy-working")
-        .expect("a working row shows the state dot");
+        .expect("a working row shows the state dot in the main list");
     let row = cx.debug_bounds("artisan-sidebar-thread-busy").expect("row");
     assert!(
         dot.right() <= row.right() && dot.left() > row.center().x,
         "trailing"
     );
-    let newer = cx
-        .debug_bounds("artisan-sidebar-thread-newer")
-        .expect("row");
     assert!(
-        newer.bottom() <= row.top(),
-        "working rows keep chronological order"
+        cx.debug_bounds("artisan-sidebar-threads-working-header")
+            .is_none(),
+        "there is no Working group"
     );
     assert!(
-        cx.debug_bounds("artisan-sidebar-thread-newer-working")
-            .is_none()
+        cx.debug_bounds("artisan-sidebar-thread-newer").is_none(),
+        "the idle thread is in the collapsed history"
     );
 
     cx.update(|_, app| {
@@ -808,4 +817,64 @@ fn working_threads_show_the_state_dot_until_their_work_ends(cx: &mut TestAppCont
             );
         }
     }
+}
+
+#[gpui::test]
+fn history_opens_and_closes_through_its_height(cx: &mut TestAppContext) {
+    const HEADER: &str = "artisan-sidebar-threads-history-header";
+    const PANEL: &str = "artisan-sidebar-threads-history-panel";
+    let (view, cx) = cx.add_window_view(|window, view_cx| test_application(window, view_cx));
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            // A long history: far taller than the window, as in real use.
+            let rows = (0..60_i64)
+                .map(|index| {
+                    recent_row(
+                        &format!("thread-{index}"),
+                        "alpha",
+                        &format!("Thread {index}"),
+                        "owner/repo",
+                        (index + 1) * HOUR_MS,
+                    )
+                })
+                .collect();
+            push_recent(application, recent_listing(rows), cx);
+        });
+    });
+    cx.simulate_resize(gpui::size(gpui::px(1400.0), gpui::px(800.0)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(PANEL).is_none(), "history starts closed");
+    let frame_after = |cx: &mut gpui::VisualTestContext, millis: u64| {
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+        cx.update(|window, app| {
+            window.simulate_next_frame(app);
+        });
+        cx.run_until_parked();
+    };
+
+    let header = cx.debug_bounds(HEADER).expect("history header");
+    cx.simulate_click(header.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    // The first open frame paints the panel shut and measures its rows.
+    let opening = cx.debug_bounds(PANEL).expect("panel paints while opening");
+    frame_after(cx, 300);
+    let open = cx.debug_bounds(PANEL).expect("panel paints open");
+    assert!(open.size.height > gpui::px(40.0), "{open:?}");
+    assert!(
+        opening.size.height < open.size.height,
+        "opening grows from shut: {opening:?} then {open:?}"
+    );
+
+    let header = cx.debug_bounds(HEADER).expect("history header");
+    cx.simulate_click(header.center(), gpui::Modifiers::none());
+    cx.run_until_parked();
+    let closing = cx
+        .debug_bounds(PANEL)
+        .expect("the rows stay painted while closing");
+    assert!(
+        closing.size.height <= open.size.height && closing.size.height > gpui::px(0.0),
+        "closing starts from the open height: {closing:?}"
+    );
+    frame_after(cx, 300);
+    assert!(cx.debug_bounds(PANEL).is_none(), "history ends closed");
 }

@@ -69,6 +69,9 @@ mod engine_install;
 
 #[path = "native_settings/global_prompt.rs"]
 pub(crate) mod global_prompt;
+
+#[path = "native_settings/archived_threads.rs"]
+pub(crate) mod archived_threads;
 pub use engine_install::{SettingsEngineInstall, SettingsEngineVersions};
 
 #[path = "native_settings/render.rs"]
@@ -203,6 +206,8 @@ pub struct SettingsScreen {
     engines: Vec<SettingsEngineNavEntry>,
     /// The global prompt page, mounted only on that route.
     global_prompt: Option<global_prompt::GlobalPromptPage>,
+    /// The archived threads on the Threads page.
+    archived_threads: archived_threads::ArchivedThreadsPage,
 }
 
 #[derive(Default)]

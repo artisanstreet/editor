@@ -118,7 +118,8 @@ const PRIVACY_ANCHORS: [SettingsAnchor; 2] = [
     SettingsAnchor::new("never-collected", "Never collected"),
 ];
 
-const THREADS_ANCHORS: [SettingsAnchor; 3] = [
+const THREADS_ANCHORS: [SettingsAnchor; 4] = [
+    SettingsAnchor::new("archived", "Archived"),
     SettingsAnchor::new("retention", "Retention"),
     SettingsAnchor::new("usage-recovery", "Usage recovery"),
     SettingsAnchor::new("agents", "Agents"),

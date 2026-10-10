@@ -21,6 +21,9 @@ mod engine_install;
 #[path = "render/global_prompt.rs"]
 mod global_prompt;
 
+#[path = "render/archived_threads.rs"]
+mod archived_threads;
+
 pub use self::chrome::{notification_gap_notice, telemetry_choice_caption};
 
 #[cfg(test)]

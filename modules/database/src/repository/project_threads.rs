@@ -2,8 +2,8 @@
 
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
-    ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect,
+    ActiveValue::Set, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect,
 };
 
 use artisan_domain::{
@@ -54,7 +54,8 @@ pub struct CreateThreadResult {
 
 impl Repository {
     /// Records a harness title only while the thread retains its automatic placeholder.
-    /// A user-authored title is never overwritten by provider metadata.
+    /// A user-authored title, including any rename, is never overwritten by
+    /// provider metadata.
     ///
     /// # Errors
     /// Returns a database failure if the title cannot be stored.
@@ -64,10 +65,14 @@ impl Repository {
         title: &ThreadTitle,
     ) -> Result<(), RepositoryError> {
         use sea_orm::sea_query::Expr;
+        let _write_gate = self.acquire_write_gate().await;
         entities::thread::Entity::update_many()
             .col_expr(entities::thread::Column::Title, Expr::value(title.as_str()))
             .filter(entities::thread::Column::ThreadId.eq(thread.as_str()))
             .filter(entities::thread::Column::Title.is_in(["New thread", "New task"]))
+            .filter(Expr::cust(
+                "thread_id NOT IN (SELECT thread_id FROM thread_lifecycle WHERE titled_by_reader = 1)",
+            ))
             .exec(&self.database)
             .await
             .map_err(|source| database_error("record generated thread title", source))?;
@@ -280,7 +285,8 @@ impl Repository {
         })
     }
 
-    /// Lists project threads by deterministic recency.
+    /// Lists project threads by deterministic recency, leaving out archived
+    /// threads.
     ///
     /// # Errors
     ///
@@ -301,6 +307,9 @@ impl Repository {
 
         let rows = entities::thread::Entity::find()
             .filter(entities::thread::Column::ProjectId.eq(project_id.as_str()))
+            .filter(sea_orm::sea_query::Expr::cust(
+                "thread_id NOT IN (SELECT thread_id FROM thread_lifecycle WHERE archived_at_ms IS NOT NULL)",
+            ))
             .order_by_desc(entities::thread::Column::UpdatedAtMs)
             .order_by_asc(entities::thread::Column::ThreadId)
             .limit((THREAD_LISTING_MAX_THREADS + 1) as u64)
@@ -735,7 +744,7 @@ fn required(
 }
 
 async fn rollback_with_error<T>(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     error: RepositoryError,
 ) -> Result<T, RepositoryError> {
     transaction
@@ -746,7 +755,7 @@ async fn rollback_with_error<T>(
 }
 
 async fn rollback_with_result<T>(
-    transaction: DatabaseTransaction,
+    transaction: crate::repository::WriteTransaction,
     result: Result<Option<T>, RepositoryError>,
 ) -> Result<T, RepositoryError> {
     transaction

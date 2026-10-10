@@ -39,6 +39,7 @@ fn row(thread: &str, project: &str, subtitle: &str, last_message: Option<i64>) -
         },
         subtitle: DisplayName::parse(subtitle).expect("subtitle"),
         project_icon: Default::default(),
+        placement: artisan_domain::ThreadPlacement::Inbox,
     }
 }
 
@@ -51,7 +52,10 @@ fn listing() -> Result<RecentThreadListing, Box<dyn Error>> {
             "artisanstreet/editor · sidebar-recents",
             None,
         ),
-        row("thread-c", "project-c", "scratch", Some(100)),
+        RecentThread {
+            placement: artisan_domain::ThreadPlacement::History,
+            ..row("thread-c", "project-c", "scratch", Some(100))
+        },
     ])?)
 }
 
@@ -160,4 +164,60 @@ fn last_activity_prefers_the_latest_message() {
         row("thread-b", "project", "project", None).last_activity(),
         UnixMillis::from_millis(20)
     );
+}
+
+#[test]
+fn thread_changes_and_the_archive_round_trip() -> Result<(), Box<dyn Error>> {
+    use artisan_domain::{
+        ArchivedThread, ArchivedThreadListing, Command, ReadArchivedThreads, ThreadChange,
+        UpdateThread,
+    };
+    round_trip(
+        WireEnvelopeBody::Request(ClientRequest::Query(Query::ReadArchivedThreads(
+            ReadArchivedThreads,
+        ))),
+        "read-archived-threads",
+    )?;
+    for change in [
+        ThreadChange::Rename(ThreadTitle::parse("Renamed")?),
+        ThreadChange::Settle,
+        ThreadChange::Archive,
+        ThreadChange::Unarchive,
+    ] {
+        round_trip(
+            WireEnvelopeBody::Request(ClientRequest::Command(Command::UpdateThread(
+                UpdateThread {
+                    request_id: RequestId::parse("update-thread")?,
+                    thread_id: ThreadId::parse("thread-a")?,
+                    change,
+                },
+            ))),
+            "update-thread",
+        )?;
+    }
+    let archived = ArchivedThreadListing::new(vec![
+        ArchivedThread {
+            thread: row("thread-b", "project", "project", Some(2)),
+            archived_at: UnixMillis::from_millis(50),
+        },
+        ArchivedThread {
+            thread: row("thread-a", "project", "project", Some(1)),
+            archived_at: UnixMillis::from_millis(40),
+        },
+    ])?;
+    assert_eq!(
+        archived.threads()[0].thread.thread.thread_id.as_str(),
+        "thread-a",
+        "the soonest to be erased comes first"
+    );
+    for listing in [ArchivedThreadListing::default(), archived] {
+        round_trip(
+            WireEnvelopeBody::Response(ServerResponse {
+                request_id: RequestId::parse("read-archived-threads")?,
+                payload: ResponsePayload::ArchivedThreads(listing),
+            }),
+            "archived-threads",
+        )?;
+    }
+    Ok(())
 }

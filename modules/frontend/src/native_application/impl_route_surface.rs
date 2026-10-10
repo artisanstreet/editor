@@ -50,7 +50,10 @@ impl NativeApplication {
                     .into_any_element()
             }
             NativeRoute::Thread { project, thread } => {
-                let key = Some((thread.clone(), self.conversation_host.is_some()));
+                let key = Some((
+                    thread.clone(),
+                    self.conversation_host.as_ref().map(Entity::entity_id),
+                ));
                 if self.thread_screen_key != key || self.thread_screen.is_none() {
                     // A fresh screen starts on its loading gate with an empty
                     // inspector; the live sync below opens the gate with the
@@ -60,8 +63,18 @@ impl NativeApplication {
                     let mounted = match self.conversation_host.clone() {
                         Some(host) => {
                             let composer = self.composer.clone();
+                            let entrance = self
+                                .pending_composer_entrance
+                                .take()
+                                .filter(|(sent, _)| sent == &thread)
+                                .map(|(_, lift)| lift);
                             let screen = cx.new(|screen_cx| {
-                                ThreadScreen::new(host, composer, ThemeMode::Dark, screen_cx)
+                                let mut screen =
+                                    ThreadScreen::new(host, composer, ThemeMode::Dark, screen_cx);
+                                if let Some(lift) = entrance {
+                                    screen.begin_composer_entrance(lift);
+                                }
+                                screen
                             });
                             // Typed text reaches the composer only while it
                             // holds window focus (the platform registers its
@@ -235,6 +248,9 @@ impl NativeApplication {
                         self.ensure_extensions_read();
                         self.refresh_settings_global_prompt(cx);
                     }
+                    if section == SettingsRoute::Threads {
+                        self.reload_settings_archive(cx);
+                    }
                 }
                 self.settings_screen
                     .clone()
@@ -345,8 +361,14 @@ impl NativeApplication {
             .unwrap_or_default();
         // Shell jobs outlive their run's turn: a dev server that died after
         // the turn ended still shows, so this list has no run gate.
+        let root = self
+            .project_navigation
+            .roots
+            .get(project)
+            .map(|root| root.to_string_lossy());
         let terminals = self.thread_terminals.update(cx, |view, cx| {
             view.select_thread(Some(thread), cx);
+            view.set_directory(root.as_deref(), cx);
             view.entries()
         });
         screen.update(cx, |screen, screen_cx| {

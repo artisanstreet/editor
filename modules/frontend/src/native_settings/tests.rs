@@ -99,7 +99,7 @@ fn section_anchors_match_legacy_nav() {
     assert_eq!(hashes(SettingsSection::Models), ["compaction", "favorites"]);
     assert_eq!(
         hashes(SettingsSection::Threads),
-        ["retention", "usage-recovery", "agents"]
+        ["archived", "retention", "usage-recovery", "agents"]
     );
     assert_eq!(hashes(SettingsSection::Notifications), ["system"]);
     assert_eq!(

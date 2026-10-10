@@ -1374,7 +1374,11 @@ impl SettingsScreen {
     /// session-defaults controllers. The threshold paints as static text
     /// because the numeric input has no wired commit path yet; the agent
     /// name set uses the real closed `Select`.
-    fn render_threads(&self, theme: &artisan_ui::theme::ArtisanTheme) -> Div {
+    fn render_threads(
+        &self,
+        theme: &artisan_ui::theme::ArtisanTheme,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
@@ -1383,6 +1387,7 @@ impl SettingsScreen {
                 SettingsSection::Threads.title().to_owned(),
                 SettingsSection::Threads.description(),
             ))
+            .child(self.render_archived_threads(theme, cx))
             .child(self.render_thread_retention(theme))
             .child(self.render_thread_titles(theme))
             .child(self.render_usage_recovery(theme))
@@ -1642,7 +1647,7 @@ impl SettingsScreen {
             SettingsRoute::Engines => self.render_engine(theme, cx),
             SettingsRoute::Notifications => self.render_notifications(theme),
             SettingsRoute::Privacy => self.render_privacy(theme),
-            SettingsRoute::Threads => self.render_threads(theme),
+            SettingsRoute::Threads => self.render_threads(theme, cx),
             SettingsRoute::About => Self::render_about(theme),
         };
         div().flex().flex_col().flex_1().min_w_0().child(section)

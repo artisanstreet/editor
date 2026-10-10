@@ -7,7 +7,7 @@ use artisan_domain::{
     ThreadTitle, UnixMillis,
 };
 use artisan_frontend::recent_thread_groups::{
-    RecentThreadAge, group_recent_threads, next_regrouping,
+    RecentThreadAge, SidebarSection, group_recent_threads, next_regrouping,
 };
 
 const HOUR: i64 = 60 * 60 * 1_000;
@@ -29,6 +29,7 @@ fn row(id: &str, activity: i64) -> RecentThread {
         },
         subtitle: DisplayName::parse("owner/repo").expect("subtitle"),
         project_icon: Default::default(),
+        placement: artisan_domain::ThreadPlacement::Inbox,
     }
 }
 
@@ -136,4 +137,38 @@ fn rows_move_to_older_groups_as_time_passes() {
         next_regrouping(&settled, UnixMillis::from_millis(NOW)),
         None
     );
+}
+
+#[test]
+fn only_settled_threads_leave_the_inbox() {
+    use artisan_domain::{ThreadAttention, ThreadPlacement};
+    let placed = |placement, attention, working| {
+        let mut thread = row("thread", NOW);
+        thread.placement = placement;
+        thread.thread.attention = attention;
+        thread.thread.has_active_work = working;
+        SidebarSection::of(&thread)
+    };
+    // Reading a thread leaves it where it is.
+    assert_eq!(
+        placed(ThreadPlacement::Inbox, ThreadAttention::None, false),
+        SidebarSection::Inbox
+    );
+    assert_eq!(
+        placed(ThreadPlacement::History, ThreadAttention::None, false),
+        SidebarSection::History
+    );
+    // A settled thread that needs the reader comes back into view.
+    for (attention, working) in [
+        (ThreadAttention::Finished, false),
+        (ThreadAttention::Failed, false),
+        (ThreadAttention::AwaitingAnswer, true),
+        (ThreadAttention::None, true),
+    ] {
+        assert_eq!(
+            placed(ThreadPlacement::History, attention, working),
+            SidebarSection::Inbox,
+            "{attention:?}, working {working}"
+        );
+    }
 }

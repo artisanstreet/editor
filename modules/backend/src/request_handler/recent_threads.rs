@@ -6,7 +6,8 @@
 
 use artisan_database::{Repository, RepositoryError};
 use artisan_domain::{
-    DisplayName, RECENT_THREADS_MAX, RecentThread, RecentThreadListing, RequestId, ThreadSummary,
+    DisplayName, RECENT_THREADS_MAX, RecentThread, RecentThreadListing, RequestId, ThreadPlacement,
+    ThreadSummary,
 };
 use artisan_protocol::{ProtocolFailure, ResponsePayload, ServerResponse};
 
@@ -68,9 +69,26 @@ async fn read_recent_threads(
     subtitles: Option<&ProjectSubtitles>,
     notifier: Option<&ConversationCommitNotifier>,
 ) -> Result<RecentThreadListing, RepositoryError> {
-    let projects = repository.list_projects().await?;
     let mut threads = repository.list_recent_threads(RECENT_THREADS_MAX).await?;
-    mark_live_work(repository, run_cancellation, &mut threads).await?;
+    mark_live_work(
+        repository,
+        run_cancellation,
+        threads.iter_mut().map(|(thread, _)| thread),
+    )
+    .await?;
+    let rows = present_threads(repository, subtitles, notifier, threads).await?;
+    RecentThreadListing::new(rows).map_err(|source| RepositoryError::ThreadListing { source })
+}
+
+/// Gives listed threads the line beneath their titles and their project
+/// icons, dropping any whose project is no longer attached.
+pub(super) async fn present_threads(
+    repository: &Repository,
+    subtitles: Option<&ProjectSubtitles>,
+    notifier: Option<&ConversationCommitNotifier>,
+    threads: Vec<(ThreadSummary, ThreadPlacement)>,
+) -> Result<Vec<RecentThread>, RepositoryError> {
+    let projects = repository.list_projects().await?;
     let resolved = subtitles.map(|subtitles| {
         let unobserved = ConversationCommitNotifier::new();
         subtitles.subtitles(projects.projects(), notifier.unwrap_or(&unobserved))
@@ -88,9 +106,9 @@ async fn read_recent_threads(
                     .map(|project| project.display_name.clone())
             })
     };
-    let rows = threads
+    Ok(threads
         .into_iter()
-        .filter_map(|thread| {
+        .filter_map(|(thread, placement)| {
             Some(RecentThread {
                 subtitle: subtitle(&thread)?,
                 project_icon: icons
@@ -98,22 +116,22 @@ async fn read_recent_threads(
                     .and_then(|icons| icons.get(&thread.project_id))
                     .cloned()
                     .unwrap_or_default(),
+                placement,
                 thread,
             })
         })
-        .collect();
-    RecentThreadListing::new(rows).map_err(|source| RepositoryError::ThreadListing { source })
+        .collect())
 }
 
 async fn mark_live_work(
     repository: &Repository,
     run_cancellation: Option<&RunCancellationRegistry>,
-    threads: &mut [ThreadSummary],
+    threads: impl Iterator<Item = &mut ThreadSummary>,
 ) -> Result<(), RepositoryError> {
     let Some(registry) = run_cancellation else {
         return Ok(());
     };
-    for thread in threads.iter_mut() {
+    for thread in threads {
         // An unavailable registry reads as no live run: the listing is
         // presentation, never a reason to fail the connection.
         let live = match registry.active_run(&thread.thread_id).ok().flatten() {

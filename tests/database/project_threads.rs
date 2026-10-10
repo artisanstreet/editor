@@ -561,6 +561,15 @@ async fn seed_recent(
         .expect("fixture restores foreign keys");
 }
 
+fn summaries(
+    listed: Vec<(
+        artisan_domain::ThreadSummary,
+        artisan_domain::ThreadPlacement,
+    )>,
+) -> Vec<artisan_domain::ThreadSummary> {
+    listed.into_iter().map(|(summary, _)| summary).collect()
+}
+
 fn thread_ids(threads: &[artisan_domain::ThreadSummary]) -> Vec<&str> {
     threads
         .iter()
@@ -593,10 +602,12 @@ async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
     // Neither a message nor assistant text: a draft is not a recent thread.
     seed_recent(&database, "project-1", "draft", 960, None, "").await;
 
-    let recent = repository
-        .list_recent_threads(10)
-        .await
-        .expect("recent threads should list");
+    let recent = summaries(
+        repository
+            .list_recent_threads(10)
+            .await
+            .expect("recent threads should list"),
+    );
     assert_eq!(
         thread_ids(&recent),
         [
@@ -615,10 +626,12 @@ async fn recent_threads_span_projects_newest_activity_first_and_skip_drafts() {
         Some(UnixMillis::from_millis(900))
     );
 
-    let bounded = repository
-        .list_recent_threads(2)
-        .await
-        .expect("a bounded page should list");
+    let bounded = summaries(
+        repository
+            .list_recent_threads(2)
+            .await
+            .expect("a bounded page should list"),
+    );
     assert_eq!(thread_ids(&bounded), ["sent-only", "new-message"]);
 }
 

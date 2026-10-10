@@ -1099,5 +1099,8 @@ mod settings_profile;
 #[path = "tests/marketplace.rs"]
 mod marketplace;
 
+#[path = "tests/thread_lifecycle.rs"]
+mod thread_lifecycle;
+
 #[path = "tests/profile_usage_refresh.rs"]
 mod profile_usage_refresh;
