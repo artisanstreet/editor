@@ -68,6 +68,9 @@ pub struct ConversationStateController {
     /// synchronization.
     turn_engine_labels: BTreeMap<TurnId, TurnEngineLabel>,
     optimistic_cancelled_turn: Option<TurnId>,
+    /// Per run, the delivery sequence of its newest completed provider
+    /// turn (see [`ConversationStateEvent::SetCompletedTurns`]).
+    completed_turns: BTreeMap<RunId, u64>,
     disclosures: BTreeMap<SceneId, DisclosureController>,
     facts: BTreeMap<SceneId, SceneFact>,
     viewport: ViewportController,

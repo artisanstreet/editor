@@ -153,6 +153,11 @@ pub(crate) fn encode_conversation_item(
             encoded.set_phase(encode_assistant_message_phase(message.phase));
             encoded.set_created_at_millis(message.created_at.as_millis());
             encoded.set_updated_at_millis(message.updated_at.as_millis());
+            let mut text_after = encoded.init_text_after();
+            match message.text_after_sequence {
+                Some(sequence) => text_after.set_sequence(sequence),
+                None => text_after.set_unknown(()),
+            }
         }
     }
     Ok(())
@@ -705,6 +710,12 @@ pub(crate) fn decode_conversation_item(
                 phase: decode_assistant_message_phase(message.get_phase()?),
                 created_at: UnixMillis::from_millis(message.get_created_at_millis()),
                 updated_at: UnixMillis::from_millis(message.get_updated_at_millis()),
+                text_after_sequence: match message.get_text_after().which()? {
+                    crate::artisan_capnp::assistant_message_item::text_after::Unknown(()) => None,
+                    crate::artisan_capnp::assistant_message_item::text_after::Sequence(
+                        sequence,
+                    ) => Some(sequence),
+                },
             }))
         }
         conversation_item::Which::Unmodeled(()) => {

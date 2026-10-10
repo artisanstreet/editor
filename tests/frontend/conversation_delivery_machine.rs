@@ -71,6 +71,7 @@ fn make_assistant(id: &str, turn: &str, ordinal: u64, body: &str) -> Conversatio
         phase: AssistantMessagePhase::Final,
         created_at: stamp(-5),
         updated_at: stamp(25),
+        text_after_sequence: None,
     })
 }
 

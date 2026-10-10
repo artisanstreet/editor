@@ -50,6 +50,7 @@ fn assistant_item(id: &str, turn: &str, ordinal: u64) -> ConversationItem {
         phase: AssistantMessagePhase::Commentary,
         created_at: UnixMillis::from_millis(-5),
         updated_at: UnixMillis::from_millis(25),
+        text_after_sequence: None,
     })
 }
 
@@ -152,6 +153,7 @@ fn phases_classify_renderer_text_without_touching_lifecycle() {
         phase: AssistantMessagePhase::Final,
         created_at: UnixMillis::from_millis(-1),
         updated_at: UnixMillis::from_millis(1),
+        text_after_sequence: None,
     };
     assert_eq!(settled_but_open.phase, AssistantMessagePhase::Final);
     assert_eq!(settled_but_open.lifecycle, ConversationLifecycle::Pending);

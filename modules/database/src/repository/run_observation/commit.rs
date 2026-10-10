@@ -725,7 +725,10 @@ async fn plan_change(
                 run_id: launched.run_id.as_str().to_owned(),
                 created_at_ms: operated_at_ms,
                 updated_at_ms: operated_at_ms,
+                text_after_sequence: None,
             };
+            let mut row = row;
+            stamp_first_text(transaction, launched.thread_id.as_str(), &mut row).await?;
             accumulator.patches.push(item_upsert_patch(
                 patch_id,
                 accumulator.patch_sequence,
@@ -753,20 +756,29 @@ async fn plan_change(
                     maximum: AssistantBody::MAX_BYTES,
                 });
             }
-            accumulator.items_to_update.push(existing_item_row(
-                &target,
-                revision,
-                body,
-                operated_at_ms,
-            )?);
-            accumulator.patches.push(item_append_patch(
-                patch_id,
-                accumulator.patch_sequence,
-                item_id.as_str(),
-                revision,
-                text.as_str(),
-                operated_at_ms,
-            ));
+            let mut row = existing_item_row(&target, revision, body, operated_at_ms)?;
+            stamp_first_text(transaction, launched.thread_id.as_str(), &mut row).await?;
+            // The first text onto an empty item lands as a full upsert: an
+            // append carries no item fields, and the Editor needs the stamp
+            // that places the reply among the turn's steps from its first
+            // word.
+            if target.body.is_empty() {
+                accumulator.patches.push(item_upsert_patch(
+                    patch_id,
+                    accumulator.patch_sequence,
+                    &row,
+                ));
+            } else {
+                accumulator.patches.push(item_append_patch(
+                    patch_id,
+                    accumulator.patch_sequence,
+                    item_id.as_str(),
+                    revision,
+                    text.as_str(),
+                    operated_at_ms,
+                ));
+            }
+            accumulator.items_to_update.push(row);
         }
         AssistantChange::Replace {
             item_id,
@@ -784,6 +796,7 @@ async fn plan_change(
             let mut row =
                 existing_item_row(&target, revision, body.as_str().to_owned(), operated_at_ms)?;
             row.phase = projection::map_phase(*phase);
+            stamp_first_text(transaction, launched.thread_id.as_str(), &mut row).await?;
             accumulator.patches.push(item_upsert_patch(
                 patch_id,
                 accumulator.patch_sequence,
@@ -791,6 +804,25 @@ async fn plan_change(
             ));
             accumulator.items_to_update.push(row);
         }
+    }
+    Ok(())
+}
+
+/// Stamps an item's first text with the thread's highest delivery sequence,
+/// once: the reply follows every step committed before its words and
+/// precedes every later one. This batch's own ledger rows are inserted after
+/// its item changes, so a step committed alongside the text, which arrived
+/// after it, is not counted.
+async fn stamp_first_text(
+    transaction: &sea_orm::DatabaseTransaction,
+    thread_id: &str,
+    row: &mut projection::ItemRow,
+) -> Result<(), RunObservationError> {
+    if row.text_after_sequence.is_none() && !row.body.is_empty() {
+        row.text_after_sequence = Some(
+            super::super::observation_ledger::latest_delivery_sequence(transaction, thread_id)
+                .await?,
+        );
     }
     Ok(())
 }
@@ -882,6 +914,7 @@ fn existing_item_row(
         run_id,
         created_at_ms: target.created_at_ms,
         updated_at_ms: operated_at_ms,
+        text_after_sequence: target.text_after_sequence,
     })
 }
 

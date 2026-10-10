@@ -27,7 +27,8 @@ const TURN_COLUMNS: &str = "SELECT turn_id, thread_id, CAST(ordinal AS TEXT), ki
 const ITEM_COLUMNS: &str = "SELECT item_id, thread_id, turn_id, CAST(ordinal AS TEXT), kind, \
             CAST(revision AS TEXT), lifecycle, item_kind, source_message_id, \
             run_id, native_item_key, phase, body, CAST(created_at_ms AS TEXT), \
-            CAST(updated_at_ms AS TEXT) FROM conversation_items";
+            CAST(updated_at_ms AS TEXT), CAST(text_after_sequence AS TEXT) \
+            FROM conversation_items";
 
 impl Repository {
     /// Reads one bounded canonical conversation snapshot from one database
@@ -597,6 +598,12 @@ async fn item_from_row(
             )?;
             let body = AssistantBody::parse(body)
                 .map_err(|error| corrupt_data("conversation_items", "body", error))?;
+            let text_after_sequence = parse_text_after_sequence(raw_value::<Option<String>, _>(
+                row,
+                15,
+                "conversation_items",
+                "text_after_sequence",
+            )?)?;
             Ok(ConversationItem::AssistantMessage(AssistantMessageItem {
                 item_id,
                 turn_id,
@@ -608,6 +615,7 @@ async fn item_from_row(
                 phase,
                 created_at: UnixMillis::from_millis(created_at_ms),
                 updated_at: UnixMillis::from_millis(updated_at_ms),
+                text_after_sequence,
             }))
         }
         _ => Err(corrupt_data(
@@ -636,4 +644,21 @@ fn require_literal(
 
 fn snapshot_error(error: &ConversationSnapshotError) -> RepositoryError {
     corrupt_data("conversation_snapshot", "invariants", error)
+}
+
+/// Parses a stored first-text stamp: absent until the item has text, never
+/// negative.
+pub(super) fn parse_text_after_sequence(
+    raw: Option<String>,
+) -> Result<Option<u64>, RepositoryError> {
+    raw.map(|value| {
+        value.parse::<u64>().map_err(|_| {
+            corrupt_data(
+                "conversation_items",
+                "text_after_sequence",
+                format!("persisted stamp {value} is not a nonnegative integer"),
+            )
+        })
+    })
+    .transpose()
 }

@@ -973,6 +973,7 @@ fn mounted_send_streams_waiting_thinking_reply_terminal(cx: &mut TestAppContext)
                 phase: AssistantMessagePhase::Final,
                 created_at: UnixMillis::EPOCH,
                 updated_at: UnixMillis::from_millis(12),
+                text_after_sequence: None,
             });
             application.handle_service_event(
                 NativeTransportEvent::PatchBatch(

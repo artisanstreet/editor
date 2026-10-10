@@ -327,6 +327,7 @@ fn make_followup_assistant(
         phase: AssistantMessagePhase::Final,
         created_at,
         updated_at,
+        text_after_sequence: None,
     })
 }
 
@@ -359,6 +360,7 @@ fn make_assistant(
         phase,
         created_at,
         updated_at,
+        text_after_sequence: None,
     })
 }
 

@@ -169,6 +169,7 @@ async fn seed_item(database: &DatabaseConnection) -> entities::conversation_item
         body: Set("Finished".to_owned()),
         created_at_ms: Set(60),
         updated_at_ms: Set(60),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await

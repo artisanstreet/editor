@@ -49,6 +49,9 @@ pub(super) struct ItemRow {
     pub run_id: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// The thread's highest delivery sequence when the item's first text
+    /// was committed; set once, never moved.
+    pub text_after_sequence: Option<i64>,
 }
 
 /// Complete post-image of the activated origin turn.
@@ -342,6 +345,7 @@ fn item_active_model(row: ItemRow) -> entities::conversation_item::ActiveModel {
         body: Set(row.body),
         created_at_ms: Set(row.created_at_ms),
         updated_at_ms: Set(row.updated_at_ms),
+        text_after_sequence: Set(row.text_after_sequence),
     }
 }
 

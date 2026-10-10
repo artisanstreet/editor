@@ -26,6 +26,7 @@ impl ConversationStateController {
             turns: BTreeMap::new(),
             turn_engine_labels: BTreeMap::new(),
             optimistic_cancelled_turn: None,
+            completed_turns: BTreeMap::new(),
             disclosures: BTreeMap::new(),
             facts: BTreeMap::new(),
             viewport: ViewportController::new(),
@@ -86,6 +87,14 @@ impl ConversationStateController {
             }
             ConversationStateEvent::Viewport(event) => self.dispatch_viewport(event),
             ConversationStateEvent::Fact(command) => self.dispatch_fact(command),
+            ConversationStateEvent::SetCompletedTurns(completed) => {
+                if self.completed_turns != completed {
+                    self.ensure_effect_capacity(1)?;
+                    self.completed_turns = completed;
+                    self.push_effect(ConversationStateEffect::SceneInvalidated);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -291,6 +300,12 @@ impl ConversationStateController {
             .filter(|fact| fact.derived())
             .map(|fact| fact.id.clone())
             .collect()
+    }
+
+    /// Per run, the delivery sequence of its newest completed provider turn.
+    #[must_use]
+    pub const fn completed_turns(&self) -> &BTreeMap<RunId, u64> {
+        &self.completed_turns
     }
 
     /// Atomically inserts or updates one bounded non-durable fact.
@@ -1146,7 +1161,8 @@ fn synchronize_turns(
             | SceneFactKind::Error { .. }
             | SceneFactKind::UsageInterruption { .. }
             | SceneFactKind::ModelTransition { .. }
-            | SceneFactKind::NativeFact { .. } => {}
+            | SceneFactKind::NativeFact { .. }
+            | SceneFactKind::Image { .. } => {}
         }
     }
 

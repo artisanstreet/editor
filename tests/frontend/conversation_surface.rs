@@ -266,6 +266,7 @@ fn ordered_scene_items() -> Vec<SceneItem> {
             SceneItemKind::Approval {
                 prompt: "approve".to_owned(),
                 approval_id: ObservationId::parse("approval").expect("approval id"),
+                decision: Some(true),
             },
             None,
         ),
@@ -467,6 +468,7 @@ fn error_approval_question_and_transition_are_distinct_kinds() {
                 SceneItemKind::Approval {
                     prompt: "approval".to_owned(),
                     approval_id: ObservationId::parse("approval").expect("approval id"),
+                    decision: Some(true),
                 },
                 None,
             ),

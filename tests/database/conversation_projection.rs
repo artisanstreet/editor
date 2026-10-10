@@ -195,6 +195,7 @@ async fn insert_user_item(database: &DatabaseConnection, seed: UserItemSeed<'_>)
         body: Set(body.to_owned()),
         created_at_ms: Set(created_at_ms),
         updated_at_ms: Set(updated_at_ms),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await
@@ -294,6 +295,7 @@ async fn insert_assistant_item(database: &DatabaseConnection, seed: AssistantIte
         body: Set(body.to_owned()),
         created_at_ms: Set(created_at_ms),
         updated_at_ms: Set(updated_at_ms),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await
@@ -864,6 +866,7 @@ async fn multimodal_item_carries_source_message_id() {
         body: Set("caption".to_owned()),
         created_at_ms: Set(100),
         updated_at_ms: Set(110),
+        text_after_sequence: Set(None),
     }
     .insert(&database)
     .await

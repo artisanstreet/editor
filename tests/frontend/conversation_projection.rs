@@ -143,6 +143,7 @@ fn make_assistant_at(
         phase,
         created_at: stamp(state.created_at),
         updated_at: stamp(state.updated_at),
+        text_after_sequence: None,
     })
 }
 

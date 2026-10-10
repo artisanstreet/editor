@@ -167,6 +167,7 @@ async fn seed_item(
         body: Set(format!("body for {item_id}")),
         created_at_ms: Set(60 + ordinal),
         updated_at_ms: Set(60 + ordinal),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await

@@ -524,6 +524,7 @@ fn patch_updated_at_accessor_covers_all_five_kinds_and_both_item_roles() {
             phase: AssistantMessagePhase::Commentary,
             created_at: stamp(-5),
             updated_at: stamp(updated_at),
+            text_after_sequence: None,
         })
     };
 

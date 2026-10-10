@@ -480,9 +480,20 @@ impl ConversationStateController {
                         AssistantMessagePhase::Commentary => AssistantPhase::Commentary,
                     },
                 };
+                // Text committed before its run's newest completed turn is
+                // whole, however long the run itself goes on.
+                let text_settled =
+                    self.completed_turns
+                        .get(&message.run_id)
+                        .is_some_and(|completed| {
+                            message
+                                .text_after_sequence
+                                .is_none_or(|first_text| *completed > first_text)
+                        });
                 let provenance = ItemProvenance {
                     run_id: Some(message.run_id.clone()),
                     lifecycle: Some(message.lifecycle),
+                    text_settled,
                 };
                 (
                     message.turn_id.clone(),
@@ -492,8 +503,13 @@ impl ConversationStateController {
                 )
             }
         };
+        let text_after_sequence = match item {
+            ConversationItem::AssistantMessage(message) => message.text_after_sequence,
+            _ => None,
+        };
         let item = SceneItem::new(id, turn_id, ordinal, kind, disclosure)
-            .map_err(ConversationStateError::Scene)?;
+            .map_err(ConversationStateError::Scene)?
+            .with_text_after_sequence(text_after_sequence);
         Ok(match provenance {
             Some(provenance) => item.with_provenance(provenance),
             None => item,

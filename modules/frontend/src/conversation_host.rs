@@ -144,12 +144,15 @@ pub fn host_now_millis() -> i64 {
 
 /// Returns whether the accepted scene carries authoritative active work.
 ///
-/// The scene is the authority: a ticking clock exists only while a status
-/// block narrates active work, and stops the moment the scene settles.
+/// The scene is the authority: a ticking clock exists while a turn carries
+/// its live elapsed basis or a status block narrates active work, and stops
+/// the moment the scene settles. A streaming reply suppresses the status
+/// block, so the basis alone keeps the section counting until the turn ends.
 #[must_use]
 pub fn scene_has_active_work(scene: &ConversationScene) -> bool {
     scene.turn_scenes().iter().any(|turn| {
-        turn.blocks().iter().any(|block| {
+        turn.active_started_at_ms.is_some()
+            || turn.blocks().iter().any(|block| {
             matches!(block, TurnBlock::TurnStatus(status) if status.narration.is_active_work())
         })
     })
@@ -366,6 +369,13 @@ impl ConversationHost {
         self.controller.derived_fact_ids()
     }
 
+    /// Per run, the delivery sequence of its newest completed provider turn
+    /// the scene was told about.
+    #[must_use]
+    pub fn completed_turns(&self) -> &std::collections::BTreeMap<artisan_domain::RunId, u64> {
+        self.controller.completed_turns()
+    }
+
     /// Returns the one child surface entity.
     #[must_use]
     pub fn surface(&self) -> &Entity<ConversationSurface> {
@@ -454,7 +464,7 @@ impl ConversationHost {
         event: ConversationStateEvent,
         cx: &mut Context<Self>,
     ) -> Result<(), ConversationHostError> {
-        self.dispatch_event(event, false, cx)
+        self.dispatch_event(event, false, true, cx)
     }
 
     /// Dispatches one event of a batch exactly like [`Self::dispatch`], but
@@ -476,7 +486,7 @@ impl ConversationHost {
         event: ConversationStateEvent,
         cx: &mut Context<Self>,
     ) -> Result<(), ConversationHostError> {
-        self.dispatch_event(event, true, cx)
+        self.dispatch_event(event, true, true, cx)
     }
 
     /// Re-projects and replaces the scene once if a batched dispatch left it
@@ -499,10 +509,16 @@ impl ConversationHost {
         presented
     }
 
+    /// `retain_refusal` is false for the surface's own interactions: a
+    /// scroll, glide, or toggle the controller refuses is a stale gesture
+    /// (its target changed under it), not corrupt state, so it is recorded
+    /// and dropped instead of reaching the adapter, which fails closed on
+    /// every refusal.
     fn dispatch_event(
         &mut self,
         event: ConversationStateEvent,
         batched: bool,
+        retain_refusal: bool,
         cx: &mut Context<Self>,
     ) -> Result<(), ConversationHostError> {
         self.flush_controller_effects();
@@ -542,6 +558,13 @@ impl ConversationHost {
                 self.flush_controller_effects();
                 cx.notify();
                 Ok(())
+            }
+            Err(error) if !retain_refusal => {
+                #[cfg(feature = "flight-recorder")]
+                artisan_tracing::instant!("ui", "surface_action.refused", "error" => error.to_string());
+                self.flush_controller_effects();
+                cx.notify();
+                Err(ConversationHostError::Controller(error))
             }
             Err(error) => {
                 self.flush_controller_effects();
@@ -706,7 +729,7 @@ impl ConversationHost {
         event: ConversationStateEvent,
         cx: &mut Context<Self>,
     ) -> SurfaceRouteDecision {
-        match self.dispatch(event, cx) {
+        match self.dispatch_event(event, false, false, cx) {
             Ok(())
             | Err(
                 ConversationHostError::Controller(_)

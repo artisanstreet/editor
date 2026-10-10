@@ -121,4 +121,8 @@ pub struct AssistantMessageItem {
     pub created_at: UnixMillis,
     /// Last update time as signed Unix epoch milliseconds.
     pub updated_at: UnixMillis,
+    /// The thread's highest observation delivery sequence when this item's
+    /// first text was committed: the item follows every step at or below it
+    /// and precedes every later one. `None` until the item has text.
+    pub text_after_sequence: Option<u64>,
 }

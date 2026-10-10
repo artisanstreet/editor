@@ -904,7 +904,10 @@ SET lifecycle = 'completed',
     body = ?,
     phase = ?,
     revision = ?,
-    updated_at_ms = ?
+    updated_at_ms = ?,
+    text_after_sequence = COALESCE(text_after_sequence, CASE WHEN ? <> '' THEN (
+        SELECT COALESCE(MAX(ledger.delivery_sequence), 0) FROM observation_ledger AS ledger
+        WHERE ledger.thread_id = conversation_items.thread_id) END)
 WHERE item_id = ?
   AND revision = ?
 RETURNING item_id
@@ -914,6 +917,8 @@ RETURNING item_id
             render_phase_label(&map_phase(command.phase)).into(),
             item_revision.into(),
             operated_at_ms.into(),
+            // The reply's first text may only arrive with settlement.
+            command.body.as_str().to_owned().into(),
             command.item_id.as_str().into(),
             context.item.revision.into(),
         ],

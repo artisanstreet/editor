@@ -23,6 +23,9 @@ pub struct Model {
     pub body: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// For an assistant reply, the thread's highest observation delivery
+    /// sequence when its first text was committed; `None` until it has text.
+    pub text_after_sequence: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

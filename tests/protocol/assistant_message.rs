@@ -150,6 +150,7 @@ fn assistant_item(
         phase,
         created_at: UnixMillis::from_millis(-7),
         updated_at: UnixMillis::from_millis(33),
+        text_after_sequence: None,
     })
 }
 
@@ -206,6 +207,31 @@ fn assert_roundtrip(value: &WireEnvelope) -> Result<(), Box<dyn Error>> {
         decoded == *value,
         "owned assistant frame changed in transit"
     );
+    Ok(())
+}
+
+#[test]
+fn first_text_stamp_roundtrips_and_absent_stays_absent() -> Result<(), Box<dyn Error>> {
+    for stamp in [None, Some(0), Some(653), Some(u64::MAX)] {
+        let ConversationItem::AssistantMessage(mut message) = assistant_item(
+            AssistantMessagePhase::Unspecified,
+            ConversationLifecycle::Streaming,
+        ) else {
+            unreachable!("the fixture is an assistant item");
+        };
+        message.text_after_sequence = stamp;
+        let snapshot = ConversationSnapshot::new(
+            thread_id(),
+            ConversationCursor::new(9),
+            vec![turn(ConversationLifecycle::Active)],
+            vec![ConversationItem::AssistantMessage(message)],
+            UnixMillis::from_millis(40),
+        )?;
+        assert_roundtrip(&response(
+            "server-assist-stamp",
+            ResponsePayload::ConversationSnapshot(snapshot),
+        ))?;
+    }
     Ok(())
 }
 
@@ -433,6 +459,7 @@ fn empty_and_whitespace_assistant_bodies_roundtrip_through_production_codec()
                         phase: AssistantMessagePhase::Commentary,
                         created_at: UnixMillis::from_millis(-7),
                         updated_at: UnixMillis::from_millis(33),
+                        text_after_sequence: None,
                     }),
                 }],
             )?),

@@ -189,16 +189,20 @@ impl SceneFact {
             disclosure,
         )?;
         // Liveness rides provenance so the scene never infers it from text;
-        // only Activity facts ever carry it, and only an explicit live
-        // lifecycle counts downstream.
+        // only Activity and Compaction facts ever carry it, and only an
+        // explicit live lifecycle counts downstream.
         let provenance = match (&self.run_id, &self.kind) {
-            (Some(run_id), SceneFactKind::Activity { .. }) => Some(ItemProvenance {
-                run_id: Some(run_id.clone()),
-                lifecycle: self.activity_lifecycle,
-            }),
+            (Some(run_id), SceneFactKind::Activity { .. } | SceneFactKind::Compaction { .. }) => {
+                Some(ItemProvenance {
+                    run_id: Some(run_id.clone()),
+                    lifecycle: self.activity_lifecycle,
+                    text_settled: false,
+                })
+            }
             (Some(run_id), _) => Some(ItemProvenance {
                 run_id: Some(run_id.clone()),
                 lifecycle: None,
+                text_settled: false,
             }),
             (None, _) => None,
         };
@@ -265,6 +269,14 @@ pub enum SceneFactKind {
     },
     /// Bounded native event/fallback fact.
     NativeFact { text: String },
+    /// One image the engine showed: where it lives on the engine host and
+    /// an optional caption.
+    Image {
+        /// Absolute path, `file://` URI, or http(s) URL.
+        src: String,
+        /// Bounded caption, when disclosed.
+        caption: Option<String>,
+    },
 }
 
 impl fmt::Debug for SceneFactKind {
@@ -282,6 +294,7 @@ impl fmt::Debug for SceneFactKind {
             Self::UsageInterruption { .. } => "UsageInterruption",
             Self::ModelTransition { .. } => "ModelTransition",
             Self::NativeFact { .. } => "NativeFact",
+            Self::Image { .. } => "Image",
         });
 
         match self {
@@ -320,6 +333,11 @@ impl fmt::Debug for SceneFactKind {
                 structure
                     .field("from_model_bytes", &from_model.len())
                     .field("to_model_bytes", &to_model.len());
+            }
+            Self::Image { src, caption } => {
+                structure
+                    .field("src_bytes", &src.len())
+                    .field("caption_bytes", &caption.as_ref().map_or(0, String::len));
             }
         }
         structure.finish()
@@ -375,6 +393,10 @@ impl SceneFactKind {
                 to_model: to_model.clone(),
             },
             Self::NativeFact { text } => SceneItemKind::NativeFact { text: text.clone() },
+            Self::Image { src, caption } => SceneItemKind::Image {
+                src: src.clone(),
+                caption: caption.clone(),
+            },
         }
     }
 }
@@ -438,6 +460,11 @@ pub enum ConversationStateEvent {
     Viewport(ViewportEvent),
     /// Register or remove one bounded non-durable fact.
     Fact(SceneFactCommand),
+    /// Replace, per run, the delivery sequence of its newest completed
+    /// provider turn. A run can outlive a turn; an assistant item whose
+    /// first text precedes that completion has whole text even while its
+    /// run stays live.
+    SetCompletedTurns(BTreeMap<RunId, u64>),
     /// Close the aggregate owner and its delivery/viewport children.
     Close,
 }
@@ -509,6 +536,10 @@ impl fmt::Debug for ConversationStateEvent {
                 .field("scene_id", scene_id)
                 .field("event", event)
                 .finish(),
+            Self::SetCompletedTurns(completed) => formatter
+                .debug_tuple("SetCompletedTurns")
+                .field(completed)
+                .finish(),
             Self::Viewport(event) => formatter.debug_tuple("Viewport").field(event).finish(),
             Self::Fact(command) => formatter.debug_tuple("Fact").field(command).finish(),
             Self::Close => formatter.write_str("Close"),
@@ -564,6 +595,7 @@ impl PartialEq for ConversationStateEvent {
                     event: right_event,
                 },
             ) => left_id == right_id && left_event == right_event,
+            (Self::SetCompletedTurns(left), Self::SetCompletedTurns(right)) => left == right,
             (Self::Viewport(left), Self::Viewport(right)) => left == right,
             (Self::Fact(left), Self::Fact(right)) => left == right,
             (Self::Close, Self::Close) => true,

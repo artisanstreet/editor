@@ -104,6 +104,7 @@ fn make_assistant(
         phase,
         created_at: stamp(2),
         updated_at: stamp(10),
+        text_after_sequence: None,
     })
 }
 

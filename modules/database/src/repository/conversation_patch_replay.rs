@@ -24,6 +24,9 @@ const PATCH_SELECT: &str = "SELECT patch_id, thread_id, CAST(sequence AS TEXT), 
             CAST(entity_created_at_ms AS TEXT), CAST(entity_updated_at_ms AS TEXT), \
             (SELECT source_message_id FROM conversation_items AS ci \
              WHERE ci.item_id = conversation_patches.item_id \
+               AND ci.thread_id = conversation_patches.thread_id LIMIT 1), \
+            (SELECT CAST(ci.text_after_sequence AS TEXT) FROM conversation_items AS ci \
+             WHERE ci.item_id = conversation_patches.item_id \
                AND ci.thread_id = conversation_patches.thread_id LIMIT 1) \
      FROM conversation_patches WHERE thread_id = ? AND sequence > ? \
      ORDER BY sequence ASC LIMIT ?";
@@ -354,6 +357,11 @@ async fn patch_from_row(
         raw_opt_signed_integer(row, 16, "conversation_patches", "entity_updated_at_ms")?;
     let source_message_id_opt =
         raw_value::<Option<String>, _>(row, 17, "conversation_items", "source_message_id")?;
+    // Set once and never moved, so a replayed upsert older than the stamp
+    // simply learns it early.
+    let text_after_sequence = super::conversation_projection::parse_text_after_sequence(
+        raw_value::<Option<String>, _>(row, 18, "conversation_items", "text_after_sequence")?,
+    )?;
 
     match kind.as_str() {
         "turn_upsert" => {
@@ -632,6 +640,7 @@ async fn patch_from_row(
                         phase,
                         created_at,
                         updated_at,
+                        text_after_sequence,
                     })
                 }
                 _ => {

@@ -292,6 +292,7 @@ async fn insert_item_projection(
         body: Set(projections.body.to_owned()),
         created_at_ms: Set(operated_at_ms),
         updated_at_ms: Set(operated_at_ms),
+        text_after_sequence: Set(None),
     })
     .exec(transaction)
     .await

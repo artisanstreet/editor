@@ -106,6 +106,7 @@ fn make_assistant(
         phase,
         created_at: stamp(2),
         updated_at: stamp(10),
+        text_after_sequence: None,
     })
 }
 
@@ -706,6 +707,7 @@ fn make_assistant_settled(
         phase,
         created_at: stamp(2),
         updated_at: stamp(updated_millis),
+        text_after_sequence: None,
     })
 }
 
@@ -2595,4 +2597,76 @@ fn optimistic_cancellation_survives_updates_and_can_roll_back() {
         scene_status(&controller, TURN_B).0,
         SceneTurnNarration::ProviderWait
     );
+}
+
+/// A reply whose run outlives its provider turn (a background agent still
+/// works) has whole text once that turn completed after its first words; an
+/// older completion says nothing about it.
+#[test]
+fn a_completed_provider_turn_settles_the_text_written_before_it() {
+    let mut controller = ConversationStateController::new(thread_id());
+    let _ = controller.drain_effects();
+    let mut reply = make_assistant_settled(
+        ASSISTANT_A,
+        TURN_A,
+        2,
+        "Waiting on the agent.",
+        AssistantMessagePhase::Unspecified,
+        ConversationLifecycle::Streaming,
+        0,
+        10,
+    );
+    if let ConversationItem::AssistantMessage(message) = &mut reply {
+        message.text_after_sequence = Some(5);
+    }
+    let live = ConversationSnapshot::new(
+        thread_id(),
+        ConversationCursor::new(1),
+        vec![make_turn(TURN_A, 0, ConversationLifecycle::Streaming)],
+        vec![make_user(USER_A, TURN_A, 1, "hello"), reply],
+        stamp(50),
+    )
+    .expect("valid authoritative snapshot");
+    controller
+        .on_delivery(ConversationDeliveryEvent::SnapshotReceived(live))
+        .expect("snapshot delivery succeeds");
+    let _ = controller.drain_effects();
+    let text_settled = |controller: &ConversationStateController| {
+        let scene = controller.scene().expect("scene builds");
+        scene
+            .turn_scene(&turn_id(TURN_A))
+            .expect("turn present")
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                TurnBlock::AssistantMessage(message) => message.provenance.clone(),
+                _ => None,
+            })
+            .expect("the reply carries provenance")
+            .text_settled
+    };
+    assert!(!text_settled(&controller), "a live reply may still grow");
+
+    let run = RunId::parse("run_controller").expect("valid run id");
+    controller
+        .dispatch(ConversationStateEvent::SetCompletedTurns(
+            [(run.clone(), 4)].into(),
+        ))
+        .expect("completed turns apply");
+    assert!(
+        !text_settled(&controller),
+        "a turn that ended before the reply's first words says nothing about it"
+    );
+
+    controller
+        .dispatch(ConversationStateEvent::SetCompletedTurns([(run, 7)].into()))
+        .expect("completed turns apply");
+    assert!(
+        matches!(
+            controller.drain_effects().as_slice(),
+            [ConversationStateEffect::SceneInvalidated, ..]
+        ),
+        "the scene re-projects"
+    );
+    assert!(text_settled(&controller), "its turn ended after its words");
 }

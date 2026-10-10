@@ -338,6 +338,7 @@ async fn insert_second_assistant_item(
         body: Set("second".to_owned()),
         created_at_ms: Set(BATCH_AT_MS),
         updated_at_ms: Set(BATCH_AT_MS),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await

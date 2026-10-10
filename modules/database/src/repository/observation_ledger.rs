@@ -43,6 +43,37 @@ pub(super) struct LedgerInsert {
     pub(super) observation_tag: &'static str,
 }
 
+/// The thread's highest committed delivery sequence, `0` before its first.
+///
+/// # Errors
+///
+/// Returns [`RunObservationError`] when the read fails or the persisted
+/// maximum is negative.
+pub(super) async fn latest_delivery_sequence(
+    transaction: &sea_orm::DatabaseTransaction,
+    thread_id: &str,
+) -> Result<i64, RunObservationError> {
+    let latest = observation_ledger::Entity::find()
+        .filter(observation_ledger::Column::ThreadId.eq(thread_id))
+        .order_by_desc(observation_ledger::Column::DeliverySequence)
+        .one(transaction)
+        .await
+        .map_err(|source| {
+            RunObservationError::Repository(database_error("read delivery sequence", source))
+        })?;
+    match latest {
+        None => Ok(0),
+        Some(row) if row.delivery_sequence < 0 => {
+            Err(RunObservationError::Repository(corrupt_data(
+                "observation_ledger",
+                "delivery_sequence",
+                "counter is negative",
+            )))
+        }
+        Some(row) => Ok(row.delivery_sequence),
+    }
+}
+
 /// Allocates the first free delivery sequence for `count` rows on one thread.
 ///
 /// Returns `MAX(delivery_sequence) + 1` read through the caller's open
@@ -63,27 +94,7 @@ pub(super) async fn allocate_delivery_base(
         counter: "delivery sequence",
         value: i64::MAX,
     })?;
-    let latest = observation_ledger::Entity::find()
-        .filter(observation_ledger::Column::ThreadId.eq(thread_id))
-        .order_by_desc(observation_ledger::Column::DeliverySequence)
-        .one(transaction)
-        .await
-        .map_err(|source| {
-            RunObservationError::Repository(database_error("allocate delivery sequence", source))
-        })?;
-    let maximum = match latest {
-        None => 0,
-        Some(row) => {
-            if row.delivery_sequence < 0 {
-                return Err(RunObservationError::Repository(corrupt_data(
-                    "observation_ledger",
-                    "delivery_sequence",
-                    "counter is negative",
-                )));
-            }
-            row.delivery_sequence
-        }
-    };
+    let maximum = latest_delivery_sequence(transaction, thread_id).await?;
     maximum
         .checked_add(additional)
         .ok_or(RunObservationError::CounterOverflow {

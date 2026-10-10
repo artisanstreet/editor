@@ -58,6 +58,7 @@ fn reply(id: &str, turn: &str, ordinal: u64, run: &str) -> ConversationItem {
         phase: AssistantMessagePhase::Final,
         created_at: UnixMillis::from_millis(5),
         updated_at: UnixMillis::from_millis(10),
+        text_after_sequence: None,
     })
 }
 
