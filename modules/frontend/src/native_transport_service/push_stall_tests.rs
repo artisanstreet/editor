@@ -29,8 +29,8 @@ use artisan_transport::{
 use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use super::{
-    FrameFactory, NativeTransportCommand, NativeTransportEvent, PrivateDelivery, QueuedCommand,
-    ServiceRuntime, command_loop_with_delivery, delivery_task_loop,
+    FrameFactory, NativeTransportCommand, NativeTransportEvent, PreviewLane, PrivateDelivery,
+    QueuedCommand, ServiceRuntime, command_loop_with_delivery, delivery_task_loop,
 };
 
 /// The Forge's per-push send limit, shortened from its production 30 s.
@@ -338,7 +338,13 @@ fn a_request_sent_during_a_long_push_is_answered_without_a_send_stall() {
         let mut frames = FrameFactory::new();
         let result = tokio::time::timeout(
             WATCHDOG,
-            command_loop_with_delivery(&mut command_rx, &mut service, &mut frames, &event_tx),
+            command_loop_with_delivery(
+                &mut command_rx,
+                &PreviewLane::default(),
+                &mut service,
+                &mut frames,
+                &event_tx,
+            ),
         )
         .await;
         if !matches!(result, Ok(Ok(()))) {

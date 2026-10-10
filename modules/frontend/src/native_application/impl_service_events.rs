@@ -81,6 +81,9 @@ impl NativeApplication {
             NativeTransportEvent::ForgeDecision(event) => self.receive_forge_decision(event, cx),
             NativeTransportEvent::EngineInstalls(event) => self.receive_engine_installs(event, cx),
             NativeTransportEvent::Extensions(event) => self.receive_extensions(event, cx),
+            NativeTransportEvent::ThreadLifecycle(event) => {
+                self.receive_thread_lifecycle(event, cx);
+            }
             NativeTransportEvent::ActiveRun {
                 thread_id,
                 generation,
@@ -109,6 +112,10 @@ impl NativeApplication {
                     images.fail_image(reference, failure, cx);
                 });
             }
+            NativeTransportEvent::MediaFileLoaded { read, bytes } => {
+                self.settle_media_file(&read, Some(bytes));
+            }
+            NativeTransportEvent::MediaFileFailed { read } => self.settle_media_file(&read, None),
             NativeTransportEvent::Starting => {
                 self.state = NativeViewState::Loading;
                 self.reset_profile_usage_for_connection();
@@ -319,7 +326,10 @@ impl NativeApplication {
             NativeTransportEvent::DeliveryLost(failure) => self.handle_delivery_lost(failure, cx),
             NativeTransportEvent::Reconnected => self.resume_after_reconnect(cx),
             NativeTransportEvent::HostHome(home) => self.adopt_resolved_home(home, cx),
-            NativeTransportEvent::Stopped(status) => self.handle_service_stopped(status, cx),
+            NativeTransportEvent::Stopped(status) => {
+                self.settle_all_media_files();
+                self.handle_service_stopped(status, cx);
+            }
         }
     }
 
@@ -709,7 +719,7 @@ impl NativeApplication {
             if self.conversation_effects.is_empty()
                 && host.read(cx).total_pending_effect_count() == 0
             {
-                Self::release_transient_scroll_custody(&host, cx);
+                self.release_host_surface(&host, cx);
                 self.conversation_host = None;
                 drop(self.conversation_host_subscription.take());
                 self.selected_thread = None;
@@ -893,7 +903,7 @@ impl NativeApplication {
         };
         // Borrowed reads: this runs on every observation, and cloning the
         // snapshot or building the controller view would copy the thread.
-        let (projection, slid_out) = {
+        let (projection, slid_out, completed) = {
             let mounted = host.read(cx);
             if mounted.thread_id() != &selected {
                 return;
@@ -912,15 +922,25 @@ impl NativeApplication {
                 .into_iter()
                 .filter(|id| !window.contains(id))
                 .collect();
-            (projection, slid_out)
+            // Whose provider turns ended: their replies' text is whole even
+            // while the run goes on.
+            let completed = (mounted.completed_turns() != state.completed_turns())
+                .then(|| state.completed_turns().clone());
+            (projection, slid_out, completed)
         };
-        if projection.facts.is_empty() && slid_out.is_empty() {
+        if projection.facts.is_empty() && slid_out.is_empty() && completed.is_none() {
             return;
         }
         // One host update for the whole pass: every fact dispatches on its
         // own as before, and the scene is re-projected once at the end.
         let invalidated = host.update(cx, |host, host_cx| {
             let mut invalidated = false;
+            if let Some(completed) = completed {
+                let set = ConversationStateEvent::SetCompletedTurns(completed);
+                if host.dispatch_batched(set, host_cx).is_ok() {
+                    invalidated = true;
+                }
+            }
             for id in slid_out {
                 let remove = crate::conversation_state_machine::SceneFactCommand::Remove { id };
                 match host.dispatch_batched(ConversationStateEvent::Fact(remove), host_cx) {
@@ -1429,7 +1449,7 @@ impl NativeApplication {
         self.pending_snapshot = None;
         self.conversation_effects.clear();
         if let Some(host) = self.conversation_host.clone() {
-            Self::release_transient_scroll_custody(&host, cx);
+            self.release_host_surface(&host, cx);
         }
         self.conversation_host = None;
         drop(self.conversation_host_subscription.take());

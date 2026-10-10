@@ -946,6 +946,39 @@ fn local_session_loss_retry_excludes_integrity_and_cancellation() {
 }
 
 #[test]
+fn a_forge_that_never_answers_is_unavailable_not_an_authentication_failure() {
+    let connect_timeout = artisan_transport::ClientSessionError::Connect(DeadlineError::Timeout {
+        operation: OperationKind::Connect,
+        limit: Duration::from_secs(5),
+    });
+    assert_eq!(
+        super::diagnostics::connect_failure_category(&connect_timeout),
+        ServiceFailureCategory::Unavailable
+    );
+
+    let handshake_timeout =
+        artisan_transport::ClientSessionError::Handshake(DeadlineError::Timeout {
+            operation: OperationKind::Handshake,
+            limit: Duration::from_secs(5),
+        });
+    assert_eq!(
+        super::diagnostics::connect_failure_category(&handshake_timeout),
+        ServiceFailureCategory::Unavailable
+    );
+
+    let refused = artisan_transport::ClientSessionError::Handshake(DeadlineError::Peer {
+        operation: OperationKind::Handshake,
+        error: artisan_transport::HandshakeStageError::Handshake(
+            artisan_transport::HandshakeError::LifecycleFeatureNotOffered,
+        ),
+    });
+    assert_eq!(
+        super::diagnostics::connect_failure_category(&refused),
+        ServiceFailureCategory::Authentication
+    );
+}
+
+#[test]
 fn only_correlated_retryable_peer_classification_can_retain_a_retry_plan() {
     let retryable = RequestFailure {
         failure: ServiceFailure::new(
@@ -1484,4 +1517,28 @@ fn forwarded_continuity_covers_second_batch_before_delayed_ack() {
     custody.on_unsubscribe(&thread);
     assert_eq!(custody.expected_batch_from(), None);
     assert_eq!(custody.active_thread(), None);
+}
+
+#[test]
+fn media_file_response_is_bounded_to_one_file() {
+    let fits = artisan_protocol::MediaFileResult {
+        bytes: vec![0; artisan_domain::MEDIA_FILE_MAX_BYTES],
+    };
+    assert!(
+        validate_response_family(
+            ExpectedResponse::MediaFile,
+            ResponsePayload::MediaFile(fits)
+        )
+        .is_ok()
+    );
+    let past = artisan_protocol::MediaFileResult {
+        bytes: vec![0; artisan_domain::MEDIA_FILE_MAX_BYTES + 1],
+    };
+    assert!(
+        validate_response_family(
+            ExpectedResponse::MediaFile,
+            ResponsePayload::MediaFile(past)
+        )
+        .is_err()
+    );
 }

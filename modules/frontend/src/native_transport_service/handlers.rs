@@ -271,6 +271,36 @@ pub(super) async fn query_project_repository(
     }
 }
 
+/// Reads one media file a reply names. Any failure, of the request or of
+/// the file, settles the read as failed: the block shows it could not load.
+pub(super) async fn read_media_file(
+    runtime: &mut ServiceRuntime,
+    frames: &mut FrameFactory,
+    events: &SyncSender<NativeTransportEvent>,
+    read: artisan_domain::ReadMediaFile,
+) -> Result<(), ServiceFailure> {
+    if !runtime.known_threads.contains(read.thread_id()) {
+        return publish(events, NativeTransportEvent::MediaFileFailed { read });
+    }
+    let response = runtime
+        .request(
+            frames,
+            query_request(Query::ReadMediaFile(read.clone())),
+            ExpectedResponse::MediaFile,
+        )
+        .await;
+    match response {
+        Ok(ResponsePayload::MediaFile(result)) => publish(
+            events,
+            NativeTransportEvent::MediaFileLoaded {
+                read,
+                bytes: result.bytes.into(),
+            },
+        ),
+        _ => publish(events, NativeTransportEvent::MediaFileFailed { read }),
+    }
+}
+
 pub(super) async fn read_message_image(
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,

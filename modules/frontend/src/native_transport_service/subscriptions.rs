@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::module_name_repetitions)]
 
+use super::diagnostics::connect_failure_category;
 use super::*;
 
 /// Minimal custody for the active subscription; the `ConversationHost` is the projection authority.
@@ -277,12 +278,17 @@ impl ServiceRuntime {
             &self.cancel,
         )
         .await;
-        let Ok((session, welcome)) = connected else {
-            let _ = attempt.quarantine();
-            return Err(ServiceFailure::new(
-                ServiceFailureStage::Handshake,
-                ServiceFailureCategory::Authentication,
-            ));
+        let (session, welcome) = match connected {
+            Ok(connected) => connected,
+            Err(error) => {
+                // The Forge may have consumed the capability even when its
+                // Welcome never arrived, so it is quarantined either way.
+                let _ = attempt.quarantine();
+                return Err(ServiceFailure::new(
+                    ServiceFailureStage::Handshake,
+                    connect_failure_category(&error),
+                ));
+            }
         };
         let reconnect_lease = attempt
             .publish_next(self.reconnect_binding, welcome.welcome.reconnect_capability)

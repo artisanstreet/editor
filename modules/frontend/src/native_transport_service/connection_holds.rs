@@ -16,7 +16,7 @@ use tokio::sync::watch;
 
 use super::{
     ComposerDraftCommand, ComposerStateCommand, EngineInstallsCommand, ExtensionsCommand,
-    ForgeDecisionCommand, NativeTransportCommand, PreferencesCommand,
+    ForgeDecisionCommand, NativeTransportCommand, PreferencesCommand, ThreadLifecycleCommand,
 };
 
 /// What an in-flight hold is keeping open, for progress copy only.
@@ -46,11 +46,13 @@ pub enum HoldKind {
     EngineVersion,
     /// An extension switch, adoption, or global prompt change.
     Extension,
+    /// A thread rename, settle, archive, or restore.
+    ThreadChange,
 }
 
 impl HoldKind {
     /// Every kind in presentation order.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Message,
         Self::QueueChange,
         Self::StopRequest,
@@ -63,6 +65,7 @@ impl HoldKind {
         Self::Preferences,
         Self::EngineVersion,
         Self::Extension,
+        Self::ThreadChange,
     ];
 
     const fn index(self) -> usize {
@@ -85,6 +88,7 @@ impl HoldKind {
             Self::Preferences => ("preference", "preferences"),
             Self::EngineVersion => ("engine version change", "engine version changes"),
             Self::Extension => ("extension change", "extension changes"),
+            Self::ThreadChange => ("thread change", "thread changes"),
         };
         if count == 1 { one } else { many }
     }
@@ -304,6 +308,9 @@ impl NativeTransportCommand {
                 | ExtensionsCommand::SavePrompt(_)
                 | ExtensionsCommand::ResolvePrompt(_),
             ) => Some(HoldKind::Extension),
+            Self::ThreadLifecycle(ThreadLifecycleCommand::Update(_)) => {
+                Some(HoldKind::ThreadChange)
+            }
             Self::ComposerDraft(
                 ComposerDraftCommand::Save { .. } | ComposerDraftCommand::Upload { .. },
             ) => Some(HoldKind::Draft),
@@ -326,6 +333,7 @@ impl NativeTransportCommand {
             )
             | Self::Preferences(PreferencesCommand::Read)
             | Self::Extensions(ExtensionsCommand::ReadCatalog | ExtensionsCommand::ReadPrompt)
+            | Self::ThreadLifecycle(ThreadLifecycleCommand::ReadArchived)
             | Self::EngineInstalls(
                 EngineInstallsCommand::Read | EngineInstallsCommand::ListVersions(_),
             )
@@ -337,6 +345,7 @@ impl NativeTransportCommand {
             | Self::RequestSnapshot(_)
             | Self::ReadConversationHistory { .. }
             | Self::ReadMessageImage(_)
+            | Self::ReadMediaFile(_)
             | Self::LoadThreadEngineSettings { .. }
             | Self::ReadComposerCatalog { .. }
             | Self::ReadModelFavorites { .. }

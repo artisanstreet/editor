@@ -598,6 +598,22 @@ pub(super) fn durable_save_retry_classification(
     }
 }
 
+/// Category for a connect that failed before the Forge welcomed it.
+///
+/// Only a Forge that answered can have refused the credential. A connect or
+/// handshake that ran out of time means the Forge never answered, as when it
+/// is stalled or restarting; calling that an authentication failure sends the
+/// user after a credential that is fine.
+pub(super) const fn connect_failure_category(error: &ClientSessionError) -> ServiceFailureCategory {
+    match error {
+        ClientSessionError::Connect(DeadlineError::Timeout { .. })
+        | ClientSessionError::Handshake(DeadlineError::Timeout { .. }) => {
+            ServiceFailureCategory::Unavailable
+        }
+        _ => ServiceFailureCategory::Authentication,
+    }
+}
+
 pub(super) fn local_session_request_loss_is_retryable(error: &ClientRequestError) -> bool {
     match error {
         ClientRequestError::Exchange(DeadlineError::Timeout { .. }) => true,
@@ -621,6 +637,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::ForgeDecision(_) => "ForgeDecision",
             Self::EngineInstalls(_) => "EngineInstalls",
             Self::Extensions(_) => "Extensions",
+            Self::ThreadLifecycle(_) => "ThreadLifecycle",
             Self::Preferences(_) => "Preferences",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(_) => "StopRun",
@@ -639,6 +656,7 @@ impl std::fmt::Debug for NativeTransportCommand {
             Self::RequestSnapshot(_) => "RequestSnapshot",
             Self::ReadConversationHistory { .. } => "ReadConversationHistory",
             Self::ReadMessageImage(_) => "ReadMessageImage",
+            Self::ReadMediaFile(_) => "ReadMediaFile",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
             Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
             Self::ReadModelFavorites { .. } => "ReadModelFavorites",

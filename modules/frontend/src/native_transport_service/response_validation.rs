@@ -40,6 +40,7 @@ pub(super) enum ExpectedResponse {
     Snapshot(ThreadId),
     ConversationHistory(ThreadId),
     MessageImage(artisan_domain::ImageAttachmentRef),
+    MediaFile,
     ThreadEngineSettings(ThreadId),
     RegisteredProfiles,
     AccountUsage {
@@ -92,6 +93,7 @@ pub(super) enum ExpectedResponse {
     EngineInstalls(super::engine_installs_operations::EngineInstallsExpectation),
     Extensions(super::extensions_operations::ExtensionsExpectation),
     Preferences(super::preferences_operations::PreferencesExpectation),
+    ArchivedThreads,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +174,9 @@ pub(super) fn validate_response_family(
         }
         (ExpectedResponse::Extensions(expected), payload) if expected.accepts(&payload) => {
             Ok(payload)
+        }
+        (ExpectedResponse::ArchivedThreads, ResponsePayload::ArchivedThreads(listing)) => {
+            Ok(ResponsePayload::ArchivedThreads(listing))
         }
         (ExpectedResponse::Directory, ResponsePayload::DirectoryPicked(outcome)) => {
             Ok(ResponsePayload::DirectoryPicked(outcome))
@@ -259,6 +264,11 @@ pub(super) fn validate_response_family(
                 && Sha256::digest(&result.bytes).as_slice() == expected.digest =>
         {
             Ok(ResponsePayload::MessageImage(result))
+        }
+        (ExpectedResponse::MediaFile, ResponsePayload::MediaFile(result))
+            if result.bytes.len() <= artisan_domain::MEDIA_FILE_MAX_BYTES =>
+        {
+            Ok(ResponsePayload::MediaFile(result))
         }
         (
             ExpectedResponse::ThreadEngineSettings(thread_id),

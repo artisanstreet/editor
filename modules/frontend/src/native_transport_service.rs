@@ -50,9 +50,9 @@ use artisan_protocol::{
     WireEnvelope, WireEnvelopeBody,
 };
 use artisan_transport::{
-    CancelHandle, ClientRequestError, ClientSession, ClientSessionLimits, DeadlineError,
-    DeliveryReceiver, EnvelopeReceiveError, EnvelopeSendError, ExchangeError, FrameError,
-    LoopbackTarget, PinnedIdentity, RequestOutcome,
+    CancelHandle, ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits,
+    DeadlineError, DeliveryReceiver, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
+    FrameError, LoopbackTarget, PinnedIdentity, RequestOutcome,
 };
 use rustls_pki_types::CertificateDer;
 use sha2::{Digest as _, Sha256};
@@ -110,6 +110,8 @@ pub enum NativeTransportCommand {
     EngineInstalls(EngineInstallsCommand),
     /// Agent extensions and the global prompt.
     Extensions(ExtensionsCommand),
+    /// Renaming, settling, archiving, and restoring threads.
+    ThreadLifecycle(ThreadLifecycleCommand),
     /// Query exact live run ownership, fenced by the application's selection generation.
     ReadActiveRun {
         thread_id: ThreadId,
@@ -168,6 +170,8 @@ pub enum NativeTransportCommand {
     },
     /// Load one persisted image named by a bounded history reference.
     ReadMessageImage(artisan_domain::ImageAttachmentRef),
+    /// Load one image or audio file a reply names, from the Forge's machine.
+    ReadMediaFile(artisan_domain::ReadMediaFile),
     /// Load authoritative engine settings for one thread and generation.
     LoadThreadEngineSettings {
         /// Thread whose settings are being read.
@@ -231,6 +235,9 @@ pub enum NativeTransportCommand {
     /// the Forge queues exactly that draft once.
     SubmitComposerDraft(Box<SubmitComposerDraft>),
     /// Resolve one assistant-authored HTTP(S) link's page title.
+    ///
+    /// Admitted to the [`PreviewLane`], never the command queue: it runs
+    /// only while no other command is waiting.
     ResolveRichLink {
         /// Canonical absolute URL selected by the rich-link URL policy.
         url: String,
@@ -275,6 +282,7 @@ pub enum NativeTransportEvent {
     Preferences(PreferencesEvent),
     EngineInstalls(EngineInstallsEvent),
     Extensions(ExtensionsEvent),
+    ThreadLifecycle(ThreadLifecycleEvent),
     ActiveRun {
         thread_id: ThreadId,
         generation: u64,
@@ -346,6 +354,15 @@ pub enum NativeTransportEvent {
     MessageImageFailed {
         reference: artisan_domain::ImageAttachmentRef,
         failure: ServiceFailure,
+    },
+    /// A reply's media file arrived from the Forge's machine.
+    MediaFileLoaded {
+        read: artisan_domain::ReadMediaFile,
+        bytes: std::sync::Arc<[u8]>,
+    },
+    /// A reply's media file could not be served.
+    MediaFileFailed {
+        read: artisan_domain::ReadMediaFile,
     },
     /// The service thread has begun installation/session startup.
     Starting,
@@ -656,6 +673,9 @@ pub struct NativeTransportService {
     finished: Arc<AtomicBool>,
     shutdown_requested: Arc<AtomicBool>,
     holds: Arc<ConnectionHolds>,
+    /// Link previews, kept out of `commands` so they never wait in or block
+    /// the command queue; see [`PreviewLane`].
+    previews: Arc<PreviewLane>,
     join: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -724,6 +744,10 @@ pub(crate) use engine_installs_operations::{EngineInstallsCommand, EngineInstall
 mod extensions_operations;
 pub(crate) use extensions_operations::{ExtensionsCommand, ExtensionsEvent};
 
+#[path = "native_thread_lifecycle_transport.rs"]
+mod thread_lifecycle_operations;
+pub(crate) use thread_lifecycle_operations::{ThreadLifecycleCommand, ThreadLifecycleEvent};
+
 #[path = "native_preferences_transport.rs"]
 mod preferences_operations;
 pub(crate) use preferences_operations::{PreferencesCommand, PreferencesEvent};
@@ -734,6 +758,10 @@ mod profile_usage_operations;
 #[path = "native_transport_service/connection_holds.rs"]
 mod connection_holds;
 pub use connection_holds::{ConnectionHolds, Hold, HoldKind, HoldState, QueuedCommand};
+
+#[path = "native_transport_service/preview_lane.rs"]
+mod preview_lane;
+pub use preview_lane::{PREVIEW_CAPACITY, PreviewLane};
 
 #[path = "native_transport_service/diagnostics.rs"]
 mod diagnostics;

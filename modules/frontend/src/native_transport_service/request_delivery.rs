@@ -519,14 +519,24 @@ async fn hand_over(
 )]
 pub(super) async fn command_loop_with_delivery(
     commands: &mut tokio::sync::mpsc::Receiver<QueuedCommand>,
+    previews: &PreviewLane,
     runtime: &mut ServiceRuntime,
     frames: &mut FrameFactory,
     events: &SyncSender<NativeTransportEvent>,
 ) -> Result<(), ServiceFailure> {
     loop {
+        // Commands and deliveries race each other exactly as before; a link
+        // preview is taken only when neither is ready, so the queued ones
+        // never delay either (see `PreviewLane`).
         let step = tokio::select! {
-            cmd = commands.recv() => LoopStep::Command(cmd),
-            delivery = runtime.deliveries.next() => LoopStep::Delivery(delivery),
+            biased;
+            step = async {
+                tokio::select! {
+                    cmd = commands.recv() => LoopStep::Command(cmd),
+                    delivery = runtime.deliveries.next() => LoopStep::Delivery(delivery),
+                }
+            } => step,
+            preview = previews.next() => LoopStep::Preview(preview),
         };
         match step {
             LoopStep::Command(cmd) => {
@@ -623,6 +633,14 @@ pub(super) async fn command_loop_with_delivery(
                         ))
                         .await?;
                     }
+                    NativeTransportCommand::ThreadLifecycle(command) => {
+                        Box::pin(
+                            thread_lifecycle_operations::handle_thread_lifecycle_command(
+                                runtime, frames, events, command,
+                            ),
+                        )
+                        .await?;
+                    }
                     NativeTransportCommand::ForgeDecision(command) => {
                         forge_decision_operations::handle_forge_decision_command(
                             runtime, frames, events, command,
@@ -653,6 +671,9 @@ pub(super) async fn command_loop_with_delivery(
                     }
                     NativeTransportCommand::ReadMessageImage(reference) => {
                         read_message_image(runtime, frames, events, reference).await?;
+                    }
+                    NativeTransportCommand::ReadMediaFile(read) => {
+                        super::handlers::read_media_file(runtime, frames, events, read).await?;
                     }
                     NativeTransportCommand::RequestSnapshot(thread_id) => {
                         request_snapshot(runtime, frames, events, thread_id).await?;
@@ -746,6 +767,33 @@ pub(super) async fn command_loop_with_delivery(
                     handle_delivery_lost_reconnect(runtime, frames, events, failure).await?;
                 }
             }
+            LoopStep::Preview(preview) => {
+                let preview_lane::QueuedPreview {
+                    #[cfg(feature = "flight-recorder")]
+                    trace,
+                    url,
+                } = preview;
+                #[cfg(feature = "flight-recorder")]
+                let queue_span = trace.id();
+                #[cfg(feature = "flight-recorder")]
+                trace.handoff();
+                #[cfg(feature = "flight-recorder")]
+                drop(trace);
+                #[cfg(feature = "flight-recorder")]
+                let _trace = artisan_tracing::span!("transport.preview", "preview.execute", "queue_span" => queue_span);
+                #[cfg(feature = "flight-recorder")]
+                {
+                    runtime.trace_command = _trace.id();
+                }
+                // Same session, reconnect, and delivery forwarding as a
+                // queued command; every failure publishes `RichLinkFailed`
+                // and only a closed bridge ends the loop.
+                resolve_rich_link(runtime, frames, events, url).await?;
+                #[cfg(feature = "flight-recorder")]
+                {
+                    runtime.trace_command = 0;
+                }
+            }
         }
     }
 }
@@ -753,4 +801,5 @@ pub(super) async fn command_loop_with_delivery(
 enum LoopStep {
     Command(Option<QueuedCommand>),
     Delivery(PrivateDelivery),
+    Preview(preview_lane::QueuedPreview),
 }

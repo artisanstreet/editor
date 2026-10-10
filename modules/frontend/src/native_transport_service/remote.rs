@@ -1,4 +1,5 @@
 //! External Forge startup. No process lease is acquired and remote shutdown is never requested.
+use super::diagnostics::connect_failure_category;
 use super::*;
 use artisan_domain::ErrorChain;
 use artisan_editor_cli::credentials::{ForgeCredentialError, hosts};
@@ -122,7 +123,12 @@ pub(super) async fn start(home: &Path) -> Result<(ServiceRuntime, FrameFactory),
                     ErrorChain(&error)
                 );
             }
-            return Err(StartupError::Stage(ServiceFailureStage::Handshake));
+            return Err(match connect_failure_category(&error) {
+                ServiceFailureCategory::Unavailable => {
+                    StartupError::Unreachable(ServiceFailureStage::Handshake)
+                }
+                _ => StartupError::Stage(ServiceFailureStage::Handshake),
+            });
         }
     };
     let lease = match attempt {

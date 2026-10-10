@@ -41,6 +41,7 @@ impl NativeTransportCommand {
             Self::Preferences(..) => "Preferences",
             Self::EngineInstalls(..) => "EngineInstalls",
             Self::Extensions(..) => "Extensions",
+            Self::ThreadLifecycle(..) => "ThreadLifecycle",
             Self::ReadActiveRun { .. } => "ReadActiveRun",
             Self::StopRun(..) => "StopRun",
             Self::RespondApproval(..) => "RespondApproval",
@@ -58,6 +59,7 @@ impl NativeTransportCommand {
             Self::RequestSnapshot(..) => "RequestSnapshot",
             Self::ReadConversationHistory { .. } => "ReadConversationHistory",
             Self::ReadMessageImage(..) => "ReadMessageImage",
+            Self::ReadMediaFile(..) => "ReadMediaFile",
             Self::LoadThreadEngineSettings { .. } => "LoadThreadEngineSettings",
             Self::ReadComposerCatalog { .. } => "ReadComposerCatalog",
             Self::ReadModelFavorites { .. } => "ReadModelFavorites",
@@ -85,6 +87,7 @@ impl NativeTransportEvent {
             Self::Preferences(..) => "Preferences",
             Self::EngineInstalls(..) => "EngineInstalls",
             Self::Extensions(..) => "Extensions",
+            Self::ThreadLifecycle(..) => "ThreadLifecycle",
             Self::ActiveRun { .. } => "ActiveRun",
             Self::ActiveRunFailed { .. } => "ActiveRunFailed",
             Self::RunStopped(..) => "RunStopped",
@@ -97,6 +100,8 @@ impl NativeTransportEvent {
             Self::QuestionsAnswerFailed { .. } => "QuestionsAnswerFailed",
             Self::MessageImageLoaded { .. } => "MessageImageLoaded",
             Self::MessageImageFailed { .. } => "MessageImageFailed",
+            Self::MediaFileLoaded { .. } => "MediaFileLoaded",
+            Self::MediaFileFailed { .. } => "MediaFileFailed",
             Self::Starting => "Starting",
             Self::Projects(..) => "Projects",
             Self::Threads { .. } => "Threads",
@@ -168,6 +173,7 @@ impl ExpectedResponse {
             Self::Snapshot(..) => "Snapshot",
             Self::ConversationHistory(..) => "ConversationHistory",
             Self::MessageImage(..) => "MessageImage",
+            Self::MediaFile => "MediaFile",
             Self::ThreadEngineSettings(..) => "ThreadEngineSettings",
             Self::RegisteredProfiles => "RegisteredProfiles",
             Self::AccountUsage { .. } => "AccountUsage",
@@ -188,6 +194,7 @@ impl ExpectedResponse {
             Self::EngineInstalls(..) => "EngineInstalls",
             Self::Extensions(..) => "Extensions",
             Self::Preferences(..) => "Preferences",
+            Self::ArchivedThreads => "ArchivedThreads",
         }
     }
 }
