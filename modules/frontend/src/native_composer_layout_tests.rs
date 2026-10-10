@@ -144,14 +144,13 @@ fn composer_hides_the_placeholder_once_drafted(cx: &mut TestAppContext) {
     );
 }
 
-/// Reference (`thread-composer.svelte:571-587`): the editor is uncapped with
-/// no internal scroll — long drafts grow the overlay card instead. A 12-line
-/// draft paints 12 × 24px = 288px of text plus the editor's own py-8 padding
-/// (16px) for 304px of editor, so the card settles at 8 + 304 + 32 + 8 =
-/// 352px. Tail clearance below the grown card is the transcript end space
-/// (surface lane), never a reinstated cap.
+/// Reference (`thread-composer.svelte:571-587`): the editor grows with the
+/// draft, but only to 40% of the window before it scrolls internally. In a
+/// 600px window a 12-line draft (12 × 24px + 16px padding = 304px) is capped
+/// at 240px, so the card settles at 8 + 240 + 32 + 8 = 288px and the caret at
+/// the draft end is scrolled into view.
 #[gpui::test]
-fn composer_grows_uncapped_with_long_drafts(cx: &mut TestAppContext) {
+fn composer_caps_long_drafts_and_scrolls_to_the_caret(cx: &mut TestAppContext) {
     let (view, cx) = mount_composer(cx, NativeComposerControlsSnapshot::default());
     cx.simulate_resize(size(px(900.0), px(600.0)));
     let draft = (1..=12)
@@ -169,13 +168,19 @@ fn composer_grows_uncapped_with_long_drafts(cx: &mut TestAppContext) {
     let editor = cx.debug_bounds(NATIVE_COMPOSER_EDITOR_SELECTOR).unwrap();
     assert_eq!(
         editor.size.height,
-        px(304.0),
-        "long drafts grow the editor past the old cap, got {editor:?}"
+        px(240.0),
+        "long drafts stop at the window share, got {editor:?}"
     );
     assert_eq!(
         card.size.height,
-        px(352.0),
-        "uncapped card must reach 352px, got {card:?}"
+        px(288.0),
+        "capped card must settle at 288px, got {card:?}"
+    );
+    let offset = cx.update(|_, app| view.read(app).editor_scroll_offset());
+    assert_eq!(
+        offset,
+        px(-64.0),
+        "the caret on the last line must be scrolled into view"
     );
 }
 

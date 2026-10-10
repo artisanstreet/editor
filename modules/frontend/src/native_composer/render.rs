@@ -6,6 +6,8 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use artisan_ui::tab_card::{TabCardStrip, tab_card_with_strip};
+use gpui::ContentMask;
 
 impl NativeComposer {
     #[expect(
@@ -17,6 +19,7 @@ impl NativeComposer {
         entity: &Entity<Self>,
         theme: &ArtisanTheme,
         desktop_theme: DesktopTheme,
+        reduce_motion: bool,
     ) -> Stateful<Div> {
         // Reference (`attachment-tray.svelte:28-30`): the open row carries
         // `px-1 pt-1 pb-2`. The tray only mounts while attachments exist,
@@ -128,7 +131,22 @@ impl NativeComposer {
                 })
                 .child(asset_glyph(AssetId::TABLER_X).size(px(14.0)));
             tile = tile.child(remove);
-            row = row.child(tile);
+            match self
+                .attachment_shake
+                .as_ref()
+                .filter(|(id, _)| *id == attachment.id && !reduce_motion)
+            {
+                Some((_, generation)) => {
+                    row = row.child(tile.with_animation(
+                        ElementId::Name(
+                            format!("artisan-native-composer-attachment-shake-{generation}").into(),
+                        ),
+                        Animation::new(Duration::from_millis(ATTACHMENT_SHAKE_MS)),
+                        |tile, progress| tile.left(px(attachment_shake_offset(progress))),
+                    ));
+                }
+                None => row = row.child(tile),
+            }
         }
 
         let mut tray = div()
@@ -277,27 +295,19 @@ impl Render for NativeComposer {
         let entity = cx.entity();
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let desktop_theme = DesktopTheme::neutral_dark();
-        let draft = self.state.draft().to_owned();
-        let styled_text = if self.selection.is_empty() {
-            StyledText::new(SharedString::from(draft))
-        } else {
-            StyledText::new(SharedString::from(draft)).with_highlights([(
-                self.selection.clone(),
-                HighlightStyle {
-                    color: Some(desktop_theme.foreground),
-                    background_color: Some(desktop_theme.selected),
-                    ..Default::default()
-                },
-            )])
-        };
+        let styled_text = self.composer_text(&theme, desktop_theme);
         self.painted_bounds = None;
-        self.layout = Some(styled_text.layout().clone());
+        self.layout = styled_text.layout().cloned();
+        let mention_menu = self.render_mention_menu(window, cx);
 
         let focus = self.focus_handle.clone();
         // Reference (`thread-composer.svelte:571-587`): `min-h-16 px-3 py-2
-        // text-base`, uncapped with no internal scroll. Growth pushes the
-        // absolute overlay taller while the transcript end space preserves
-        // scroll-to-bottom (surface lane); no pixel cap lives here.
+        // text-base`. Growth pushes the absolute overlay taller while the
+        // transcript end space preserves scroll-to-bottom (surface lane), but
+        // only up to a share of the window: past it the editor scrolls
+        // internally so long prompts stay visible and navigable.
+        let editor_max_height = editor_max_height(window.viewport_size().height);
+        let editor_scroll = self.editor_scroll.clone();
         let mut editor = div()
             .id("artisan-native-composer-editor")
             .debug_selector(|| NATIVE_COMPOSER_EDITOR_SELECTOR.to_string())
@@ -305,14 +315,24 @@ impl Render for NativeComposer {
             .w_full()
             .flex_1()
             .min_w(px(0.0))
-            .min_h(px(64.0))
+            .min_h(px(EDITOR_MIN_HEIGHT))
+            .max_h(editor_max_height)
+            .overflow_y_scroll()
+            .track_scroll(&self.editor_scroll)
+            // Contain the wheel while the draft overflows so the transcript
+            // behind the composer does not scroll along with it.
+            .on_scroll_wheel(move |_, _, cx| {
+                if editor_scroll.max_offset().y > Pixels::ZERO {
+                    cx.stop_propagation();
+                }
+            })
             .px(px(12.0))
             .py(px(8.0))
             .text_color(desktop_theme.foreground)
             .text_size(px(16.0))
             .line_height(px(24.0))
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .letter_spacing(px(ProseTypography::body_tracking_px(16.0)))
+            .tracking(ProseTypography::TRACKING_EM)
             .whitespace_normal()
             .track_focus(&focus)
             .child(styled_text);
@@ -356,6 +376,12 @@ impl Render for NativeComposer {
             .on_action(cx.listener(Self::move_right_action))
             .on_action(cx.listener(Self::select_left_action))
             .on_action(cx.listener(Self::select_right_action))
+            .on_action(cx.listener(Self::word_left_action))
+            .on_action(cx.listener(Self::word_right_action))
+            .on_action(cx.listener(Self::select_word_left_action))
+            .on_action(cx.listener(Self::select_word_right_action))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::move_home))
             .on_action(cx.listener(Self::move_end))
@@ -370,6 +396,8 @@ impl Render for NativeComposer {
             .on_action(cx.listener(Self::select_document_home_action))
             .on_action(cx.listener(Self::select_document_end_action))
             .on_action(cx.listener(Self::request_send_action))
+            .on_action(cx.listener(Self::accept_mention_action))
+            .on_action(cx.listener(Self::dismiss_mention_action))
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
@@ -487,13 +515,19 @@ impl Render for NativeComposer {
             .flex_col()
             .min_h(px(112.0))
             .p(px(8.0))
-            .rounded(px(18.0))
+            .rounded(px(NATIVE_COMPOSER_RADIUS_PX))
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(&theme))
             .shadow(glass_card_shadows())
             .relative()
-            .child(glass_material_layer(GlassStrength::Quiet, px(18.0)))
-            .child(glass_highlight_layer(GlassStrength::Quiet, px(18.0)))
+            .child(glass_material_layer(
+                GlassStrength::Quiet,
+                px(NATIVE_COMPOSER_RADIUS_PX),
+            ))
+            .child(glass_highlight_layer(
+                GlassStrength::Quiet,
+                px(NATIVE_COMPOSER_RADIUS_PX),
+            ))
             .on_drop::<ExternalPaths>(move |paths, _, cx| {
                 let paths = paths.paths().to_vec();
                 drop_entity.update(cx, |composer, composer_cx| {
@@ -531,10 +565,26 @@ impl Render for NativeComposer {
                 self.tray_entrance_generation = self.tray_entrance_generation.wrapping_add(1);
             }
             self.tray_was_open = true;
-            let tray = self.attachment_tray(&entity, &theme, desktop_theme);
+            let tray = self.attachment_tray(&entity, &theme, desktop_theme, cx.reduce_motion());
             root = root.child(self.animate_tray_entrance(tray, cx));
         }
         root = root.child(editor);
+        // The mention menu hangs above the card at its full width and paints
+        // over the transcript, as the picker popovers do.
+        if let Some(menu) = mention_menu {
+            root = root.child(
+                deferred(
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(gpui::relative(1.0))
+                        .pb(px(8.0))
+                        .child(menu),
+                )
+                .with_priority(1),
+            );
+        }
         if let Some(controls_row) = controls_row {
             root = root.child(controls_row);
         } else if let Some(legacy_toolbar) = legacy_toolbar {
@@ -559,7 +609,60 @@ impl Render for NativeComposer {
         if let Some(lip) = controls_lip {
             shell = shell.child(lip);
         }
-        shell.child(root)
+        // The tab frames only the card: jump, failure, and the queued lip
+        // above stay outside it.
+        let card = match self.tab.clone() {
+            Some(tab) => {
+                let mut moving = false;
+                let strip = self
+                    .goal
+                    .frame(std::time::Instant::now(), desktop_theme, &mut moving)
+                    .map(|frame| TabCardStrip {
+                        reveal: frame.reveal,
+                        content: frame.content,
+                    });
+                if moving {
+                    window.request_animation_frame();
+                }
+                tab_card_with_strip(
+                    Self::render_tab(tab, desktop_theme, window, cx),
+                    strip,
+                    root,
+                    px(NATIVE_COMPOSER_RADIUS_PX),
+                )
+                .into_any_element()
+            }
+            None => root.into_any_element(),
+        };
+        shell.child(card)
+    }
+}
+
+impl NativeComposer {
+    /// Renders the card's tab: the home picker's ghost select, or the open
+    /// thread's project as a quiet label.
+    fn render_tab(
+        tab: ComposerTab,
+        desktop_theme: DesktopTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match tab {
+            ComposerTab::Picker { picker, label } => picker.update(cx, |picker, picker_cx| {
+                picker.render_ghost_trigger(&label, window, picker_cx)
+            }),
+            ComposerTab::Project(label) => div()
+                .h(px(28.0))
+                .px(px(8.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(13.0))
+                .text_color(desktop_theme.secondary)
+                .child(asset_glyph(AssetId::TABLER_FOLDER).size(px(15.0)))
+                .child(div().truncate().max_w(px(240.0)).child(label))
+                .into_any_element(),
+        }
     }
 }
 
@@ -582,7 +685,8 @@ impl NativeComposerInputElement {
 
 impl Element for NativeComposerInputElement {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    /// The mention glyphs, laid out over their sigils.
+    type PrepaintState = Vec<AnyElement>;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -606,12 +710,25 @@ impl Element for NativeComposerInputElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
         self.child.prepaint(window, cx);
+        // The text layout now carries this frame's window positions, so the
+        // active selection end can be measured against the viewport. A
+        // correction lands on the next frame.
+        let scrolled = self
+            .view
+            .update(cx, |composer, _| composer.follow_selection_head(bounds));
+        if scrolled {
+            window.refresh();
+        }
+        let inputs = self.view.read(cx).mention_glyph_inputs();
+        inputs.map_or_else(Vec::new, |(layout, spans)| {
+            mentions::prepaint_mention_glyphs(&layout, spans, window, cx)
+        })
     }
 
     fn paint(
@@ -620,7 +737,7 @@ impl Element for NativeComposerInputElement {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        glyphs: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -647,6 +764,7 @@ impl Element for NativeComposerInputElement {
                     composer.begin_selection_drag(
                         event.position,
                         event.modifiers.shift,
+                        event.click_count,
                         composer_cx,
                     );
                 });
@@ -680,8 +798,19 @@ impl Element for NativeComposerInputElement {
             }
         });
         self.child.paint(window, cx);
+        if !glyphs.is_empty() {
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                for glyph in glyphs.iter_mut() {
+                    glyph.paint(window, cx);
+                }
+            });
+        }
         if let Some(caret) = self.view.read(cx).caret_quad(window) {
-            window.paint_quad(caret);
+            // The caret paints outside the scrolled child, so it needs the
+            // viewport clip itself once the line scrolls out of view.
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                window.paint_quad(caret);
+            });
         }
         self.view.update(cx, |composer, _| {
             composer.painted_bounds = valid_bounds(&bounds).then_some(bounds);
@@ -801,5 +930,182 @@ impl gpui::EntityInputHandler for NativeComposer {
         let draft = self.state.draft();
         let byte_index = self.byte_index_for_global_point(point)?;
         utf8_offset_to_utf16(draft, byte_index)
+    }
+}
+
+/// Reference `min-h-16`: one editor row plus padding never collapses.
+const EDITOR_MIN_HEIGHT: f32 = 64.0;
+
+/// Share of the window height the editor may grow to before it scrolls.
+const EDITOR_MAX_VIEWPORT_SHARE: f32 = 0.4;
+
+/// Breathing room kept between the followed caret and the viewport edge;
+/// matches the editor's vertical padding.
+const EDITOR_FOLLOW_INSET: f32 = 8.0;
+
+/// Height cap for the editor viewport, never below its minimum height.
+fn editor_max_height(viewport_height: Pixels) -> Pixels {
+    (viewport_height * EDITOR_MAX_VIEWPORT_SHARE).max(px(EDITOR_MIN_HEIGHT))
+}
+
+/// The vertical scroll offset that brings the row spanning `head_top` to
+/// `head_bottom` inside `viewport`, or `None` when it is already visible.
+///
+/// Offsets follow GPUI: zero at the top, more negative further down,
+/// bounded by `-max_offset`.
+fn follow_offset(
+    viewport: Bounds<Pixels>,
+    head_top: Pixels,
+    head_bottom: Pixels,
+    offset: Pixels,
+    max_offset: Pixels,
+) -> Option<Pixels> {
+    let inset = px(EDITOR_FOLLOW_INSET);
+    let target = if head_top < viewport.top() + inset {
+        offset + (viewport.top() + inset - head_top)
+    } else if head_bottom > viewport.bottom() - inset {
+        offset - (head_bottom - (viewport.bottom() - inset))
+    } else {
+        return None;
+    };
+    let target = target.min(Pixels::ZERO).max(-max_offset.max(Pixels::ZERO));
+    (target != offset).then_some(target)
+}
+
+impl NativeComposer {
+    #[cfg(test)]
+    pub(crate) fn editor_scroll_offset(&self) -> Pixels {
+        self.editor_scroll.offset().y
+    }
+
+    /// Scrolls the editor so the active selection end is visible after a
+    /// selection or draft change. Returns whether the offset moved.
+    fn follow_selection_head(&mut self, viewport: Bounds<Pixels>) -> bool {
+        if self.followed_selection_revision == self.selection_revision {
+            return false;
+        }
+        self.followed_selection_revision = self.selection_revision;
+        let Some(layout) = self.layout.as_ref() else {
+            return false;
+        };
+        let head = if self.selection_reversed {
+            self.selection.start
+        } else {
+            self.selection.end
+        };
+        let line_height = layout.line_height();
+        let top = layout
+            .position_for_index(head)
+            .unwrap_or_else(|| layout.bounds().origin)
+            .y;
+        if !valid_bounds(&viewport) || !valid_pixels(top) || line_height <= Pixels::ZERO {
+            return false;
+        }
+        let offset = self.editor_scroll.offset();
+        let Some(target) = follow_offset(
+            viewport,
+            top,
+            top + line_height,
+            offset.y,
+            self.editor_scroll.max_offset().y,
+        ) else {
+            return false;
+        };
+        self.editor_scroll.set_offset(point(offset.x, target));
+        true
+    }
+}
+
+/// Duplicate-attachment shake: two 80ms swings and two 60ms recovery legs
+/// (transitions.dev error shake, `--shake-dur-a`/`--shake-dur-b`).
+const ATTACHMENT_SHAKE_MS: u64 = 280;
+
+/// Horizontal tile offset at `progress` through the shake: rest, +6px,
+/// -6px, +4px overshoot, rest, each leg on its own smooth-out curve.
+fn attachment_shake_offset(progress: f32) -> f32 {
+    const STOPS: [(f32, f32); 5] = [
+        (0.0, 0.0),
+        (80.0 / 280.0, 6.0),
+        (160.0 / 280.0, -6.0),
+        (220.0 / 280.0, 4.0),
+        (1.0, 0.0),
+    ];
+    let progress = progress.clamp(0.0, 1.0);
+    STOPS
+        .windows(2)
+        .find(|leg| progress <= leg[1].0)
+        .map_or(0.0, |leg| {
+            let (start, from) = leg[0];
+            let (end, to) = leg[1];
+            let eased = composer_smooth_out((progress - start) / (end - start));
+            from + (to - from) * eased
+        })
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use gpui::{Bounds, point, px, size};
+
+    use super::{EDITOR_MIN_HEIGHT, editor_max_height, follow_offset};
+
+    fn viewport() -> Bounds<gpui::Pixels> {
+        Bounds::new(point(px(0.0), px(100.0)), size(px(400.0), px(200.0)))
+    }
+
+    #[test]
+    fn editor_cap_scales_with_the_window_but_keeps_its_minimum() {
+        assert_eq!(editor_max_height(px(1000.0)), px(400.0));
+        assert_eq!(editor_max_height(px(100.0)), px(EDITOR_MIN_HEIGHT));
+    }
+
+    #[test]
+    fn visible_head_keeps_the_offset() {
+        assert_eq!(
+            follow_offset(viewport(), px(150.0), px(174.0), px(-40.0), px(500.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn head_below_the_viewport_scrolls_down_to_it() {
+        // Viewport bottom 300, inset 8: a row ending at 330 needs 38px more.
+        assert_eq!(
+            follow_offset(viewport(), px(306.0), px(330.0), px(-40.0), px(500.0)),
+            Some(px(-78.0))
+        );
+    }
+
+    #[test]
+    fn head_above_the_viewport_scrolls_up_and_clamps_at_the_top() {
+        assert_eq!(
+            follow_offset(viewport(), px(60.0), px(84.0), px(-40.0), px(500.0)),
+            Some(px(0.0))
+        );
+        assert_eq!(
+            follow_offset(viewport(), px(90.0), px(114.0), px(-100.0), px(500.0)),
+            Some(px(-82.0))
+        );
+    }
+
+    #[test]
+    fn scrolling_down_never_passes_the_content_end() {
+        assert_eq!(
+            follow_offset(viewport(), px(900.0), px(924.0), px(0.0), px(120.0)),
+            Some(px(-120.0))
+        );
+    }
+}
+
+#[cfg(test)]
+mod shake_tests {
+    use super::attachment_shake_offset;
+
+    #[test]
+    fn duplicate_shake_swings_both_ways_and_settles_at_rest() {
+        assert!(attachment_shake_offset(0.0).abs() < 1e-4);
+        assert!((attachment_shake_offset(80.0 / 280.0) - 6.0).abs() < 1e-3);
+        assert!((attachment_shake_offset(160.0 / 280.0) + 6.0).abs() < 1e-3);
+        assert!((attachment_shake_offset(220.0 / 280.0) - 4.0).abs() < 1e-3);
+        assert!(attachment_shake_offset(1.0).abs() < 1e-4);
     }
 }

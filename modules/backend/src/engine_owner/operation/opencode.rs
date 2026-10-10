@@ -524,6 +524,7 @@ async fn execute_authorized_configured_turn(
     {
         return session.abort(shutdown, error).await;
     }
+    let engine_text = session.input.engine_prompt_text();
     let files: Vec<PromptFile> = session
         .input
         .prompt
@@ -550,11 +551,7 @@ async fn execute_authorized_configured_turn(
             &files,
             &session.input.prompt_id,
             session.resume,
-            session
-                .input
-                .prompt
-                .text()
-                .map(artisan_domain::AuthoredText::as_str),
+            engine_text.as_deref(),
         ),
     )
     .await

@@ -7,6 +7,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use artisan_ui::text_navigation::{
+    WordBehavior, caret_index_for_position, next_word_position, previous_word_position,
+};
 
 impl NativeComposer {
     pub(super) fn undo_action(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -63,7 +66,36 @@ impl NativeComposer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.accept_mention_highlight(cx) {
+            return;
+        }
         self.request_send(cx);
+    }
+
+    /// Tab chooses the highlighted mention row; without a menu it moves
+    /// focus as usual.
+    pub(super) fn accept_mention_action(
+        &mut self,
+        _: &AcceptMention,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.accept_mention_highlight(cx) {
+            cx.propagate();
+        }
+    }
+
+    /// Escape closes the mention menu; without a menu it reaches whatever
+    /// handles Escape outside the editor.
+    pub(super) fn dismiss_mention_action(
+        &mut self,
+        _: &DismissMention,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.dismiss_mention_menu(cx) {
+            cx.propagate();
+        }
     }
 
     pub(super) fn replace_range(
@@ -153,23 +185,30 @@ impl NativeComposer {
         self.selection.clone()
     }
 
+    /// Starts a mouse selection: one click places the caret (`extend`, the
+    /// shift key, extends instead), a double click selects a word and a
+    /// triple click a paragraph; the drag that follows grows the selection
+    /// by that unit.
     pub(super) fn begin_selection_drag(
         &mut self,
         point: Point<Pixels>,
         extend: bool,
+        click_count: usize,
         cx: &mut Context<Self>,
     ) {
         let Some(byte_index) = self.byte_index_for_global_point(point) else {
             return;
         };
-        if extend {
+        let unit = SelectionUnit::from_click_count(click_count);
+        if unit == SelectionUnit::Character && extend {
             self.select_to(byte_index);
         } else {
-            self.selection = byte_index..byte_index;
+            self.selection = unit.range_at(self.state.draft(), byte_index);
             self.selection_reversed = false;
             self.selection_anchor = None;
             self.advance_selection_revision();
         }
+        self.drag_origin = (unit, self.selection.clone());
         self.marked_range = None;
         self.clear_vertical_goal();
         self.selection_dragging = true;
@@ -185,7 +224,19 @@ impl NativeComposer {
         };
         let old_selection = self.selection.clone();
         let old_reversed = self.selection_reversed;
-        self.select_to(byte_index);
+        let unit = self.drag_origin.0;
+        if unit == SelectionUnit::Character {
+            self.select_to(byte_index);
+        } else {
+            let (selection, reversed) =
+                unit.extend(self.state.draft(), &self.drag_origin.1, byte_index);
+            if selection != old_selection || reversed != old_reversed {
+                self.selection = selection;
+                self.selection_reversed = reversed;
+                self.selection_anchor = None;
+                self.advance_selection_revision();
+            }
+        }
         self.marked_range = None;
         self.clear_vertical_goal();
         if old_selection != self.selection || old_reversed != self.selection_reversed {
@@ -214,6 +265,44 @@ impl NativeComposer {
                 SelectRight,
                 Some(NATIVE_COMPOSER_KEY_CONTEXT),
             ),
+            // Word movement and deletion: ctrl on Windows and Linux, alt
+            // (option) on macOS, as in Chrome.
+            KeyBinding::new("ctrl-left", WordLeft, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-right", WordRight, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                SelectWordLeft,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                SelectWordRight,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-backspace",
+                BackspaceWord,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("ctrl-delete", DeleteWord, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("alt-left", WordLeft, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("alt-right", WordRight, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new(
+                "alt-shift-left",
+                SelectWordLeft,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "alt-shift-right",
+                SelectWordRight,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "alt-backspace",
+                BackspaceWord,
+                Some(NATIVE_COMPOSER_KEY_CONTEXT),
+            ),
+            KeyBinding::new("alt-delete", DeleteWord, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("cmd-a", SelectAll, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("ctrl-a", SelectAll, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new("cmd-v", Paste, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
@@ -267,6 +356,8 @@ impl NativeComposer {
                 Some(NATIVE_COMPOSER_KEY_CONTEXT),
             ),
             KeyBinding::new("enter", RequestSend, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("tab", AcceptMention, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
+            KeyBinding::new("escape", DismissMention, Some(NATIVE_COMPOSER_KEY_CONTEXT)),
             KeyBinding::new(
                 "shift-enter",
                 InsertNewline,
@@ -322,7 +413,8 @@ impl NativeComposer {
         let target = if !extend && !self.selection.is_empty() {
             self.selection.start
         } else {
-            previous_character_boundary(self.state.draft(), self.cursor_offset())
+            let target = previous_character_boundary(self.state.draft(), self.cursor_offset());
+            self.caret_target_over_mentions(target, false)
         };
         if extend {
             self.select_to(target);
@@ -339,7 +431,8 @@ impl NativeComposer {
         let target = if !extend && !self.selection.is_empty() {
             self.selection.end
         } else {
-            next_character_boundary(self.state.draft(), self.cursor_offset())
+            let target = next_character_boundary(self.state.draft(), self.cursor_offset());
+            self.caret_target_over_mentions(target, true)
         };
         if extend {
             self.select_to(target);
@@ -352,12 +445,33 @@ impl NativeComposer {
         }
     }
 
-    pub(super) fn delete_backward(
-        &mut self,
-        _: &Backspace,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Moves the caret one word left or right from the selection's head
+    /// (Chrome's `ctrl`+arrow), or with `extend` moves only the head.
+    pub(super) fn move_word(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        if self.state.is_disabled() {
+            return;
+        }
+        let draft = self.state.draft();
+        let cursor = self.cursor_offset();
+        let target = if forward {
+            next_word_position(draft, cursor, WordBehavior::platform())
+        } else {
+            previous_word_position(draft, cursor)
+        };
+        if extend {
+            self.select_to(target);
+            self.marked_range = None;
+            self.clear_vertical_goal();
+            self.selection_dragging = false;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
+    }
+
+    /// Deletes the marked text or the selection, else one character (or,
+    /// with `word`, up to the next word stop) before or after the caret.
+    fn delete_toward(&mut self, forward: bool, word: bool, cx: &mut Context<Self>) {
         if self.state.is_disabled() {
             return;
         }
@@ -366,33 +480,90 @@ impl NativeComposer {
             .clone()
             .filter(|range| !range.is_empty())
             .or_else(|| (!self.selection.is_empty()).then_some(self.selection.clone()))
+            .or_else(|| self.mention_deletion_range(forward))
             .or_else(|| {
+                let draft = self.state.draft();
                 let cursor = self.cursor_offset();
-                (cursor > 0)
-                    .then(|| previous_character_boundary(self.state.draft(), cursor)..cursor)
+                let range = match (forward, word) {
+                    (true, false) => cursor..next_character_boundary(draft, cursor),
+                    (true, true) => {
+                        cursor..next_word_position(draft, cursor, WordBehavior::platform())
+                    }
+                    (false, false) => previous_character_boundary(draft, cursor)..cursor,
+                    (false, true) => previous_word_position(draft, cursor)..cursor,
+                };
+                (!range.is_empty()).then_some(range)
             });
         if let Some(range) = range {
             self.replace_range(range, "", None, cx);
         }
     }
 
+    pub(super) fn delete_backward(
+        &mut self,
+        _: &Backspace,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(false, false, cx);
+    }
+
     pub(super) fn delete_forward(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        if self.state.is_disabled() {
-            return;
-        }
-        let range = self
-            .marked_range
-            .clone()
-            .filter(|range| !range.is_empty())
-            .or_else(|| (!self.selection.is_empty()).then_some(self.selection.clone()))
-            .or_else(|| {
-                let cursor = self.cursor_offset();
-                (cursor < self.state.draft().len())
-                    .then(|| cursor..next_character_boundary(self.state.draft(), cursor))
-            });
-        if let Some(range) = range {
-            self.replace_range(range, "", None, cx);
-        }
+        self.delete_toward(true, false, cx);
+    }
+
+    pub(super) fn delete_word_backward(
+        &mut self,
+        _: &BackspaceWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(false, true, cx);
+    }
+
+    pub(super) fn delete_word_forward(
+        &mut self,
+        _: &DeleteWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(true, true, cx);
+    }
+
+    pub(super) fn word_left_action(
+        &mut self,
+        _: &WordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(false, false, cx);
+    }
+
+    pub(super) fn word_right_action(
+        &mut self,
+        _: &WordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(true, false, cx);
+    }
+
+    pub(super) fn select_word_left_action(
+        &mut self,
+        _: &SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(false, true, cx);
+    }
+
+    pub(super) fn select_word_right_action(
+        &mut self,
+        _: &SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(true, true, cx);
     }
 
     pub(super) fn move_left_action(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -459,6 +630,9 @@ impl NativeComposer {
     }
 
     pub(super) fn move_up_action(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.move_mention_highlight(-1, cx) {
+            return;
+        }
         self.move_vertical(-1, window, false, cx);
     }
 
@@ -468,6 +642,9 @@ impl NativeComposer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.move_mention_highlight(1, cx) {
+            return;
+        }
         self.move_vertical(1, window, false, cx);
     }
 
@@ -750,9 +927,9 @@ impl NativeComposer {
         } else if point.y >= layout_bounds.bottom() {
             self.state.draft().len()
         } else {
-            match layout.index_for_position(point) {
-                Ok(index) | Err(index) => index,
-            }
+            // The nearest character boundary, not the glyph under the
+            // pointer, so clicking a letter's right half lands after it.
+            caret_index_for_position(layout, point)
         };
         (index <= self.state.draft().len())
             .then(|| previous_char_boundary(self.state.draft(), index))
@@ -793,9 +970,9 @@ impl NativeComposer {
         } else if point.y >= layout_bounds.bottom() {
             self.state.draft().len()
         } else {
-            match layout.index_for_position(point) {
-                Ok(index) | Err(index) => index,
-            }
+            // The nearest character boundary, not the glyph under the
+            // pointer, so clicking a letter's right half lands after it.
+            caret_index_for_position(layout, point)
         };
         (index <= self.state.draft().len())
             .then(|| previous_char_boundary(self.state.draft(), index))

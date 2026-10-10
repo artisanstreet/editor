@@ -345,6 +345,65 @@ impl HomeProjectPickerView {
             .into_any_element()
     }
 
+    /// Renders the trigger as a ghost select for the composer's tab: folder
+    /// glyph, project name, and selector chevrons. It never gains a fill;
+    /// it brightens from muted to foreground on hover and while open. It
+    /// shares the inline trigger's menu, focus, and bounds, so mount one or
+    /// the other, never both.
+    pub fn render_ghost_trigger(
+        &self,
+        label: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let viewport = window.viewport_size();
+        let menu = self.render_menu(viewport, cx);
+        let disabled = self.state.is_disabled();
+        self.trigger_focus.clone().tab_stop(!disabled);
+        let theme = self.theme;
+        let open = self.state.is_open();
+
+        div()
+            .id("home-project-trigger-root")
+            .tab_group()
+            .on_mouse_down_out(cx.listener(Self::handle_outside_press))
+            .debug_selector(|| HOME_TRIGGER_SELECTOR.to_string())
+            .relative()
+            .child(self.render_trigger_probe())
+            .children(menu.map(deferred))
+            .child(
+                div()
+                    .id("home-project-trigger")
+                    .track_focus(&self.trigger_focus)
+                    .on_key_down(cx.listener(Self::disarm_stale_release_fence))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(10.0))
+                    .text_size(px(13.0))
+                    // Muted at rest; the whole face brightens on hover and
+                    // while the menu is open instead of gaining a fill.
+                    .text_color(if open { theme.foreground } else { theme.secondary })
+                    .when(!disabled, |face| {
+                        face.cursor_pointer()
+                            .hover(move |style| style.text_color(theme.foreground))
+                            .on_click(cx.listener(Self::handle_trigger_click))
+                    })
+                    .when(disabled, |face| face.opacity(0.5))
+                    .child(asset_glyph(AssetId::TABLER_FOLDER).size(px(15.0)))
+                    .child(
+                        div()
+                            .truncate()
+                            .max_w(px(240.0))
+                            .child(SharedString::from(label.to_owned())),
+                    )
+                    .child(asset_glyph(AssetId::TABLER_SELECTOR).size(px(14.0))),
+            )
+            .into_any_element()
+    }
+
     fn render_trigger_probe(&self) -> AnyElement {
         let probe_bounds = Rc::clone(&self.trigger_bounds);
         let probe_reveal = Rc::clone(&self.initial_reveal_flat);

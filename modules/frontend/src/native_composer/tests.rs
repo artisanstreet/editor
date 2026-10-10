@@ -4,7 +4,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 
 use super::native_composer_attachments::ComposerAttachment;
 use super::{
@@ -21,6 +21,7 @@ use crate::native_composer_visuals::composer_placeholder_phrase;
 use artisan_domain::{AuthoredText, ImageAttachment, QueueMessagePayload};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
 use artisan_ui::motion::MotionPolicy;
+use artisan_ui::text_navigation::WordBehavior;
 use artisan_ui::theme::{ArtisanTheme, ThemeMode};
 use base64::Engine as _;
 use gpui::{
@@ -448,6 +449,134 @@ fn multiline_key_bindings_drive_navigation_and_selection(cx: &mut TestAppContext
 
     cx.simulate_keystrokes("ctrl-end");
     cx.update(|_, app| assert_eq!(view.read(app).selection, 7..7));
+}
+
+/// Whether word movement skips the spaces after a word (Windows and WSL).
+fn skips_spaces() -> bool {
+    WordBehavior::platform() == WordBehavior::SkipSpaces
+}
+
+fn selection(cx: &mut VisualTestContext, view: &Entity<NativeComposer>) -> (Range<usize>, bool) {
+    cx.update(|_, app| {
+        let composer = view.read(app);
+        (composer.selection.clone(), composer.selection_reversed)
+    })
+}
+
+#[gpui::test]
+fn ctrl_arrows_move_and_extend_by_word_from_the_head(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+    set_draft(cx, &view, "hello world foo");
+    bind_actions(cx);
+    focus_editor(cx, &view);
+
+    cx.simulate_keystrokes("ctrl-home ctrl-right");
+    let first_stop = if skips_spaces() { 6 } else { 5 };
+    assert_eq!(selection(cx, &view), (first_stop..first_stop, false));
+    cx.simulate_keystrokes("ctrl-end ctrl-left alt-left");
+    assert_eq!(selection(cx, &view), (6..6, false));
+
+    // A word move starts from the head of a selection and collapses it.
+    cx.simulate_keystrokes("ctrl-end shift-left shift-left ctrl-left");
+    assert_eq!(selection(cx, &view), (12..12, false));
+
+    // Extension moves the head by words and keeps the anchor.
+    cx.simulate_keystrokes("ctrl-end ctrl-shift-left ctrl-shift-left");
+    assert_eq!(selection(cx, &view), (6..15, true));
+    cx.simulate_keystrokes("alt-shift-right");
+    let stop = if skips_spaces() { 12 } else { 11 };
+    assert_eq!(selection(cx, &view), (stop..15, true));
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), "hello world foo"));
+}
+
+#[gpui::test]
+fn ctrl_backspace_and_delete_remove_words_through_the_edit_path(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+    set_draft(cx, &view, "hello world foo");
+    bind_actions(cx);
+    focus_editor(cx, &view);
+
+    cx.simulate_keystrokes("ctrl-end ctrl-backspace");
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), "hello world "));
+    cx.simulate_keystrokes("ctrl-z");
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), "hello world foo"));
+
+    cx.simulate_keystrokes("ctrl-home ctrl-delete");
+    let expected = if skips_spaces() {
+        "world foo"
+    } else {
+        " world foo"
+    };
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), expected));
+
+    // A selection is deleted whole rather than extended by a word.
+    cx.simulate_keystrokes("ctrl-end shift-left alt-backspace");
+    let trimmed = &expected[..expected.len() - 1];
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), trimmed));
+
+    cx.update(|_, app| {
+        view.update(app, |composer, composer_cx| {
+            composer.set_disabled(true, composer_cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-end ctrl-backspace ctrl-home ctrl-delete");
+    cx.update(|_, app| assert_eq!(view.read(app).draft(), trimmed));
+}
+
+/// The window point `fraction` of the way across the character at
+/// `index`, vertically centred on its row.
+fn point_in_character(
+    cx: &mut VisualTestContext,
+    view: &Entity<NativeComposer>,
+    index: usize,
+    fraction: f32,
+) -> gpui::Point<gpui::Pixels> {
+    cx.update(|_, app| {
+        let layout = view.read(app).layout.clone().expect("painted layout");
+        let start = layout.position_for_index(index).expect("start position");
+        let end = layout.position_for_index(index + 1).expect("end position");
+        point(
+            start.x + (end.x - start.x) * fraction,
+            start.y + layout.line_height() / 2.0,
+        )
+    })
+}
+
+#[gpui::test]
+fn clicks_place_the_nearest_caret_and_select_by_word_and_paragraph(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| NativeComposer::new(cx));
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    set_draft(cx, &view, "hello world foo\nnext");
+    focus_editor(cx, &view);
+
+    let right_half = point_in_character(cx, &view, 1, 0.75);
+    let in_world = point_in_character(cx, &view, 7, 0.25);
+    let in_foo = point_in_character(cx, &view, 13, 0.25);
+    let in_hello = point_in_character(cx, &view, 2, 0.25);
+    let word_end = if skips_spaces() { 12 } else { 11 };
+    cx.update(|_, app| {
+        view.update(app, |composer, composer_cx| {
+            // The right half of "e" places the caret after it.
+            composer.begin_selection_drag(right_half, false, 1, composer_cx);
+            assert_eq!(composer.selection, 2..2);
+            composer.end_selection_drag();
+
+            composer.begin_selection_drag(in_world, false, 2, composer_cx);
+            assert_eq!(composer.selection, 6..word_end);
+            composer.update_selection_drag(in_foo, composer_cx);
+            assert_eq!(composer.selection, 6..15);
+            assert!(!composer.selection_reversed);
+            composer.update_selection_drag(in_hello, composer_cx);
+            assert_eq!(composer.selection, 0..word_end);
+            assert!(composer.selection_reversed);
+            composer.end_selection_drag();
+
+            composer.begin_selection_drag(in_world, false, 3, composer_cx);
+            assert_eq!(composer.selection, 0..16);
+            composer.end_selection_drag();
+        });
+    });
 }
 
 #[test]

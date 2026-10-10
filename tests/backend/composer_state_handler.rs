@@ -124,6 +124,17 @@ async fn seed_message(
     payload: QueueMessagePayload,
 ) -> (ThreadId, MessageId, RequestId) {
     let thread_id = seed_thread(repository, label).await;
+    // A thread accepts messages only once it has an engine to run them.
+    repository
+        .set_thread_engine_config(SetThreadEngineConfigInput {
+            request_id: request(&format!("engine-{label}")),
+            thread_id: thread_id.clone(),
+            precondition: EngineConfigUpdatePrecondition::Unconfigured,
+            config: engine_config(label),
+            accepted_at: UnixMillis::from_millis(250),
+        })
+        .await
+        .expect("engine settings should persist");
     let message_id = message(&format!("message-{label}"));
     let original_request_id = request(&format!("queue-{label}"));
     repository

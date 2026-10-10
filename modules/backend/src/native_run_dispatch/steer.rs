@@ -435,8 +435,25 @@ pub(super) async fn handle_steer(
     // drain below compiles and later steers keep their sender. Pinned
     // once inside `drive_steer_ack`: polling by value across iterations
     // would move it after the first poll.
+    // The engine's copy names mentioned skills in its own terms; the steered
+    // row keeps the user's text.
+    let project = context
+        .repository
+        .read_thread_project(&thread_id)
+        .await
+        .ok();
+    let known_skills = context.config.engine_inventory().known_skills(
+        state.engine.as_str(),
+        project.as_ref().map(artisan_domain::ProjectId::as_str),
+    );
+    let engine_text =
+        crate::prompt_mentions::directed_text(state.engine, text.as_str(), &known_skills);
     let outcome = {
-        let pending = turn.steer_message(request_id.as_str(), text.as_str(), images);
+        let pending = turn.steer_message(
+            request_id.as_str(),
+            engine_text.as_deref().unwrap_or(text.as_str()),
+            images,
+        );
         drive_steer_ack(context, state, turn, pending).await
     };
     match outcome {

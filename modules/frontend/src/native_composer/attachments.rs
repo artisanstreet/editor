@@ -277,9 +277,15 @@ impl NativeComposer {
             authored |= stored.is_none();
             match outcome.result {
                 Ok(prepared) => {
-                    if self.attachment_is_duplicate(index, &prepared) {
+                    if let Some(existing) = self.duplicate_attachment_id(index, &prepared) {
+                        // The image is already in the tray: shake that tile
+                        // instead of attaching it twice.
                         self.attachments.remove(index);
-                        self.attachment_error = Some("That image is already attached.".into());
+                        let generation = self
+                            .attachment_shake
+                            .as_ref()
+                            .map_or(0, |(_, generation)| generation.wrapping_add(1));
+                        self.attachment_shake = Some((existing, generation));
                         continue;
                     }
                     let other_total = self
@@ -326,12 +332,17 @@ impl NativeComposer {
         self.prune_attachment_tasks();
     }
 
-    fn attachment_is_duplicate(&self, index: usize, prepared: &PreparedComposerAttachment) -> bool {
+    /// The ready attachment that already carries `prepared`'s image, if any.
+    fn duplicate_attachment_id(
+        &self,
+        index: usize,
+        prepared: &PreparedComposerAttachment,
+    ) -> Option<String> {
         self.attachments
             .iter()
             .enumerate()
             .filter(|(other_index, _)| *other_index != index)
-            .any(|(_, attachment)| {
+            .find(|(_, attachment)| {
                 (attachment.is_ready()
                     && attachment.source_digest == prepared.source_digest
                     && attachment.source_size_bytes == prepared.source_size_bytes)
@@ -339,6 +350,7 @@ impl NativeComposer {
                         && attachment.encoded_digest == prepared.encoded_digest
                         && attachment.size_bytes == prepared.size_bytes)
             })
+            .map(|(_, attachment)| attachment.id.clone())
     }
 
     pub(super) fn remove_attachment(&mut self, attachment_id: &str, cx: &mut Context<Self>) {

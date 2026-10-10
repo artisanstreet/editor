@@ -428,9 +428,6 @@ impl NativeComposer {
                         .unwrap_or_else(|| "Question".to_owned()),
                 ),
             );
-        if count > 1 {
-            header = header.child(format!("{} of {count}", self.questionnaire.step + 1));
-        }
         let dismiss_entity = entity.clone();
         header = header.child(
             div()

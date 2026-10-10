@@ -338,8 +338,9 @@ same way Settings does.
 - **Updates**: first-party updates with the app; third-party track `latest` with an update badge,
   or pin. A version change that alters permissions goes back through review.
 - **Sources**: list, add a git marketplace or local folder, refresh, disable.
-- **In threads**: the composer's slash menu lists installed skills; a run's MCP calls show which
-  installation served them (from gateway logs).
+- **In threads**: `/`, `$`, and `@` open one composer menu of skills and connectors
+  (see Composer mentions); a run's MCP calls show which installation served them (from gateway
+  logs).
 
 ## Delivery phases
 
@@ -444,6 +445,31 @@ Deviations from the design above, by decision while building:
   stays in phase 2.
 - On Windows without Developer Mode the Marketplace shows the banner and opens Developer
   settings; the elevated "Enable for me" helper is not built yet.
+
+### Composer mentions (2026-10-07)
+
+The composer names skills, connectors, and commands inline, and the engines report what they
+can use:
+
+- `/`, `$`, and `@` at the start of a word open the same menu of skills and connectors; `@`
+  puts connectors first, otherwise skills lead. Each section shows under its own header with a
+  separator, the list scrolls, and the text after the sigil filters all of it. There are no
+  command rows: model, reasoning, access, and navigation already have their own controls, and
+  the Editor is not a terminal UI. The menu opens and closes with the transitions-dev dropdown
+  motion (250 ms from 97% scale, 150 ms to 99%, smooth-out), growing up out of the composer.
+- A mention is plain text in the draft (`$skill`, `@connector`, `/goal`), recognised against the
+  catalog, so drafts, the queue, and the Forge store exactly what was typed. The editor paints a
+  mention in its kind's colour (`mention_skill` purple-pink, `mention_connector` blue,
+  `mention_command` amber) with a glyph over its sigil, deletes it whole, and steps the caret
+  over it; sent messages show the same colours in the transcript.
+- Engines report their inventory as runs start: Claude from `system/init` (skills, plugins, MCP
+  servers with status; descriptions from each `SKILL.md`), Codex from `skills/list` before
+  `turn/start` and from `mcpServer/startupStatus/updated`, now subscribed. The Forge keeps the
+  last report per engine and project (`backend::engine_inventory`, cached in
+  `extensions/engine-inventory.json`) and serves it as `ExtensionCatalog.inventories`.
+- Codex reads `$skill` itself. For Claude, Grok, and OpenCode2 the Forge appends one line naming
+  the mentioned skills to the engine's copy of the message (`backend::prompt_mentions`); the
+  stored message keeps the user's text.
 
 Not started: the MCP gateway and secrets (phase 3), catalog sources and Discover (phase 4),
 subagents, hooks, instruction packages, and project scope (phase 5).

@@ -23,8 +23,9 @@ use gpui::{
     Div, Element, ElementId, ElementInputHandler, Entity, EventEmitter, ExternalPaths, FocusHandle,
     Focusable, GlobalElementId, HighlightStyle, ImageFormat, ImageSource, InspectorElementId,
     IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Point, Render, RenderImage, SharedString, Stateful, StyledText,
-    Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, img, point,
+    ObjectFit, Pixels, Point, Render, RenderImage, ScrollHandle, SharedString, Stateful,
+    StyledText, Subscription, Task, UTF16Selection, Window, actions, anchored, deferred, div, img,
+    point,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -45,6 +46,7 @@ use artisan_ui::glass::{
     GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
     glass_highlight_layer, glass_material_layer,
 };
+use artisan_ui::text_navigation::SelectionUnit;
 
 #[path = "native_composer_attachments.rs"]
 mod native_composer_attachments;
@@ -67,6 +69,12 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        BackspaceWord,
+        DeleteWord,
         SelectAll,
         Paste,
         Copy,
@@ -87,9 +95,13 @@ actions!(
         InsertNewline,
         Undo,
         Redo,
+        AcceptMention,
+        DismissMention,
     ]
 );
 
+/// Corner radius of the composer card; frames around it stay concentric.
+pub(crate) const NATIVE_COMPOSER_RADIUS_PX: f32 = 18.0;
 const NATIVE_COMPOSER_KEY_CONTEXT: &str = "artisan-native-composer";
 const NATIVE_COMPOSER_PLACEHOLDER_SELECTOR: &str = "artisan-native-composer-placeholder";
 pub(crate) const NATIVE_COMPOSER_EDITOR_SELECTOR: &str = "artisan-native-composer-editor";
@@ -169,6 +181,9 @@ pub(crate) struct NativeComposer {
     attachment_preview_task: Option<Task<()>>,
     attachment_preview_request: u64,
     attachment_error: Option<String>,
+    /// The attachment a duplicate paste or drop shook, with a generation
+    /// that gives every repeat its own animation identity.
+    attachment_shake: Option<(String, u64)>,
     draft_generation: u64,
     draft_revision: u64,
     selection_revision: u64,
@@ -204,9 +219,17 @@ pub(crate) struct NativeComposer {
     vertical_goal_x: Option<Pixels>,
     vertical_goal_column: Option<usize>,
     selection_dragging: bool,
+    /// The unit the current mouse selection started with and the range its
+    /// click selected; a drag grows the selection by that unit.
+    drag_origin: (SelectionUnit, Range<usize>),
     marked_range: Option<Range<usize>>,
     layout: Option<gpui::TextLayout>,
     painted_bounds: Option<Bounds<Pixels>>,
+    /// Scroll state for the height-capped editor viewport.
+    editor_scroll: ScrollHandle,
+    /// The selection revision whose active end was last scrolled into view,
+    /// so wheel scrolling is never overridden by an unchanged caret.
+    followed_selection_revision: u64,
     /// Presentation-only placeholder reveal state.
     ///
     /// This mirrors `composer-placeholder.ts:21-25` without touching draft
@@ -221,6 +244,44 @@ pub(crate) struct NativeComposer {
     tray_was_open: bool,
     /// Open agent questionnaires and the answer being given.
     questionnaire: questionnaire::QuestionnairePanel,
+    /// What the card's tab shows; `None` paints the bare card.
+    tab: Option<ComposerTab>,
+    /// The thread's goal, grown along the card's top edge beside the tab.
+    goal: goal_strip::GoalStrip,
+    /// What the draft can name with `$`, `@`, and `/`.
+    mentions: crate::composer_mentions::MentionCatalog,
+    /// The menu `/`, `$`, and `@` open.
+    mention_menu: mention_menu::MentionMenu,
+}
+
+/// The content of the composer card's tab.
+#[derive(Clone)]
+pub(crate) enum ComposerTab {
+    /// The project the composer sends into, chosen with the home picker's
+    /// ghost select.
+    Picker {
+        picker: Entity<crate::home_project_picker::HomeProjectPickerView>,
+        label: SharedString,
+    },
+    /// The project an open thread belongs to; a thread never changes
+    /// project, so the tab only names it.
+    Project(SharedString),
+}
+
+impl ComposerTab {
+    fn same_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Picker { picker, label },
+                Self::Picker {
+                    picker: other_picker,
+                    label: other_label,
+                },
+            ) => picker.entity_id() == other_picker.entity_id() && label == other_label,
+            (Self::Project(label), Self::Project(other)) => label == other,
+            _ => false,
+        }
+    }
 }
 
 impl EventEmitter<NativeComposerEvent> for NativeComposer {}
@@ -232,6 +293,30 @@ impl Focusable for NativeComposer {
 }
 
 impl NativeComposer {
+    /// Sets what the card's tab shows, notifying only on a change so a
+    /// per-render caller cannot loop.
+    /// Shows the thread's goal beside the tab, or retracts it.
+    pub(crate) fn set_goal(&mut self, goal: Option<ComposerGoal>, cx: &mut Context<Self>) {
+        if self
+            .goal
+            .set(goal, std::time::Instant::now(), cx.reduce_motion())
+        {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_tab(&mut self, tab: Option<ComposerTab>, cx: &mut Context<Self>) {
+        let unchanged = match (&self.tab, &tab) {
+            (None, None) => true,
+            (Some(current), Some(next)) => current.same_as(next),
+            _ => false,
+        };
+        if !unchanged {
+            self.tab = tab;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         Self {
             state: ComposerState::new(),
@@ -254,6 +339,7 @@ impl NativeComposer {
             attachment_preview_task: None,
             attachment_preview_request: 0,
             attachment_error: None,
+            attachment_shake: None,
             draft_generation: 0,
             draft_revision: 0,
             selection_revision: 0,
@@ -277,14 +363,21 @@ impl NativeComposer {
             vertical_goal_x: None,
             vertical_goal_column: None,
             selection_dragging: false,
+            drag_origin: (SelectionUnit::Character, 0..0),
             marked_range: None,
             layout: None,
             painted_bounds: None,
+            editor_scroll: ScrollHandle::new(),
+            followed_selection_revision: 0,
             placeholder_generation: 0,
             placeholder_was_visible: true,
             tray_entrance_generation: 0,
             tray_was_open: false,
+            tab: None,
+            goal: goal_strip::GoalStrip::default(),
             questionnaire: questionnaire::QuestionnairePanel::default(),
+            mentions: crate::composer_mentions::MentionCatalog::default(),
+            mention_menu: mention_menu::MentionMenu::default(),
         }
     }
 
@@ -1016,6 +1109,10 @@ mod tests;
 #[path = "native_composer/forge_draft_tests.rs"]
 mod forge_draft_tests;
 
+#[cfg(test)]
+#[path = "native_composer/mention_tests.rs"]
+mod mention_tests;
+
 #[path = "native_composer/attachments.rs"]
 mod attachments;
 
@@ -1030,4 +1127,14 @@ mod forge_draft;
 
 #[path = "native_composer/questionnaire.rs"]
 mod questionnaire;
+
+#[path = "native_composer/goal_strip.rs"]
+mod goal_strip;
+
+#[path = "native_composer/mentions.rs"]
+mod mentions;
+
+#[path = "native_composer/mention_menu.rs"]
+mod mention_menu;
+pub(crate) use goal_strip::{ComposerGoal, ComposerGoalState};
 pub(crate) use questionnaire::{ComposerQuestion, ComposerQuestionnaire};

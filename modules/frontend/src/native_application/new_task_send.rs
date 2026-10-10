@@ -116,6 +116,13 @@ impl NativeApplication {
         thread: ThreadId,
         cx: &mut Context<Self>,
     ) {
+        // Sent from the new-thread screen: the opened thread receives its
+        // composer where this screen centred it, and slides it home.
+        if matches!(self.route(), NativeRoute::NewThread { .. })
+            && let Some(lift) = self.new_thread_composer_lift.get()
+        {
+            self.pending_composer_entrance = Some((thread.clone(), lift));
+        }
         match scope {
             ComposerDraftScope::Project(project) => {
                 self.project_navigation.restore_draft = false;
