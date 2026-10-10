@@ -158,6 +158,11 @@ Exactly one `final_message_by_turn` per turn over non-empty assistants:
    Failed/Cancelled turns never promote here — without an independent
    session lifecycle that limitation is stated, not equated away.
 
+Rules 1 and 2 skip every assistant before the turn's latest steer (a user
+message other than its first): the run went on, so a reply the engine marked
+final before it was not the answer, and promoting it would fold the live work
+after the steer out of sight. That reply joins the work instead.
+
 Progress and work ordinals use durable item ordinals + fact ordinals;
 commentary never counts as reply OR work for progress (it is prose-like
 history, matching the reference).
