@@ -533,6 +533,7 @@ dependencies = [
  "bytes",
  "command-group",
  "fs2",
+ "futures",
  "getrandom 0.4.3",
  "http",
  "http-body-util",

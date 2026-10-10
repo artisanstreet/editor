@@ -25,6 +25,7 @@ artisan-transport = { path = "../transport" }
 base64.workspace = true
 bytes.workspace = true
 fs2.workspace = true
+futures.workspace = true
 getrandom.workspace = true
 http.workspace = true
 http-body-util.workspace = true

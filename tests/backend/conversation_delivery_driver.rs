@@ -2964,6 +2964,138 @@ async fn recent_threads_are_pushed_to_a_connection_that_read_them() -> Result<()
     Ok(())
 }
 
+/// A write that waits on the disk does not hold up the connection: while a
+/// draft save is stuck behind another process's write lock for longer than
+/// the request limit, a read on the same connection answers at once, the
+/// save completes when the lock is released, and the connection serves on.
+#[tokio::test]
+async fn a_stalled_write_neither_blocks_reads_nor_ends_the_connection()
+-> Result<(), Box<dyn Error>> {
+    use sea_orm::{ConnectionTrait, TransactionTrait};
+
+    let (temporary, app) = opened_app().await?;
+    let repository = app.repository().clone();
+    let thread_id = seed_project_thread_and_message(&repository).await?;
+    let pki = test_pki();
+    let endpoint = artisan_transport::bind_loopback_client(client_config(&pki))?;
+    let notifier = ConversationCommitNotifier::new();
+    let handler =
+        RequestHandler::new(repository.clone()).with_conversation_commit_notifier(notifier.clone());
+    let listener = ForgeListener::bind(
+        server_config(&pki),
+        LocalCapability::from_bytes(INITIAL_CAPABILITY),
+        Box::new(TestOrigin::new()),
+        listener_limits(),
+        std::num::NonZeroU32::new(1).expect("admission capacity"),
+        std::num::NonZeroU32::new(4).expect("request capacity"),
+    )?;
+    let address = listener.local_addr()?;
+    let cancel = CancelHandle::new();
+    let server = async {
+        let (listener, _report) = listener.serve_one(&handler, &cancel).await?;
+        listener.drain().await?;
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let read_recent = || {
+        ClientRequest::Query(artisan_domain::Query::ReadRecentThreads(
+            artisan_domain::ReadRecentThreads,
+        ))
+    };
+    let client = async {
+        let connection = connect_client(&endpoint, address).await?;
+        let (mut control_send, mut control_recv) = connection.open_bi().await?;
+        let _welcome = artisan_transport::client_handshake(
+            &mut control_send,
+            &mut control_recv,
+            hello_envelope(),
+        )
+        .await?;
+
+        // Another process holds the database's write lock, as a commit the
+        // kernel keeps for tens of seconds does.
+        let blocker = artisan_database::connect(
+            SqliteConfig::file(&temporary.path).sqlx_logging(false),
+        )
+        .await?;
+        let stall = blocker.begin().await?;
+        stall
+            .execute_unprepared("CREATE TABLE stalled_write_probe (value INTEGER)")
+            .await?;
+        let stalled_at = std::time::Instant::now();
+
+        let save = artisan_domain::SaveComposerDraft::new(
+            RequestId::parse("stalled-draft-save")?,
+            artisan_domain::ComposerDraftScope::Thread(thread_id.clone()),
+            artisan_domain::AuthoredText::parse("written behind a slow disk")?,
+            Vec::new(),
+        )?;
+        let save = request_once(
+            &connection,
+            "stalled-draft-save",
+            ClientRequest::Command(artisan_domain::Command::SaveComposerDraft(save)),
+        );
+        tokio::pin!(save);
+        let read = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let started = std::time::Instant::now();
+            let read = request_once(&connection, "read-beside-stall", read_recent()).await;
+            (read, started.elapsed())
+        };
+        tokio::select! {
+            biased;
+            saved = &mut save => {
+                return Err(format!("the save finished during the stall: {saved:?}").into());
+            }
+            (read, took) = read => {
+                let ResponsePayload::RecentThreads(_) = read? else {
+                    return Err("expected the recent threads".into());
+                };
+                assert!(
+                    took < Duration::from_secs(1),
+                    "the read waited {took:?} behind the stalled write"
+                );
+            }
+        }
+
+        // Released only after the request limit passed: the save was never
+        // failed for waiting on the disk.
+        let limit = listener_limits().next_request;
+        tokio::time::sleep((limit + Duration::from_millis(500)).saturating_sub(stalled_at.elapsed()))
+            .await;
+        stall.rollback().await?;
+        let ResponsePayload::ComposerDraftSaved(_) = save.await? else {
+            return Err("expected the draft save to complete".into());
+        };
+        assert!(stalled_at.elapsed() > limit);
+
+        let ResponsePayload::RecentThreads(_) =
+            request_once(&connection, "read-after-stall", read_recent()).await?
+        else {
+            return Err("expected the connection to serve on".into());
+        };
+        assert!(connection.close_reason().is_none());
+        blocker.close().await?;
+        cancel.cancel();
+        drop(control_send);
+        drop(control_recv);
+        Ok::<(), Box<dyn Error>>(())
+    };
+    let (server_result, client_result) = tokio::join!(server, client);
+    server_result?;
+    client_result?;
+    artisan_transport::shutdown(
+        &endpoint,
+        quinn::VarInt::from_u32(0),
+        b"stalled write test complete",
+        TEST_DEADLINE,
+    )
+    .await?;
+    drop(endpoint);
+    drop(handler);
+    app.shutdown().await?;
+    Ok(())
+}
+
 /// A connection that listed the projects receives the catalog again when
 /// another client attaches one, and nothing when it did not change.
 #[tokio::test]
