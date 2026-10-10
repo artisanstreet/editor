@@ -55,7 +55,7 @@ impl Repository {
         stored_at: UnixMillis,
     ) -> UploadResult<ComposerAttachmentChunkOutcome> {
         let transaction = self
-            .begin_write()
+            .begin_write("store_composer_attachment_chunk")
             .await
             .map_err(|source| database_error("begin composer attachment chunk", source))?;
         let applied = apply_chunk(&transaction, chunk, stored_at).await;

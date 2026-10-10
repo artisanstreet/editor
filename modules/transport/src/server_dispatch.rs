@@ -161,6 +161,26 @@ where
     F: FnOnce(IncomingRequest) -> Fut,
     Fut: Future<Output = Result<(WireEnvelope, R), E>>,
 {
+    let incoming = receive_server_request(receive).await?;
+    let request_id = incoming.request_id.clone();
+    let (reply, receipt) = handle(incoming).await.map_err(ServerDispatchError::Local)?;
+    send_server_reply(send, &reply, &request_id).await?;
+    Ok(receipt)
+}
+
+/// Reads the one request of an accepted stream: the first half of
+/// [`dispatch_server_request_with_receipt`], for callers that bound reading,
+/// answering, and replying separately.
+///
+/// # Errors
+///
+/// Returns [`ServerDispatchError::Receive`] for bounded receive failures,
+/// [`ServerDispatchError::UnexpectedMessage`] when the first valid envelope
+/// is not a request, and [`ServerDispatchError::Correlation`] if the frame
+/// identity cannot be reused as a correlation id.
+pub async fn receive_server_request<E>(
+    receive: &mut RecvStream,
+) -> Result<IncomingRequest, ServerDispatchError<E>> {
     let WireEnvelope {
         protocol_version,
         frame_id,
@@ -175,19 +195,35 @@ where
     let request_id = frame_id
         .to_request_id()
         .map_err(|source| ServerDispatchError::Correlation { source })?;
-    let incoming = IncomingRequest {
+    Ok(IncomingRequest {
         protocol_version,
         frame_id,
         sent_at,
-        request_id: request_id.clone(),
+        request_id,
         request,
-    };
+    })
+}
 
-    let (reply, receipt) = handle(incoming).await.map_err(ServerDispatchError::Local)?;
-    validate_reply(&reply.body, &request_id)?;
-    send_envelope(send, &reply).await?;
+/// Validates one reply against the request it settles, writes it, and
+/// finishes the server send side: the second half of
+/// [`dispatch_server_request_with_receipt`]. Nothing is written when the
+/// reply is not a correlated response or protocol failure for `request_id`.
+///
+/// # Errors
+///
+/// Returns [`ServerDispatchError::Reply`] when the reply is the wrong family,
+/// uncorrelated, or settles a different request, [`ServerDispatchError::Send`]
+/// when it cannot be encoded or written, and [`ServerDispatchError::Finish`]
+/// when the send side cannot be finished after it.
+pub async fn send_server_reply<E>(
+    send: &mut SendStream,
+    reply: &WireEnvelope,
+    request_id: &RequestId,
+) -> Result<(), ServerDispatchError<E>> {
+    validate_reply(&reply.body, request_id)?;
+    send_envelope(send, reply).await?;
     send.finish()?;
-    Ok(receipt)
+    Ok(())
 }
 
 /// Dispatches exactly one server-side request over one accepted stream pair.

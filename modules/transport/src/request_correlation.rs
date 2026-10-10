@@ -274,6 +274,19 @@ impl RequestCorrelationRegistry {
         }
     }
 
+    /// Gives up one pending request whose reply will never be read (its
+    /// stream was abandoned), freeing its pending slot. The identity stays
+    /// retired, exactly as after a completion, so it can never be admitted
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestCorrelationError::Unknown`] when `request_id` is not
+    /// pending; the registry is then unchanged.
+    pub fn abandon(&mut self, request_id: &RequestId) -> Result<(), RequestCorrelationError> {
+        self.complete(request_id)
+    }
+
     /// Removes exactly one pending request id, leaving the registry
     /// unchanged when it is not pending.
     ///

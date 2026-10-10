@@ -71,7 +71,7 @@ impl Repository {
         }
         let encoded_owner = owner.to_storage();
         let transaction = self
-            .begin_write()
+            .begin_write("renew_message_dispatch_lease")
             .await
             .map_err(|source| database_error("begin message-dispatch lease renewal", source))?;
         let statement = Statement::from_sql_and_values(

@@ -37,7 +37,7 @@ use super::{
 const PUSH_LIMIT: Duration = Duration::from_secs(2);
 
 /// Failure-only watchdog for every other wait.
-const WATCHDOG: Duration = Duration::from_secs(20);
+pub(super) const WATCHDOG: Duration = Duration::from_secs(20);
 
 /// Enough pushed batches to exceed the Editor's delivery channel and the
 /// stream's receive window many times over.
@@ -46,7 +46,7 @@ const PUSHED_BATCHES: u64 = 200;
 /// Patches per batch; each carries a full text fragment.
 const PATCHES_PER_BATCH: u64 = 5;
 
-fn identity() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
+pub(super) fn identity() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
     let key = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("identity");
     (
         key.cert.der().clone(),
@@ -54,7 +54,7 @@ fn identity() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
     )
 }
 
-fn thread() -> ThreadId {
+pub(super) fn thread() -> ThreadId {
     ThreadId::parse("push-stall-thread").expect("thread")
 }
 
@@ -83,7 +83,7 @@ fn pushed_batch(index: u64) -> PatchBatch {
     .expect("batch")
 }
 
-fn server_frame(name: String, body: WireEnvelopeBody) -> WireEnvelope {
+pub(super) fn server_frame(name: String, body: WireEnvelopeBody) -> WireEnvelope {
     WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse(name).expect("frame"),
@@ -108,30 +108,8 @@ async fn serve(
     connection: quinn::Connection,
     delivery: &mut Option<quinn::SendStream>,
 ) -> ForgeOutcome {
-    let welcome = || {
-        server_frame(
-            "forge-welcome".into(),
-            WireEnvelopeBody::Welcome(Welcome {
-                negotiated_version: ProtocolVersion::V1,
-                connection_id: ConnectionId::parse("push-stall").expect("connection"),
-                reconnect_capability: ReconnectCapability::from_bytes([3; 32]),
-                lifecycle_control_supported: false,
-            }),
-        )
-    };
     let step = async {
-        let (mut send, mut receive) = connection.accept_bi().await.map_err(|e| e.to_string())?;
-        let hello = artisan_transport::receive_client_hello(&mut receive)
-            .await
-            .map_err(|e| e.to_string())?;
-        artisan_transport::send_server_welcome(
-            &mut send,
-            &welcome(),
-            &hello.hello.supported_versions,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        send.finish().map_err(|e| e.to_string())?;
+        welcome_editor(&connection).await?;
         answer_one(&connection, "first").await?;
         Ok::<_, String>(())
     };
@@ -172,12 +150,42 @@ async fn serve(
     }
 }
 
+/// Answers the Editor's Hello on its first stream.
+pub(super) async fn welcome_editor(connection: &quinn::Connection) -> Result<(), String> {
+    let welcome = server_frame(
+        "forge-welcome".into(),
+        WireEnvelopeBody::Welcome(Welcome {
+            negotiated_version: ProtocolVersion::V1,
+            connection_id: ConnectionId::parse("push-stall").expect("connection"),
+            reconnect_capability: ReconnectCapability::from_bytes([3; 32]),
+            lifecycle_control_supported: false,
+        }),
+    );
+    let (mut send, mut receive) = connection.accept_bi().await.map_err(|e| e.to_string())?;
+    let hello = artisan_transport::receive_client_hello(&mut receive)
+        .await
+        .map_err(|e| e.to_string())?;
+    artisan_transport::send_server_welcome(&mut send, &welcome, &hello.hello.supported_versions)
+        .await
+        .map_err(|e| e.to_string())?;
+    send.finish().map_err(|e| e.to_string())
+}
+
 /// Accepts one request and answers it with a correlated failure.
 async fn answer_one(connection: &quinn::Connection, name: &str) -> Result<(), String> {
-    let (mut send, mut receive) = connection.accept_bi().await.map_err(|e| e.to_string())?;
+    let (send, mut receive) = connection.accept_bi().await.map_err(|e| e.to_string())?;
     let request = artisan_transport::receive_envelope(&mut receive)
         .await
         .map_err(|e| e.to_string())?;
+    refuse(send, &request, name).await
+}
+
+/// Answers one received request with a correlated failure.
+pub(super) async fn refuse(
+    mut send: quinn::SendStream,
+    request: &WireEnvelope,
+    name: &str,
+) -> Result<(), String> {
     let request_id = request
         .frame_id
         .to_request_id()
@@ -236,7 +244,7 @@ fn start_forge(
     (address, outcome_rx, thread)
 }
 
-fn hello() -> WireEnvelope {
+pub(super) fn hello() -> WireEnvelope {
     WireEnvelope {
         protocol_version: ProtocolVersion::V1,
         frame_id: FrameId::parse("editor-hello").expect("frame"),
@@ -251,7 +259,7 @@ fn hello() -> WireEnvelope {
 
 /// Connects a real session and starts its delivery task, as the service
 /// does after startup.
-async fn connected_runtime(
+pub(super) async fn connected_runtime(
     address: SocketAddr,
     certificate: CertificateDer<'static>,
     events: std::sync::mpsc::SyncSender<NativeTransportEvent>,

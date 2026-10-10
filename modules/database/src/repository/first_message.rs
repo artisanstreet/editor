@@ -93,7 +93,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("queue_first_message")
             .await
             .map_err(|source| database_error("begin first-message transaction", source))?;
         let inserted_message = insert_first_message(&transaction, &input).await?;

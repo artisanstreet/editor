@@ -52,7 +52,7 @@ use artisan_protocol::{
 use artisan_transport::{
     CancelHandle, ClientRequestError, ClientSession, ClientSessionError, ClientSessionLimits,
     DeadlineError, DeliveryReceiver, EnvelopeReceiveError, EnvelopeSendError, ExchangeError,
-    FrameError, LoopbackTarget, PinnedIdentity, RequestOutcome,
+    FrameError, LoopbackTarget, PinnedIdentity, RequestOutcome, ResolvedRequest,
 };
 use rustls_pki_types::CertificateDer;
 use sha2::{Digest as _, Sha256};
@@ -821,6 +821,10 @@ use service_lifecycle::{CustodyStep, cleanup_plan};
 #[path = "native_transport_service/request_delivery.rs"]
 mod request_delivery;
 
+#[path = "native_transport_service/mutation_lane.rs"]
+mod mutation_lane;
+use mutation_lane::{LaneJob, LaneRequests, MutationLane};
+
 pub use request_delivery::delivery_task_loop;
 #[cfg(test)]
 use request_delivery::session_needs_reconnect;
@@ -858,7 +862,7 @@ use handlers::{
     durable_save_request, known_thread_for_queue, list_registered_profiles, load_initial_catalog,
     load_thread_engine_settings, query_project_repository, read_conversation_history,
     read_message_image, request_snapshot, resolve_rich_link, select_project,
-    set_thread_engine_config, submit_composer_draft,
+    set_thread_engine_config,
 };
 
 #[cfg(test)]
@@ -872,6 +876,10 @@ mod command_loop_tests;
 #[cfg(test)]
 #[path = "native_transport_service/push_stall_tests.rs"]
 mod push_stall_tests;
+
+#[cfg(test)]
+#[path = "native_transport_service/mutation_lane_tests.rs"]
+mod mutation_lane_tests;
 
 #[cfg(feature = "flight-recorder")]
 #[path = "native_transport_service/flight_recorder.rs"]

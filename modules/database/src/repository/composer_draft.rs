@@ -160,7 +160,7 @@ impl Repository {
         input: SaveComposerDraftInput,
     ) -> DraftResult<ComposerDraftSaveOutcome> {
         let transaction = self
-            .begin_write()
+            .begin_write("save_composer_draft")
             .await
             .map_err(|source| database_error("begin composer-draft save", source))?;
         match apply_save(&transaction, &input).await {
@@ -196,7 +196,7 @@ impl Repository {
         let digest = ComposerAttachmentDigest::new(Sha256::digest(image.bytes()).into());
         let size_bytes = u32::try_from(image.byte_len())
             .map_err(|_| corrupt_data("composer_attachments", "size_bytes", "image too large"))?;
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("store_composer_attachment").await;
         self.database
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,

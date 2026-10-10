@@ -195,7 +195,7 @@ impl Repository {
     pub async fn fail_run(&self, command: FailRun<'_>) -> Result<FailRunOutcome, FailRunError> {
         validate_fail(&command)?;
         let transaction = self
-            .begin_write()
+            .begin_write("fail_run")
             .await
             .map_err(|source| FailRunError::Repository(database_error("begin fail run", source)))?;
         match execute_fail(&transaction, &command).await {

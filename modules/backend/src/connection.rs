@@ -3,9 +3,12 @@
 //! This component composes boundaries the Forge process already owns — the
 //! single-use [`CredentialAuthority`], the public [`RequestHandler`] seam,
 //! and the established transport handshake and single-request dispatcher —
-//! into one admitted QUIC connection driven strictly sequentially. It owns
-//! no listener, endpoint, database, correlation registry, scheduler, task
-//! pool, or callback store: the caller continues to own Forge storage, the
+//! into one admitted QUIC connection. Each request arrives on its own
+//! stream, and the configured delivery path answers them beside each other
+//! within the connection's one task (see [`request_lanes`] for the lanes
+//! that keep subscription and lifecycle ordering). It owns no listener,
+//! endpoint, database, correlation registry, scheduler, spawned task, or
+//! callback store: the caller continues to own Forge storage, the
 //! handler, cancellation, and endpoint lifetimes, and hands over one
 //! accepted `quinn::Connection` at a time through
 //! [`ForgeConnection::authenticate`].
@@ -305,10 +308,10 @@ pub(crate) fn is_orderly_peer_disconnect(source: &DeadlineError<RequestStageErro
 /// The value keeps Quinn private, retains the exclusive mutable
 /// credential-authority lease for its whole lifetime, and closes the owned
 /// connection with the fixed application reason when dropped. The caller
-/// services it sequentially with [`Self::drive_until_end`] for the configured
-/// delivery path or [`Self::respond_next`] for the legacy request path; no
-/// spawning, concurrent handler tasks, or background work exist inside this
-/// leaf.
+/// services it with [`Self::drive_until_end`], which answers the configured
+/// delivery path's requests concurrently inside the caller's task, or with
+/// [`Self::respond_next`] for the legacy request path, one request at a
+/// time; nothing is spawned and no background work outlives the call.
 #[must_use = "an admitted connection must be serviced; dropping it closes the connection"]
 pub struct ForgeConnection<'authority, 'handler, 'cancel, 'lifecycle> {
     connection: Connection,
@@ -519,12 +522,14 @@ impl ForgeConnection<'_, '_, '_, '_> {
     /// Drives one authenticated connection until its request budget is
     /// reached or a bounded request/delivery stage fails.
     ///
-    /// A configured conversation notifier switches the owner to one
-    /// serialized accept-or-wake loop. Requests still use the established
-    /// bidirectional dispatcher, while wake scans and initial activation
-    /// replay use the same connection-owned writer. A caller cancellation
-    /// finishes that writer before registry cleanup; every other terminal
-    /// path drops it so its existing guard resets unfinished output.
+    /// A configured conversation notifier switches the owner to concurrent
+    /// service ([`request_lanes`]): requests are answered beside each other,
+    /// while subscription requests, wake scans, and every request's delivery
+    /// follow-up share the one connection-owned writer. A caller
+    /// cancellation finishes that writer before registry cleanup; every
+    /// other terminal path drops it so its existing guard resets unfinished
+    /// output. Without a notifier the legacy request path answers one
+    /// request at a time.
     pub(crate) async fn drive_until_end<F>(
         mut self,
         capacity: u32,
@@ -533,80 +538,51 @@ impl ForgeConnection<'_, '_, '_, '_> {
     where
         F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
     {
-        let mut completed_requests = 0_u32;
-
-        loop {
-            if completed_requests >= capacity {
-                return self.finish_at_capacity(completed_requests).await;
-            }
-
-            if self.conversation_delivery.is_none() {
-                let (returned, count) = self
-                    .drive_legacy_request(&mut stamp, completed_requests)
-                    .await?;
-                self = returned;
-                completed_requests = count;
-                continue;
-            }
-
-            let event = match self.next_driver_event().await {
-                Ok(event) => event,
-                Err(source) => return self.fail_connection(source, completed_requests).await,
-            };
-
-            match event {
-                DriverEvent::Wake => {
-                    if let Err(source) = self.deliver_driver_wake(&mut stamp).await {
-                        return self.fail_connection(source, completed_requests).await;
-                    }
-                }
-                DriverEvent::Request { send, recv } => {
-                    let mut streams = StageStreams::new();
-                    streams.install(send, recv);
-                    let frame = match stamp() {
-                        Ok(frame) => frame,
-                        Err(source) => {
-                            drop(streams);
-                            return self
-                                .fail_connection(
-                                    DeadlineError::Peer {
-                                        operation: OperationKind::Send,
-                                        error: source,
-                                    },
-                                    completed_requests,
-                                )
-                                .await;
-                        }
-                    };
-                    let outcome = match self.dispatch_driver_request(frame, &mut streams).await {
-                        Ok(outcome) => {
-                            streams.release();
-                            outcome
-                        }
-                        Err(source) => {
-                            return self.fail_connection(source, completed_requests).await;
-                        }
-                    };
-                    completed_requests += 1;
-
-                    if let Err(source) = self.deliver_driver_request(outcome, &mut stamp).await {
-                        return self.fail_connection(source, completed_requests).await;
-                    }
-                }
-            }
+        if let Some(driver) = self.conversation_delivery.take() {
+            return self.drive_concurrently(driver, capacity, stamp).await;
         }
-    }
-
-    async fn finish_at_capacity(
-        mut self,
-        completed_requests: u32,
-    ) -> Result<(Self, u32), DriveUntilEndError> {
-        if let Some(driver) = self.conversation_delivery.as_mut() {
-            driver.cleanup(true).await.map_err(|error| {
-                DriveUntilEndError::new(completed_requests, delivery_cleanup_source(error))
-            })?;
+        let mut completed_requests = 0_u32;
+        while completed_requests < capacity {
+            let (returned, count) = self
+                .drive_legacy_request(&mut stamp, completed_requests)
+                .await?;
+            self = returned;
+            completed_requests = count;
         }
         Ok((self, completed_requests))
+    }
+
+    async fn drive_concurrently<F>(
+        self,
+        driver: ConversationDeliveryDriver,
+        capacity: u32,
+        stamp: F,
+    ) -> Result<(Self, u32), DriveUntilEndError>
+    where
+        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
+    {
+        let wakes = driver.wakes();
+        let lanes = request_lanes::RequestLanes::new(&self, driver, stamp);
+        let end = lanes.serve(capacity, wakes).await;
+        let mut driver = lanes.into_driver();
+        match end {
+            request_lanes::ServiceEnd::Capacity { completed } => {
+                driver.cleanup(true).await.map_err(|error| {
+                    DriveUntilEndError::new(completed, delivery_cleanup_source(error))
+                })?;
+                Ok((self, completed))
+            }
+            request_lanes::ServiceEnd::Failed { completed, source } => {
+                if matches!(&source, DeadlineError::Cancelled { .. }) {
+                    driver.cleanup(true).await.map_err(|error| {
+                        DriveUntilEndError::new(completed, delivery_cleanup_source(error))
+                    })?;
+                } else {
+                    let _discarded = driver.cleanup(false).await;
+                }
+                Err(DriveUntilEndError::new(completed, source))
+            }
+        }
     }
 
     async fn drive_legacy_request<F>(
@@ -631,126 +607,6 @@ impl ForgeConnection<'_, '_, '_, '_> {
             .await
             .map_err(|source| DriveUntilEndError::new(completed_requests, source))?;
         Ok((returned, completed_requests + 1))
-    }
-
-    async fn next_driver_event(&mut self) -> Result<DriverEvent, DeadlineError<RequestStageError>> {
-        // `drive_until_end` only enters a driver stage while the driver is
-        // installed, and the field is never reassigned after authentication;
-        // a missing driver is reported as a typed stage failure, not a panic.
-        let Some(driver) = self.conversation_delivery.as_mut() else {
-            return Err(delivery_stage_failure(
-                OperationKind::Receive,
-                DeliveryStageError::Writer,
-            ));
-        };
-        // Ordinary desktop idle is not a request failure: this wait has no
-        // deadline and resolves on the next request stream, delivery wake,
-        // caller cancellation, or transport failure. Started dispatches keep
-        // their `next_request` bound at their own sites below.
-        tokio::select! {
-            biased;
-            () = self.cancel.wait() => Err(DeadlineError::Cancelled {
-                operation: OperationKind::Receive,
-            }),
-            event = wait_for_driver_event(&self.connection, driver) => event.map_err(|error| {
-                DeadlineError::Peer {
-                    operation: OperationKind::Receive,
-                    error,
-                }
-            }),
-        }
-    }
-
-    async fn dispatch_driver_request(
-        &self,
-        frame: ServerFrameStamp,
-        streams: &mut StageStreams,
-    ) -> Result<RequestDispatchOutcome, DeadlineError<RequestStageError>> {
-        // Only reached from the driver branch of `drive_until_end`; a missing
-        // driver stays a typed delivery failure rather than panicking.
-        let Some(driver) = self.conversation_delivery.as_ref() else {
-            return Err(delivery_stage_failure(
-                OperationKind::Receive,
-                DeliveryStageError::Writer,
-            ));
-        };
-        run_with_deadline(
-            OperationKind::Receive,
-            self.limits.next_request,
-            self.cancel,
-            drive_request_stream(
-                self.handler,
-                self.lifecycle,
-                self.lifecycle_witness,
-                self.protocol_version,
-                frame,
-                Some(driver.context()),
-                streams,
-                self.cancel,
-            ),
-        )
-        .await
-    }
-
-    async fn deliver_driver_wake<F>(
-        &mut self,
-        stamp: &mut F,
-    ) -> Result<(), DeadlineError<RequestStageError>>
-    where
-        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
-    {
-        // Only reached from the driver branch of `drive_until_end`; a missing
-        // driver stays a typed delivery failure rather than panicking.
-        let Some(driver) = self.conversation_delivery.as_mut() else {
-            return Err(delivery_stage_failure(
-                OperationKind::Send,
-                DeliveryStageError::Writer,
-            ));
-        };
-        #[cfg(feature = "flight-recorder")]
-        let _trace = artisan_tracing::span!("forge.request", "delivery.wake");
-        driver
-            .deliver_wake(stamp, self.limits.next_request, self.cancel)
-            .await
-    }
-
-    async fn deliver_driver_request<F>(
-        &mut self,
-        outcome: RequestDispatchOutcome,
-        stamp: &mut F,
-    ) -> Result<(), DeadlineError<RequestStageError>>
-    where
-        F: FnMut() -> Result<ServerFrameStamp, RequestStageError>,
-    {
-        // Only reached from the driver branch of `drive_until_end`; a missing
-        // driver stays a typed delivery failure rather than panicking.
-        let Some(driver) = self.conversation_delivery.as_mut() else {
-            return Err(delivery_stage_failure(
-                OperationKind::Send,
-                DeliveryStageError::Writer,
-            ));
-        };
-        #[cfg(feature = "flight-recorder")]
-        let _trace = artisan_tracing::span!("forge.request", "delivery.after_request");
-        driver
-            .handle_request(outcome, stamp, self.limits.next_request, self.cancel)
-            .await
-    }
-
-    async fn fail_connection(
-        mut self,
-        source: DeadlineError<RequestStageError>,
-        completed_requests: u32,
-    ) -> Result<(Self, u32), DriveUntilEndError> {
-        let graceful = matches!(&source, DeadlineError::Cancelled { .. });
-        match (self.conversation_delivery.as_mut(), graceful) {
-            (Some(driver), true) => driver.cleanup(true).await.map_err(|error| {
-                DriveUntilEndError::new(completed_requests, delivery_cleanup_source(error))
-            })?,
-            (Some(driver), false) => drop(driver.cleanup(false).await),
-            (None, _) => {}
-        }
-        Err(DriveUntilEndError::new(completed_requests, source))
     }
 }
 
@@ -913,62 +769,93 @@ async fn drive_request_stream(
     // reply.
     let receipt = dispatch_server_request_with_receipt(send, recv, |incoming| async move {
         let request_id = incoming.request_id;
-        let request = incoming.request;
-        let (answered, receipt) = match request {
-            ClientRequest::Lifecycle(_request) if !lifecycle_witness.supported => (
-                Err(unsupported_feature_failure(&request_id)),
-                PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
-            ),
-            ClientRequest::Lifecycle(request) => {
-                match lifecycle.dispatch(request_id.clone(), request).await {
-                    LifecycleDispatch::Reply { response, receipt } => (
-                        Ok(ServerResponse {
-                            request_id: request_id.clone(),
-                            payload: ResponsePayload::Lifecycle(response),
-                        }),
-                        PostResponseReceipt::Lifecycle(receipt),
-                    ),
-                    LifecycleDispatch::Failure(failure) => (
-                        Err(failure),
-                        PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
-                    ),
-                }
-            }
-            request => {
-                let (answered, receipt) = match dispatch_context {
-                    Some(context) => dispatch_handler
-                        .respond_with_receipt_in_context(context, &request_id, &request)
-                        .await
-                        .into_parts(),
-                    None => dispatch_handler
-                        .respond_with_receipt(&request_id, &request)
-                        .await
-                        .into_parts(),
-                };
-                let follow_up = RequestFollowUp::after(&request, &answered);
-                (
-                    answered,
-                    PostResponseReceipt::Handler { receipt, follow_up },
-                )
-            }
-        };
-        let body = match answered {
-            Ok(response) => WireEnvelopeBody::Response(response),
-            Err(failure) => WireEnvelopeBody::ProtocolError(failure),
-        };
+        let (answered, receipt) = answer(
+            dispatch_handler,
+            lifecycle,
+            lifecycle_witness,
+            dispatch_context,
+            &request_id,
+            incoming.request,
+        )
+        .await;
         Ok::<(WireEnvelope, PostResponseReceipt), Infallible>((
-            WireEnvelope {
-                protocol_version,
-                frame_id: stamp.frame_id,
-                sent_at: stamp.sent_at,
-                body,
-            },
+            reply_envelope(protocol_version, stamp, answered),
             receipt,
         ))
     })
     .await?;
 
     complete_request_receipt(handler, context, streams, receipt, cancel).await
+}
+
+/// Answers one read request. Lifecycle requests are intercepted before the
+/// ordinary handler, while every other request follows the existing handler
+/// path. Receipts remain opaque until the transport has validated, written,
+/// and finished the correlated reply.
+async fn answer(
+    handler: &RequestHandler,
+    lifecycle: &LifecycleController,
+    lifecycle_witness: LifecycleWitness,
+    context: Option<&ConversationConnectionContext>,
+    request_id: &RequestId,
+    request: ClientRequest,
+) -> (Result<ServerResponse, ProtocolFailure>, PostResponseReceipt) {
+    match request {
+        ClientRequest::Lifecycle(_request) if !lifecycle_witness.supported => (
+            Err(unsupported_feature_failure(request_id)),
+            PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
+        ),
+        ClientRequest::Lifecycle(request) => {
+            match lifecycle.dispatch(request_id.clone(), request).await {
+                LifecycleDispatch::Reply { response, receipt } => (
+                    Ok(ServerResponse {
+                        request_id: request_id.clone(),
+                        payload: ResponsePayload::Lifecycle(response),
+                    }),
+                    PostResponseReceipt::Lifecycle(receipt),
+                ),
+                LifecycleDispatch::Failure(failure) => (
+                    Err(failure),
+                    PostResponseReceipt::Lifecycle(LifecycleControlReceipt::none()),
+                ),
+            }
+        }
+        request => {
+            let (answered, receipt) = match context {
+                Some(context) => handler
+                    .respond_with_receipt_in_context(context, request_id, &request)
+                    .await
+                    .into_parts(),
+                None => handler
+                    .respond_with_receipt(request_id, &request)
+                    .await
+                    .into_parts(),
+            };
+            let follow_up = RequestFollowUp::after(&request, &answered);
+            (
+                answered,
+                PostResponseReceipt::Handler { receipt, follow_up },
+            )
+        }
+    }
+}
+
+/// Stamps one answer as the correlated reply envelope.
+fn reply_envelope(
+    protocol_version: ProtocolVersion,
+    stamp: ServerFrameStamp,
+    answered: Result<ServerResponse, ProtocolFailure>,
+) -> WireEnvelope {
+    let body = match answered {
+        Ok(response) => WireEnvelopeBody::Response(response),
+        Err(failure) => WireEnvelopeBody::ProtocolError(failure),
+    };
+    WireEnvelope {
+        protocol_version,
+        frame_id: stamp.frame_id,
+        sent_at: stamp.sent_at,
+        body,
+    }
 }
 
 async fn complete_request_receipt(
@@ -1041,25 +928,6 @@ enum PostResponseReceipt {
     Lifecycle(LifecycleControlReceipt),
 }
 
-enum DriverEvent {
-    Request { send: SendStream, recv: RecvStream },
-    Wake,
-}
-
-async fn wait_for_driver_event(
-    connection: &Connection,
-    driver: &mut ConversationDeliveryDriver,
-) -> Result<DriverEvent, RequestStageError> {
-    tokio::select! {
-        accepted = connection.accept_bi() => accepted
-            .map(|(send, recv)| DriverEvent::Request { send, recv })
-            .map_err(|source| RequestStageError::Accept { source }),
-        wake = driver.wait_for_wake() => wake
-            .map(|()| DriverEvent::Wake)
-            .map_err(RequestStageError::Delivery),
-    }
-}
-
 #[derive(Clone, Copy)]
 struct LifecycleWitness {
     supported: bool,
@@ -1096,6 +964,13 @@ impl StageStreams {
         recv: RecvStream,
     ) -> (&mut SendStream, &mut RecvStream) {
         (self.send.insert(send), self.recv.insert(recv))
+    }
+
+    /// The installed outbound direction, for writing the reply.
+    fn reply_stream(&mut self) -> &mut SendStream {
+        self.send
+            .as_mut()
+            .expect("the reply stream is installed before the request is read")
     }
 
     /// Records that the outbound direction finished successfully and must
@@ -1174,6 +1049,9 @@ impl Drop for AdmissionGuard {
         }
     }
 }
+
+#[path = "connection/request_lanes.rs"]
+mod request_lanes;
 
 #[cfg(test)]
 #[path = "../../../tests/backend/lifecycle_connection.rs"]

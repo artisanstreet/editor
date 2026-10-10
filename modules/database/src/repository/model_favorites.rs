@@ -209,7 +209,7 @@ impl Repository {
         }
 
         let transaction = self
-            .begin_write()
+            .begin_write("set_model_favorite")
             .await
             .map_err(|source| database_error("begin model-favorites transaction", source))?;
 

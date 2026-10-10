@@ -12,6 +12,7 @@ use sea_orm::{
 
 use crate::sqlite_write_retry::retry_write_operation;
 
+use super::write_gate::WriteGateGuard;
 use super::{Repository, RepositoryError};
 
 /// Begins one read-then-write transaction with SQLite `BEGIN IMMEDIATE`.
@@ -27,9 +28,13 @@ use super::{Repository, RepositoryError};
 /// writers queue in-process in arrival order without holding a pool
 /// connection: reads keep the rest of the pool however slowly the disk
 /// commits, and writers of this process never contend for SQLite's lock.
+/// `operation` names the write in the gate's stall reports.
 impl Repository {
-    pub(crate) async fn begin_write(&self) -> Result<WriteTransaction, DbErr> {
-        let gate = self.acquire_write_gate().await;
+    pub(crate) async fn begin_write(
+        &self,
+        operation: &'static str,
+    ) -> Result<WriteTransaction, DbErr> {
+        let gate = self.acquire_write_gate(operation).await;
         let transaction = retry_write_operation(|| {
             self.database.begin_with_options(TransactionOptions {
                 sqlite_transaction_mode: Some(SqliteTransactionMode::Immediate),
@@ -46,9 +51,10 @@ impl Repository {
     /// Waits for this process's turn to write.
     ///
     /// Single-statement writes outside [`Self::begin_write`] hold the guard
-    /// across their statement for the same ordering.
-    pub(crate) async fn acquire_write_gate(&self) -> tokio::sync::OwnedMutexGuard<()> {
-        std::sync::Arc::clone(&self.write_gate).lock_owned().await
+    /// across their statement for the same ordering. A wait or hold longer
+    /// than the gate's stall threshold is reported under `operation`.
+    pub(crate) async fn acquire_write_gate(&self, operation: &'static str) -> WriteGateGuard {
+        self.write_gate.acquire(operation).await
     }
 }
 
@@ -57,7 +63,7 @@ impl Repository {
 pub(crate) struct WriteTransaction {
     // Declared first so it drops (and rolls back) before the gate opens.
     transaction: DatabaseTransaction,
-    _gate: tokio::sync::OwnedMutexGuard<()>,
+    _gate: WriteGateGuard,
 }
 
 impl WriteTransaction {
@@ -400,14 +406,17 @@ mod write_gate_tests {
             .expect("table");
         let repository = Repository::new(database);
 
-        let held = repository.begin_write().await.expect("first writer");
+        let held = repository
+            .begin_write("test write")
+            .await
+            .expect("first writer");
         held.execute_unprepared("INSERT INTO gate_rows VALUES (1)")
             .await
             .expect("first insert");
         let second = {
             let repository = repository.clone();
             tokio::spawn(async move {
-                let transaction = repository.begin_write().await?;
+                let transaction = repository.begin_write("test write").await?;
                 transaction
                     .execute_unprepared("INSERT INTO gate_rows VALUES (2)")
                     .await?;
@@ -429,5 +438,31 @@ mod write_gate_tests {
             .expect("second writer commits after the first");
         assert_eq!(count_rows(&repository).await, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gate names the write holding it, so a writer stuck behind a slow
+    /// disk can report what it waits for, and forgets it once it lets go.
+    #[tokio::test]
+    async fn the_gate_names_its_holder_until_it_lets_go() {
+        let repository = Repository::new(
+            connect(SqliteConfig::in_memory().sqlx_logging(false))
+                .await
+                .expect("memory database opens"),
+        );
+        assert_eq!(repository.write_gate.holder(), None);
+        let held = repository.acquire_write_gate("first write").await;
+        assert_eq!(repository.write_gate.holder(), Some("first write"));
+        let waiting = {
+            let repository = repository.clone();
+            tokio::spawn(async move {
+                let _turn = repository.acquire_write_gate("second write").await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "the second write waits its turn");
+        assert_eq!(repository.write_gate.holder(), Some("first write"));
+        drop(held);
+        waiting.await.expect("second write takes its turn");
+        assert_eq!(repository.write_gate.holder(), None);
     }
 }

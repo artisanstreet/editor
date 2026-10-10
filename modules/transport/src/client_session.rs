@@ -45,6 +45,16 @@
 //! admission and settlement contract but waits, after settlement, for the
 //! peer's response stream to finish cleanly before returning the owner.
 //!
+//! # Concurrent requests
+//!
+//! [`ClientSession::requester`] hands out a [`SessionRequester`] that runs
+//! requests on the same connection beside the owner's, each on its own
+//! stream, up to [`CONCURRENT_REQUEST_CAPACITY`] at once. They share the
+//! owner's correlation registry, so every request identity is still
+//! admitted at most once per connection and settles only its own request.
+//! A requester never closes the connection: its errors are the request's
+//! own, and the owner decides what a lost connection means.
+//!
 //! # Whole-stage limits
 //!
 //! Connect, handshake, request, and shutdown each run under ONE
@@ -74,9 +84,10 @@
 use crate::SessionTarget;
 pub use crate::session_target::{LoopbackTarget, SessionTargetError};
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use artisan_domain::IdentifierError;
+use artisan_domain::{IdentifierError, RequestId};
 use artisan_protocol::{
     ClientRequest, ConnectionId, ProtocolVersion, WireEnvelope, WireEnvelopeBody,
 };
@@ -97,6 +108,7 @@ use crate::{
 
 mod exchange;
 mod link;
+mod requester;
 
 pub use exchange::{ExchangeError, HandshakeStageError, ReplyRejection};
 
@@ -105,6 +117,7 @@ use exchange::{
     request_stage_acknowledging_response,
 };
 use link::SessionLink;
+pub use requester::SessionRequester;
 
 /// The one public failure condition for the consuming server-delivery
 /// receiver.
@@ -225,6 +238,11 @@ impl Drop for DeliveryReceiver {
 /// — so this constant fixes the lifecycle's capacity instead of exposing
 /// a tuning knob.
 pub const PENDING_CAPACITY: usize = 1;
+
+/// Requests a session's [`SessionRequester`]s run at once, beside the
+/// owner's one. Below the streams a Forge lets a peer keep open, so the
+/// owner's request always finds a stream.
+pub const CONCURRENT_REQUEST_CAPACITY: usize = 8;
 
 /// Caller-supplied bounds for one client session.
 ///
@@ -370,8 +388,11 @@ pub struct ClientSession {
     /// The single established connection behind every request.
     connection: Connection,
     /// Accepted lifecycle carried unchanged through every successful
-    /// request of this connection's whole life.
-    lifecycle: ClientRequestLifecycle,
+    /// request of this connection's whole life, shared with its
+    /// requesters.
+    lifecycle: Arc<Mutex<ClientRequestLifecycle>>,
+    /// Admission of the requesters' concurrent requests.
+    concurrent: Arc<tokio::sync::Semaphore>,
     /// Whole-stage limits retained from connect time.
     limits: ClientSessionLimits,
     /// Negotiated non-secret protocol revision.
@@ -439,7 +460,10 @@ impl ClientSession {
         // Budget validation precedes every resource: the registry is the
         // sole authority and rejects a zero budget immediately.
         let target = target.into();
-        let lifecycle = ClientRequestLifecycle::new(PENDING_CAPACITY, limits.admission_budget)?;
+        let lifecycle = ClientRequestLifecycle::new(
+            PENDING_CAPACITY + CONCURRENT_REQUEST_CAPACITY,
+            limits.admission_budget,
+        )?;
 
         // Whole connect stage under one guard: from the first bind until
         // the handshake completes, every escape closes what exists.
@@ -474,7 +498,8 @@ impl ClientSession {
             Self {
                 endpoint,
                 connection,
-                lifecycle,
+                lifecycle: Arc::new(Mutex::new(lifecycle)),
+                concurrent: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_REQUEST_CAPACITY)),
                 limits,
                 negotiated_version,
                 connection_id,
@@ -515,7 +540,7 @@ impl ClientSession {
     /// far. This counts consumed budget, never pending occupancy.
     #[must_use]
     pub fn admitted(&self) -> usize {
-        self.lifecycle.admitted()
+        lock(&self.lifecycle).admitted()
     }
 
     /// Returns the fixed simultaneous pending capacity, always
@@ -523,6 +548,23 @@ impl ClientSession {
     #[must_use]
     pub const fn pending_capacity(&self) -> usize {
         PENDING_CAPACITY
+    }
+
+    /// Hands out a requester for concurrent requests on this session's
+    /// connection; see the [module
+    /// documentation](self#concurrent-requests). It stays usable only while
+    /// the connection is open: dropping the session closes it.
+    #[must_use]
+    pub fn requester(&self) -> SessionRequester {
+        SessionRequester {
+            connection: self.connection.clone(),
+            lifecycle: Arc::clone(&self.lifecycle),
+            concurrent: Arc::clone(&self.concurrent),
+            negotiated_version: self.negotiated_version,
+            connection_id: self.connection_id.clone(),
+            lifecycle_control_supported: self.lifecycle_control_supported,
+            send_limit: self.limits.request,
+        }
     }
 
     /// Takes the server-initiated delivery receiver without waiting for the
@@ -583,36 +625,19 @@ impl ClientSession {
     /// outcome, which would mean lifecycle bookkeeping diverged from its
     /// registry mirror; no decoded input reaches that path.
     pub async fn request(
-        mut self,
+        self,
         envelope: WireEnvelope,
         cancel: &CancelHandle,
     ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
         // Pre-I/O validation, in order: family, negotiated version,
         // negotiated lifecycle feature, correlation seeding, admission.
         // Nothing touches the network before all five pass.
-        if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
-            let received = message_kind(&envelope.body);
-            return Err(ClientRequestError::NotARequest { received });
-        }
-        if envelope.protocol_version != self.negotiated_version {
-            return Err(ClientRequestError::VersionMismatch {
-                envelope_version: envelope.protocol_version.get(),
-                negotiated_version: self.negotiated_version.get(),
-            });
-        }
-        if matches!(
-            &envelope.body,
-            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
-        ) && !self.lifecycle_control_supported
-        {
-            return Err(ClientRequestError::UnsupportedFeature);
-        }
-        let request_id = envelope
-            .frame_id
-            .to_request_id()
-            .map_err(ClientRequestError::Correlation)?;
-        let mut waiter = self
-            .lifecycle
+        let request_id = validate_outbound(
+            &envelope,
+            self.negotiated_version,
+            self.lifecycle_control_supported,
+        )?;
+        let mut waiter = lock(&self.lifecycle)
             .admit(request_id.clone())
             .map_err(ClientRequestError::Admission)?;
 
@@ -632,22 +657,12 @@ impl ClientSession {
 
         // Validation strictly precedes lifecycle settlement: version,
         // family, and exact current-operation correlation first.
-        let settled = classify_reply(&reply, self.negotiated_version, &request_id)
-            .map_err(ClientRequestError::Reply)?;
-        match settled {
-            SettledReply::Response(response) => {
-                self.lifecycle
-                    .resolve_on_response(&response)
-                    .map_err(ReplyRejection::Settle)
-                    .map_err(ClientRequestError::Reply)?;
-            }
-            SettledReply::Failure(failure) => {
-                self.lifecycle
-                    .resolve_on_failure(&failure)
-                    .map_err(ReplyRejection::Settle)
-                    .map_err(ClientRequestError::Reply)?;
-            }
-        }
+        settle_reply(
+            &self.lifecycle,
+            &reply,
+            self.negotiated_version,
+            &request_id,
+        )?;
         let resolved = waiter
             .take_outcome()
             .expect("the admitted request settled exactly once into its private waiter");
@@ -684,7 +699,7 @@ impl ClientSession {
     /// which would mean lifecycle bookkeeping diverged from its registry
     /// mirror; no decoded input reaches that invariant violation.
     pub async fn request_acknowledging_response(
-        mut self,
+        self,
         envelope: WireEnvelope,
         cancel: &CancelHandle,
     ) -> Result<(Self, ResolvedRequest), ClientRequestError> {
@@ -692,33 +707,17 @@ impl ClientSession {
         // family, negotiated version, lifecycle feature, correlation
         // seeding, admission. Nothing touches the network before all five
         // pass.
-        if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
-            let received = message_kind(&envelope.body);
-            return Err(ClientRequestError::NotARequest { received });
-        }
-        if envelope.protocol_version != self.negotiated_version {
-            return Err(ClientRequestError::VersionMismatch {
-                envelope_version: envelope.protocol_version.get(),
-                negotiated_version: self.negotiated_version.get(),
-            });
-        }
-        if matches!(
-            &envelope.body,
-            WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
-        ) && !self.lifecycle_control_supported
-        {
-            return Err(ClientRequestError::UnsupportedFeature);
-        }
-        let request_id = envelope
-            .frame_id
-            .to_request_id()
-            .map_err(ClientRequestError::Correlation)?;
-        let mut waiter = self
-            .lifecycle
+        let request_id = validate_outbound(
+            &envelope,
+            self.negotiated_version,
+            self.lifecycle_control_supported,
+        )?;
+        let mut waiter = lock(&self.lifecycle)
             .admit(request_id.clone())
             .map_err(ClientRequestError::Admission)?;
 
         let negotiated_version = self.negotiated_version;
+        let lifecycle = &self.lifecycle;
         let resolved = run_with_deadline(
             OperationKind::Receive,
             self.limits.request,
@@ -726,22 +725,8 @@ impl ClientSession {
             request_stage_acknowledging_response(&self.connection, envelope, |reply| {
                 // Validation and lifecycle settlement happen before the
                 // stage is allowed to observe response EOF/FIN.
-                let settled = classify_reply(reply, negotiated_version, &request_id)
+                settle_reply(lifecycle, reply, negotiated_version, &request_id)
                     .map_err(AcknowledgingResponseError::Reply)?;
-                match settled {
-                    SettledReply::Response(response) => {
-                        self.lifecycle
-                            .resolve_on_response(&response)
-                            .map_err(ReplyRejection::Settle)
-                            .map_err(AcknowledgingResponseError::Reply)?;
-                    }
-                    SettledReply::Failure(failure) => {
-                        self.lifecycle
-                            .resolve_on_failure(&failure)
-                            .map_err(ReplyRejection::Settle)
-                            .map_err(AcknowledgingResponseError::Reply)?;
-                    }
-                }
                 Ok(waiter
                     .take_outcome()
                     .expect("the admitted request settled exactly once into its private waiter"))
@@ -787,4 +772,61 @@ impl ClientSession {
         // synchronous teardown.
         drained.map_err(ClientSessionError::Shutdown)
     }
+}
+
+fn lock(lifecycle: &Mutex<ClientRequestLifecycle>) -> MutexGuard<'_, ClientRequestLifecycle> {
+    lifecycle.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Pre-I/O validation of one outbound request, in order: family,
+/// negotiated version, negotiated lifecycle feature, correlation seeding.
+fn validate_outbound(
+    envelope: &WireEnvelope,
+    negotiated_version: ProtocolVersion,
+    lifecycle_control_supported: bool,
+) -> Result<RequestId, ClientRequestError> {
+    if !matches!(&envelope.body, WireEnvelopeBody::Request(_)) {
+        let received = message_kind(&envelope.body);
+        return Err(ClientRequestError::NotARequest { received });
+    }
+    if envelope.protocol_version != negotiated_version {
+        return Err(ClientRequestError::VersionMismatch {
+            envelope_version: envelope.protocol_version.get(),
+            negotiated_version: negotiated_version.get(),
+        });
+    }
+    if matches!(
+        &envelope.body,
+        WireEnvelopeBody::Request(ClientRequest::Lifecycle(_))
+    ) && !lifecycle_control_supported
+    {
+        return Err(ClientRequestError::UnsupportedFeature);
+    }
+    envelope
+        .frame_id
+        .to_request_id()
+        .map_err(ClientRequestError::Correlation)
+}
+
+/// Validates one reply against the request it must settle, then settles it
+/// in the shared lifecycle.
+fn settle_reply(
+    lifecycle: &Mutex<ClientRequestLifecycle>,
+    reply: &WireEnvelope,
+    negotiated_version: ProtocolVersion,
+    request_id: &RequestId,
+) -> Result<(), ReplyRejection> {
+    let settled = classify_reply(reply, negotiated_version, request_id)?;
+    let mut lifecycle = lock(lifecycle);
+    match settled {
+        SettledReply::Response(response) => lifecycle
+            .resolve_on_response(&response)
+            .map(drop)
+            .map_err(ReplyRejection::Settle)?,
+        SettledReply::Failure(failure) => lifecycle
+            .resolve_on_failure(&failure)
+            .map(drop)
+            .map_err(ReplyRejection::Settle)?,
+    }
+    Ok(())
 }

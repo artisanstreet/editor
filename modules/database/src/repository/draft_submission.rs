@@ -105,9 +105,12 @@ impl Repository {
         &self,
         input: SubmitComposerDraftInput,
     ) -> Result<DraftSubmission, DraftSubmissionError> {
-        let transaction = self.begin_write().await.map_err(|source| {
-            database_error::<RepositoryError>("begin composer-draft submission", source)
-        })?;
+        let transaction = self
+            .begin_write("submit_composer_draft")
+            .await
+            .map_err(|source| {
+                database_error::<RepositoryError>("begin composer-draft submission", source)
+            })?;
         let outcome = submit(&transaction, &input).await;
         let first = matches!(
             &outcome,

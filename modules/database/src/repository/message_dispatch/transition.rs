@@ -100,7 +100,7 @@ impl Repository {
         let operated_at_ms = millis(command.operated_at);
         let encoded_owner = command.owner.to_storage();
         let transaction = self
-            .begin_write()
+            .begin_write("complete_message_dispatch")
             .await
             .map_err(|source| database_error("begin message-dispatch completion", source))?;
         let statement = Statement::from_sql_and_values(
@@ -189,7 +189,7 @@ impl Repository {
         let encoded_owner = command.owner.to_storage();
         let reason = command.reason.as_str().to_owned();
         let transaction = self
-            .begin_write()
+            .begin_write("fail_message_dispatch")
             .await
             .map_err(|source| database_error("begin message-dispatch terminal failure", source))?;
         let statement = Statement::from_sql_and_values(
@@ -283,7 +283,7 @@ impl Repository {
         let encoded_owner = command.owner.to_storage();
         let reason = command.reason.as_str().to_owned();
         let transaction = self
-            .begin_write()
+            .begin_write("requeue_message_dispatch")
             .await
             .map_err(|source| database_error("begin message-dispatch requeue", source))?;
         let statement = Statement::from_sql_and_values(

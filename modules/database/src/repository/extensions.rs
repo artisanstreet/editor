@@ -72,7 +72,7 @@ impl Repository {
         extension: &StoredExtension,
         at: UnixMillis,
     ) -> Result<(), RepositoryError> {
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("save_extension").await;
         self.database
             .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Sqlite,

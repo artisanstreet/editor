@@ -365,6 +365,22 @@ impl ClientRequestLifecycle {
         ))
     }
 
+    /// Gives up one pending request whose reply will never be read,
+    /// dropping its waiter unsettled and freeing its pending capacity; the
+    /// identity stays retired (see
+    /// [`RequestCorrelationRegistry::abandon`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RequestCorrelationError::Unknown`] when `request_id` is not
+    /// pending; nothing changes then.
+    pub fn abandon(&mut self, request_id: &RequestId) -> Result<(), RequestCorrelationError> {
+        self.registry.abandon(request_id)?;
+        self.waiters
+            .retain(|pending| pending.request_id != *request_id);
+        Ok(())
+    }
+
     /// Deposits one outcome into exactly one pending request's waiter and
     /// removes that delivery entry.
     ///

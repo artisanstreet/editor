@@ -142,7 +142,7 @@ impl BidiGuard {
     /// A peer-stopped send side (Forge's deliberate post-Hello STOP)
     /// makes this attempt fail harmlessly; the failure is discarded so
     /// cleanup never masks the stage's primary result.
-    fn finish_outbound(&mut self) {
+    pub(super) fn finish_outbound(&mut self) {
         if let Some(send) = self.send.as_mut() {
             let _finished = send.finish();
         }
@@ -233,16 +233,42 @@ pub(super) async fn request_stage(
     connection: &Connection,
     envelope: WireEnvelope,
 ) -> Result<WireEnvelope, ExchangeError> {
-    let (send, receive) = connection.open_bi().await?;
-    let mut streams = BidiGuard::new(send, receive);
-    let reply = {
-        let (send, receive) = streams.lend();
-        send_envelope(send, &envelope).await?;
-        receive_envelope(receive).await?
-    };
+    let mut streams = open_and_send(connection, &envelope).await?;
+    let reply = receive_reply(&mut streams).await?;
     streams.finish_outbound();
     drop(streams);
     Ok(reply)
+}
+
+/// The first half of [`request_stage`]: opens one guarded fresh stream and
+/// sends exactly one bounded request envelope on it. The returned guard
+/// resets and stops the stream if its reply is never read.
+///
+/// # Errors
+///
+/// Returns [`ExchangeError::Open`] and [`ExchangeError::Send`].
+pub(super) async fn open_and_send(
+    connection: &Connection,
+    envelope: &WireEnvelope,
+) -> Result<BidiGuard, ExchangeError> {
+    let (send, receive) = connection.open_bi().await?;
+    let mut streams = BidiGuard::new(send, receive);
+    {
+        let (send, _receive) = streams.lend();
+        send_envelope(send, envelope).await?;
+    }
+    Ok(streams)
+}
+
+/// The second half of [`request_stage`]: receives exactly one bounded reply
+/// on a stream [`open_and_send`] opened.
+///
+/// # Errors
+///
+/// Returns [`ExchangeError::Receive`].
+pub(super) async fn receive_reply(streams: &mut BidiGuard) -> Result<WireEnvelope, ExchangeError> {
+    let (_send, receive) = streams.lend();
+    Ok(receive_envelope(receive).await?)
 }
 
 /// Runs a request exchange whose caller must settle the one decoded reply

@@ -100,7 +100,7 @@ impl Repository {
         at: UnixMillis,
     ) -> Result<(), RepositoryError> {
         let transaction = self
-            .begin_write()
+            .begin_write("update_thread")
             .await
             .map_err(|source| database_error("begin thread update", source))?;
         let result = apply_change(&transaction, thread, change, at).await;
@@ -182,7 +182,7 @@ impl Repository {
     /// Returns a preserved database failure.
     pub async fn file_quiet_threads(&self, at: UnixMillis) -> Result<u64, RepositoryError> {
         let cutoff = at.as_millis().saturating_sub(HISTORY_IDLE_MS);
-        let _write_gate = self.acquire_write_gate().await;
+        let _write_gate = self.acquire_write_gate("file_quiet_threads").await;
         self.database
             .execute_raw(statement(
                 &file_quiet_threads_sql(),
@@ -239,7 +239,7 @@ impl Repository {
         let mut erased = Vec::with_capacity(ids.len());
         for id in ids {
             let transaction = self
-                .begin_write()
+                .begin_write("erase_expired_archived_threads")
                 .await
                 .map_err(|source| database_error("begin archived thread erase", source))?;
             let result = erase_thread(&transaction, &id).await;

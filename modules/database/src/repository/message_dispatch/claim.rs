@@ -96,7 +96,7 @@ impl Repository {
 
         let encoded_owner = claim.owner.to_storage();
         let transaction = self
-            .begin_write()
+            .begin_write("claim_next_message_dispatch")
             .await
             .map_err(|source| database_error("begin message-dispatch claim", source))?;
         let statement = Statement::from_sql_and_values(

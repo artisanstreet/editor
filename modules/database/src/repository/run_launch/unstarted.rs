@@ -114,7 +114,7 @@ impl Repository {
         command: FailUnstartedRun<'_>,
     ) -> Result<FailUnstartedRunOutcome, RepositoryError> {
         let transaction = self
-            .begin_write()
+            .begin_write("fail_unstarted_run")
             .await
             .map_err(|source| database_error("begin unstarted-run failure", source))?;
         match execute(&transaction, &command).await {

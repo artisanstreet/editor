@@ -139,21 +139,19 @@ impl ComposerDraftExpectation {
     }
 }
 
-/// Handles one draft command on the authenticated service runtime.
+/// Handles one draft command on the mutation lane.
 pub(super) async fn handle_composer_draft_command(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     events: &SyncSender<NativeTransportEvent>,
     command: ComposerDraftCommand,
 ) -> Result<(), ServiceFailure> {
     let event = match command {
         ComposerDraftCommand::Save { sequence, command } => {
-            save_draft(runtime, frames, sequence, *command).await
+            save_draft(requests, sequence, *command).await
         }
         ComposerDraftCommand::Read(scope) => {
-            let result = runtime
+            let result = requests
                 .request(
-                    frames,
                     query_request(Query::ReadComposerDraft(ReadComposerDraft {
                         scope: scope.clone(),
                     })),
@@ -172,7 +170,7 @@ pub(super) async fn handle_composer_draft_command(
             attachment_id,
             command,
         } => {
-            let result = upload(runtime, frames, *command).await;
+            let result = upload(requests, *command).await;
             ComposerDraftEvent::Uploaded {
                 scope,
                 attachment_id,
@@ -180,7 +178,7 @@ pub(super) async fn handle_composer_draft_command(
             }
         }
         ComposerDraftCommand::ReadAttachment { scope, digest } => {
-            let result = read_attachment(runtime, frames, digest).await.map(Box::new);
+            let result = read_attachment(requests, digest).await.map(Box::new);
             ComposerDraftEvent::AttachmentRead {
                 scope,
                 digest,
@@ -193,8 +191,7 @@ pub(super) async fn handle_composer_draft_command(
 
 /// Sends one draft save and reports its acknowledgement or failure.
 async fn save_draft(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     sequence: u64,
     save: SaveComposerDraft,
 ) -> ComposerDraftEvent {
@@ -205,8 +202,7 @@ async fn save_draft(
     };
     let request_id = save.request_id().clone();
     match mutate(
-        runtime,
-        frames,
+        requests,
         &request_id,
         Command::SaveComposerDraft(save),
         expected,
@@ -233,8 +229,7 @@ async fn save_draft(
 
 /// Sends one idempotent draft mutation with its stable frame identity.
 async fn mutate(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     request_id: &RequestId,
     command: Command,
     expected: ComposerDraftExpectation,
@@ -248,26 +243,21 @@ async fn mutate(
         sent_at,
         command,
     };
-    durable_save_request(
-        runtime,
-        frames,
-        &mutation,
-        ExpectedResponse::ComposerDraft(expected),
-    )
-    .await
-    .map_err(ServiceFailure::from)
+    requests
+        .durable(&mutation, ExpectedResponse::ComposerDraft(expected))
+        .await
+        .map_err(ServiceFailure::from)
 }
 
 /// Stores one picked image and answers its reference once every byte is
 /// stored.
 async fn upload(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     command: UploadComposerAttachment,
 ) -> Result<ComposerAttachmentRef, ServiceFailure> {
     let mut stored = None;
     for request in upload_requests(command)? {
-        stored = Some(upload_one(runtime, frames, request).await?);
+        stored = Some(upload_one(requests, request).await?);
     }
     match stored {
         Some((reference, 0)) => Ok(reference),
@@ -305,15 +295,13 @@ pub(super) fn upload_requests(
 
 /// Sends one upload request: the reference and the bytes still missing.
 async fn upload_one(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     command: UploadComposerAttachment,
 ) -> Result<(ComposerAttachmentRef, u32), ServiceFailure> {
     let request_id = command.request_id.clone();
     let expected = ComposerDraftExpectation::Uploaded(request_id.clone());
     match mutate(
-        runtime,
-        frames,
+        requests,
         &request_id,
         Command::UploadComposerAttachment(command),
         expected,
@@ -329,8 +317,7 @@ async fn upload_one(
 
 /// Reads one stored attachment window by window.
 async fn read_attachment(
-    runtime: &mut ServiceRuntime,
-    frames: &mut FrameFactory,
+    requests: &mut LaneRequests,
     digest: ComposerAttachmentDigest,
 ) -> Result<ComposerAttachmentResult, ServiceFailure> {
     let mut readback = AttachmentReadback::new(digest);
@@ -340,9 +327,8 @@ async fn read_attachment(
             digest,
             offset: read.offset,
         };
-        let window = match runtime
+        let window = match requests
             .request(
-                frames,
                 query_request(Query::ReadComposerAttachment(read)),
                 ExpectedResponse::ComposerDraft(expected),
             )

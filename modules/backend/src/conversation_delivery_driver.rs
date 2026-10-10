@@ -16,6 +16,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use artisan_database::{
@@ -58,7 +59,7 @@ pub(crate) use recent_threads::RequestFollowUp;
 /// connection.
 #[derive(Debug)]
 pub(crate) struct ConversationDeliveryDriver {
-    context: ConversationConnectionContext,
+    context: Arc<ConversationConnectionContext>,
     writer: Option<ConversationDeliveryWriter>,
     wake: ConversationCommitAnySubscription,
     active: BTreeMap<artisan_domain::ThreadId, ActivatedConversationSubscription>,
@@ -109,8 +110,9 @@ struct DeliveredOutbox {
 }
 
 impl ConversationDeliveryDriver {
-    /// Creates the sole writer and the sole process-wide wake receiver for a
-    /// connection.
+    /// Creates the sole writer for a connection, and the receiver its
+    /// host-state revision is read from. The connection waits for wakes on
+    /// its own receiver ([`Self::wakes`]).
     pub(crate) fn new(
         connection: quinn::Connection,
         protocol_version: artisan_protocol::ProtocolVersion,
@@ -119,7 +121,7 @@ impl ConversationDeliveryDriver {
         let registrar = context.registrar().clone();
         let wake = context.notifier().subscribe_any();
         Self {
-            context,
+            context: Arc::new(context),
             writer: Some(ConversationDeliveryWriter::new(
                 connection,
                 registrar,
@@ -141,18 +143,18 @@ impl ConversationDeliveryDriver {
         }
     }
 
-    /// Borrows the connection-owned request context for dispatch and
-    /// activation.
-    pub(crate) fn context(&self) -> &ConversationConnectionContext {
-        &self.context
+    /// Shares the connection-owned request context, so requests are handled
+    /// and activated beside the driver's own delivery work.
+    pub(crate) fn context(&self) -> Arc<ConversationConnectionContext> {
+        Arc::clone(&self.context)
     }
 
-    /// Waits for one coalesced process-wide commit wake.
-    pub(crate) async fn wait_for_wake(&mut self) -> Result<(), DeliveryStageError> {
-        self.wake
-            .wait()
-            .await
-            .map_err(|ConversationCommitWaitError::Closed| DeliveryStageError::NotifierClosed)
+    /// Subscribes the connection to the same coalesced process-wide commit
+    /// wakes the driver reads its host-state revision from. The connection
+    /// waits on its own receiver while the driver is busy, so a commit that
+    /// lands during a delivery is still seen as one later wake.
+    pub(crate) fn wakes(&self) -> ConversationWakes {
+        ConversationWakes(self.context.notifier().subscribe_any())
     }
 
     /// Applies the post-response request outcome in connection order.
@@ -890,6 +892,20 @@ impl ConversationDeliveryDriver {
             | ConversationDeliveryError::Registry(_)
             | ConversationDeliveryError::ObservationRegistry(_) => DeliveryStageError::Writer,
         })
+    }
+}
+
+/// One connection's wait for the next coalesced commit or host-state wake.
+#[derive(Debug)]
+pub(crate) struct ConversationWakes(ConversationCommitAnySubscription);
+
+impl ConversationWakes {
+    /// Waits for one coalesced process-wide commit wake. Cancellation safe.
+    pub(crate) async fn wait(&mut self) -> Result<(), DeliveryStageError> {
+        self.0
+            .wait()
+            .await
+            .map_err(|ConversationCommitWaitError::Closed| DeliveryStageError::NotifierClosed)
     }
 }
 
