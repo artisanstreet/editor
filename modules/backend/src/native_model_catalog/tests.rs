@@ -693,19 +693,31 @@ fn discovery_adds_claude_rows_with_1m_policy_only_when_eligible() {
         .context_window
         .as_ref()
         .expect("1M claude rows inherit the [1m] choice");
-    assert_eq!(context.options[0].tokens, 1_000_000);
-    assert_eq!(context.options[0].label, "1M");
-    assert!(context.options[0].native_suffix.is_empty());
+    // 1M rows also offer a 400K cap, carried as configuration so the CLI
+    // compacts at it; the full window stays the default.
+    assert_eq!(context.default, "standard");
+    assert_eq!(context.options[0].tokens, 400_000);
+    assert_eq!(context.options[0].label, "400K");
+    assert_eq!(
+        context.options[0]
+            .native_config
+            .as_ref()
+            .map(|config| config.model_context_window),
+        Some(400_000)
+    );
+    assert_eq!(context.options[1].tokens, 1_000_000);
+    assert_eq!(context.options[1].label, "1M");
+    assert!(context.options[1].native_suffix.is_empty());
+    assert!(context.options[1].native_config.is_none());
     let haiku = catalog
         .manifest
         .models
         .iter()
         .find(|model| model.native_model_id == "claude-haiku-legacy")
         .expect("new haiku row");
-    assert_eq!(
-        haiku.capabilities.context_window.as_ref().unwrap().options[0].tokens,
-        200_000
-    );
+    let haiku_options = &haiku.capabilities.context_window.as_ref().unwrap().options;
+    assert_eq!(haiku_options.len(), 1, "no cap below a 1M window");
+    assert_eq!(haiku_options[0].tokens, 200_000);
 }
 
 #[test]

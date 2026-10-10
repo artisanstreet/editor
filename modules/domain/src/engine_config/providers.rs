@@ -141,6 +141,40 @@ impl CodexModelContextWindow {
     }
 }
 
+/// Positive auto-compact window in tokens for the Claude CLI
+/// (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the same knob as `/autocompact`).
+///
+/// The CLI compacts once the context nears this size and clamps it to the
+/// model's own window, so a 1M-context model can run as if it had less.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ClaudeAutoCompactWindow(u64);
+
+impl ClaudeAutoCompactWindow {
+    /// Creates a window in the inclusive
+    /// `1..=CODEX_MODEL_CONTEXT_WINDOW_MAX_TOKENS` range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineConfigError`] when `value` is zero or exceeds the
+    /// finite ceiling.
+    pub const fn new(value: u64) -> Result<Self, EngineConfigError> {
+        if value == 0 || value > CODEX_MODEL_CONTEXT_WINDOW_MAX_TOKENS {
+            Err(EngineConfigError::new(
+                "auto_compact_window",
+                EngineConfigReason::OutOfRange,
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the window in tokens.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// Complete selection for the Codex engine.
 ///
 /// The model stays optional because the adapter omits `--model` when no
@@ -366,6 +400,7 @@ pub struct ClaudeSelection {
     permission_mode: Option<ClaudePermissionMode>,
     disable_tools: bool,
     safe_mode: bool,
+    auto_compact_window: Option<ClaudeAutoCompactWindow>,
 }
 
 impl ClaudeSelection {
@@ -405,7 +440,18 @@ impl ClaudeSelection {
             permission_mode,
             disable_tools,
             safe_mode,
+            auto_compact_window: None,
         })
+    }
+
+    /// Returns this selection with an auto-compact window override.
+    #[must_use]
+    pub const fn with_auto_compact_window(
+        mut self,
+        window: Option<ClaudeAutoCompactWindow>,
+    ) -> Self {
+        self.auto_compact_window = window;
+        self
     }
 
     /// Returns the managed profile identity.
@@ -424,6 +470,12 @@ impl ClaudeSelection {
     #[must_use]
     pub const fn permission(&self) -> &EnginePermissionPolicy {
         &self.permission
+    }
+
+    /// Returns the optional auto-compact window override.
+    #[must_use]
+    pub const fn auto_compact_window(&self) -> Option<ClaudeAutoCompactWindow> {
+        self.auto_compact_window
     }
 
     /// Returns the optional effort choice.

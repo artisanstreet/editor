@@ -129,6 +129,54 @@ fn a_saved_claude_model_splits_its_context_suffix_back_off() {
 }
 
 #[test]
+fn a_saved_claude_window_cap_displays_as_its_capped_option() {
+    let mut catalog = fixture();
+    let model = catalog
+        .manifest
+        .models
+        .iter_mut()
+        .find(|model| model.id == "claude-fable")
+        .unwrap();
+    let context = model.capabilities.context_window.as_mut().unwrap();
+    let mut capped = context.options[0].clone();
+    capped.id = "capped".to_owned();
+    capped.tokens = 400_000;
+    capped.native_config = Some(crate::native_model_catalog::NativeContextConfig {
+        model_context_window: 400_000,
+    });
+    context.options.insert(0, capped);
+    let saved = |window| {
+        EngineRunConfig::new(
+            EngineSelection::Claude(
+                ClaudeSelection::new(
+                    profile(),
+                    Some(EngineModelId::parse("claude-fable-5").unwrap()),
+                    permission("autonomous", FilesystemAccess::Host, NetworkAccess::Enabled),
+                    Some(ClaudeEffort::parse("high").unwrap()),
+                    Some(ClaudePermissionMode::Auto),
+                    false,
+                    false,
+                )
+                .unwrap()
+                .with_auto_compact_window(window),
+            ),
+            runtime(),
+        )
+    };
+    let shown = |config: &EngineRunConfig| {
+        saved_config_policy(&catalog, config)
+            .and_then(|policy| policy.context_window)
+            .map(|window| window.id)
+    };
+    let window = artisan_domain::ClaudeAutoCompactWindow::new(400_000).unwrap();
+    assert_eq!(shown(&saved(Some(window))).as_deref(), Some("capped"));
+    assert_eq!(shown(&saved(None)).as_deref(), Some("standard"));
+    // A window no option carries belongs to no row.
+    let unknown = artisan_domain::ClaudeAutoCompactWindow::new(123_000).unwrap();
+    assert_eq!(shown(&saved(Some(unknown))), None);
+}
+
+#[test]
 fn a_configuration_the_catalog_cannot_display_has_no_policy() {
     let mut catalog = fixture();
     catalog

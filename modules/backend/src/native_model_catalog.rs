@@ -544,6 +544,13 @@ fn discovered_definition(row: &DiscoveredModel, id: String) -> NativeModelDefini
     }
 }
 
+/// The capped window offered on Claude models with a 1M context, applied
+/// through the CLI's auto-compact window rather than the model id.
+const CLAUDE_CAPPED_CONTEXT_TOKENS: u64 = 400_000;
+
+/// The smallest Claude window that also offers [`CLAUDE_CAPPED_CONTEXT_TOKENS`].
+const CLAUDE_LARGE_CONTEXT_TOKENS: u64 = 1_000_000;
+
 /// Builds context choices from reported limits using the harness override protocol.
 fn discovered_context_policy(row: &DiscoveredModel) -> Option<NativeContextWindowCapability> {
     use artisan_catalog::{NativeContextConfig, NativeContextWindowOption};
@@ -558,7 +565,17 @@ fn discovered_context_policy(row: &DiscoveredModel) -> Option<NativeContextWindo
         native_suffix: String::new(),
         tokens,
     };
-    let mut options = vec![option("standard", base, None)];
+    let mut options = Vec::new();
+    if row.engine_id == CLAUDE_ENGINE_ID && base >= CLAUDE_LARGE_CONTEXT_TOKENS {
+        options.push(option(
+            "capped",
+            CLAUDE_CAPPED_CONTEXT_TOKENS,
+            Some(NativeContextConfig {
+                model_context_window: CLAUDE_CAPPED_CONTEXT_TOKENS,
+            }),
+        ));
+    }
+    options.push(option("standard", base, None));
     if row.engine_id == CODEX_ENGINE_ID && max > base {
         options.push(option(
             "extended",

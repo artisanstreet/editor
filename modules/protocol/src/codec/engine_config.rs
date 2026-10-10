@@ -224,6 +224,11 @@ pub(crate) fn encode_engine_run_config(
             );
             arm.set_disable_tools(selection.disable_tools());
             arm.set_safe_mode(selection.safe_mode());
+            arm.set_auto_compact_window(
+                selection
+                    .auto_compact_window()
+                    .map_or(0, ClaudeAutoCompactWindow::get),
+            );
             encode_engine_permission(arm.reborrow().init_permission(), selection.permission());
         }
         EngineSelection::Grok(selection) => {
@@ -619,6 +624,15 @@ pub(crate) fn decode_claude_selection(
         "request.setThreadEngineConfig.config.selectionV2.permissionMode",
         ClaudePermissionMode::parse,
     )?;
+    let auto_compact_window = match arm.get_auto_compact_window() {
+        0 => None,
+        window => Some(ClaudeAutoCompactWindow::new(window).map_err(|error| {
+            engine_config_error(
+                "request.setThreadEngineConfig.config.selectionV2.autoCompactWindow",
+                error.reason(),
+            )
+        })?),
+    };
     let permission = decode_engine_permission(arm.get_permission()?)?;
     Ok(ClaudeSelection::new(
         profile_id,
@@ -628,7 +642,8 @@ pub(crate) fn decode_claude_selection(
         permission_mode,
         arm.get_disable_tools(),
         arm.get_safe_mode(),
-    )?)
+    )?
+    .with_auto_compact_window(auto_compact_window))
 }
 
 pub(crate) fn decode_grok_selection(

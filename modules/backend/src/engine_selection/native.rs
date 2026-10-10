@@ -9,12 +9,12 @@
 
 use artisan_catalog::{NativeModelCatalog, NativeModelPolicy, NativePermissionOption};
 use artisan_domain::{
-    ApprovalMode, ClaudeEffort, ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow,
-    CodexReasoningEffort, CodexSelection, CodexServiceTier, CursorPermissionMode,
-    CursorReasoningEffort, CursorSelection, CursorSpeed, EngineAgentId, EngineModelId,
-    EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineSelection, FilesystemAccess,
-    GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, PermissionId,
-    WebSearchAccess,
+    ApprovalMode, ClaudeAutoCompactWindow, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineAgentId,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineSelection,
+    FilesystemAccess, GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess,
+    PermissionId, WebSearchAccess,
 };
 
 /// Builds the durable selection for the four fixture-proven native engines.
@@ -92,7 +92,7 @@ pub(super) fn native_selection_config(
                 })
                 .transpose()?;
             neutral_speed(policy)?;
-            let model = claude_model(policy)?;
+            let (model, auto_compact_window) = claude_model(policy)?;
             let model = EngineModelId::parse(model).map_err(|_| "Invalid model identity")?;
             ClaudeSelection::new(
                 profile,
@@ -103,7 +103,9 @@ pub(super) fn native_selection_config(
                 false,
                 false,
             )
-            .map(EngineSelection::Claude)
+            .map(|selection| {
+                EngineSelection::Claude(selection.with_auto_compact_window(auto_compact_window))
+            })
             .map_err(|_| "This permission selection cannot run on this engine")
         }
         "grok" => {
@@ -411,21 +413,27 @@ fn direct_model(policy: &NativeModelPolicy) -> Result<String, &'static str> {
     }
 }
 
-/// Composes the Claude CLI model id with its context-window suffix.
+/// Composes the Claude CLI model id with its context-window suffix, plus
+/// the auto-compact window a configuration option asks for.
 ///
-/// This mirrors `ComposeNativeModelId` in `catalog/src/context-window.ts`: a
-/// window expressed as configuration never reaches the model id (Claude has
-/// no such option today, so one is an honest error), while an identity suffix
-/// such as `[1m]` is appended verbatim.
-fn claude_model(policy: &NativeModelPolicy) -> Result<String, &'static str> {
+/// This mirrors `ComposeNativeModelId` in `catalog/src/context-window.ts`: an
+/// identity suffix such as `[1m]` is appended verbatim, while a window
+/// expressed as configuration never reaches the model id and instead caps
+/// the CLI's auto-compact window.
+fn claude_model(
+    policy: &NativeModelPolicy,
+) -> Result<(String, Option<ClaudeAutoCompactWindow>), &'static str> {
     let base = direct_model(policy)?;
     match policy.context_window.as_ref() {
-        None => Ok(base),
+        None => Ok((base, None)),
         Some(choice) => {
-            if choice.native_config.is_some() {
-                return Err("This provider does not support these configuration overrides");
-            }
-            Ok(format!("{base}{}", choice.native_suffix))
+            let window = choice
+                .native_config
+                .as_ref()
+                .map(|config| ClaudeAutoCompactWindow::new(config.model_context_window))
+                .transpose()
+                .map_err(|_| "Invalid runtime configuration")?;
+            Ok((format!("{base}{}", choice.native_suffix), window))
         }
     }
 }

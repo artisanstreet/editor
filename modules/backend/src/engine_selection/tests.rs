@@ -181,6 +181,48 @@ fn claude_choice_builds_a_floored_claude_selection() {
 }
 
 #[test]
+fn claude_capped_window_sets_an_auto_compact_window() {
+    let mut catalog = fixture();
+    let context = catalog
+        .manifest
+        .models
+        .iter_mut()
+        .find(|model| model.id == "claude-opus")
+        .and_then(|model| model.capabilities.context_window.as_mut())
+        .unwrap();
+    let mut capped = context.options[0].clone();
+    capped.id = "capped".to_owned();
+    capped.tokens = 400_000;
+    capped.native_config = Some(NativeContextConfig {
+        model_context_window: 400_000,
+    });
+    context.options.insert(0, capped);
+    let mut policy = profiled_policy(&catalog, "claude-opus");
+    policy.context_window = Some(NativeContextSelection {
+        id: "capped".to_owned(),
+        native_suffix: String::new(),
+        native_config: Some(NativeContextConfig {
+            model_context_window: 400_000,
+        }),
+    });
+    let config = config_for_policy(&catalog, &policy, None).unwrap();
+    let EngineSelection::Claude(selection) = config.selection() else {
+        panic!("expected a Claude selection");
+    };
+    assert_eq!(
+        selection
+            .auto_compact_window()
+            .map(artisan_domain::ClaudeAutoCompactWindow::get),
+        Some(400_000)
+    );
+    // The cap is configuration, never identity: the model id stays bare.
+    assert_eq!(
+        selection.model_id().unwrap().as_str(),
+        policy.native_model_id
+    );
+}
+
+#[test]
 fn claude_restricted_selects_plan_mode_at_the_write_floor() {
     let catalog = fixture();
     let mut policy = profiled_policy(&catalog, "claude-fable");

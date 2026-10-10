@@ -14,10 +14,10 @@ pub use identity::{
     FiniteMillis, OpenCode2Selection,
 };
 pub use providers::{
-    ClaudeEffort, ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow,
-    CodexReasoningEffort, CodexSelection, CodexServiceTier, CursorPermissionMode,
-    CursorReasoningEffort, CursorSelection, CursorSpeed, GrokPermissionMode, GrokReasoningEffort,
-    GrokSelection,
+    ClaudeAutoCompactWindow, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
+    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier,
+    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, GrokPermissionMode,
+    GrokReasoningEffort, GrokSelection,
 };
 pub use runtime::{
     ApprovalMode, EngineConfigRevision, EngineConfigUpdatePrecondition, EnginePermissionPolicy,

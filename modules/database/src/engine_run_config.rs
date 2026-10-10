@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use artisan_domain::{
-    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
-    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
-    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed,
-    ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId, EngineConfigError, EngineId, EngineModelId,
-    EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig, EngineRuntimeControls,
-    EngineRuntimeControlsInput, EngineSelection, EngineVariantId, FilesystemAccess, FiniteMillis,
-    GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess, OpenCode2Selection,
-    PermissionId, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeAutoCompactWindow, ClaudeEffort, ClaudePermissionMode,
+    ClaudeSelection, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
+    CodexServiceTier, CountLimit, CursorPermissionMode, CursorReasoningEffort, CursorSelection,
+    CursorSpeed, ENGINE_CONFIG_MAX_ENCODED_BYTES, EngineAgentId, EngineConfigError, EngineId,
+    EngineModelId, EnginePermissionPolicy, EngineProfileId, EngineRouteId, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, EngineVariantId,
+    FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
+    NetworkAccess, OpenCode2Selection, PermissionId, WebSearchAccess,
 };
 
 #[derive(Debug, Error)]
@@ -474,6 +474,8 @@ struct StoredClaudeDetails<'a> {
     permission_mode: Option<&'static str>,
     disable_tools: bool,
     safe_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_compact_window: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -538,6 +540,8 @@ struct RawClaudeDetails {
     permission_mode: Option<String>,
     disable_tools: bool,
     safe_mode: bool,
+    #[serde(default)]
+    auto_compact_window: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -649,7 +653,14 @@ fn into_domain_v2(raw: RawConfigV2) -> Result<EngineRunConfig, EngineRunConfigCo
                     details.disable_tools,
                     details.safe_mode,
                 )
-                .map_err(domain_error)?,
+                .map_err(domain_error)?
+                .with_auto_compact_window(
+                    details
+                        .auto_compact_window
+                        .map(ClaudeAutoCompactWindow::new)
+                        .transpose()
+                        .map_err(domain_error)?,
+                ),
             )
         }
         EngineId::Grok => {
@@ -811,6 +822,9 @@ pub(crate) fn encode(config: &EngineRunConfig) -> Result<Vec<u8>, EngineRunConfi
                     .map(ClaudePermissionMode::as_str),
                 disable_tools: selection.disable_tools(),
                 safe_mode: selection.safe_mode(),
+                auto_compact_window: selection
+                    .auto_compact_window()
+                    .map(ClaudeAutoCompactWindow::get),
             }),
         )?,
         EngineSelection::Grok(selection) => encode_v2(
