@@ -315,6 +315,8 @@ pub enum Command {
     SaveGlobalPrompt(crate::SaveGlobalPrompt),
     /// See [`ResolveGlobalPrompt`](crate::ResolveGlobalPrompt).
     ResolveGlobalPrompt(crate::ResolveGlobalPrompt),
+    /// See [`UpdateThread`](crate::UpdateThread).
+    UpdateThread(crate::UpdateThread),
 }
 
 impl Command {
@@ -346,6 +348,7 @@ impl Command {
             Self::AdoptExtension(command) => &command.request_id,
             Self::SaveGlobalPrompt(command) => &command.request_id,
             Self::ResolveGlobalPrompt(command) => &command.request_id,
+            Self::UpdateThread(command) => &command.request_id,
         }
     }
 }
@@ -519,4 +522,8 @@ pub enum Query {
     ReadExtensions(crate::ReadExtensions),
     /// See [`ReadGlobalPrompt`](crate::ReadGlobalPrompt).
     ReadGlobalPrompt(crate::ReadGlobalPrompt),
+    /// See [`ReadArchivedThreads`](crate::ReadArchivedThreads).
+    ReadArchivedThreads(crate::ReadArchivedThreads),
+    /// See [`ReadMediaFile`](crate::ReadMediaFile).
+    ReadMediaFile(crate::ReadMediaFile),
 }

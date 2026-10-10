@@ -134,8 +134,12 @@ pub enum ResponsePayload {
     Extensions(artisan_domain::ExtensionCatalog),
     /// Answer to the global prompt read, save, and resolution.
     GlobalPrompt(artisan_domain::GlobalPrompt),
+    /// The archived threads, answering their read and every thread change.
+    ArchivedThreads(artisan_domain::ArchivedThreadListing),
     /// The vendor's versions of one engine, answering a listing.
     EngineVersions(artisan_domain::EngineVersionList),
+    /// The bytes of one media file, answering its read.
+    MediaFile(MediaFileResult),
 }
 
 /// Successful response correlated to a client request frame.
@@ -161,6 +165,22 @@ impl fmt::Debug for MessageImageResult {
         formatter
             .debug_struct("MessageImageResult")
             .field("reference", &self.reference)
+            .field("bytes_len", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// One media file a reply names, read from the Forge's machine.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MediaFileResult {
+    /// The file's bytes, at most [`artisan_domain::MEDIA_FILE_MAX_BYTES`].
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for MediaFileResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaFileResult")
             .field("bytes_len", &self.bytes.len())
             .finish()
     }

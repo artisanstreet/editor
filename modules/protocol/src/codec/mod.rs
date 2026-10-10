@@ -4,54 +4,56 @@ use artisan_domain::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
     ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
     CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput,
-    EngineObservationAttribution, EngineObservationEvent, FileAction, FileObservation, LimitScope,
-    MessagePhase, NativeActionObservation, OBSERVATION_ANSWERS_MAX, OBSERVATION_PLAN_MAX_ENTRIES,
+    EngineObservationAttribution, EngineObservationEvent, FileAction, FileObservation,
+    GoalObservation, GoalState, ImageObservation, ImageOrigin, LimitScope, MessagePhase,
+    NativeActionObservation, OBSERVATION_ANSWERS_MAX, OBSERVATION_PLAN_MAX_ENTRIES,
     OBSERVATION_QUESTION_MAX_OPTIONS, Observation, ObservationError, ObservationId,
     ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation,
     ProtocolDiagnosticObservation, QuestionInput, QuestionObservation, QuestionOption,
     QuestionState, ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation,
     RetryAttemptState, RetryObservation, RunState, RunStateObservation, RunTerminalObservation,
-    RunTerminalState, SearchObservation, SearchScope, SearchState, SubagentInput,
-    SubagentObservation, SubagentState, SubagentTranscriptObservation, TerminalActivityInput,
-    TerminalActivityObservation, TerminalActivityState, TerminalChannel, ToolAction,
-    ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
-    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
-    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
-    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
+    RunTerminalState, SafetyAction, SafetyCategory, SafetyObservation, SearchObservation,
+    SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
+    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
+    TerminalActivityState, TerminalChannel, ToolAction, ToolObservation,
+    TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta, TranscriptContent,
+    TranscriptFile, TranscriptReasoningSummaryCompleted, TranscriptReasoningSummaryDelta,
+    TranscriptSearch, TranscriptTerminalActivity, TranscriptTool, TurnState, TurnStateObservation,
+    UsageBasis, UsageInput, UsageObservation,
 };
 use artisan_domain::{
     ApprovalMode, AssistantBody, AssistantBodyError, AssistantMessageItem, AssistantMessagePhase,
     AttachProject, AuthoredText, ByteLimit, CONVERSATION_PATCH_BATCH_MAX_PATCHES,
-    CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, ClaudeEffort,
-    ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow, CodexReasoningEffort,
-    CodexSelection, CodexServiceTier, Command, ConversationCursor, ConversationItem,
-    ConversationLifecycle, ConversationPatch, ConversationQuery, ConversationQueryBounds,
-    ConversationRequest, ConversationSnapshot, ConversationSnapshotError, ConversationSubscribe,
-    ConversationSubscriptionStart, ConversationTurn, ConversationUnsubscribe, CountLimit,
-    CounterError, CreateThread, CursorPermissionMode, CursorReasoningEffort, CursorSelection,
-    CursorSpeed, DIRECTORY_LISTING_MAX_ENTRIES, DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry,
-    DirectoryId, DirectoryKind, DirectoryListing, DirectoryListingError, DirectoryPlace,
-    DisplayName, DisplayNameError, ENGINE_USAGE_ENGINES_MAX, ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE,
-    EngineAgentId, EngineConfigError, EngineConfigReason, EngineConfigRevision,
-    EngineConfigUpdatePrecondition, EngineId, EngineModelId, EnginePermissionPolicy,
-    EngineProfileId, EngineReadiness, EngineReadinessVerdict, EngineRouteId, EngineRunConfig,
-    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, EngineUsageAuth,
-    EngineUsageAuthentication, EngineUsageError, EngineUsageReport, EngineUsageSnapshot,
-    EngineUsageWindow, EngineUsageWindowKind, EngineVariantId, Event, FilesystemAccess,
-    FiniteMillis, FirstMessageQueued, GrokPermissionMode, GrokReasoningEffort, GrokSelection,
-    IdentifierError, ImageAttachment, ImageAttachmentError, ImageAttachmentRef,
-    ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId, ItemOrdinal,
-    ListAttachedProjects, ListDirectories, ListProjectThreads, LiveThinking, LiveThinkingBlock,
-    MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT, MessageBody,
-    MessageBodyError, MessageId, ModelFavoriteId, ModelFavoriteIdError, ModelFavoritesRevision,
-    ModelFavoritesRevisionError, ModelFavoritesSnapshotError, MultimodalUserMessageItem,
-    NetworkAccess, ObservationHistoryCurrent, OpenCode2Selection, PROJECT_LISTING_MAX_PROJECTS,
-    PatchBatch, PatchBatchError, PatchId, PatchSequence, PermissionId, PlaceKind, ProjectAttached,
-    ProjectId, ProjectListing, ProjectListingError, ProjectSummary, Query, QueryTurnCount,
-    QueryTurnCountError, QueueFirstMessage, QueueMessage, QueueMessagePayload,
-    QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage, ReadActiveRun,
-    ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition, RequestId,
-    RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
+    CONVERSATION_QUERY_MAX_TURNS, CatalogRevision, CatalogRevisionError, ClaudeAutoCompactWindow,
+    ClaudeEffort, ClaudePermissionMode, ClaudeSelection, CodexModelContextWindow,
+    CodexReasoningEffort, CodexSelection, CodexServiceTier, Command, ConversationCursor,
+    ConversationItem, ConversationLifecycle, ConversationPatch, ConversationQuery,
+    ConversationQueryBounds, ConversationRequest, ConversationSnapshot, ConversationSnapshotError,
+    ConversationSubscribe, ConversationSubscriptionStart, ConversationTurn,
+    ConversationUnsubscribe, CountLimit, CounterError, CreateThread, CursorPermissionMode,
+    CursorReasoningEffort, CursorSelection, CursorSpeed, DIRECTORY_LISTING_MAX_ENTRIES,
+    DIRECTORY_LISTING_MAX_PLACES, DirectoryEntry, DirectoryId, DirectoryKind, DirectoryListing,
+    DirectoryListingError, DirectoryPlace, DisplayName, DisplayNameError, ENGINE_USAGE_ENGINES_MAX,
+    ENGINE_USAGE_WINDOWS_MAX_PER_ENGINE, EngineAgentId, EngineConfigError, EngineConfigReason,
+    EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
+    EnginePermissionPolicy, EngineProfileId, EngineReadiness, EngineReadinessVerdict,
+    EngineRouteId, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
+    EngineSelection, EngineUsageAuth, EngineUsageAuthentication, EngineUsageError,
+    EngineUsageReport, EngineUsageSnapshot, EngineUsageWindow, EngineUsageWindowKind,
+    EngineVariantId, Event, FilesystemAccess, FiniteMillis, FirstMessageQueued, GrokPermissionMode,
+    GrokReasoningEffort, GrokSelection, IdentifierError, ImageAttachment, ImageAttachmentError,
+    ImageAttachmentRef, ImageAttachmentRefError, IncrementalText, IncrementalTextError, ItemId,
+    ItemOrdinal, ListAttachedProjects, ListDirectories, ListProjectThreads, LiveThinking,
+    LiveThinkingBlock, MESSAGE_IMAGE_ATTACHMENT_MAX_BYTES, MESSAGE_IMAGE_ATTACHMENT_MAX_COUNT,
+    MessageBody, MessageBodyError, MessageId, ModelFavoriteId, ModelFavoriteIdError,
+    ModelFavoritesRevision, ModelFavoritesRevisionError, ModelFavoritesSnapshotError,
+    MultimodalUserMessageItem, NetworkAccess, ObservationHistoryCurrent, OpenCode2Selection,
+    PROJECT_LISTING_MAX_PROJECTS, PatchBatch, PatchBatchError, PatchId, PatchSequence,
+    PermissionId, PlaceKind, ProjectAttached, ProjectId, ProjectListing, ProjectListingError,
+    ProjectSummary, Query, QueryTurnCount, QueryTurnCountError, QueueFirstMessage, QueueMessage,
+    QueueMessagePayload, QueueMessagePayloadError, QueuedMessage, QuotaSurface, ReadAccountUsage,
+    ReadActiveRun, ReadComposerCatalog, ReadHostCatalog, ReadModelFavorites, ReceiptDisposition,
+    RequestId, RespondApproval, RespondQuestion, Revision, RootPath, RootPathError, RunId,
     RunInteractionError, SetModelFavorite, SetThreadEngineConfig, SteerTarget, StopRun,
     THREAD_LISTING_MAX_THREADS, THREAD_TERMINALS_MAX, ThreadAttention, ThreadCreated, ThreadId,
     ThreadListing, ThreadListingError, ThreadRetitled, ThreadSummary, ThreadTerminal,
@@ -82,11 +84,12 @@ use crate::types::{
     ConversationSubscriptionStopped, DirectoryPickOutcome, ErrorCode, ErrorDetail, EventCursor,
     FirstMessageReceipt, FrameId, Hello, HelloCredential, LifecycleRequest, LifecycleResponse,
     LifecycleState, LifecycleStatus, LifecycleStopDisposition, LifecycleStopReceipt,
-    LocalCapability, LocalCapabilityError, MessageImageResult, ModelFavoritesSnapshot,
-    ProtocolFailure, ProtocolValueError, ProtocolVersion, QueueMessageReceipt, ReconnectCapability,
-    ReconnectCapabilityError, RegisteredEngineProfilesResult, ResolveRichLinkRequest,
-    RespondApprovalReceipt, RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata,
-    RunInteractionOutcome, RunLiveStatus, ServerEvent, ServerResponse, SetModelFavoriteReceipt,
+    LocalCapability, LocalCapabilityError, MediaFileResult, MessageImageResult,
+    ModelFavoritesSnapshot, ProtocolFailure, ProtocolValueError, ProtocolVersion,
+    QueueMessageReceipt, ReconnectCapability, ReconnectCapabilityError,
+    RegisteredEngineProfilesResult, ResolveRichLinkRequest, RespondApprovalReceipt,
+    RespondQuestionReceipt, ResponsePayload, RichLinkPageMetadata, RunInteractionOutcome,
+    RunLiveStatus, ServerEvent, ServerResponse, SetModelFavoriteReceipt,
     SetThreadEngineConfigResult, StopRunDisposition, StopRunReceipt, VersionOffer,
     VersionOfferError, Welcome, WireEnvelope, WireEnvelopeBody,
 };
@@ -102,6 +105,7 @@ mod extensions;
 mod forge_decisions;
 mod history;
 mod interaction;
+mod media_file;
 mod message_submission;
 mod observation;
 mod queries;
@@ -109,6 +113,7 @@ mod recent_threads;
 mod repository;
 mod rich_link;
 mod server;
+mod thread_lifecycle;
 mod user_preferences;
 
 pub(crate) use composer_draft::*;
@@ -121,6 +126,7 @@ pub(crate) use extensions::*;
 pub(crate) use forge_decisions::*;
 pub(crate) use history::*;
 pub(crate) use interaction::*;
+pub(crate) use media_file::*;
 pub(crate) use message_submission::*;
 pub(crate) use observation::*;
 pub(crate) use queries::*;
@@ -128,6 +134,7 @@ pub(crate) use recent_threads::*;
 pub(crate) use repository::*;
 pub(crate) use rich_link::*;
 pub(crate) use server::*;
+pub(crate) use thread_lifecycle::*;
 pub(crate) use user_preferences::*;
 
 pub use error::{ProtocolDecodeError, ProtocolEncodeError};

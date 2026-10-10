@@ -264,6 +264,43 @@ struct RecentThread {
   repositoryHost @2 :Text;
   # Normalized 48-pixel PNG, at most 16 KiB. Empty selects the host logo.
   projectIconPng @3 :Data;
+  # Whether the thread is in view or settled into History. Fresh ordinal;
+  # peers that predate it read every row as in view.
+  placement @4 :ThreadPlacement;
+}
+
+# Where a listed thread sits in the sidebar.
+enum ThreadPlacement {
+  inbox @0;
+  history @1;
+}
+
+# One archived thread and when the reader archived it. The Forge erases it
+# thirty days after that.
+struct ArchivedThread {
+  thread @0 :RecentThread;
+  archivedAtMs @1 :Int64;
+}
+
+# The archived threads, the soonest to be erased first. Bounded to at most
+# 500 rows by owned conversion.
+struct ArchivedThreadList {
+  threads @0 :List(ArchivedThread);
+}
+
+# One change the reader makes to a thread.
+struct UpdateThreadRequest {
+  threadId @0 :Text;
+  change :union {
+    # The reader's own title, which generated titles never replace.
+    rename @1 :Text;
+    # Settles the thread into History until its next activity.
+    settle @2 :Void;
+    # Moves the thread to the archive.
+    archive @3 :Void;
+    # Restores an archived thread to the sidebar.
+    unarchive @4 :Void;
+  }
 }
 
 # Recently active threads across every attached project, newest activity
@@ -582,6 +619,8 @@ struct ClaudeEngineSelection {
   disableTools @4 :Bool;
   safeMode @5 :Bool;
   permission @6 :EnginePermissionPolicy;
+  # CLAUDE_CODE_AUTO_COMPACT_WINDOW in tokens; 0 leaves the CLI default.
+  autoCompactWindow @7 :UInt64;
 }
 
 struct GrokEngineSelection {
@@ -954,6 +993,17 @@ struct Request {
     # Settles global prompt setup or a drifted engine, answered with the
     # global prompt. Fresh ordinal.
     resolveGlobalPrompt @58 :GlobalPromptResolution;
+
+    # The archived threads, answered with archivedThreads. Fresh ordinal.
+    readArchivedThreads @59 :Void;
+
+    # Renames, settles, archives, or restores one thread, answered with
+    # archivedThreads. Fresh ordinal.
+    updateThread @60 :UpdateThreadRequest;
+
+    # One image or audio file a reply names, read from the Forge's machine,
+    # answered with mediaFile. Fresh ordinal.
+    readMediaFile @61 :ReadMediaFileRequest;
   }
 }
 
@@ -1081,6 +1131,12 @@ struct Response {
     # Answer to readGlobalPrompt, saveGlobalPrompt, and resolveGlobalPrompt.
     # Fresh ordinal.
     globalPrompt @50 :GlobalPrompt;
+
+    # Answer to readArchivedThreads and updateThread. Fresh ordinal.
+    archivedThreads @51 :ArchivedThreadList;
+
+    # Answer to readMediaFile. Fresh ordinal.
+    mediaFile @52 :MediaFileResult;
   }
 }
 
@@ -1288,6 +1344,30 @@ enum ObservationFileAction {
   read @3;
 }
 
+# How an image entered the run.
+enum ObservationImageOrigin {
+  generated @0;
+  viewed @1;
+  toolResult @2;
+}
+
+# What a provider safety system did to the request.
+enum ObservationSafetyAction {
+  holding @0;
+  released @1;
+  rerouted @2;
+  refused @3;
+}
+
+# The policy area a provider safety system named.
+enum ObservationSafetyCategory {
+  cyber @0;
+  bio @1;
+  chemical @2;
+  policy @3;
+  unspecified @4;
+}
+
 # Scope of one search observation.
 enum ObservationSearchScope {
   workspace @0;
@@ -1344,6 +1424,15 @@ enum ObservationPlanEntryStatus {
 enum ObservationCompactionState {
   started @0;
   completed @1;
+}
+
+# Where a session goal stands.
+enum ObservationGoalState {
+  active @0;
+  paused @1;
+  met @2;
+  abandoned @3;
+  cleared @4;
 }
 
 # Provider attempt state of one retry observation.
@@ -1859,6 +1948,41 @@ struct ObservationRunTerminal {
   summaryTitle @5 :Text;
 }
 
+# One image an engine generated, viewed, or received from a tool. Carries
+# the absolute path on the engine host, never the pixels.
+struct ObservationImage {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  itemId @2 :Text;
+  origin @3 :ObservationImageOrigin;
+  path @4 :Text;
+  # Empty decodes as absent: a present caption is never empty.
+  caption @5 :Text;
+}
+
+# One report of where the session goal stands.
+struct ObservationGoal {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  state @2 :ObservationGoalState;
+  # Empty decodes as absent: a present objective or detail is never empty.
+  objective @3 :Text;
+  detail @4 :Text;
+}
+
+# One report of a provider safety system holding, rerouting, or refusing the
+# request.
+struct ObservationSafety {
+  id @0 :Text;
+  sequence @1 :UInt64;
+  action @2 :ObservationSafetyAction;
+  category @3 :ObservationSafetyCategory;
+  # Empty decodes as absent: a present code, message, or model is never empty.
+  providerCode @4 :Text;
+  message @5 :Text;
+  model @6 :Text;
+}
+
 # One sanitized engine observation row. Member ordinals follow the domain
 # `Observation` variant order and are frozen once committed.
 struct EngineObservation {
@@ -1885,6 +2009,9 @@ struct EngineObservation {
     tool @19 :ObservationTool;
     turnState @20 :ObservationTurnStateObservation;
     usage @21 :ObservationUsage;
+    goal @22 :ObservationGoal;
+    image @23 :ObservationImage;
+    safety @24 :ObservationSafety;
   }
 }
 
@@ -2073,6 +2200,16 @@ struct AssistantMessageItem {
 
   # Renderer-disclosed text phase.
   phase @9 :AssistantMessagePhase;
+
+  # Where the item's first text falls among its thread's observations: the
+  # thread's highest observation delivery sequence when that text was
+  # committed. The item follows every step at or below it and precedes every
+  # later one. `unknown` until the item has text, and for items stored before
+  # the stamp existed.
+  textAfter :union {
+    unknown @10 :Void;
+    sequence @11 :UInt64;
+  }
 }
 
 # Renderer-visible conversation item vocabulary. Appending another kind
@@ -2516,6 +2653,25 @@ struct MessageImageResult {
   bytes @1 :Data;
 }
 
+# One media file a reply names. `path` is relative to the thread's project
+# (anchor project) or the Forge user's home folder (anchor home) unless it is
+# absolute by the Forge's own rules.
+struct ReadMediaFileRequest {
+  threadId @0 :Text;
+  path @1 :Text;
+  anchor @2 :MediaPathAnchor;
+}
+
+enum MediaPathAnchor {
+  project @0;
+  home @1;
+}
+
+# The file's bytes, at most MEDIA_FILE_MAX_BYTES.
+struct MediaFileResult {
+  bytes @0 :Data;
+}
+
 # ---------------------------------------------------------------------------
 # Provider-account usage. Owned conversions in `modules/protocol/src/codec.rs`
 # validate these messages before they cross application service boundaries.
@@ -2789,6 +2945,9 @@ struct UserPreferences {
   # A null pointer means no route was recorded yet.
   route @3 :NavigationRoute;
   account @4 :AccountProfile;
+  # The options the user last chose each model with, most recently chosen
+  # first, at most 256 models.
+  modelPreferences @5 :List(ModelPreference);
 }
 
 # The user opened projectId, and threadId in it when not empty.
@@ -3088,6 +3247,12 @@ struct SaveModelPreferenceRequest {
   source @1 :ModelPreferenceSource;
 }
 
+# The configuration the user last chose one catalog model with.
+struct ModelPreference {
+  modelId @0 :Text;
+  config @1 :EngineRunConfig;
+}
+
 # ---------------------------------------------------------------------------
 # Agent extensions and the global prompt (2026-10-07), appended so every
 # pre-existing node identity stays stable.
@@ -3143,10 +3308,12 @@ enum ExtensionLinkSupport {
   developerModeRequired @1;
 }
 
-# Every extension, at most 512, and whether skills can be linked.
+# Every extension, at most 512, whether skills can be linked, and what each
+# engine last reported it can use, at most 64.
 struct ExtensionCatalog {
   extensions @0 :List(Extension);
   links @1 :ExtensionLinkSupport;
+  inventories @2 :List(EngineInventory);
 }
 
 struct SetExtensionEnabledRequest {
@@ -3240,4 +3407,49 @@ enum ThreadTerminalState {
   failed @2;
   killed @3;
   ended @4;
+}
+
+# ---------------------------------------------------------------------------
+# What engines report they can use (2026-10-07), appended so every
+# pre-existing node identity stays stable.
+# ---------------------------------------------------------------------------
+
+enum InventorySkillSource {
+  user @0;
+  project @1;
+  plugin @2;
+  system @3;
+}
+
+# One skill an engine reported. `description` and `plugin` are empty when
+# absent.
+struct InventorySkill {
+  name @0 :Text;
+  description @1 :Text;
+  source @2 :InventorySkillSource;
+  plugin @3 :Text;
+}
+
+enum ConnectorStatus {
+  connected @0;
+  pending @1;
+  needsAuth @2;
+  failed @3;
+  disabled @4;
+}
+
+# One MCP server an engine reported. `plugin` is empty when absent.
+struct InventoryConnector {
+  name @0 :Text;
+  status @1 :ConnectorStatus;
+  plugin @2 :Text;
+}
+
+# What one engine reported while running in one project; `projectId` is
+# empty when it ran in none. At most 512 skills and 512 connectors.
+struct EngineInventory {
+  engineId @0 :Text;
+  projectId @1 :Text;
+  skills @2 :List(InventorySkill);
+  connectors @3 :List(InventoryConnector);
 }

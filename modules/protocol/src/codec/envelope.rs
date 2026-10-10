@@ -306,6 +306,15 @@ pub(crate) fn encode_request(
         ClientRequest::Command(Command::ResolveGlobalPrompt(command)) => {
             encode_resolve_global_prompt(builder, command);
         }
+        ClientRequest::Query(Query::ReadArchivedThreads(_)) => {
+            encode_read_archived_threads(builder);
+        }
+        ClientRequest::Query(Query::ReadMediaFile(query)) => {
+            encode_read_media_file(builder, query);
+        }
+        ClientRequest::Command(Command::UpdateThread(command)) => {
+            encode_update_thread(builder, command);
+        }
         ClientRequest::ResolveRichLink(request) => {
             builder
                 .reborrow()
@@ -407,6 +416,12 @@ pub(crate) fn encode_response_payload(
         }
         ResponsePayload::GlobalPrompt(prompt) => {
             encode_global_prompt(builder.reborrow().init_global_prompt(), prompt)?;
+        }
+        ResponsePayload::ArchivedThreads(listing) => {
+            encode_archived_threads(builder.reborrow().init_archived_threads(), listing)?;
+        }
+        ResponsePayload::MediaFile(result) => {
+            encode_media_file(builder.reborrow(), result);
         }
         ResponsePayload::AccountUsage(snapshot) => {
             encode_engine_usage_snapshot(builder.reborrow().init_account_usage(), snapshot)?;
@@ -869,6 +884,9 @@ pub(crate) fn decode_request(
         request::Which::ResolveGlobalPrompt(command) => {
             decode_resolve_global_prompt(request_id, command?)
         }
+        request::Which::ReadArchivedThreads(()) => Ok(decode_read_archived_threads()),
+        request::Which::ReadMediaFile(query) => decode_read_media_file(query?),
+        request::Which::UpdateThread(command) => decode_update_thread(request_id, command?),
     }
 }
 
@@ -1031,6 +1049,10 @@ pub(crate) fn decode_response(
         response::Which::GlobalPrompt(prompt) => {
             ResponsePayload::GlobalPrompt(decode_global_prompt(prompt?)?)
         }
+        response::Which::ArchivedThreads(listing) => {
+            ResponsePayload::ArchivedThreads(decode_archived_threads(listing?)?)
+        }
+        response::Which::MediaFile(result) => decode_media_file(result?)?,
     };
     Ok(ServerResponse {
         request_id,

@@ -44,7 +44,10 @@ const PROJECT_DRAFT_SUBMISSIONS_MIGRATION: &str = "m20261002_000022_project_draf
 const THREAD_READS_MIGRATION: &str = "m20261003_000023_thread_reads";
 const DROP_STORED_THINKING_MIGRATION: &str = "m20261004_000024_drop_stored_thinking";
 const LEDGER_TAG_MIGRATION: &str = "m20261005_000025_observation_ledger_tag";
+const MODEL_PREFERENCES_MIGRATION: &str = "m20261005_000026_model_preferences";
+const ITEM_TEXT_AFTER_SEQUENCE_MIGRATION: &str = "m20261006_000027_item_text_after_sequence";
 const EXTENSIONS_MIGRATION: &str = "m20261007_000028_extensions_and_global_prompt";
+const THREAD_LIFECYCLE_MIGRATION: &str = "m20261008_000029_thread_lifecycle";
 
 struct TempDatabase {
     directory: PathBuf,
@@ -131,7 +134,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&first).await?, 13);
     assert_eq!(
         scalar_i64(&first, "SELECT count(*) FROM seaql_migrations").await?,
-        26
+        29
     );
     first
         .execute_unprepared(
@@ -165,7 +168,7 @@ async fn empty_file_migrates_and_repeated_startup_is_idempotent() -> Result<(), 
     assert_eq!(native_table_count(&reopened).await?, 13);
     assert_eq!(
         scalar_i64(&reopened, "SELECT count(*) FROM seaql_migrations").await?,
-        26
+        29
     );
     let queued = reopened
         .query_one_raw(Statement::from_string(
@@ -245,7 +248,10 @@ async fn migration_records_both_immutable_versions_in_order() -> Result<(), Box<
             THREAD_READS_MIGRATION.to_string(),
             DROP_STORED_THINKING_MIGRATION.to_string(),
             LEDGER_TAG_MIGRATION.to_string(),
-            EXTENSIONS_MIGRATION.to_string()
+            MODEL_PREFERENCES_MIGRATION.to_string(),
+            ITEM_TEXT_AFTER_SEQUENCE_MIGRATION.to_string(),
+            EXTENSIONS_MIGRATION.to_string(),
+            THREAD_LIFECYCLE_MIGRATION.to_string()
         ]
     );
     database.close().await?;
@@ -1008,7 +1014,7 @@ async fn queue_steer_and_snapshot_migrations_preserve_legacy_rows() -> Result<()
     migrate_to_current(&database).await?;
     assert_eq!(
         scalar_i64(&database, "SELECT count(*) FROM seaql_migrations").await?,
-        26
+        29
     );
     for (table, expected) in [
         ("messages", 1),
@@ -1123,7 +1129,7 @@ async fn assert_migrated_schema(
 ) -> Result<(), Box<dyn Error>> {
     assert_eq!(
         scalar_i64(database, "SELECT count(*) FROM seaql_migrations").await?,
-        26,
+        29,
         "migration must record every version exactly once"
     );
     assert_eq!(

@@ -84,13 +84,14 @@ pub use conversation_history::{
     EarlierTurnMarkers, HeldBackTurnWork, HeldBackWork, TURN_WORK_PAGE_MAX_ROWS,
 };
 pub use engine_config::{
-    ApprovalMode, ByteLimit, ClaudeEffort, ClaudePermissionMode, ClaudeSelection,
-    CodexModelContextWindow, CodexReasoningEffort, CodexSelection, CodexServiceTier, CountLimit,
-    CursorPermissionMode, CursorReasoningEffort, CursorSelection, CursorSpeed, EngineConfigError,
-    EngineConfigReason, EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId,
-    EnginePermissionPolicy, EngineRunConfig, EngineRuntimeControls, EngineRuntimeControlsInput,
-    EngineSelection, FilesystemAccess, FiniteMillis, GrokPermissionMode, GrokReasoningEffort,
-    GrokSelection, NetworkAccess, OpenCode2Selection, WebSearchAccess,
+    ApprovalMode, ByteLimit, ClaudeAutoCompactWindow, ClaudeEffort, ClaudePermissionMode,
+    ClaudeSelection, CodexModelContextWindow, CodexReasoningEffort, CodexSelection,
+    CodexServiceTier, CountLimit, CursorPermissionMode, CursorReasoningEffort, CursorSelection,
+    CursorSpeed, EngineConfigError, EngineConfigReason, EngineConfigRevision,
+    EngineConfigUpdatePrecondition, EngineId, EnginePermissionPolicy, EngineRunConfig,
+    EngineRuntimeControls, EngineRuntimeControlsInput, EngineSelection, FilesystemAccess,
+    FiniteMillis, GrokPermissionMode, GrokReasoningEffort, GrokSelection, NetworkAccess,
+    OpenCode2Selection, WebSearchAccess,
 };
 pub use engine_socket::{
     EngineCapabilityName, EngineCapabilityState, EngineCommandTag, EngineDescriptor,
@@ -122,27 +123,29 @@ pub use observation::{
     AgentMessageCompletedObservation, AgentMessageDeltaObservation, ApprovalKind,
     ApprovalObservation, ApprovalRequest, ApprovalState, ArtisanCode, CompactionObservation,
     CompactionState, DiagnosticLevel, EngineErrorRef, EngineErrorRefInput, FileAction,
-    FileObservation, LimitScope, MessagePhase, NativeActionObservation,
-    OBSERVATION_ANSWER_MAX_BYTES, OBSERVATION_ANSWERS_MAX, OBSERVATION_ARTISAN_CODE_MAX_BYTES,
-    OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_COUNT_MAX, OBSERVATION_DELTA_MAX_BYTES,
-    OBSERVATION_DESCRIPTION_MAX_BYTES, OBSERVATION_DURATION_MAX_MILLIS, OBSERVATION_ID_MAX_BYTES,
-    OBSERVATION_LABEL_MAX_BYTES, OBSERVATION_LIMIT_LABEL_MAX_BYTES, OBSERVATION_MESSAGE_MAX_BYTES,
-    OBSERVATION_OUTPUT_MAX_BYTES, OBSERVATION_PATH_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES,
-    OBSERVATION_PLAN_TEXT_MAX_BYTES, OBSERVATION_PROVIDER_CODE_MAX_BYTES,
-    OBSERVATION_QUERY_MAX_BYTES, OBSERVATION_QUESTION_MAX_OPTIONS, OBSERVATION_REASON_MAX_BYTES,
-    OBSERVATION_SEQUENCE_MAX, OBSERVATION_SUMMARY_INDEX_MAX, OBSERVATION_TEXT_MAX_BYTES,
-    OBSERVATION_TIMESTAMP_MAX_BYTES, OBSERVATION_TITLE_MAX_BYTES, Observation, ObservationError,
-    ObservationId, ObservationSequence, PlanEntry, PlanEntryStatus, PlanObservation,
-    ProcessDiagnosticObservation, ProtocolDiagnosticObservation, QuestionInput,
-    QuestionObservation, QuestionOption, QuestionState, ReasoningSummaryCompletedObservation,
-    ReasoningSummaryDeltaObservation, RetryAttemptState, RetryObservation, RunState,
-    RunStateObservation, RunTerminalObservation, RunTerminalState, SearchObservation, SearchScope,
-    SearchState, SubagentInput, SubagentObservation, SubagentState, SubagentTranscriptObservation,
-    TerminalActivityInput, TerminalActivityObservation, TerminalActivityState, TerminalChannel,
-    ToolAction, ToolObservation, TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta,
-    TranscriptContent, TranscriptFile, TranscriptReasoningSummaryCompleted,
-    TranscriptReasoningSummaryDelta, TranscriptSearch, TranscriptTerminalActivity, TranscriptTool,
-    TurnState, TurnStateObservation, UsageBasis, UsageInput, UsageObservation,
+    FileObservation, GoalObservation, GoalState, ImageObservation, ImageOrigin, LimitScope,
+    MessagePhase, NativeActionObservation, OBSERVATION_ANSWER_MAX_BYTES, OBSERVATION_ANSWERS_MAX,
+    OBSERVATION_ARTISAN_CODE_MAX_BYTES, OBSERVATION_COMMAND_MAX_BYTES, OBSERVATION_COUNT_MAX,
+    OBSERVATION_DELTA_MAX_BYTES, OBSERVATION_DESCRIPTION_MAX_BYTES,
+    OBSERVATION_DURATION_MAX_MILLIS, OBSERVATION_ID_MAX_BYTES, OBSERVATION_LABEL_MAX_BYTES,
+    OBSERVATION_LIMIT_LABEL_MAX_BYTES, OBSERVATION_MESSAGE_MAX_BYTES, OBSERVATION_OUTPUT_MAX_BYTES,
+    OBSERVATION_PATH_MAX_BYTES, OBSERVATION_PLAN_MAX_ENTRIES, OBSERVATION_PLAN_TEXT_MAX_BYTES,
+    OBSERVATION_PROVIDER_CODE_MAX_BYTES, OBSERVATION_QUERY_MAX_BYTES,
+    OBSERVATION_QUESTION_MAX_OPTIONS, OBSERVATION_REASON_MAX_BYTES, OBSERVATION_SEQUENCE_MAX,
+    OBSERVATION_SUMMARY_INDEX_MAX, OBSERVATION_TEXT_MAX_BYTES, OBSERVATION_TIMESTAMP_MAX_BYTES,
+    OBSERVATION_TITLE_MAX_BYTES, Observation, ObservationError, ObservationId, ObservationSequence,
+    PlanEntry, PlanEntryStatus, PlanObservation, ProcessDiagnosticObservation,
+    ProtocolDiagnosticObservation, QuestionInput, QuestionObservation, QuestionOption,
+    QuestionState, ReasoningSummaryCompletedObservation, ReasoningSummaryDeltaObservation,
+    RetryAttemptState, RetryObservation, RunState, RunStateObservation, RunTerminalObservation,
+    RunTerminalState, SafetyAction, SafetyCategory, SafetyObservation, SearchObservation,
+    SearchScope, SearchState, SubagentInput, SubagentObservation, SubagentState,
+    SubagentTranscriptObservation, TerminalActivityInput, TerminalActivityObservation,
+    TerminalActivityState, TerminalChannel, ToolAction, ToolObservation,
+    TranscriptAgentMessageCompleted, TranscriptAgentMessageDelta, TranscriptContent,
+    TranscriptFile, TranscriptReasoningSummaryCompleted, TranscriptReasoningSummaryDelta,
+    TranscriptSearch, TranscriptTerminalActivity, TranscriptTool, TurnState, TurnStateObservation,
+    UsageBasis, UsageInput, UsageObservation,
 };
 pub use text::{
     DisplayName, DisplayNameError, MessageBody, MessageBodyError, RootPath, RootPathError,
@@ -251,13 +254,22 @@ pub use recent_threads::{
     RecentThread, RecentThreadListing,
 };
 
+pub mod thread_lifecycle;
+pub use thread_lifecycle::{
+    ARCHIVE_RETENTION_MS, ARCHIVED_THREADS_MAX, ArchivedThread, ArchivedThreadListing,
+    HISTORY_IDLE_MS, ReadArchivedThreads, ThreadChange, ThreadPlacement, UpdateThread,
+};
+
 pub mod extensions;
 pub use extensions::{
-    AdoptExtension, EXTENSION_CATALOG_MAX, EXTENSION_DESCRIPTION_MAX_BYTES, EXTENSION_DIGEST_BYTES,
-    EXTENSION_ENGINES_MAX, EXTENSION_ID_MAX_BYTES, EXTENSION_NAME_MAX_BYTES,
-    EXTENSION_REASON_MAX_BYTES, Extension, ExtensionCatalog, ExtensionEngineState,
-    ExtensionEngineStatus, ExtensionError, ExtensionKind, ExtensionLinkSupport, ExtensionOrigin,
-    ReadExtensions, SetExtensionEnabled, valid_skill_name, validate_extension_id,
+    AdoptExtension, ConnectorStatus, EXTENSION_CATALOG_MAX, EXTENSION_DESCRIPTION_MAX_BYTES,
+    EXTENSION_DIGEST_BYTES, EXTENSION_ENGINES_MAX, EXTENSION_ID_MAX_BYTES,
+    EXTENSION_NAME_MAX_BYTES, EXTENSION_REASON_MAX_BYTES, EngineInventory, Extension,
+    ExtensionCatalog, ExtensionEngineState, ExtensionEngineStatus, ExtensionError, ExtensionKind,
+    ExtensionLinkSupport, ExtensionOrigin, INVENTORIES_MAX, INVENTORY_ITEMS_MAX,
+    INVENTORY_NAME_MAX_BYTES, InventoryConnector, InventorySkill, InventorySkillSource,
+    ReadExtensions, SetExtensionEnabled, valid_inventory_name, valid_skill_name,
+    validate_extension_id,
 };
 
 pub mod global_prompt;
@@ -269,10 +281,16 @@ pub use global_prompt::{
     SaveGlobalPrompt, validate_prompt_text,
 };
 
+pub mod media_file;
+pub use media_file::{
+    MEDIA_FILE_MAX_BYTES, MediaFilePath, MediaFilePathError, MediaPathAnchor, ReadMediaFile,
+};
+
 pub mod user_preferences;
 pub use user_preferences::{
     AccountProfile, ImportLegacyPreferences, LegacyImportOutcome, LegacyPreferencesImported,
-    ModelPreferenceSource, NAVIGATION_PROJECTS_MAX, NavigationProject, NavigationRecord,
-    NavigationRecordError, NavigationRoute, ReadUserPreferences, RecordNavigation,
-    SaveModelPreference, UserPreferences, UserPreferencesRevision,
+    MODEL_PREFERENCES_MAX, ModelPreference, ModelPreferenceSource, NAVIGATION_PROJECTS_MAX,
+    NavigationProject, NavigationRecord, NavigationRecordError, NavigationRoute,
+    ReadUserPreferences, RecordNavigation, SaveModelPreference, UserPreferences,
+    UserPreferencesRevision,
 };

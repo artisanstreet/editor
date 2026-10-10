@@ -315,6 +315,21 @@ pub enum ProtocolDecodeError {
         #[source]
         source: artisan_domain::GlobalPromptError,
     },
+    /// A media-file path failed its domain bound.
+    #[error("invalid media file path in {field}: {source}")]
+    MediaFilePath {
+        /// Offending field.
+        field: &'static str,
+        /// Domain-owned path validation failure.
+        #[source]
+        source: artisan_domain::MediaFilePathError,
+    },
+    /// Media-file bytes exceeded what one file may hold.
+    #[error("{field} exceeds {} bytes", artisan_domain::MEDIA_FILE_MAX_BYTES)]
+    MediaFileTooLarge {
+        /// Offending field.
+        field: &'static str,
+    },
     /// An account-usage field failed its domain bound or shape policy.
     #[error("invalid account usage: {source}")]
     EngineUsage {

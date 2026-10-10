@@ -95,5 +95,9 @@ name = "recent_threads"
 path = "../../tests/protocol/recent_threads.rs"
 
 [[test]]
+name = "media_file"
+path = "../../tests/protocol/media_file.rs"
+
+[[test]]
 name = "engine_installs"
 path = "../../tests/protocol/engine_installs.rs"
