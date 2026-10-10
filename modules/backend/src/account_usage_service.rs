@@ -66,12 +66,13 @@ const READ_FAILED: &str = "engine usage read failed";
 const NOT_INSTALLED: &str = "engine is not installed on this Forge";
 const UNREPRESENTABLE_READ: &str = "provider usage could not be represented";
 const UNKNOWN_ENGINE: &str = "unknown engine id";
-const GROK_UNSUPPORTED: &str = "Grok Build exposes no account-usage surface.";
+const GROK_UNSUPPORTED: &str = "Grok exposes no account-usage surface.";
+const GROK_SIGNED_OUT: &str = "Grok is not signed in.";
 const OPENCODE2_UNSUPPORTED: &str = "OpenCode exposes no account-usage surface.";
 const CODEX_DISPLAY: &str = "Codex";
 const CLAUDE_DISPLAY: &str = "Claude";
 const CURSOR_DISPLAY: &str = "Cursor";
-const GROK_DISPLAY: &str = "Grok Build";
+const GROK_DISPLAY: &str = "Grok";
 const OPENCODE2_DISPLAY: &str = "OpenCode";
 
 /// Typed failure of one engine read with its honest report states.
@@ -393,6 +394,49 @@ impl AccountUsageReader for UnsupportedAccountUsageReader {
     }
 }
 
+/// Grok's roster entry. Grok exposes no usage surface, but its model
+/// listing says when the CLI is signed out; that reports as an
+/// unauthenticated account, so readiness asks for sign-in before anything
+/// falls back to the engine having no models.
+#[derive(Debug)]
+pub struct GrokAccountUsageReader;
+
+impl AccountUsageReader for GrokAccountUsageReader {
+    fn engine_id(&self) -> &'static str {
+        "grok"
+    }
+
+    fn display_name(&self) -> &'static str {
+        GROK_DISPLAY
+    }
+
+    fn read(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>> {
+        Box::pin(async move {
+            let discovery = crate::model_discovery::discovery_bundle().await;
+            Err(grok_usage_failure(
+                discovery.unauthenticated_engines.contains(&"grok"),
+            ))
+        })
+    }
+}
+
+/// The report a Grok read serves: unauthenticated when its CLI reported it
+/// is signed out, otherwise the honest unsupported surface.
+fn grok_usage_failure(signed_out: bool) -> ReaderFailure {
+    if signed_out {
+        ReaderFailure::new(
+            EngineUsageAuthentication::Unauthenticated,
+            None,
+            QuotaSurface::Unsupported,
+            GROK_SIGNED_OUT,
+        )
+    } else {
+        ReaderFailure::unsupported(GROK_UNSUPPORTED)
+    }
+}
+
 /// Cloneable account-usage fan-out service with per-engine freshness.
 #[derive(Debug)]
 pub struct AccountUsageService {
@@ -425,8 +469,8 @@ struct CachedUsage {
 }
 
 impl AccountUsageService {
-    /// Creates the production roster: Codex, Claude, Cursor, then the
-    /// unsupported Grok Build and `OpenCode` entries.
+    /// Creates the production roster: Codex, Claude, Cursor, Grok (sign-in
+    /// state only), then the unsupported `OpenCode` entry.
     #[must_use]
     pub fn with_defaults(database_path: &Path, cursor: CursorUsageConfig) -> Self {
         Self::with_readers(
@@ -438,11 +482,7 @@ impl AccountUsageService {
                     launch: UsageLaunch::Managed(database_path.to_path_buf()),
                 }) as Arc<dyn AccountUsageReader>,
                 Arc::new(CursorAccountUsageReader::new(cursor)) as Arc<dyn AccountUsageReader>,
-                Arc::new(UnsupportedAccountUsageReader::new(
-                    "grok",
-                    GROK_DISPLAY,
-                    GROK_UNSUPPORTED,
-                )) as Arc<dyn AccountUsageReader>,
+                Arc::new(GrokAccountUsageReader) as Arc<dyn AccountUsageReader>,
                 Arc::new(UnsupportedAccountUsageReader::new(
                     "opencode2",
                     OPENCODE2_DISPLAY,
@@ -784,4 +824,54 @@ fn system_millis() -> i64 {
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod grok_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct SignedOutGrok;
+
+    impl AccountUsageReader for SignedOutGrok {
+        fn engine_id(&self) -> &'static str {
+            "grok"
+        }
+
+        fn display_name(&self) -> &'static str {
+            GROK_DISPLAY
+        }
+
+        fn read(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<ProviderUsage, ReaderFailure>> + Send + '_>>
+        {
+            Box::pin(async { Err(grok_usage_failure(true)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_out_grok_needs_sign_in_and_signed_in_stays_unsupported() {
+        let service = AccountUsageService::with_readers(
+            vec![Arc::new(SignedOutGrok) as Arc<dyn AccountUsageReader>],
+            ACCOUNT_USAGE_FRESHNESS,
+            ACCOUNT_USAGE_PER_ENGINE_TIMEOUT,
+        );
+        let snapshot = service
+            .read(&ReadAccountUsage::new(None, false).expect("query"))
+            .await;
+        let verdicts: Vec<_> = snapshot
+            .engines()
+            .iter()
+            .map(|report| report.readiness().verdict())
+            .collect();
+        assert_eq!(
+            verdicts,
+            [artisan_domain::EngineReadinessVerdict::NeedsSignIn]
+        );
+        assert_eq!(
+            grok_usage_failure(false).auth_state,
+            EngineUsageAuthentication::Unknown
+        );
+    }
 }

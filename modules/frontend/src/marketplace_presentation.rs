@@ -245,14 +245,8 @@ pub fn prompt_chip(state: &GlobalPromptEngineState) -> EngineChip {
 /// The short product name of an engine.
 #[must_use]
 pub fn engine_name(engine_id: &str) -> &'static str {
-    match engine_id {
-        "claude" => "Claude Code",
-        "codex" => "Codex",
-        "cursor" => "Cursor",
-        "grok" => "Grok",
-        "opencode2" => "OpenCode",
-        _ => "Engine",
-    }
+    artisan_domain::EngineId::parse(engine_id)
+        .map_or("Engine", artisan_domain::EngineId::display_name)
 }
 
 fn join_names(names: &[&str]) -> String {

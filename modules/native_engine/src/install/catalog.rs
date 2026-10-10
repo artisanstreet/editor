@@ -55,7 +55,7 @@ impl ManagedEngine {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::Cursor => "Cursor Agent",
-            Self::Grok => "Grok Build",
+            Self::Grok => "Grok",
             Self::OpenCode2 => "OpenCode2",
         }
     }

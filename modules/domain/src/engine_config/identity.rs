@@ -193,6 +193,18 @@ impl EngineId {
         }
     }
 
+    /// Returns the short product name shown to the reader.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenCode2 => "OpenCode",
+            Self::Codex => "Codex",
+            Self::Claude => "Claude Code",
+            Self::Grok => "Grok",
+            Self::Cursor => "Cursor",
+        }
+    }
+
     /// Parses a stable storage or wire spelling.
     ///
     /// # Errors

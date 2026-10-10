@@ -186,7 +186,7 @@ fn managed_engine_label(engine_id: &str) -> &str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "cursor" => "Cursor Agent",
-        "grok" => "Grok Build",
+        "grok" => "Grok",
         "opencode2" => "OpenCode2",
         other => other,
     }

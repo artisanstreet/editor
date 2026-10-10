@@ -31,7 +31,7 @@ use super::super::grok::GrokLaunch;
 /// Display name of the Grok adapter, mirroring
 /// `GrokEngineDescriptor.display_name` in
 /// `modules/engines/src/grok/engine.ts:52`.
-const GROK_DISPLAY_NAME: &str = "Grok Build";
+const GROK_DISPLAY_NAME: &str = "Grok";
 
 /// Exact transport spelling of the Grok ACP stdio wire, mirroring
 /// `grok_transport` in `modules/engines/src/grok/engine.ts:6`.
