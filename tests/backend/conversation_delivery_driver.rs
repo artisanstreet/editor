@@ -2969,8 +2969,8 @@ async fn recent_threads_are_pushed_to_a_connection_that_read_them() -> Result<()
 /// the request limit, a read on the same connection answers at once, the
 /// save completes when the lock is released, and the connection serves on.
 #[tokio::test]
-async fn a_stalled_write_neither_blocks_reads_nor_ends_the_connection()
--> Result<(), Box<dyn Error>> {
+async fn a_stalled_write_neither_blocks_reads_nor_ends_the_connection() -> Result<(), Box<dyn Error>>
+{
     use sea_orm::{ConnectionTrait, TransactionTrait};
 
     let (temporary, app) = opened_app().await?;
@@ -3011,12 +3011,19 @@ async fn a_stalled_write_neither_blocks_reads_nor_ends_the_connection()
         )
         .await?;
 
+        // Open the pool's connections first, as a running Forge has them:
+        // opening a fresh pooled connection while another process holds
+        // the write lock can itself wait on the lock, which is a database
+        // concern apart from how the connection serves its requests.
+        let warm = (0..6).map(|_| repository.read_user_preferences());
+        for read in futures::future::join_all(warm).await {
+            read?;
+        }
         // Another process holds the database's write lock, as a commit the
         // kernel keeps for tens of seconds does.
-        let blocker = artisan_database::connect(
-            SqliteConfig::file(&temporary.path).sqlx_logging(false),
-        )
-        .await?;
+        let blocker =
+            artisan_database::connect(SqliteConfig::file(&temporary.path).sqlx_logging(false))
+                .await?;
         let stall = blocker.begin().await?;
         stall
             .execute_unprepared("CREATE TABLE stalled_write_probe (value INTEGER)")
@@ -3060,8 +3067,10 @@ async fn a_stalled_write_neither_blocks_reads_nor_ends_the_connection()
         // Released only after the request limit passed: the save was never
         // failed for waiting on the disk.
         let limit = listener_limits().next_request;
-        tokio::time::sleep((limit + Duration::from_millis(500)).saturating_sub(stalled_at.elapsed()))
-            .await;
+        tokio::time::sleep(
+            (limit + Duration::from_millis(500)).saturating_sub(stalled_at.elapsed()),
+        )
+        .await;
         stall.rollback().await?;
         let ResponsePayload::ComposerDraftSaved(_) = save.await? else {
             return Err("expected the draft save to complete".into());

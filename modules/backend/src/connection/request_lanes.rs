@@ -9,8 +9,8 @@
 //! - **Subscription requests** (Subscribe, Unsubscribe) change which threads
 //!   the delivery driver pushes. Each holds the driver for its whole stage —
 //!   answer, reply, activation, and the activated thread's first push — so
-//!   it never interleaves with a wake scan or with another subscription
-//!   request, and they take the driver in the order their streams were
+//!   it never interleaves with a wake scan or with another request's
+//!   follow-up, and they take the driver in the order their streams were
 //!   accepted ([`AcceptOrder`]). The registry's lease fencing therefore sees
 //!   exactly the order it saw when the connection was served one request at
 //!   a time: a scan never records a batch under a lease a concurrent
@@ -29,15 +29,21 @@
 //!   by the connection itself (its idle timeout), which ends the service
 //!   through the accept.
 //!
-//! After its reply every request still hands its follow-up to the driver
+//! Every request writes its reply and hands its follow-up to the driver
 //! (the listing it served becomes what later pushes are compared against,
-//! and host-state changes are looked for), and wake scans run as one more
-//! task beside the requests, one at a time.
+//! and host-state changes are looked for) while it holds the driver, so no
+//! wake scan runs between a reply and its follow-up: a change the peer
+//! makes after reading a reply is always pushed against what that reply
+//! showed. Wake scans run as one more task beside the requests, one at a
+//! time. Locks are always taken in the same order — accept order, then the
+//! answering lock, then the driver — so the lanes cannot wait on each
+//! other in a cycle.
 
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -96,6 +102,9 @@ pub(super) struct RequestLanes<'a, F> {
     exclusive: RwLock<()>,
     order: AcceptOrder,
     stamp: StdMutex<F>,
+    /// Requests whose reply was written and settled, follow-up or not: the
+    /// count the listener reports, as it was before the follow-up ran.
+    replied: AtomicU32,
 }
 
 impl<'a, F> RequestLanes<'a, F>
@@ -120,6 +129,7 @@ where
             exclusive: RwLock::new(()),
             order: AcceptOrder::default(),
             stamp: StdMutex::new(stamp),
+            replied: AtomicU32::new(0),
         }
     }
 
@@ -134,11 +144,13 @@ where
     /// dropped with their stream guards, which reset unfinished replies.
     pub(super) async fn serve(&self, capacity: u32, mut wakes: ConversationWakes) -> ServiceEnd {
         let mut tasks = FuturesUnordered::new();
-        let (mut admitted, mut completed) = (0_u32, 0_u32);
+        let mut admitted = 0_u32;
         let (mut answering, mut scanning) = (0_usize, false);
         loop {
             if admitted >= capacity && answering == 0 && !scanning {
-                return ServiceEnd::Capacity { completed };
+                return ServiceEnd::Capacity {
+                    completed: self.replied.load(Ordering::Relaxed),
+                };
             }
             let accepting = admitted < capacity && answering < MAX_CONCURRENT_REQUESTS;
             // Ordinary desktop idle is not a request failure: waiting for
@@ -148,21 +160,20 @@ where
                 biased;
                 () = self.cancel.wait() => {
                     return ServiceEnd::Failed {
-                        completed,
+                        completed: self.replied.load(Ordering::Relaxed),
                         source: DeadlineError::Cancelled {
                             operation: OperationKind::Receive,
                         },
                     };
                 }
                 Some(end) = tasks.next() => match end {
-                    TaskEnd::Request(RequestEnd::Served) => {
-                        answering -= 1;
-                        completed += 1;
-                    }
-                    TaskEnd::Request(RequestEnd::Dropped) => answering -= 1,
+                    TaskEnd::Request(RequestEnd::Served | RequestEnd::Dropped) => answering -= 1,
                     TaskEnd::Request(RequestEnd::Fatal(source))
                     | TaskEnd::Scan(Err(source)) => {
-                        return ServiceEnd::Failed { completed, source };
+                        return ServiceEnd::Failed {
+                            completed: self.replied.load(Ordering::Relaxed),
+                            source,
+                        };
                     }
                     TaskEnd::Scan(Ok(())) => scanning = false,
                 },
@@ -175,7 +186,7 @@ where
                     }
                     Err(source) => {
                         return ServiceEnd::Failed {
-                            completed,
+                            completed: self.replied.load(Ordering::Relaxed),
                             source: DeadlineError::Peer {
                                 operation: OperationKind::Receive,
                                 error: RequestStageError::Accept { source },
@@ -190,7 +201,7 @@ where
                     }
                     Err(error) => {
                         return ServiceEnd::Failed {
-                            completed,
+                            completed: self.replied.load(Ordering::Relaxed),
                             source: delivery_stage_failure(OperationKind::Receive, error),
                         };
                     }
@@ -203,7 +214,7 @@ where
     async fn run(&self, task: Task<'_>) -> TaskEnd {
         match task {
             Task::Request { ticket, send, recv } => {
-                TaskEnd::Request(self.serve_request(ticket, send, recv).await)
+                TaskEnd::Request(Box::pin(self.serve_request(ticket, send, recv)).await)
             }
             Task::Scan => TaskEnd::Scan(self.scan().await),
         }
@@ -259,16 +270,24 @@ where
         };
         match lane(&incoming.request) {
             Lane::Subscription => {
-                let driver = ticket.take_turn(&self.driver).await;
+                let turn = ticket.wait_turn().await;
                 let answering = self.exclusive.read().await;
-                self.serve_in_order(frame, incoming, streams, Hold::Driver(driver, answering))
-                    .await
+                let driver = self.driver.lock().await;
+                // Holding the driver, the next subscription request may
+                // queue behind this one.
+                drop(turn);
+                Box::pin(self.serve_in_order(
+                    frame,
+                    incoming,
+                    streams,
+                    Hold::Driver(driver, answering),
+                ))
+                .await
             }
             Lane::Exclusive => {
                 drop(ticket);
                 let alone = self.exclusive.write().await;
-                self.serve_in_order(frame, incoming, streams, Hold::Alone(alone))
-                    .await
+                Box::pin(self.serve_in_order(frame, incoming, streams, Hold::Alone(alone))).await
             }
             Lane::Independent => {
                 drop(ticket);
@@ -291,33 +310,40 @@ where
             request,
             ..
         } = incoming;
-        let stage = run_with_deadline(OperationKind::Receive, self.limit, self.cancel, async {
-            let (answered, receipt) = answer(
-                self.handler,
-                self.lifecycle,
-                self.witness,
-                Some(&self.context),
-                &request_id,
-                request,
-            )
-            .await;
-            let reply = reply_envelope(self.protocol_version, frame, answered);
-            send_server_reply::<Infallible>(streams.reply_stream(), &reply, &request_id).await?;
-            complete_request_receipt(
-                self.handler,
-                Some(&self.context),
-                &mut streams,
-                receipt,
-                self.cancel,
-            )
-            .await
-        })
+        let stage = Box::pin(run_with_deadline(
+            OperationKind::Receive,
+            self.limit,
+            self.cancel,
+            async {
+                let (answered, receipt) = answer(
+                    self.handler,
+                    self.lifecycle,
+                    self.witness,
+                    Some(&self.context),
+                    &request_id,
+                    request,
+                )
+                .await;
+                let reply = reply_envelope(self.protocol_version, frame, answered);
+                send_server_reply::<Infallible>(streams.reply_stream(), &reply, &request_id)
+                    .await?;
+                complete_request_receipt(
+                    self.handler,
+                    Some(&self.context),
+                    &mut streams,
+                    receipt,
+                    self.cancel,
+                )
+                .await
+            },
+        ))
         .await;
         match stage {
             Ok(outcome) => {
                 // The stage completed: hand both directions back for
                 // ordinary drops without cleanup actions.
                 streams.release();
+                self.replied.fetch_add(1, Ordering::Relaxed);
                 // A lifecycle request lets the others answer again before
                 // it waits for the driver: a subscription request may hold
                 // the driver while it waits for its turn to answer.
@@ -369,6 +395,9 @@ where
             artisan_tracing::instant!("forge.request", "request.slow", "request_id" => request_id.as_str(), "family" => family, "took_ms" => took.as_millis());
         }
         let reply = reply_envelope(self.protocol_version, frame, answered);
+        // Replied and followed up under the driver, so no wake scan runs
+        // between the two (see the module documentation).
+        let driver = self.driver.lock().await;
         if let Err(error) = run_with_deadline(
             OperationKind::Send,
             self.limit,
@@ -391,7 +420,8 @@ where
         {
             Ok(outcome) => {
                 streams.release();
-                self.follow_up(outcome, None).await
+                self.replied.fetch_add(1, Ordering::Relaxed);
+                self.follow_up(outcome, Some(driver)).await
             }
             Err(error) => RequestEnd::Fatal(DeadlineError::Peer {
                 operation: OperationKind::Receive,
@@ -576,9 +606,9 @@ struct Ticket<'o> {
 }
 
 impl Ticket<'_> {
-    /// Waits until every earlier stream is settled or holds the lane, then
-    /// takes the lane.
-    async fn take_turn<T>(self, lane: &Mutex<T>) -> MutexGuard<'_, T> {
+    /// Waits until every earlier stream is settled or holds the lane. The
+    /// ticket is kept until the caller holds the lane itself.
+    async fn wait_turn(self) -> Self {
         loop {
             let changed = self.order.changed.notified();
             tokio::pin!(changed);
@@ -586,13 +616,10 @@ impl Ticket<'_> {
             // and the wait still wakes this one.
             changed.as_mut().enable();
             if self.order.is_first(self.number) {
-                break;
+                return self;
             }
             changed.await;
         }
-        let turn = lane.lock().await;
-        drop(self);
-        turn
     }
 }
 
