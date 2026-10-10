@@ -98,7 +98,13 @@ pub(crate) fn approval_response_line(request_id: &str, approved: bool) -> String
         "response": {
             "subtype": "success",
             "request_id": request_id,
-            "response": { "behavior": if approved { "allow" } else { "deny" } },
+            // A denial must say why: the CLI rejects a `deny` without a
+            // `message` as malformed.
+            "response": if approved {
+                serde_json::json!({ "behavior": "allow" })
+            } else {
+                serde_json::json!({ "behavior": "deny", "message": "The user denied this request." })
+            },
         },
     })
     .to_string()
@@ -152,7 +158,6 @@ impl ClaudeApprovalRequest {
     }
 
     /// Returns the human description.
-    #[cfg(test)]
     pub(crate) fn description(&self) -> &str {
         &self.description
     }

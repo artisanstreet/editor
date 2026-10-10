@@ -566,6 +566,12 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
         assert_eq!(value["type"], "control_response");
         assert_eq!(value["response"]["request_id"], request_id);
         assert_eq!(value["response"]["response"]["behavior"], behavior);
+        if !approved {
+            assert!(
+                value["response"]["response"]["message"].is_string(),
+                "the CLI rejects a deny without a message"
+            );
+        }
         // The run continues: deltas still normalize after a deny.
         let delta = parse_frame(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"onward"}}}"#,
@@ -600,6 +606,38 @@ async fn approval_deny_then_allow_resolves_without_side_effect() {
     let line = approval_response_line("perm-9", true);
     let value: serde_json::Value = serde_json::from_str(&line).expect("helper json");
     assert_eq!(value["response"]["response"]["behavior"], "allow");
+}
+
+#[tokio::test]
+async fn permission_request_presents_an_approval_row() {
+    let mut tracker = ClaudePendingTracker::new();
+    let event = parse_frame(
+        r#"{"type":"control_request","request_id":"perm-row","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"grep -r goal /tmp/goalprobe"}}}"#,
+        4,
+    )
+    .expect("approval decodes");
+    let (sender, mut receiver) = mpsc::channel(8);
+    let mut active = None;
+    let outcome = apply_event(
+        event,
+        &run_id(),
+        "session-1",
+        &mut tracker,
+        &mut active,
+        &sender,
+        4,
+        None,
+    )
+    .await;
+    assert_eq!(outcome, ClaudeApplyOutcome::Continue { end_input: false });
+    assert!(tracker.waiting_on_user());
+    let EngineObservation::Activity(artisan_domain::Observation::Approval(row)) =
+        receiver.try_recv().expect("the request reaches the user")
+    else {
+        panic!("expected an approval row")
+    };
+    assert_eq!(row.approval_id().as_str(), "perm-row");
+    assert!(receiver.try_recv().is_err(), "one row per request");
 }
 
 #[test]
