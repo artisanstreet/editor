@@ -143,6 +143,17 @@ pub struct ThreadScreen {
     pub(super) terminals_loading: bool,
     pub(super) checklist: Vec<ThreadChecklistEntry>,
     pub(super) agents: Vec<ThreadAgentEntry>,
+    /// Set when the screen opens from a new-thread send: the composer starts
+    /// lifted to where that screen centred it and settles into its dock,
+    /// and the first transcript content fades in.
+    pub(super) entrance: Option<ComposerEntrance>,
+}
+
+/// The new-thread send entrance this screen plays once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ComposerEntrance {
+    /// How far above its dock the composer starts, in logical pixels.
+    pub(crate) lift_px: f32,
 }
 
 impl ThreadScreen {
@@ -178,7 +189,15 @@ impl ThreadScreen {
             terminals_loading: false,
             checklist: Vec::new(),
             agents: Vec::new(),
+            entrance: None,
         }
+    }
+
+    /// Plays the new-thread send entrance: the composer slides down from
+    /// `lift_px` above its dock, and the screen keeps its open layout while
+    /// the thread loads so the composer never disappears mid-slide.
+    pub(crate) fn begin_composer_entrance(&mut self, lift_px: f32) {
+        self.entrance = Some(ComposerEntrance { lift_px });
     }
 
     /// Mounts host, composer, and screen in one application-context step.
@@ -294,11 +313,11 @@ impl ThreadScreen {
     /// content width fits the column. The application feeds this to
     /// [`desktop_shell`](crate::desktop_shell::desktop_shell) each frame,
     /// after the route body has published this frame's gate and content
-    /// width, so the shell's right junction crosshair appears and disappears
-    /// with the column's left rule.
+    /// width, so the shell's titlebar rule appears and disappears with the
+    /// column's left rule.
     #[must_use]
     pub fn visible_inspector_width(&self) -> Option<Pixels> {
-        if self.gate_branch() == ThreadRouteGateRender::OpenedRoute {
+        if self.renders_open_layout() {
             self.inspector_width().map(px)
         } else {
             None
@@ -334,9 +353,12 @@ impl ThreadScreen {
         &self.environment
     }
 
-    /// Replaces the Terminals rows, returning whether they changed so a
-    /// per-render caller notifies only on a change.
-    pub fn set_terminals(&mut self, terminals: Vec<ThreadTerminalEntry>) -> bool {
+    /// Replaces the Terminals rows with the jobs still running, returning
+    /// whether they changed so a per-render caller notifies only on a
+    /// change. A job that stopped leaves the section, as a finished agent
+    /// does: a one-off command never stays, a dev server stays while it runs.
+    pub fn set_terminals(&mut self, mut terminals: Vec<ThreadTerminalEntry>) -> bool {
+        terminals.retain(|entry| entry.state == ThreadTerminalState::Running);
         let changed = self.terminals != terminals;
         self.terminals = terminals;
         changed
@@ -416,6 +438,16 @@ impl ThreadScreen {
     ///
     /// This is the same ordered projection the legacy gate uses
     /// (`thread-route-gate.svelte` branches), reused rather than restated.
+    /// Whether the open layout paints: the gate opened it, or a new-thread
+    /// entrance holds it while the thread loads.
+    pub(super) fn renders_open_layout(&self) -> bool {
+        match self.gate_branch() {
+            ThreadRouteGateRender::OpenedRoute => true,
+            ThreadRouteGateRender::LoadingIndicator => self.entrance.is_some(),
+            _ => false,
+        }
+    }
+
     pub(super) fn gate_branch(&self) -> ThreadRouteGateRender {
         let (has_thread_open, loading, has_failure) = self.gate.presence();
         thread_route_gate_render(has_thread_open, loading, has_failure)

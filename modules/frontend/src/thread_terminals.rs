@@ -10,51 +10,72 @@
 //! dropped older output) starts the screen afresh and says so.
 //!
 //! [`ThreadTerminalsView`] owns the mirror for the selected thread and draws
-//! the dialog: the job's output with its colours, scrollable through
-//! everything kept, opening at the bottom. It follows new output while the
-//! reader is at the bottom and stays put once they scroll up; scrolling back
-//! down follows again. New output re-renders only this view: the inspector
-//! changes only when a job starts, stops, or leaves.
+//! the dialog: a glass card that reads as the terminal the job ran in. The
+//! command sits after the shell's prompt, its output follows with its
+//! colours, and the last line is the cursor while the job runs or a fresh
+//! prompt once it stopped. The card scrolls through everything kept, opens
+//! at the bottom, follows new output while the reader is at the bottom and
+//! stays put once they scroll up; scrolling back down follows again. New
+//! output re-renders only this view: the inspector changes only when a job
+//! starts, stops, or leaves.
 
 #![forbid(unsafe_code)]
 
+use std::ops::Range;
+
 use artisan_assets::AssetId;
 use artisan_domain::{ThreadId, ThreadTerminal, ThreadTerminalState, ThreadTerminals};
-use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant};
-use artisan_ui::dialog::{Dialog, DialogStyle};
+use artisan_ui::button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant};
+use artisan_ui::dialog::DialogAnimation;
+use artisan_ui::glass::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
 use artisan_ui::motion::MotionPolicy;
 use artisan_ui::terminal_text::{TerminalPalette, TerminalScreen, highlights};
 use artisan_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, ThemeMode};
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
 use gpui::{
-    AnyElement, ClipboardItem, Context, FocusHandle, FollowMode, IntoElement, ListAlignment,
-    ListState, Render, SharedString, StyledText, WeakEntity, Window, deferred, div, list, px,
+    AnimationExt as _, AnyElement, ClipboardItem, ColorExt as _, Context, FocusHandle, FollowMode,
+    FontWeight, HighlightStyle, IntoElement, KeyDownEvent, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, Render, SharedString, StyledText, Window, deferred, div, list, px,
 };
 
-/// Stable debug selector prefix for the output dialog.
+/// Stable debug selector for the dialog's overlay.
 pub const THREAD_TERMINAL_DIALOG_SELECTOR: &str = "artisan-thread-terminal-dialog";
 
-/// Stable debug selector for the dialog's output list.
+/// Stable debug selector for the terminal card.
 pub const THREAD_TERMINAL_OUTPUT_SELECTOR: &str = "artisan-thread-terminal-output";
 
 /// Above the shell's deferred menus, below the image preview.
 const DIALOG_DEFERRED_PRIORITY: usize = 90;
 
-/// Widest the output dialog grows.
+/// Widest the terminal grows.
 const DIALOG_MAX_WIDTH_PX: f32 = 1040.0;
 
-/// Room the dialog leaves around itself inside the window.
+/// Room the terminal leaves around itself inside the window.
 const DIALOG_WINDOW_MARGIN_PX: f32 = 48.0;
 
-/// Tallest the output area grows.
+/// Tallest the terminal grows.
 const OUTPUT_MAX_HEIGHT_PX: f32 = 640.0;
 
-/// Share of the window height the output area may take.
+/// Share of the window height the terminal may take.
 const OUTPUT_HEIGHT_SHARE: f32 = 0.62;
 
 /// Output text size and line height.
 const OUTPUT_TEXT_PX: f32 = 12.5;
 const OUTPUT_LINE_HEIGHT_PX: f32 = 18.0;
+
+/// The block cursor of a running job.
+const CURSOR_WIDTH_PX: f32 = 7.5;
+const CURSOR_HEIGHT_PX: f32 = 15.0;
+
+/// Dims the window behind the terminal, lightly enough for the glass to
+/// show what it covers.
+const BACKDROP_OPACITY: f32 = 0.45;
+
+/// Hover group of the terminal card, which reveals its copy control.
+const CARD_GROUP: &str = "artisan-thread-terminal-card";
 
 /// Trailing lines re-measured after new output: a spinner or progress bar
 /// rewrites the last few lines in place.
@@ -259,16 +280,80 @@ pub fn terminal_name(command: Option<&str>) -> String {
         .map_or_else(|| UNNAMED_TERMINAL_LABEL.to_owned(), str::to_owned)
 }
 
-/// How a job's state reads in a sentence.
-#[must_use]
-pub fn terminal_status(state: ThreadTerminalState) -> String {
-    match state {
-        ThreadTerminalState::Running => "Running".to_owned(),
-        ThreadTerminalState::Exited { code: Some(code) } => format!("Exited with code {code}"),
-        ThreadTerminalState::Exited { code: None } => "Exited".to_owned(),
-        ThreadTerminalState::Failed => "Failed".to_owned(),
-        ThreadTerminalState::Killed => "Stopped".to_owned(),
-        ThreadTerminalState::Ended => "Ended with the agent's turn".to_owned(),
+/// The prompt of the shell a job ran in, drawn before its command.
+///
+/// Engines run commands through the Forge machine's shell, not a terminal
+/// emulator, so the prompt follows the machine: PowerShell on Windows, a
+/// POSIX shell (bash or zsh) on Linux, macOS, and WSL. The project's root
+/// path tells which, since the Forge reports it in its own form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShellPrompt {
+    /// What the shell prints before a command, e.g. `~/projects/app$ ` or
+    /// `PS C:\Users\me\app> `.
+    pub prompt: String,
+    /// What the shell prints before each continuation line of a command.
+    pub continuation: &'static str,
+    /// Whether the prompt is coloured, as default POSIX prompts are.
+    pub coloured: bool,
+}
+
+impl Default for ShellPrompt {
+    fn default() -> Self {
+        Self::for_directory(None)
+    }
+}
+
+impl ShellPrompt {
+    /// The prompt of a shell sitting in `directory`, when it is known.
+    #[must_use]
+    pub fn for_directory(directory: Option<&str>) -> Self {
+        let directory = directory.map(str::trim).filter(|path| !path.is_empty());
+        match directory {
+            Some(path) if is_windows_path(path) => Self {
+                prompt: format!("PS {}> ", path.trim_end_matches(['\\', '/'])),
+                continuation: ">> ",
+                coloured: false,
+            },
+            Some(path) => Self {
+                prompt: format!("{}$ ", home_relative(path)),
+                continuation: "> ",
+                coloured: true,
+            },
+            None => Self {
+                prompt: "$ ".to_owned(),
+                continuation: "> ",
+                coloured: true,
+            },
+        }
+    }
+}
+
+/// `C:\...`, `C:/...`, or a `\\server\share` path.
+fn is_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with("\\\\")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+/// `path` with its home directory as `~`, as POSIX prompts show it.
+fn home_relative(path: &str) -> String {
+    let path = if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    };
+    let home_end = if path == "/root" || path.starts_with("/root/") {
+        Some("/root".len())
+    } else {
+        ["/home/", "/Users/"].iter().find_map(|prefix| {
+            let user = path.strip_prefix(prefix)?;
+            let user_len = user.find('/').unwrap_or(user.len());
+            (user_len > 0).then_some(prefix.len() + user_len)
+        })
+    };
+    match home_end {
+        Some(end) => format!("~{}", &path[end..]),
+        None => path.to_owned(),
     }
 }
 
@@ -277,9 +362,11 @@ pub struct ThreadTerminalsView {
     mirror: Option<ThreadTerminalsMirror>,
     /// The job whose dialog is open.
     open: Option<String>,
+    /// The prompt of the shell the selected thread's jobs run in.
+    prompt: ShellPrompt,
     list: ListState,
-    /// What the list was last told about the open job's screen.
-    shown: ShownLines,
+    /// What the list was last told about the open job.
+    shown: Layout,
     following: bool,
     copied: bool,
     focus: FocusHandle,
@@ -287,11 +374,97 @@ pub struct ThreadTerminalsView {
     latest_focus: FocusHandle,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct ShownLines {
+/// How the open job's rows lay out in the list: the command after its
+/// prompt, a note when earlier output is missing, the screen's lines, then
+/// the cursor or the next prompt.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Layout {
+    /// The command's lines.
+    commands: usize,
+    /// Rows before the output: the command's lines, then the note.
+    lead: usize,
+    /// The screen's lines.
     lines: usize,
+    /// Rows after the output.
+    trail: usize,
     truncated: u64,
     cleared: u64,
+}
+
+impl Layout {
+    fn of(terminal: &MirroredTerminal) -> Self {
+        let screen = terminal.screen();
+        let commands = command_lines(terminal.terminal().command.as_deref()).len();
+        let lead = commands + usize::from(terminal.missing_earlier_output());
+        let trail = match terminal.terminal().state {
+            // `^C`, then the prompt the shell returns to.
+            ThreadTerminalState::Killed => 2,
+            // The cursor while it runs; the next prompt once it stopped.
+            _ => 1,
+        };
+        Self {
+            commands,
+            lead,
+            lines: screen.line_count(),
+            trail,
+            truncated: screen.truncated_line_count(),
+            cleared: screen.cleared_line_count(),
+        }
+    }
+
+    fn total(self) -> usize {
+        self.lead + self.lines + self.trail
+    }
+
+    fn output(self) -> Range<usize> {
+        self.lead..self.lead + self.lines
+    }
+}
+
+/// The lines a command is typed as; a job without a command shows a bare
+/// prompt.
+fn command_lines(command: Option<&str>) -> Vec<&str> {
+    let lines: Vec<&str> = command
+        .map(|command| command.trim_end().lines().collect())
+        .unwrap_or_default();
+    if lines.is_empty() { vec![""] } else { lines }
+}
+
+/// One row of the open job.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Row {
+    /// Line `n` of the command; the first follows the prompt.
+    Command(usize),
+    /// Earlier output is missing.
+    Missing,
+    /// Screen line `n`.
+    Output(usize),
+    /// The running job's cursor.
+    Cursor,
+    /// The stopped job's interrupt.
+    Interrupt,
+    /// The prompt the shell returned to.
+    Prompt,
+}
+
+impl Row {
+    fn at(state: ThreadTerminalState, layout: Layout, index: usize) -> Option<Self> {
+        if index < layout.commands {
+            return Some(Self::Command(index));
+        }
+        if index < layout.lead {
+            return Some(Self::Missing);
+        }
+        if layout.output().contains(&index) {
+            return Some(Self::Output(index - layout.lead));
+        }
+        match (index - layout.output().end, state) {
+            (0, ThreadTerminalState::Running) => Some(Self::Cursor),
+            (0, ThreadTerminalState::Killed) => Some(Self::Interrupt),
+            (1, ThreadTerminalState::Killed) | (0, _) => Some(Self::Prompt),
+            _ => None,
+        }
+    }
 }
 
 impl ThreadTerminalsView {
@@ -305,8 +478,9 @@ impl ThreadTerminalsView {
         Self {
             mirror: None,
             open: None,
+            prompt: ShellPrompt::default(),
             list,
-            shown: ShownLines::default(),
+            shown: Layout::default(),
             following: true,
             copied: false,
             focus: cx.focus_handle(),
@@ -323,6 +497,18 @@ impl ThreadTerminalsView {
         self.mirror = thread.cloned().map(ThreadTerminalsMirror::new);
         if self.open.take().is_some() {
             cx.notify();
+        }
+    }
+
+    /// Sets the directory the selected thread's jobs run in: its project's
+    /// root, as the Forge reports it.
+    pub fn set_directory(&mut self, directory: Option<&str>, cx: &mut Context<Self>) {
+        let prompt = ShellPrompt::for_directory(directory);
+        if prompt != self.prompt {
+            self.prompt = prompt;
+            if self.open.is_some() {
+                cx.notify();
+            }
         }
     }
 
@@ -344,10 +530,9 @@ impl ThreadTerminalsView {
         if mirror.terminal(&open).is_none() {
             self.open = None;
             cx.notify();
-        } else if change.output.contains(&open) {
+        } else if change.entries || change.output.contains(&open) {
+            // A stop swaps the cursor for the next prompt.
             self.sync_list();
-            cx.notify();
-        } else if change.entries {
             cx.notify();
         }
         change.entries
@@ -372,7 +557,7 @@ impl ThreadTerminalsView {
             return;
         }
         self.open = Some(terminal_id.to_owned());
-        self.shown = ShownLines::default();
+        self.shown = Layout::default();
         self.copied = false;
         self.list.reset(0);
         self.sync_list();
@@ -400,35 +585,35 @@ impl ThreadTerminalsView {
         self.mirror.as_ref()?.terminal(open)
     }
 
-    /// Tells the list what changed on the open job's screen: lines dropped
-    /// from the front, new lines, and the last few lines, which output may
-    /// have rewritten in place.
+    /// Tells the list what changed on the open job: lines dropped from the
+    /// front of its output, new lines, the last few lines, which output may
+    /// have rewritten in place, and the rows after them, which change when
+    /// the job stops.
     fn sync_list(&mut self) {
-        let Some(screen) = self.open_terminal().map(MirroredTerminal::screen) else {
+        let Some(next) = self.open_terminal().map(Layout::of) else {
             return;
-        };
-        let next = ShownLines {
-            lines: screen.line_count(),
-            truncated: screen.truncated_line_count(),
-            cleared: screen.cleared_line_count(),
         };
         let shown = self.shown;
         self.shown = next;
         let dropped = usize::try_from(next.truncated - shown.truncated).unwrap_or(usize::MAX);
-        if next.cleared != shown.cleared || dropped >= shown.lines {
-            self.list.reset(next.lines);
+        if next.lead != shown.lead || next.cleared != shown.cleared || dropped >= shown.lines {
+            self.list.reset(next.total());
             return;
-        }
-        if dropped > 0 {
-            self.list.splice(0..dropped, 0);
         }
         let kept = shown.lines - dropped;
         let from = kept.saturating_sub(REMEASURED_TAIL_LINES);
         if next.lines < from {
-            self.list.reset(next.lines);
+            self.list.reset(next.total());
             return;
         }
-        self.list.splice(from..kept, next.lines - from);
+        let lead = next.lead;
+        self.list
+            .splice(lead + shown.lines..lead + shown.lines + shown.trail, 0);
+        if dropped > 0 {
+            self.list.splice(lead..lead + dropped, 0);
+        }
+        self.list
+            .splice(lead + from..lead + kept, next.lines - from + next.trail);
     }
 
     fn note_scroll(&mut self, cx: &mut Context<Self>) {
@@ -454,182 +639,250 @@ impl ThreadTerminalsView {
         cx.notify();
     }
 
-    fn render_line(&self, index: usize, theme: &ArtisanTheme) -> AnyElement {
-        let style = DialogStyle::resolve(*theme, MotionPolicy::Reduced);
-        let line = self
-            .open_terminal()
-            .and_then(|terminal| terminal.screen().line(index));
-        let row = div().w_full().min_h(px(OUTPUT_LINE_HEIGHT_PX)).px(px(12.0));
-        let Some(line) = line else {
+    fn render_row(&self, index: usize, theme: &ArtisanTheme) -> AnyElement {
+        let row = div()
+            .w_full()
+            .min_h(px(OUTPUT_LINE_HEIGHT_PX))
+            .px(px(16.0))
+            .flex()
+            .items_center();
+        let Some(terminal) = self.open_terminal() else {
+            return row.into_any_element();
+        };
+        let facts = terminal.terminal();
+        let Some(kind) = Row::at(facts.state, self.shown, index) else {
             return row.into_any_element();
         };
         let palette = TerminalPalette::for_theme(theme);
-        let runs = highlights(line, &palette, style.foreground, style.background);
-        row.child(StyledText::new(SharedString::from(line.text.clone())).with_highlights(runs))
-            .into_any_element()
+        let foreground = theme.colors.foreground.to_paint();
+        let prompt_style = HighlightStyle {
+            color: Some(palette.base[12]),
+            font_weight: Some(FontWeight::BOLD),
+            ..HighlightStyle::default()
+        };
+        let typed = |prefix: &str, text: &str, coloured: bool| {
+            let line = SharedString::from(format!("{prefix}{text}"));
+            let runs = if coloured && !prefix.is_empty() {
+                // The `$ ` stays plain, as in a default bash prompt.
+                let tinted = prefix.trim_end().trim_end_matches('$').len();
+                vec![(0..tinted, prompt_style)]
+            } else {
+                Vec::new()
+            };
+            StyledText::new(line).with_highlights(runs)
+        };
+        let prompt = &self.prompt;
+        let child = match kind {
+            Row::Command(line) => {
+                let text = command_lines(facts.command.as_deref())
+                    .get(line)
+                    .copied()
+                    .unwrap_or_default();
+                if line == 0 {
+                    typed(&prompt.prompt, text, prompt.coloured).into_any_element()
+                } else {
+                    typed(prompt.continuation, text, false).into_any_element()
+                }
+            }
+            Row::Missing => div()
+                .text_color(theme.colors.muted_foreground.to_paint())
+                .child("Earlier output is not kept; showing the newest.")
+                .into_any_element(),
+            Row::Output(line) => match terminal.screen().line(line) {
+                Some(line) => {
+                    let background = gpui::transparent_black();
+                    let runs = highlights(line, &palette, foreground, background);
+                    StyledText::new(SharedString::from(line.text.clone()))
+                        .with_highlights(runs)
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            },
+            Row::Cursor => div()
+                .w(px(CURSOR_WIDTH_PX))
+                .h(px(CURSOR_HEIGHT_PX))
+                .bg(theme.colors.foreground.with_alpha(0.8).to_paint())
+                .into_any_element(),
+            Row::Interrupt => div().child("^C").into_any_element(),
+            Row::Prompt => typed(&prompt.prompt, "", prompt.coloured).into_any_element(),
+        };
+        row.child(child).into_any_element()
     }
 
-    fn render_dialog(
-        &self,
-        terminal: &MirroredTerminal,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn render_dialog(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
         let viewport = window.viewport_size();
         let width = (f32::from(viewport.width) - 2.0 * DIALOG_WINDOW_MARGIN_PX)
             .clamp(320.0, DIALOG_MAX_WIDTH_PX);
         let height =
             (f32::from(viewport.height) * OUTPUT_HEIGHT_SHARE).clamp(160.0, OUTPUT_MAX_HEIGHT_PX);
-        let facts = terminal.terminal();
-        let mut status = terminal_status(facts.state);
-        if facts.background {
-            status.push_str(" · background");
-        }
+        let radius = RadiusTokens::value(RadiusStep::X2l);
         let view = cx.entity().downgrade();
-        let render_theme = theme;
         let output = list(self.list.clone(), move |index, _, cx| {
             view.upgrade().map_or_else(
                 || div().into_any_element(),
-                |view| view.read(cx).render_line(index, &render_theme),
+                |view| view.read(cx).render_row(index, &theme),
             )
         })
         .w_full()
         .h_full();
-        let empty = terminal.screen().line_count() == 0;
-        let body = div()
+        let card = div()
+            .id("artisan-thread-terminal-card")
+            .group(CARD_GROUP)
             .relative()
             .w(px(width))
             .h(px(height))
-            .flex()
-            .flex_col()
-            .rounded(RadiusTokens::value(RadiusStep::Lg))
+            .rounded(radius)
+            .backdrop_blur(glass_blur_radius(GlassStrength::Strong))
+            .bg(glass_foreground_base(&theme))
             .border_1()
             .border_color(theme.colors.border.to_paint())
+            .shadow(glass_card_shadows())
             .overflow_hidden()
-            .font_family(theme.typography.mono.family)
-            .text_size(px(OUTPUT_TEXT_PX))
-            .line_height(px(OUTPUT_LINE_HEIGHT_PX))
+            .occlude()
             .debug_selector(|| THREAD_TERMINAL_OUTPUT_SELECTOR.to_owned())
-            .children(terminal.missing_earlier_output().then(|| {
+            .child(glass_material_layer(GlassStrength::Strong, radius))
+            .child(glass_highlight_layer(GlassStrength::Strong, radius))
+            .child(
                 div()
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .border_b_1()
-                    .border_color(theme.colors.border.to_paint())
-                    .text_color(theme.colors.muted_foreground.to_paint())
-                    .child("Earlier output is not kept; showing the newest.")
+                    .relative()
+                    .size_full()
+                    .py(px(14.0))
+                    .font_family(theme.typography.mono.family)
+                    .tracking(0.0)
+                    .text_size(px(OUTPUT_TEXT_PX))
+                    .line_height(px(OUTPUT_LINE_HEIGHT_PX))
+                    .text_color(theme.colors.foreground.to_paint())
+                    .child(output),
+            )
+            .children(self.render_controls(&theme, cx));
+        let backdrop = div()
+            .absolute()
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .left(px(0.0))
+            .bg(gpui::black().opacity(BACKDROP_OPACITY))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _, cx| {
+                    view.close(cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let overlay = div()
+            .absolute()
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .left(px(0.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .track_focus(&self.focus)
+            .debug_selector(|| THREAD_TERMINAL_DIALOG_SELECTOR.to_owned())
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.eq_ignore_ascii_case("escape")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    window.prevent_default();
+                    view.close(cx);
+                    cx.stop_propagation();
+                }
             }))
-            .child(if empty {
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(theme.colors.muted_foreground.to_paint())
-                    .child("No output yet.")
-                    .into_any_element()
-            } else {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .py(px(8.0))
-                    .child(output)
-                    .into_any_element()
-            });
-        let footer = self.render_footer(&theme, cx);
-        let close_view = cx.entity().downgrade();
-        let dialog = Dialog::new(
-            "artisan-thread-terminal-dialog",
-            self.focus.clone(),
-            theme,
-            MotionPolicy::Full,
-            true,
-            terminal_name(facts.command.as_deref()),
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .child(body)
-                .child(footer),
-        )
-        .description(status)
-        .max_width(px(width + 2.0 * 24.0))
-        .debug_selector(THREAD_TERMINAL_DIALOG_SELECTOR)
-        .on_dismiss(move |_, _, cx| {
-            let _ = close_view.update(cx, Self::close);
-        });
-        deferred(
-            div()
-                .absolute()
-                .left(px(0.0))
-                .top(px(0.0))
-                .right(px(0.0))
-                .bottom(px(0.0))
-                .track_focus(&self.focus)
-                .child(dialog),
-        )
-        .with_priority(DIALOG_DEFERRED_PRIORITY)
-        .into_any_element()
+            .child(backdrop)
+            .child(card);
+        let overlay = if cx.reduce_motion() {
+            overlay.into_any_element()
+        } else {
+            overlay
+                .with_animation(
+                    "artisan-thread-terminal-open",
+                    DialogAnimation.gpui_clock(),
+                    |element, progress| element.opacity(progress),
+                )
+                .into_any_element()
+        };
+        deferred(overlay)
+            .with_priority(DIALOG_DEFERRED_PRIORITY)
+            .into_any_element()
     }
 
-    fn render_footer(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> gpui::Div {
+    /// The card's floating controls: copy, revealed while the pointer is
+    /// over the card, and a jump back to the newest output once the reader
+    /// scrolled up.
+    fn render_controls(&self, theme: &ArtisanTheme, cx: &Context<Self>) -> Vec<AnyElement> {
+        let icon_button = |id: &'static str, focus: &FocusHandle, icon, label: &'static str| {
+            let label = AccessibleLabel::new(label).ok()?;
+            Button::new(
+                id,
+                focus.clone(),
+                *theme,
+                MotionPolicy::Full,
+                ButtonVariant::Ghost,
+                ButtonSize::IconSmall,
+                ButtonContent::icon_only(icon, label),
+            )
+            .ok()
+        };
         let copy_view = cx.entity().downgrade();
-        let copy = Button::new(
+        let (copy_icon, copy_label) = if self.copied {
+            (AssetId::TABLER_CHECK, "Copied")
+        } else {
+            (AssetId::TABLER_COPY, "Copy output")
+        };
+        let copy = icon_button(
             "artisan-thread-terminal-copy",
-            self.copy_focus.clone(),
-            *theme,
-            MotionPolicy::Full,
-            ButtonVariant::Ghost,
-            ButtonSize::Small,
-            if self.copied {
-                ButtonContent::icon_text(AssetId::TABLER_CHECK, "Copied")
-            } else {
-                ButtonContent::icon_text(AssetId::TABLER_COPY, "Copy output")
-            },
+            &self.copy_focus,
+            copy_icon,
+            copy_label,
         )
-        .ok()
         .map(|button| {
-            button.on_activate(move |_, _, cx| {
+            let button = button.on_activate(move |_, _, cx| {
                 let _ = copy_view.update(cx, Self::copy_output);
-            })
+            });
+            div()
+                .absolute()
+                .top(px(8.0))
+                .right(px(8.0))
+                .opacity(0.0)
+                .group_hover(CARD_GROUP, |hover| hover.opacity(1.0))
+                .child(button)
+                .into_any_element()
         });
-        let latest_view: WeakEntity<Self> = cx.entity().downgrade();
+        let latest_view = cx.entity().downgrade();
         let latest = (!self.following)
             .then(|| {
-                Button::new(
+                icon_button(
                     "artisan-thread-terminal-latest",
-                    self.latest_focus.clone(),
-                    *theme,
-                    MotionPolicy::Full,
-                    ButtonVariant::Ghost,
-                    ButtonSize::Small,
-                    ButtonContent::icon_text(AssetId::TABLER_ARROW_BAR_TO_DOWN, "Jump to latest"),
+                    &self.latest_focus,
+                    AssetId::TABLER_ARROW_BAR_TO_DOWN,
+                    "Jump to latest",
                 )
-                .ok()
             })
             .flatten()
             .map(|button| {
-                button.on_activate(move |_, _, cx| {
+                let button = button.on_activate(move |_, _, cx| {
                     let _ = latest_view.update(cx, Self::jump_to_latest);
-                })
+                });
+                div()
+                    .absolute()
+                    .bottom(px(8.0))
+                    .right(px(8.0))
+                    .child(button)
+                    .into_any_element()
             });
-        div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap(px(8.0))
-            .children(latest)
-            .children(copy)
+        copy.into_iter().chain(latest).collect()
     }
 }
 
 impl Render for ThreadTerminalsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.open_terminal() {
-            Some(terminal) => self.render_dialog(terminal, window, cx),
-            None => div().into_any_element(),
+        if self.open_terminal().is_some() {
+            self.render_dialog(window, cx)
+        } else {
+            div().into_any_element()
         }
     }
 }
@@ -789,8 +1042,20 @@ mod tests {
         cx.run_until_parked();
         cx.update(|_, app| {
             let view = terminals.read(app);
-            assert_eq!(view.list.item_count(), 410);
+            // Two command lines, the output, and the running job's cursor.
+            assert_eq!(view.list.item_count(), 2 + 410 + 1);
             assert!(view.list.is_following_tail());
+        });
+
+        cx.update(|_, app| {
+            terminals.update(app, |view, cx| {
+                let killed = ThreadTerminalState::Killed;
+                assert!(view.apply(push(vec![job("a", killed, first_len, b"")]), cx));
+                // `^C` and the prompt the shell returns to replace the cursor.
+                assert_eq!(view.list.item_count(), 2 + 410 + 2);
+                assert_eq!(Row::at(killed, view.shown, 2 + 410), Some(Row::Interrupt));
+                assert_eq!(Row::at(killed, view.shown, 2 + 411), Some(Row::Prompt));
+            });
         });
 
         cx.update(|_, app| {
@@ -804,11 +1069,25 @@ mod tests {
     }
 
     #[test]
-    fn statuses_read_as_sentences() {
-        assert_eq!(
-            terminal_status(ThreadTerminalState::Exited { code: Some(3) }),
-            "Exited with code 3"
-        );
+    fn a_job_without_a_command_shows_a_bare_prompt() {
         assert_eq!(terminal_name(None), UNNAMED_TERMINAL_LABEL);
+        assert_eq!(command_lines(None), vec![""]);
+        assert_eq!(command_lines(Some("cat <<'EOF'\nhi\nEOF\n")).len(), 3);
+    }
+
+    #[test]
+    fn the_prompt_follows_the_machine_the_job_ran_on() {
+        let prompt = |path| ShellPrompt::for_directory(Some(path)).prompt;
+        assert_eq!(prompt("/home/me/projects/app"), "~/projects/app$ ");
+        assert_eq!(prompt("/Users/me/app/"), "~/app$ ");
+        assert_eq!(prompt("/home/me"), "~$ ");
+        assert_eq!(prompt("/root/app"), "~/app$ ");
+        assert_eq!(prompt("/srv/app"), "/srv/app$ ");
+        assert_eq!(prompt("/"), "/$ ");
+        let windows = ShellPrompt::for_directory(Some(r"C:\Users\me\Projects\"));
+        assert_eq!(windows.prompt, r"PS C:\Users\me\Projects> ");
+        assert_eq!(windows.continuation, ">> ");
+        assert!(!windows.coloured);
+        assert_eq!(ShellPrompt::for_directory(None).prompt, "$ ");
     }
 }

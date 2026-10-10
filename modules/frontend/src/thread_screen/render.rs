@@ -4,6 +4,9 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use artisan_ui::motion::MotionCurve;
+use gpui::AnyElement;
+use std::time::Duration;
 
 /// The muted label heading one inspector section, with its debug selector.
 #[derive(Clone, Copy)]
@@ -46,11 +49,31 @@ fn inspector_row_glyph(theme: &ArtisanTheme, kind: InspectorRowIcon) -> impl Int
     .flex_shrink_0()
 }
 
-/// Workspace body tracking at the control size: −0.04 em resolved through
-/// the shared helper, so 14 px workspace text takes −0.56 px
-/// (`docs-responsive-surfaces`, `ProseTypography::body_tracking_px`).
-fn workspace_body_tracking(theme: &ArtisanTheme) -> f32 {
-    ProseTypography::body_tracking_px(f32::from(theme.typography.control_text))
+/// The inspector column's frame: a flat true-black column `width` wide,
+/// padded by the sidebar inset, with its one-device-pixel left rule. The
+/// new-thread screen paints it empty so its composer sits exactly where a
+/// thread's does.
+pub(crate) fn inspector_column(width: f32, rule: Pixels) -> Div {
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(width))
+        .min_h_0()
+        .flex()
+        .flex_col()
+        .p(px(DESKTOP_COLUMN_INSET_PX))
+        .bg(shell_black())
+        .debug_selector(|| THREAD_SCREEN_INSPECTOR_SELECTOR.to_owned())
+        .child(
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .bottom(px(0.0))
+                .w(rule)
+                .bg(DesktopTheme::neutral_dark().line)
+                .debug_selector(|| THREAD_SCREEN_INSPECTOR_RULE_SELECTOR.to_owned()),
+        )
 }
 
 impl ThreadScreen {
@@ -67,20 +90,49 @@ impl ThreadScreen {
     /// without this frame. The 40 px top spacing lives inside the scroll
     /// content (owned by the surface).
     fn render_transcript_column(&self, cx: &App) -> impl IntoElement {
-        div()
+        let column = div()
             .relative()
             .min_h_0()
             .flex_1()
             .overflow_hidden()
             .bg(shell_black())
-            .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned())
-            // Cached: the transcript renders when it changes, not when the
-            // inspector, the composer, or the sidebar beside it does.
-            .child(div().w_full().h_full().child(crate::view_boundary::cached_view(
-                self.host.clone(),
-                gpui::StyleRefinement::default().size_full(),
-                cx,
-            )))
+            .debug_selector(|| THREAD_SCREEN_TRANSCRIPT_SELECTOR.to_owned());
+        let opened = self.gate_branch() == ThreadRouteGateRender::OpenedRoute;
+        // A new-thread entrance holds the open layout while the thread
+        // loads; the transcript joins only once it can present whole.
+        if self.entrance.is_some() && !opened {
+            return column.into_any_element();
+        }
+        // Cached: the transcript renders when it changes, not when the
+        // inspector, the composer, or the sidebar beside it does.
+        let transcript =
+            div()
+                .relative()
+                .w_full()
+                .h_full()
+                .child(crate::view_boundary::cached_view(
+                    self.host.clone(),
+                    gpui::StyleRefinement::default().size_full(),
+                    cx,
+                ));
+        if self.entrance.is_none() || cx.reduce_motion() {
+            return column.child(transcript).into_any_element();
+        }
+        // The first message fades in as it rises into place.
+        column
+            .child(
+                transcript.with_animation(
+                    "thread-transcript-entrance",
+                    Animation::new(Duration::from_millis(TRANSCRIPT_ENTRANCE_MS))
+                        .with_easing(ease_in_out),
+                    |transcript, progress| {
+                        transcript
+                            .opacity(progress)
+                            .top(px(TRANSCRIPT_ENTRANCE_RISE_PX * (1.0 - progress)))
+                    },
+                ),
+            )
+            .into_any_element()
     }
 
     /// Renders one Context row: glyph, flexible label, truncating value.
@@ -113,7 +165,7 @@ impl ThreadScreen {
                     .min_w_0()
                     .text_size(theme.typography.control_text)
                     .font_weight(ProseTypography::BODY_WEIGHT)
-                    .letter_spacing(px(workspace_body_tracking(theme)))
+                    .tracking(ProseTypography::TRACKING_EM)
                     .text_color(theme.colors.foreground.to_paint())
                     .child(label.to_owned()),
             )
@@ -124,7 +176,7 @@ impl ThreadScreen {
                     .truncate()
                     .text_size(theme.typography.control_text)
                     .font_weight(ProseTypography::BODY_WEIGHT)
-                    .letter_spacing(px(workspace_body_tracking(theme)))
+                    .tracking(ProseTypography::TRACKING_EM)
                     .text_color(theme.colors.foreground.to_paint())
                     .child(value),
             )
@@ -181,7 +233,7 @@ impl ThreadScreen {
                             .min_w_0()
                             .text_size(theme.typography.control_text)
                             .font_weight(ProseTypography::BODY_WEIGHT)
-                            .letter_spacing(px(workspace_body_tracking(theme)))
+                            .tracking(ProseTypography::TRACKING_EM)
                             .text_color(theme.colors.foreground.to_paint())
                             .child("Changes"),
                     )
@@ -226,17 +278,15 @@ impl ThreadScreen {
         inspector_section(theme, THREAD_SCREEN_CONTEXT_SELECTOR, None, rows)
     }
 
-    /// Renders the Terminals section: the shell jobs of the thread's runs.
+    /// Renders the Terminals section: the thread's shell jobs that are
+    /// still running.
     ///
     /// A skeleton shimmer shows while loading (`flex flex-col gap-2` with
     /// `h-4` bars at 3/5 and 2/5 widths, inset like the rows so the bars
-    /// start on the row text edge). Each row is the `terminal-2` glyph, the
-    /// command's first line in mono, and the job's state at the right edge
-    /// in the Agents section's language: a spinning arc while it runs, then
-    /// a sky dot for a clean exit, a destructive dot for a failure, and a
-    /// muted dot when it was stopped or ended with its turn. Running jobs
-    /// list first. Clicking a row opens the job's output. The section is
-    /// omitted while the thread has no jobs.
+    /// start on the row text edge). Each row is the `terminal-2` glyph and
+    /// the command's first line in mono; being listed means it runs, so no
+    /// state mark. Clicking a row opens the job's output. The section is
+    /// omitted while nothing runs.
     fn render_terminals_section(&self, theme: &ArtisanTheme) -> Option<Div> {
         if self.terminals_loading {
             let bar = |fraction: f32| {
@@ -270,7 +320,6 @@ impl ThreadScreen {
         let mut list = div().flex().min_w_0().flex_col();
         for entry in &self.terminals {
             let row_selector = format!("{THREAD_SCREEN_TERMINAL_ROW_PREFIX}-{}", entry.terminal_id);
-            let state = terminal_state_mark(theme, entry.state, format!("{row_selector}-state"));
             let opener = self.on_open_terminal.clone();
             let terminal_id = entry.terminal_id.clone();
             let mut row = div()
@@ -297,8 +346,7 @@ impl ThreadScreen {
                         .letter_spacing(px(0.0))
                         .text_color(theme.colors.foreground.to_paint())
                         .child(entry.name.clone()),
-                )
-                .child(state);
+                );
             if let Some(opener) = opener {
                 let hover_theme = *theme;
                 row = row
@@ -328,7 +376,7 @@ impl ThreadScreen {
     /// destructive when it failed. Click-to-inspect needs the agent
     /// transcript viewer and is a gap, so rows render without a fake
     /// affordance. The section is omitted while there are no agents.
-    fn render_agents_section(&self, theme: &ArtisanTheme) -> Option<Div> {
+    fn render_agents_section(&self, theme: &ArtisanTheme, reduce_motion: bool) -> Option<Div> {
         if self.agents.is_empty() {
             return None;
         }
@@ -347,10 +395,29 @@ impl ThreadScreen {
                     move || selector.clone()
                 });
             let state = match agent.state {
-                ThreadAgentState::Working => state.child(
-                    FadeArc::new(SharedString::from(state_selector), *theme)
-                        .size(px(AGENT_STATE_SLOT_PX)),
-                ),
+                // Live work breathes like the sidebar's working dot.
+                ThreadAgentState::Working => {
+                    let dot = div()
+                        .size(px(AGENT_STATE_DOT_PX))
+                        .rounded_full()
+                        .bg(theme.colors.primary.to_paint());
+                    if reduce_motion {
+                        state.child(dot)
+                    } else {
+                        state.child(dot.with_animation(
+                            SharedString::from(state_selector),
+                            Animation::new(AGENT_WORKING_PULSE).repeat(),
+                            |dot, progress| {
+                                let swing =
+                                    (progress * std::f32::consts::TAU).cos().mul_add(0.5, 0.5);
+                                dot.opacity(
+                                    AGENT_WORKING_PULSE_FLOOR
+                                        + (1.0 - AGENT_WORKING_PULSE_FLOOR) * swing,
+                                )
+                            },
+                        ))
+                    }
+                }
                 ThreadAgentState::Completed => state.child(
                     div()
                         .size(px(AGENT_STATE_DOT_PX))
@@ -383,7 +450,7 @@ impl ThreadScreen {
                             .truncate()
                             .text_size(theme.typography.control_text)
                             .font_weight(ProseTypography::BODY_WEIGHT)
-                            .letter_spacing(px(workspace_body_tracking(theme)))
+                            .tracking(ProseTypography::TRACKING_EM)
                             .text_color(theme.colors.foreground.to_paint())
                             .child(agent.name.clone()),
                     )
@@ -433,7 +500,7 @@ impl ThreadScreen {
                 // scope; `font-medium` resolves through the redefined token);
                 // tone and strikethrough stay per state below.
                 .font_weight(ProseTypography::BODY_WEIGHT)
-                .letter_spacing(px(workspace_body_tracking(theme)))
+                .tracking(ProseTypography::TRACKING_EM)
                 .debug_selector(|| {
                     format!("artisan-thread-screen-checklist-entry-{}", presented.id)
                 });
@@ -474,13 +541,18 @@ impl ThreadScreen {
     /// one-device-pixel rule in the shell's line paint (`rule`) spanning the
     /// column's full height, i.e. the whole body below the titlebar; it is a
     /// plain absolute element with no pointer listener, so it cannot
-    /// intercept input. The titlebar end of that rule is the shell's
-    /// junction crosshair, fed by [`ThreadScreen::visible_inspector_width`].
+    /// intercept input. The shell continues that rule through the titlebar,
+    /// fed by [`ThreadScreen::visible_inspector_width`].
     ///
     /// A rule closes every section across the column's full width, so the
-    /// inspector reads as a grid with the titlebar rule above it; each
-    /// junction with the left rule carries the shell's crosshair.
-    fn render_inspector(&self, theme: &ArtisanTheme, width: f32, rule: Pixels) -> impl IntoElement {
+    /// inspector reads as a grid with the titlebar rule above it.
+    fn render_inspector(
+        &self,
+        theme: &ArtisanTheme,
+        width: f32,
+        rule: Pixels,
+        reduce_motion: bool,
+    ) -> impl IntoElement {
         let section_gap = theme.spacing.steps(3.0);
         let mut sections = div()
             .flex()
@@ -497,7 +569,7 @@ impl ThreadScreen {
             ));
         let closed = [
             (
-                self.render_agents_section(theme),
+                self.render_agents_section(theme, reduce_motion),
                 THREAD_SCREEN_AGENTS_RULE_SELECTOR,
             ),
             (
@@ -519,27 +591,7 @@ impl ThreadScreen {
                 ));
             }
         }
-        div()
-            .relative()
-            .flex_shrink_0()
-            .w(px(width))
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .p(px(DESKTOP_COLUMN_INSET_PX))
-            .bg(shell_black())
-            .debug_selector(|| THREAD_SCREEN_INSPECTOR_SELECTOR.to_owned())
-            .child(
-                div()
-                    .absolute()
-                    .left(px(0.0))
-                    .top(px(0.0))
-                    .bottom(px(0.0))
-                    .w(rule)
-                    .bg(DesktopTheme::neutral_dark().line)
-                    .debug_selector(|| THREAD_SCREEN_INSPECTOR_RULE_SELECTOR.to_owned()),
-            )
-            .child(sections)
+        inspector_column(width, rule).child(sections)
     }
 
     /// The full-width rule closing one inspector section.
@@ -548,8 +600,6 @@ impl ThreadScreen {
     /// column inset away from the rows on both sides (the section gap plus
     /// a signed margin), the spacing the titlebar rule keeps above the
     /// first row.
-    /// The crosshair centres both arms on the junction with the left rule;
-    /// like that rule it is a plain element that cannot intercept input.
     fn render_section_rule(
         width: f32,
         rule: Pixels,
@@ -560,7 +610,6 @@ impl ThreadScreen {
         // Negative when the gap exceeds the inset: the rule then pulls both
         // neighbours in so it still sits exactly the inset from each.
         let breathing = px(DESKTOP_COLUMN_INSET_PX) - section_gap;
-        let arm_offset = (px(DESKTOP_CROSSHAIR_SIZE_PX) - rule) / 2.0;
         div()
             .relative()
             .flex_none()
@@ -570,11 +619,6 @@ impl ThreadScreen {
             .my(breathing)
             .bg(line.line)
             .debug_selector(move || selector.to_owned())
-            .child(
-                junction_crosshair(line, rule)
-                    .left(-arm_offset)
-                    .top(-arm_offset),
-            )
     }
 
     /// Renders the composer overlay frame around the packet-2 composer surface.
@@ -591,9 +635,9 @@ impl ThreadScreen {
     /// The frame paints after the transcript, so it sits above it. Tail
     /// clearance below the card is the transcript end space (surface lane,
     /// pending): this frame reserves nothing itself.
-    fn render_composer_overlay(&self, pad_bottom_px: f32, cx: &Context<Self>) -> impl IntoElement {
+    fn render_composer_overlay(&self, pad_bottom_px: f32, cx: &Context<Self>) -> AnyElement {
         let surface = self.host.read(cx).surface().clone();
-        div()
+        let overlay = div()
             .absolute()
             .left(px(0.0))
             .right(px(0.0))
@@ -623,7 +667,23 @@ impl ThreadScreen {
                     .max_w(px(PROSE_WIDTH_PX))
                     .debug_selector(|| THREAD_SCREEN_COMPOSER_CARD_SELECTOR.to_owned())
                     .child(self.composer.clone()),
-            )
+            );
+        match self.entrance {
+            Some(entrance) if !cx.reduce_motion() => {
+                let lift = entrance.lift_px;
+                // Starts where the new-thread screen centred the composer and
+                // settles into the dock.
+                overlay
+                    .with_animation(
+                        "thread-composer-entrance",
+                        Animation::new(Duration::from_millis(COMPOSER_ENTRANCE_MS))
+                            .with_easing(smooth_out),
+                        move |overlay, progress| overlay.bottom(px(lift * (1.0 - progress))),
+                    )
+                    .into_any_element()
+            }
+            _ => overlay.into_any_element(),
+        }
     }
 
     /// Renders the gate loading branch (`thread-route-gate.svelte`).
@@ -698,7 +758,7 @@ impl ThreadScreen {
                 div()
                     .text_size(theme.typography.control_text)
                     .font_weight(ProseTypography::BODY_WEIGHT)
-                    .letter_spacing(px(workspace_body_tracking(theme)))
+                    .tracking(ProseTypography::TRACKING_EM)
                     .text_color(theme.colors.destructive.to_paint())
                     .child(message.to_owned()),
             );
@@ -756,10 +816,10 @@ impl ThreadScreen {
             .bg(shell_black())
             .child(conversation);
         if let Some(width) = self.inspector_width() {
-            // The same display-aware stroke the shell draws its rules and
-            // junction marks with, so the rule stays one physical pixel.
+            // The same display-aware stroke the shell draws its rules with,
+            // so the rule stays one physical pixel.
             let rule = DesktopShellStyle::resolve(false, window.scale_factor()).one_device_pixel;
-            row = row.child(self.render_inspector(theme, width, rule));
+            row = row.child(self.render_inspector(theme, width, rule, cx.reduce_motion()));
         }
         div()
             .relative()
@@ -773,30 +833,14 @@ impl ThreadScreen {
     }
 }
 
-/// A Terminals row's state at its right edge, in the Agents section's
-/// language: a spinning arc while the job runs, then a sky dot for a clean
-/// exit, a destructive dot for a failure, and a muted dot when it was
-/// stopped or ended with its turn.
-fn terminal_state_mark(theme: &ArtisanTheme, state: ThreadTerminalState, selector: String) -> Div {
-    let mark = div()
-        .flex_shrink_0()
-        .size(px(AGENT_STATE_SLOT_PX))
-        .flex()
-        .items_center()
-        .justify_center()
-        .debug_selector({
-            let selector = selector.clone();
-            move || selector.clone()
-        });
-    let dot = |color: Hsla| div().size(px(AGENT_STATE_DOT_PX)).rounded_full().bg(color);
-    match state {
-        ThreadTerminalState::Running => mark.child(
-            FadeArc::new(SharedString::from(selector), *theme).size(px(AGENT_STATE_SLOT_PX)),
-        ),
-        settled if settled.is_failure() => mark.child(dot(theme.colors.destructive.to_paint())),
-        ThreadTerminalState::Exited { .. } => mark.child(dot(theme.colors.unread.to_paint())),
-        _ => mark.child(dot(theme.colors.muted_foreground.to_paint())),
-    }
+#[allow(clippy::cast_possible_truncation)]
+fn smooth_out(progress: f32) -> f32 {
+    MotionCurve::SmoothOut.sample(f64::from(progress)) as f32
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn ease_in_out(progress: f32) -> f32 {
+    MotionCurve::EaseInOut.sample(f64::from(progress)) as f32
 }
 
 impl Render for ThreadScreen {
@@ -804,6 +848,9 @@ impl Render for ThreadScreen {
         let theme = ArtisanTheme::for_mode(self.theme_mode);
         match self.gate_branch() {
             ThreadRouteGateRender::OpenedRoute => {
+                self.render_open(&theme, window, cx).into_any_element()
+            }
+            ThreadRouteGateRender::LoadingIndicator if self.entrance.is_some() => {
                 self.render_open(&theme, window, cx).into_any_element()
             }
             ThreadRouteGateRender::LoadingIndicator => {

@@ -35,9 +35,9 @@
 //!   ([`THREAD_INSPECTOR_WIDTH_PX`]), with a one-device-pixel left rule and
 //!   the unlabelled Context rows followed by the Agents, Checklist and
 //!   Terminals sections under muted labels set like the sidebar's thread-age
-//!   groups. The shell paints the junction crosshair
-//!   where that rule meets the titlebar. Row content is projected through the
-//!   already-ported [`crate::thread_environment_presentation`] and
+//!   groups. The shell continues that rule through the titlebar. Row content
+//!   is projected through the already-ported
+//!   [`crate::thread_environment_presentation`] and
 //!   [`crate::thread_panel_policy`] policies; the Terminals rows come from
 //!   [`crate::thread_terminals`], which also draws their output dialog.
 //!
@@ -55,7 +55,6 @@ use std::rc::Rc;
 use artisan_assets::AssetId;
 use artisan_domain::{PlanEntry, PlanEntryStatus, ThreadId, ThreadTerminalState};
 use artisan_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility};
-use artisan_ui::fade_arc::FadeArc;
 use artisan_ui::gradient::hover_fill_gradient;
 use artisan_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use artisan_ui::motion::MotionPolicy;
@@ -64,8 +63,8 @@ use artisan_ui::theme::{
 };
 use artisan_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
-    App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla, IntoElement, Pixels, Render,
-    SharedString, Subscription, Window, div,
+    Animation, AnimationExt as _, App, AppContext as _, Context, Div, Entity, FocusHandle, Hsla,
+    IntoElement, Pixels, Render, SharedString, Subscription, Window, div,
     prelude::{
         InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
     },
@@ -74,8 +73,7 @@ use gpui::{
 
 use crate::conversation_host::{ConversationHost, ConversationHostError};
 use crate::desktop_shell::{
-    DESKTOP_COLUMN_INSET_PX, DESKTOP_CROSSHAIR_SIZE_PX, DESKTOP_SIDEBAR_WIDTH_PX,
-    DesktopShellStyle, desktop_section_label, junction_crosshair,
+    DESKTOP_COLUMN_INSET_PX, DESKTOP_SIDEBAR_WIDTH_PX, DesktopShellStyle, desktop_section_label,
 };
 use crate::native_composer::NativeComposer;
 use crate::shell_layout::{ProseWidth, desktop_inspector_pixels};
@@ -93,7 +91,17 @@ mod state;
 #[path = "thread_screen/render.rs"]
 mod render;
 
+pub(crate) use render::inspector_column;
 pub use state::*;
+
+/// The composer's slide from the new-thread screen's centre to its dock:
+/// a large position change, so `--duration-slow` on `--ease-smooth-out`.
+pub(crate) const COMPOSER_ENTRANCE_MS: u64 = 400;
+/// The first transcript content's entrance: a text-reveal rise of
+/// `--distance-medium` on `--ease-in-out` (GPUI has no blur filter, so the
+/// reference's cross-blur is left out).
+pub(crate) const TRANSCRIPT_ENTRANCE_MS: u64 = 400;
+pub(crate) const TRANSCRIPT_ENTRANCE_RISE_PX: f32 = 12.0;
 
 /// Stable debug selector for the thread screen root.
 pub const THREAD_SCREEN_SELECTOR: &str = "artisan-thread-screen";
@@ -175,10 +183,10 @@ pub const THREAD_SCREEN_PROJECT_ROW_SELECTOR: &str = "artisan-thread-screen-proj
 pub const THREAD_SCREEN_ENV_ROW_SELECTOR: &str = "artisan-thread-screen-env-row";
 
 /// `--prose-width: 48rem` (`lib/styles/theme.css:157`); `1rem` is `16px`.
-const PROSE_WIDTH_PX: f32 = 768.0;
+pub(crate) const PROSE_WIDTH_PX: f32 = 768.0;
 
 /// `px-6` on the transcript column and composer dock.
-const COLUMN_PAD_X_PX: f32 = 24.0;
+pub(crate) const COLUMN_PAD_X_PX: f32 = 24.0;
 
 /// `pb-4` under the composer frame below the `sm` breakpoint.
 const COMPOSER_PAD_BOTTOM_PX: f32 = 16.0;
@@ -252,12 +260,17 @@ pub(crate) fn thread_inspector_width(content_width_px: f32) -> Option<f32> {
 /// (`thread-terminals-card.svelte:195-196`) — 16 px.
 const LOADING_BAR_PX: f32 = 16.0;
 
-/// Slot holding an agent row's state mark: the row glyph's 16 px, so the
-/// working arc and the settled dot share one center.
+/// Slot holding an agent row's state mark: the row glyph's 16 px, so every
+/// state dot sits on one center.
 const AGENT_STATE_SLOT_PX: f32 = 16.0;
 
 /// Settled agent state dot: `state-dot size-1.5` (`thread-agents.svelte`).
 const AGENT_STATE_DOT_PX: f32 = 6.0;
+/// One full fade of a working agent's dot, out and back (the sidebar's
+/// working pulse).
+const AGENT_WORKING_PULSE: std::time::Duration = std::time::Duration::from_millis(1_600);
+/// The dimmest a working agent's dot gets mid-pulse.
+const AGENT_WORKING_PULSE_FLOOR: f32 = 0.4;
 
 /// Which inspector row a glyph belongs to.
 ///
@@ -1266,6 +1279,46 @@ mod tests {
                 .is_none(),
             "a hidden section takes its rule with it"
         );
+    }
+
+    /// Terminals lists only jobs that run: a one-off command that exited,
+    /// failed, or was stopped leaves the section, and a row carries no state
+    /// mark.
+    #[gpui::test]
+    fn terminals_list_only_running_jobs(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            mount_proof_screen("shell-proof-terminals", EXPANDED_WIDE_CONTENT, cx)
+        });
+        cx.run_until_parked();
+        let job = |id: &str, state| ThreadTerminalEntry {
+            terminal_id: id.to_owned(),
+            name: id.to_owned(),
+            state,
+            background: false,
+        };
+        update_screen(&view, cx, |screen| {
+            screen.set_terminals(vec![
+                job("done", ThreadTerminalState::Exited { code: Some(0) }),
+                job("failed", ThreadTerminalState::Exited { code: Some(1) }),
+            ])
+        });
+        assert!(
+            cx.debug_bounds(THREAD_SCREEN_TERMINALS_SELECTOR).is_none(),
+            "finished jobs leave the section"
+        );
+        update_screen(&view, cx, |screen| {
+            screen.set_terminals(vec![
+                job("server", ThreadTerminalState::Running),
+                job("done", ThreadTerminalState::Exited { code: Some(0) }),
+            ])
+        });
+        // `debug_bounds` takes `'static` selectors.
+        let row = |id: &str| -> &'static str {
+            format!("{THREAD_SCREEN_TERMINAL_ROW_PREFIX}-{id}").leak()
+        };
+        assert!(cx.debug_bounds(row("server")).is_some());
+        assert!(cx.debug_bounds(row("done")).is_none());
+        assert!(cx.debug_bounds(row("server-state")).is_none());
     }
 
     /// The Project row appears only once a project label is published, and

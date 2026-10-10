@@ -363,6 +363,32 @@ fn tool_event(
     action: ToolAction,
     detail: Option<&str>,
 ) -> NativeTransportEvent {
+    tool_event_in_turn(
+        thread_id,
+        run,
+        "turn-agents",
+        delivery_sequence,
+        tool_id,
+        kind,
+        action,
+        detail,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one observation's full attribution"
+)]
+fn tool_event_in_turn(
+    thread_id: &ThreadId,
+    run: &str,
+    turn: &str,
+    delivery_sequence: u64,
+    tool_id: &str,
+    kind: &str,
+    action: ToolAction,
+    detail: Option<&str>,
+) -> NativeTransportEvent {
     let tool = ToolObservation::new(
         ObservationId::parse(format!("{run}:{tool_id}:{delivery_sequence}")).expect("id"),
         ObservationSequence::new(delivery_sequence).expect("sequence"),
@@ -379,7 +405,7 @@ fn tool_event(
             observation: Observation::Tool(tool),
             attribution: Some(EngineObservationAttribution {
                 run_id: RunId::parse(run).expect("run"),
-                turn_id: TurnId::parse("turn-agents").expect("turn"),
+                turn_id: TurnId::parse(turn).expect("turn"),
                 committed_at: UnixMillis::from_millis(10),
                 delivery_sequence,
             }),
@@ -639,5 +665,62 @@ fn a_thread_with_a_full_activity_window_keeps_receiving_messages(cx: &mut TestAp
     assert_eq!(
         state(cx),
         (false, window - 2, Some(ConversationCursor::new(7)), true)
+    );
+}
+
+#[gpui::test]
+fn activity_the_scene_cannot_place_yet_never_wedges_the_thread(cx: &mut TestAppContext) {
+    // Activity for a turn the snapshot does not hold yet is skipped and
+    // retained for a later replay. The skip used to leave a refusal behind
+    // in the host, which the next pump treated as fatal: the thread froze
+    // while the Forge kept delivering.
+    let (view, cx) = mount_open_thread(cx);
+    let thread_a = ThreadId::parse("thread-a").expect("thread");
+    let message = |from: u64, item: &str, ordinal: u64, body: &str| {
+        NativeTransportEvent::PatchBatch(echo_batch(
+            &thread_a,
+            from,
+            item,
+            None,
+            "turn-agents",
+            0,
+            ordinal,
+            body,
+        ))
+    };
+    let state = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|_, app| {
+            let application = view.read(app);
+            let host = application.conversation_host.clone().expect("host");
+            (
+                matches!(application.state, NativeViewState::Failure(_)),
+                host.read(app).controller_view().delivery.cursor,
+            )
+        })
+    };
+    cx.update(|_, app| {
+        view.update(app, |application, cx| {
+            application.handle_service_event(message(1, "item-user", 1, "hello"), cx);
+            application.handle_service_event(
+                tool_event_in_turn(
+                    &thread_a,
+                    "run-b",
+                    "turn-not-yet-delivered",
+                    1,
+                    "tool-early",
+                    "bash",
+                    ToolAction::Started,
+                    Some("ls"),
+                ),
+                cx,
+            );
+            application.handle_service_event(message(3, "item-user-2", 2, "second"), cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        state(cx),
+        (false, Some(ConversationCursor::new(5))),
+        "the skipped activity leaves the thread live and the next message lands"
     );
 }

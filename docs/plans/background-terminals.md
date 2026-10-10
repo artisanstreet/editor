@@ -228,9 +228,11 @@ Built on `background-terminals` (2026-10-08). Where it differs from the design a
 difference is listed here, and this section wins.
 
 - **Engines own one turn, so jobs do too.** Claude (`claude -p`) and Codex (`app-server`) are
-  spawned for one turn and torn down after it. Claude Code also kills its own background shells
-  when input closes. A background dev server therefore lives as long as the agent's turn. The
-  board keeps the job and its last output after that, marked `Ended with the agent's turn`. If
+  spawned for one turn and torn down after it. As of CLI 2.1.296 Claude Code no longer kills its
+  background shells when input closes; it keeps running until they end. The pump therefore
+  settles the turn at its `result` instead of at the CLI's exit, and teardown ends the process
+  group, shells included. A background dev server therefore lives as long as the agent's
+  turn. The board keeps the job and its last output after that, marked `Ended with the agent's turn`. If
   jobs should outlive the turn, the Forge has to own the process (the ACP terminal capability,
   phase 6) or keep an engine session alive between turns.
 - **No ledger observation kind.** All engine processes are gone after a Forge restart, so a
