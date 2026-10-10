@@ -51,9 +51,9 @@ use rustls_pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use sea_orm::EntityTrait;
 
 use super::{
-    ClaimExecution, ClaimIds, ClaimLease, LoadedClaim, NativeRunDispatcherConfig,
-    NativeRunDispatcherConfigInput, ResolvedLaunch, TurnConsumptionContext, consume_turn,
-    launch_claim,
+    ClaimContinuation, ClaimExecution, ClaimIds, ClaimLease, LoadedClaim,
+    NativeRunDispatcherConfig, NativeRunDispatcherConfigInput, ResolvedLaunch,
+    TurnConsumptionContext, consume_turn, launch_claim,
 };
 use crate::{
     CommandOrigin, CommandOriginClockError, CommandOriginEntropyError, ForgeListener,
@@ -583,7 +583,7 @@ async fn launch_claim_streams_user_admission_before_provider_startup() {
                 },
                 ids,
                 lease,
-                None,
+                ClaimContinuation::Fresh,
             )
             .await
             .expect("production launch must start");
@@ -1081,7 +1081,7 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                 },
                 ids,
                 lease,
-                None,
+                ClaimContinuation::Fresh,
             )
             .await
             .expect("production launch must start");
@@ -1122,6 +1122,7 @@ async fn assert_live_stream_before_terminal(scenario: &str) {
                             _ => panic!("codex launch must survive"),
                         },
                         continuation: None,
+                        handoff: None,
                         prompt_delivery: "immediate".to_owned(),
                         stream_after: 0,
                         control_capacity: 1,

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::{Arc, Mutex, TryLockError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use artisan_domain::ThreadId;
 use tokio::sync::watch;
@@ -105,8 +105,6 @@ pub enum ConversationCommitPublish {
     Notified,
     /// No live subscription was registered for the thread.
     Unobserved,
-    /// The registry was briefly occupied, so the hint was dropped.
-    Coalesced,
 }
 
 /// Failure while registering a conversation commit subscription.
@@ -197,21 +195,17 @@ impl ConversationCommitNotifier {
 
     /// Publishes a synchronous, bounded wake hint for exact `thread_id`.
     ///
-    /// The registry lock is acquired with `try_lock`: an occupied critical
-    /// section never makes the committer wait, and the hint is reported as
-    /// [`ConversationCommitPublish::Coalesced`] instead. A Tokio watch state
-    /// retains at most its current value, so repeated publishes do not build a
-    /// per-commit queue.
+    /// The registry lock guards only map lookups, so the committer waits at
+    /// most for another worker's lookup; skipping the wake instead would lose
+    /// it. A Tokio watch state retains at most its current value, so repeated
+    /// publishes do not build a per-commit queue.
     #[must_use]
     pub fn publish(&self, thread_id: &ThreadId) -> ConversationCommitPublish {
-        let state = match self.registry.state.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::WouldBlock) => {
-                let _ = self.registry.any_sender.send(());
-                return ConversationCommitPublish::Coalesced;
-            }
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        };
+        let state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let result = match state.entries.get(thread_id) {
             Some(entry) if entry.sender.send(()).is_ok() => ConversationCommitPublish::Notified,

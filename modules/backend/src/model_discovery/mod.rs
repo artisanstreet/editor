@@ -235,13 +235,28 @@ async fn probe_and_store() -> Arc<DiscoveryBundle> {
         .await
         .as_ref()
         .map(|(_, _, bundle)| Arc::clone(bundle));
-    let codex_program = managed_program(ManagedEngine::Codex);
-    let cursor_program = managed_program(ManagedEngine::Cursor);
-    let grok_program = managed_program(ManagedEngine::Grok);
-    let opencode2_program = managed_program(ManagedEngine::OpenCode2);
+    // Resolving a managed engine reads its install state and verifies its
+    // executable, hashing it when the cached verdict is stale: disk work
+    // that must not hold a runtime worker.
+    let resolved = tokio::task::spawn_blocking(|| {
+        (
+            managed_program(ManagedEngine::Codex),
+            managed_program(ManagedEngine::Cursor),
+            managed_program(ManagedEngine::Grok),
+            managed_program(ManagedEngine::OpenCode2),
+            managed_home(ManagedEngine::Claude),
+        )
+    })
+    .await;
+    let (codex_program, cursor_program, grok_program, opencode2_program, claude_home) =
+        match resolved {
+            Ok(resolved) => resolved,
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(_) => (None, None, None, None, None),
+        };
     let (codex, claude, opencode2, cursor, grok) = tokio::join!(
         discover_codex(codex_program.as_ref()),
-        discover_claude(managed_home(ManagedEngine::Claude)),
+        discover_claude(claude_home),
         discover_opencode2(opencode2_program.as_ref()),
         discover_cursor(cursor_program.as_ref()),
         discover_grok(grok_program.as_ref()),

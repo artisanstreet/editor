@@ -707,6 +707,8 @@ impl ForgeConnection<'_, '_, '_, '_> {
                 DeliveryStageError::Writer,
             ));
         };
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "delivery.wake");
         driver
             .deliver_wake(stamp, self.limits.next_request, self.cancel)
             .await
@@ -728,6 +730,8 @@ impl ForgeConnection<'_, '_, '_, '_> {
                 DeliveryStageError::Writer,
             ));
         };
+        #[cfg(feature = "flight-recorder")]
+        let _trace = artisan_tracing::span!("forge.request", "delivery.after_request");
         driver
             .handle_request(outcome, stamp, self.limits.next_request, self.cancel)
             .await
@@ -883,6 +887,11 @@ async fn drive_request_stream(
     streams: &mut StageStreams,
     cancel: &CancelHandle,
 ) -> Result<RequestDispatchOutcome, RequestStageError> {
+    // Spans the whole stage: reading the request, handling it (its own
+    // `request.with_receipt` span) and sending the reply, so a stalled
+    // stage's dump shows which of the three it is stuck in.
+    #[cfg(feature = "flight-recorder")]
+    let _trace = artisan_tracing::span!("forge.request", "request.stage");
     // `StageStreams::install` runs synchronously at every caller, the fields
     // are private, and `release` only runs after dispatch returns; the pair is
     // installed for this whole stage.

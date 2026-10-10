@@ -358,7 +358,7 @@ impl History {
             if !*warned
                 && matches!(
                     event.category,
-                    "navigation" | "project.intake" | "transport.request" | "ui"
+                    "forge.request" | "navigation" | "project.intake" | "transport.request" | "ui"
                 )
                 && now.saturating_sub(event.ts) >= SLOW_OPERATION_US
             {

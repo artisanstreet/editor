@@ -37,8 +37,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rustls-pki-types.workspace = true
 sea-orm.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 zeroize.workspace = true
 command-group.workspace = true
 tiktoken-rs = "0.12.0"
@@ -50,7 +51,6 @@ winapi-util.workspace = true
 [dev-dependencies]
 artisan-native-engine = { path = "../native_engine", features = ["fixtures"] }
 rcgen.workspace = true
-sha2.workspace = true
 tempfile = "=3.27.0" # workspace-absent
 
 [[test]]
@@ -164,6 +164,14 @@ path = "../../tests/backend/process_custody.rs"
 [[test]]
 name = "request_handler"
 path = "../../tests/backend/request_handler.rs"
+
+[[test]]
+name = "thread_lifecycle"
+path = "../../tests/backend/thread_lifecycle.rs"
+
+[[test]]
+name = "media_file"
+path = "../../tests/backend/media_file.rs"
 
 [[test]]
 name = "engine_usage"

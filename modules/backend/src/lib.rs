@@ -1,5 +1,9 @@
 //! Forge application assembly boundary.
 
+// The spawned Forge future is deep enough that proving it `Send` exceeds the
+// default limit.
+#![recursion_limit = "256"]
+
 use std::{future::Future, process::ExitCode, sync::Arc};
 
 use artisan_transport::CancelHandle;
@@ -24,8 +28,10 @@ pub mod directory_controller;
 pub mod directory_helper;
 pub(crate) mod directory_helper_codec;
 pub mod directory_selection;
+pub(crate) mod engine_inventory;
 pub mod engine_owner;
 pub(crate) mod extension_sync;
+pub(crate) mod prompt_mentions;
 pub use artisan_domain::error_chain;
 pub mod file_identity_policy;
 pub mod forge_runtime;
@@ -38,6 +44,7 @@ pub mod host_suspend_detection_policy;
 pub mod lifecycle_control;
 pub mod listener;
 pub mod live_thinking;
+mod media_file_service;
 pub mod native_run_dispatch;
 pub mod orchestration_intake_policy;
 pub mod preview_service_policy;
@@ -57,9 +64,9 @@ pub mod subscription_patch_selection_policy;
 pub mod telemetry_preferences_control_policy;
 pub mod terminal_transcript_consumption_policy;
 pub mod thread_liveness_policy;
-pub mod thread_terminals;
 pub mod thread_metadata_refiner_policy;
 pub mod thread_resource_quiescence_policy;
+pub mod thread_terminals;
 pub mod usage_interruption_model_policy;
 pub mod wake_lock_policy;
 
@@ -116,19 +123,32 @@ pub use storage::{ForgeStorage, ForgeStorageCloseError, ForgeStorageOpenError};
 /// Runs the synchronous Forge binary boundary.
 ///
 /// The helper dispatch remains in `main` so this function is reached only for
-/// normal Forge startup. It owns one current-thread runtime, parses only the
+/// normal Forge startup. It owns one multi-thread runtime, parses only the
 /// explicit long-form launch contract, and keeps the caller-owned cancellation
 /// handle attached to the signal and process futures.
+/// Runtime workers. Enough that a few tasks stuck in blocking calls at once
+/// leave the rest of the Forge responsive; the Forge is mostly I/O-bound, so
+/// more would only idle.
+const FORGE_WORKER_THREADS: usize = 4;
+
 #[must_use]
 pub fn run() -> ExitCode {
     #[cfg(feature = "flight-recorder")]
     let _trace_session = artisan_tracing::start("forge");
     #[cfg(feature = "flight-recorder")]
-    artisan_tracing::name_thread("forge.event_loop");
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    artisan_tracing::name_thread("forge.main");
+    // Several workers, so a task stuck in a blocking call (a process spawn
+    // waiting for exec, a file read on a saturated disk) holds up only its
+    // own worker: lease heartbeats, request deadlines and delivery keep
+    // running on the others.
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder
+        .worker_threads(FORGE_WORKER_THREADS)
+        .thread_name("forge-worker")
+        .enable_all();
+    #[cfg(feature = "flight-recorder")]
+    builder.on_thread_start(|| artisan_tracing::name_thread("forge.worker"));
+    let runtime = match builder.build() {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!(
@@ -139,8 +159,8 @@ pub fn run() -> ExitCode {
         }
     };
 
-    // Reports any stall of the single event-loop thread, which would also
-    // stall every lease heartbeat and request deadline.
+    // Reports when the runtime stops making progress, which also stalls
+    // lease heartbeats and request deadlines.
     let _watchdog = event_loop_watchdog::start(&runtime);
 
     let cancel = Arc::new(CancelHandle::new());
@@ -152,7 +172,14 @@ pub fn run() -> ExitCode {
         }
     };
 
-    let result = runtime.block_on(run_with_signal(config, cancel));
+    // Spawned rather than driven by `block_on`, so serving runs on a worker
+    // like every other task and the watchdog sees it when it blocks.
+    let result = runtime.block_on(async {
+        match tokio::spawn(run_with_signal(config, cancel)).await {
+            Ok(result) => result,
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        }
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -305,3 +332,5 @@ mod account_profile;
 mod engine_manager;
 
 mod engine_install_handler;
+
+pub(crate) mod thread_upkeep;

@@ -461,7 +461,12 @@ impl ProjectRepositoryService {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| GitReadError::Unavailable)?;
+        // Spawning waits for the child's exec, which reads the Git binary
+        // from disk; keep that wait on the blocking pool.
+        let mut child = tokio::task::spawn_blocking(move || command.spawn())
+            .await
+            .map_err(|_| GitReadError::Unavailable)?
+            .map_err(|_| GitReadError::Unavailable)?;
         let mut stdout = child.stdout.take().ok_or(GitReadError::Unavailable)?;
         let mut stderr = child.stderr.take().ok_or(GitReadError::Unavailable)?;
         let mut stdout_bytes = Vec::new();

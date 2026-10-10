@@ -101,10 +101,17 @@ impl ComposerCatalogService {
         root: RootPath,
         profile: &EngineProfileId,
     ) -> Result<CatalogResult, ComposerCatalogServiceError> {
-        let authority = NativeOpenCode2Authority::new();
-        let launch = authority
-            .resolve_profile_launch(&self.database, profile)
-            .map_err(|_| ComposerCatalogServiceError::ProfileUnavailable)?;
+        // Resolving takes the exclusive install lock, which waits by sleeping
+        // up to 30 s while a running OpenCode2 launch holds it; on the Forge's
+        // single event-loop thread that would freeze every other request.
+        let database = self.database.clone();
+        let profile_id = profile.clone();
+        let launch = tokio::task::spawn_blocking(move || {
+            NativeOpenCode2Authority::new().resolve_profile_launch(&database, &profile_id)
+        })
+        .await
+        .map_err(|_| ComposerCatalogServiceError::ProfileUnavailable)?
+        .map_err(|_| ComposerCatalogServiceError::ProfileUnavailable)?;
         let scope = CatalogScope::new(profile.as_str(), root.as_str(), "safe")
             .map_err(|_| ComposerCatalogServiceError::ScopeUnavailable)?;
         let now = tokio::time::Instant::now();

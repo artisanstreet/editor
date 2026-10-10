@@ -3,8 +3,11 @@
 //! A provider stream can emit assistant text one token at a time, and every
 //! delta previously earned its own SQLite batch commit plus its own
 //! subscriber wake. The coalescer buffers byte-exact append fragments and
-//! reports a byte/count threshold or a 50 ms deadline, so one
-//! commit carries a bounded run of deltas. Buffered bytes live in memory only:
+//! reports a byte/count threshold or a deadline, so one commit carries a
+//! bounded run of deltas. The deadline starts at 50 ms and follows how long
+//! commits actually take: on a slow or busy disk a stream commits less often
+//! in larger pieces instead of queueing a commit behind every other one, so
+//! its share of the disk stays bounded. Buffered bytes live in memory only:
 //! every full-body persistence path and the end of the turn flush the buffer,
 //! so the durable projection stays byte-identical to the uncoalesced stream.
 
@@ -27,18 +30,66 @@ pub(super) const MAX_PENDING_DELTA_BYTES: usize = CONVERSATION_TEXT_FRAGMENT_MAX
 /// streams collapse many deltas into one transaction and one wake.
 pub(super) const MAX_PENDING_DELTA_FRAGMENTS: usize = 32;
 
-/// Maximum delay before a partial burst becomes visible.
+/// Delay before a partial burst becomes visible while commits are fast.
 pub(super) const MAX_PENDING_DELTA_DELAY: Duration = Duration::from_millis(50);
 
+/// Ceiling on the adaptive delay: even on a stalled disk, text a stream has
+/// already received is offered for commit at least once a second.
+pub(super) const SLOW_DISK_DELTA_DELAY: Duration = Duration::from_secs(1);
+
+/// A partial burst waits this many commit durations, so one stream keeps its
+/// disk share near a fifth however slowly commits complete.
+const COMMIT_COST_MULTIPLE: u32 = 4;
+
 /// In-memory buffer for one run of byte-exact assistant append fragments.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct DeltaCoalescer {
     pending: String,
     fragments: usize,
     deadline: Option<Instant>,
+    delay: Duration,
+}
+
+impl Default for DeltaCoalescer {
+    fn default() -> Self {
+        Self {
+            pending: String::new(),
+            fragments: 0,
+            deadline: None,
+            delay: MAX_PENDING_DELTA_DELAY,
+        }
+    }
 }
 
 impl DeltaCoalescer {
+    /// The delay a fresh burst waits before its deadline fires.
+    #[cfg(test)]
+    pub(super) const fn delay(&self) -> Duration {
+        self.delay
+    }
+
+    /// Adapts the delay to how long one coalesced commit just took.
+    ///
+    /// The delay moves halfway toward [`COMMIT_COST_MULTIPLE`] commit
+    /// durations, clamped to the 50 ms floor and the one-second ceiling, so a
+    /// single slow outlier does not stall a stream and a recovered disk
+    /// returns to the floor within a few commits.
+    pub(super) fn record_commit(&mut self, took: Duration) {
+        let target = took
+            .saturating_mul(COMMIT_COST_MULTIPLE)
+            .clamp(MAX_PENDING_DELTA_DELAY, SLOW_DISK_DELTA_DELAY);
+        self.delay = (self.delay + target) / 2;
+    }
+
+    /// Fragment count that makes a commit due at the current delay.
+    ///
+    /// Scales with the delay so a slow disk does not get its commits back by
+    /// the count threshold that a token-rate stream reaches first.
+    fn fragment_threshold(&self) -> usize {
+        let scale = self.delay.as_millis() / MAX_PENDING_DELTA_DELAY.as_millis();
+        MAX_PENDING_DELTA_FRAGMENTS.saturating_mul(usize::try_from(scale.max(1)).unwrap_or(1))
+    }
+
     /// Whether no delta is currently buffered.
     pub(super) fn is_empty(&self) -> bool {
         self.pending.is_empty()
@@ -73,12 +124,18 @@ impl DeltaCoalescer {
             return false;
         }
         if self.pending.is_empty() {
-            self.deadline = Some(Instant::now() + MAX_PENDING_DELTA_DELAY);
+            self.deadline = Some(Instant::now() + self.delay);
         }
         self.pending.push_str(text);
         self.fragments = self.fragments.saturating_add(1);
-        self.pending.len() >= MAX_PENDING_DELTA_BYTES
-            || self.fragments >= MAX_PENDING_DELTA_FRAGMENTS
+        self.pending.len() >= MAX_PENDING_DELTA_BYTES || self.fragments >= self.fragment_threshold()
+    }
+
+    /// Clears the buffer after its own coalesced commit, which took `took`,
+    /// and adapts the delay to it.
+    pub(super) fn clear_after_commit(&mut self, took: Duration) {
+        self.clear();
+        self.record_commit(took);
     }
 
     /// Clears the buffer after its bytes were durably committed.
@@ -220,5 +277,57 @@ mod deadline_tests {
         assert!(buffer.deadline().is_none());
         assert!(!buffer.push(""));
         assert!(buffer.deadline().is_none());
+    }
+}
+
+#[cfg(test)]
+mod adaptive_delay_tests {
+    use super::{
+        DeltaCoalescer, MAX_PENDING_DELTA_DELAY, MAX_PENDING_DELTA_FRAGMENTS, SLOW_DISK_DELTA_DELAY,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn fast_commits_keep_the_fifty_millisecond_floor() {
+        let mut buffer = DeltaCoalescer::default();
+        for _ in 0..20 {
+            buffer.record_commit(Duration::from_millis(2));
+        }
+        assert_eq!(buffer.delay(), MAX_PENDING_DELTA_DELAY);
+        for _ in 0..(MAX_PENDING_DELTA_FRAGMENTS - 1) {
+            assert!(!buffer.push("d"));
+        }
+        assert!(buffer.push("d"), "the count threshold is unchanged");
+    }
+
+    #[test]
+    fn slow_commits_stretch_the_delay_and_the_count_threshold_up_to_a_second() {
+        let mut buffer = DeltaCoalescer::default();
+        // A 500 ms commit (a busy hard disk) heads for the one-second ceiling.
+        for _ in 0..12 {
+            buffer.record_commit(Duration::from_millis(500));
+        }
+        assert!(buffer.delay() > Duration::from_millis(900));
+        assert!(buffer.delay() <= SLOW_DISK_DELTA_DELAY);
+        // A token-rate stream no longer forces a commit every 32 deltas.
+        for _ in 0..(MAX_PENDING_DELTA_FRAGMENTS * 4) {
+            assert!(!buffer.push("d"));
+        }
+        // The disk recovers: the delay falls back to the floor.
+        buffer.clear();
+        for _ in 0..12 {
+            buffer.record_commit(Duration::from_millis(1));
+        }
+        assert!(buffer.delay() < MAX_PENDING_DELTA_DELAY + Duration::from_millis(1));
+    }
+
+    #[test]
+    fn one_slow_outlier_moves_the_delay_only_halfway() {
+        let mut buffer = DeltaCoalescer::default();
+        buffer.record_commit(Duration::from_secs(10));
+        assert_eq!(
+            buffer.delay(),
+            (MAX_PENDING_DELTA_DELAY + SLOW_DISK_DELTA_DELAY) / 2
+        );
     }
 }

@@ -37,7 +37,10 @@ pub(super) async fn discover_codex(
     let result = session.list_models(deadline).await;
     session.close().await;
     let rows = result?;
-    let context = read_context_windows(&program.home.join(".codex"));
+    let codex_home = program.home.join(".codex");
+    let context = tokio::task::spawn_blocking(move || read_context_windows(&codex_home))
+        .await
+        .unwrap_or_default();
     Some(rows.into_iter().map(|row| map_row(row, &context)).collect())
 }
 

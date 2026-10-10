@@ -81,6 +81,7 @@ pub(super) async fn flush_pending_deltas(
         );
         return false;
     };
+    let started = std::time::Instant::now();
     if let Err(error) = commit_batch_with_retry(CommitBatchRequest {
         repository: context.repository,
         notifier: &context.config.notifier,
@@ -104,7 +105,7 @@ pub(super) async fn flush_pending_deltas(
     }
     // The bytes are durable: clear the buffer before any later fallible
     // bookkeeping so a second flush can never replay them.
-    state.coalescer.clear();
+    state.coalescer.clear_after_commit(started.elapsed());
     let next_revision = match state.assistant_revision.checked_next() {
         Ok(next_revision) => next_revision,
         Err(error) => {
@@ -295,10 +296,7 @@ pub(super) async fn start_assistant_item(
         scope: &state.scope,
         batch_sequence: state.batch_sequence,
         operated_at,
-        activate_turn_patch_id: state
-            .parked_parts
-            .is_empty()
-            .then_some(&activation_patch_id),
+        activate_turn_patch_id: (!state.turn_activated).then_some(&activation_patch_id),
         changes: &changes,
         checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
@@ -316,6 +314,7 @@ pub(super) async fn start_assistant_item(
     state.coalescer.clear();
     state.assistant_item = Some(item_id);
     state.assistant_revision = Revision::new(0);
+    state.turn_activated = true;
     state.scope.expected_updated_at = operated_at;
     let Some(next_sequence) = state.batch_sequence.checked_add(1) else {
         mark_interrupted(
@@ -392,7 +391,7 @@ pub(super) async fn ensure_assistant_item(
         scope: &state.scope,
         batch_sequence: state.batch_sequence,
         operated_at,
-        activate_turn_patch_id: Some(&activation_patch_id),
+        activate_turn_patch_id: (!state.turn_activated).then_some(&activation_patch_id),
         changes: &changes,
         checkpoint: artisan_database::CheckpointUpdate::Keep,
         retries: context.config.max_command_retries,
@@ -404,6 +403,7 @@ pub(super) async fn ensure_assistant_item(
     state.coalescer.clear();
     state.assistant_item = Some(item_id);
     state.assistant_revision = Revision::new(0);
+    state.turn_activated = true;
     state.scope.expected_updated_at = operated_at;
     Ok(())
 }

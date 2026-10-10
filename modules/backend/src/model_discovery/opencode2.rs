@@ -52,7 +52,10 @@ pub(super) async fn discover_opencode2(
     if identifiers.is_empty() {
         return None;
     }
-    let metadata = read_models_cache(&executable.home);
+    let home = executable.home.clone();
+    let metadata = tokio::task::spawn_blocking(move || read_models_cache(&home))
+        .await
+        .unwrap_or_default();
     Some(
         identifiers
             .into_iter()

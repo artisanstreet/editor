@@ -19,6 +19,7 @@ pub(crate) fn user_preferences(stored: StoredUserPreferences) -> UserPreferences
     UserPreferences {
         revision: stored.revision,
         default_engine_config: stored.default_engine_config,
+        model_preferences: stored.model_preferences,
         navigation: stored.navigation,
         account: host_account_profile(),
     }
@@ -27,13 +28,20 @@ pub(crate) fn user_preferences(stored: StoredUserPreferences) -> UserPreferences
 /// The account profile of the running Forge.
 #[must_use]
 pub(crate) fn host_account_profile() -> AccountProfile {
+    // Read once: host-state delivery builds this profile on the serving
+    // path, where a file read on a busy disk would stall every connection.
+    static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     let user = ["USER", "LOGNAME", "USERNAME"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok());
-    let host = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .or_else(|| std::env::var("COMPUTERNAME").ok());
+    let host = HOST
+        .get_or_init(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .or_else(|| std::env::var("HOSTNAME").ok())
+                .or_else(|| std::env::var("COMPUTERNAME").ok())
+        })
+        .clone();
     account_profile(user, host)
 }
 
