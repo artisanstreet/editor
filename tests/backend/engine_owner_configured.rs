@@ -264,7 +264,8 @@ async fn collect_happy_path_observations(turn: &mut AcceptedTurn) -> (bool, bool
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
             | EngineObservation::SubagentTranscript(_)
-            | EngineObservation::Shell(_) => {
+            | EngineObservation::Shell(_)
+            | EngineObservation::Inventory(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(term) => {

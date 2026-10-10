@@ -996,7 +996,8 @@ mod tests {
             | EngineObservation::Activity(_)
             | EngineObservation::Subagent(_)
             | EngineObservation::SubagentTranscript(_)
-            | EngineObservation::Shell(_) => {
+            | EngineObservation::Shell(_)
+            | EngineObservation::Inventory(_) => {
                 panic!("unexpected production observation in fixture")
             }
             EngineObservation::Terminal(_) | EngineObservation::SummaryTitle { .. } => {

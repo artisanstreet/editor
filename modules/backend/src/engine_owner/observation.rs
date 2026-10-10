@@ -30,7 +30,7 @@ pub(crate) enum TerminalState {
 /// (never zero/invented/incremented per chunk), stable chunk ID, optional
 /// explicit provider part ID, and exact delta text. Empty text may produce
 /// zero deltas.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct TextDelta {
     run_id: RunId,
     sequence: u64,
@@ -38,8 +38,23 @@ pub(crate) struct TextDelta {
     part_id: Option<String>,
     phase: Option<artisan_domain::AssistantMessagePhase>,
     delta: String,
+    /// When the chunk reached the Forge, for measuring streaming speed. It
+    /// describes the delivery, not the delta, so equality ignores it.
     received_at: std::time::Instant,
 }
+
+impl PartialEq for TextDelta {
+    fn eq(&self, other: &Self) -> bool {
+        self.run_id == other.run_id
+            && self.sequence == other.sequence
+            && self.chunk_id == other.chunk_id
+            && self.part_id == other.part_id
+            && self.phase == other.phase
+            && self.delta == other.delta
+    }
+}
+
+impl Eq for TextDelta {}
 
 #[allow(dead_code)]
 impl TextDelta {
@@ -378,6 +393,9 @@ pub(crate) enum EngineObservation {
     SubagentTranscript(SubagentTranscriptRow),
     Activity(artisan_domain::Observation),
     Shell(ShellJobRow),
+    /// What the engine reported it can use. Never committed to the ledger:
+    /// it updates the Forge-wide engine inventory.
+    Inventory(crate::engine_inventory::InventoryReport),
 }
 
 pub(crate) use crate::thread_terminals::{ShellJobChange, ShellJobEnd, ShellJobRow};

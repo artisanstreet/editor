@@ -73,6 +73,8 @@
 
 mod adapter;
 mod content;
+mod generation;
+mod inventory;
 mod launch;
 mod protocol;
 #[cfg(test)]
@@ -84,6 +86,7 @@ mod usage;
 pub(crate) use adapter::*;
 #[cfg(test)]
 pub(crate) use content::*;
+pub(crate) use inventory::{ClaudeSkillRoots, init_inventory};
 pub(crate) use launch::*;
 pub(crate) use protocol::*;
 #[cfg(test)]

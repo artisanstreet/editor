@@ -1297,8 +1297,11 @@ async fn fresh_migrate_is_idempotent_and_registers_the_third_version() -> Result
     database.close().await?;
     let reopened = connect(SqliteConfig::file(temp.database()).sqlx_logging(false)).await?;
     migrate_to_current(&reopened).await?;
+    // The execution version sits third in the history, whatever later
+    // migrations follow it, and every version registers exactly once.
+    let versions = migration_versions(&reopened).await?;
     assert_eq!(
-        migration_versions(&reopened).await?,
+        versions[..4],
         [
             INITIAL_MIGRATION.to_string(),
             RECEIPTS_MIGRATION.to_string(),
@@ -1306,6 +1309,7 @@ async fn fresh_migrate_is_idempotent_and_registers_the_third_version() -> Result
             ENGINE_CONFIG_MIGRATION.to_string(),
         ]
     );
+    assert_eq!(versions.len(), Migrator::migrations().len());
     reopened.close().await?;
     Ok(())
 }
@@ -1325,7 +1329,10 @@ async fn execution_upgrade_preserves_receipts_era_data() -> Result<(), Box<dyn E
 
     migrate_to_current(&database).await?;
 
-    assert_eq!(migration_versions(&database).await?.len(), 4);
+    assert_eq!(
+        migration_versions(&database).await?.len(),
+        Migrator::migrations().len()
+    );
     let dispatch = database
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
@@ -1375,7 +1382,10 @@ async fn down_reverses_only_execution_objects_then_reapply_restores_them()
 
     Migrator::up(&database, None).await?;
 
-    assert_eq!(migration_versions(&database).await?.len(), 4);
+    assert_eq!(
+        migration_versions(&database).await?.len(),
+        Migrator::migrations().len()
+    );
     assert_eq!(named_table_count(&database, &all_tables).await?, 13);
     assert_eq!(scalar_i64(&database, execution_index).await?, 1);
     database.close().await?;
@@ -1384,8 +1394,11 @@ async fn down_reverses_only_execution_objects_then_reapply_restores_them()
 
 #[tokio::test]
 async fn schema_inventory_matches_the_approved_contract() -> Result<(), Box<dyn Error>> {
+    // The contract is the execution migration's own output: later
+    // migrations add tables and indexes of their own, so the inventory is
+    // read at the version that closed the execution era.
     let database = connect_memory().await?;
-    migrate_to_current(&database).await?;
+    Migrator::up(&database, Some(4)).await?;
 
     let mut tables = text_rows(
         &database,

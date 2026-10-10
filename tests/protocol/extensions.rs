@@ -5,10 +5,11 @@
 use std::error::Error;
 
 use artisan_domain::{
-    AdoptExtension, Command, Event, Extension, ExtensionCatalog, ExtensionEngineState,
-    ExtensionEngineStatus, ExtensionKind, ExtensionLinkSupport, ExtensionOrigin, GlobalPrompt,
-    GlobalPromptCandidate, GlobalPromptEngineState, GlobalPromptEngineStatus,
-    GlobalPromptResolution, GlobalPromptRevision, GlobalPromptSetup, Query, ReadExtensions,
+    AdoptExtension, Command, ConnectorStatus, EngineInventory, Event, Extension, ExtensionCatalog,
+    ExtensionEngineState, ExtensionEngineStatus, ExtensionKind, ExtensionLinkSupport,
+    ExtensionOrigin, GlobalPrompt, GlobalPromptCandidate, GlobalPromptEngineState,
+    GlobalPromptEngineStatus, GlobalPromptResolution, GlobalPromptRevision, GlobalPromptSetup,
+    InventoryConnector, InventorySkill, InventorySkillSource, Query, ReadExtensions,
     ReadGlobalPrompt, RequestId, ResolveGlobalPrompt, SaveGlobalPrompt, SetExtensionEnabled,
     UnixMillis,
 };
@@ -77,7 +78,50 @@ fn catalog() -> Result<ExtensionCatalog, Box<dyn Error>> {
             },
         ],
         ExtensionLinkSupport::DeveloperModeRequired,
-    )?)
+    )?
+    .with_inventories(vec![
+        EngineInventory {
+            engine_id: "claude".to_owned(),
+            project_id: Some("project-1".to_owned()),
+            skills: vec![
+                InventorySkill {
+                    name: "cloudflare:wrangler".to_owned(),
+                    description: "Run Wrangler.".to_owned(),
+                    source: InventorySkillSource::Plugin,
+                    plugin: Some("cloudflare".to_owned()),
+                },
+                InventorySkill {
+                    name: "simplify".to_owned(),
+                    description: String::new(),
+                    source: InventorySkillSource::System,
+                    plugin: None,
+                },
+            ],
+            connectors: vec![
+                InventoryConnector {
+                    name: "claude.ai Notion".to_owned(),
+                    status: ConnectorStatus::NeedsAuth,
+                    plugin: None,
+                },
+                InventoryConnector {
+                    name: "cloudflare-api".to_owned(),
+                    status: ConnectorStatus::Connected,
+                    plugin: Some("cloudflare".to_owned()),
+                },
+            ],
+        },
+        // An engine that ran outside any project and has listed no skills.
+        EngineInventory {
+            engine_id: "codex".to_owned(),
+            project_id: None,
+            skills: Vec::new(),
+            connectors: vec![InventoryConnector {
+                name: "sentry".to_owned(),
+                status: ConnectorStatus::Pending,
+                plugin: None,
+            }],
+        },
+    ])?)
 }
 
 fn prompt(setup: GlobalPromptSetup) -> Result<GlobalPrompt, Box<dyn Error>> {

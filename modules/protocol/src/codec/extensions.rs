@@ -5,12 +5,14 @@
 use super::*;
 
 use artisan_domain::{
-    AdoptExtension, EXTENSION_CATALOG_MAX, EXTENSION_ENGINES_MAX, Extension, ExtensionCatalog,
-    ExtensionEngineState, ExtensionEngineStatus, ExtensionError, ExtensionKind,
-    ExtensionLinkSupport, ExtensionOrigin, GLOBAL_PROMPT_CANDIDATES_MAX, GLOBAL_PROMPT_ENGINES_MAX,
-    GlobalPrompt, GlobalPromptCandidate, GlobalPromptEngineState, GlobalPromptEngineStatus,
-    GlobalPromptError, GlobalPromptResolution, GlobalPromptRevision, GlobalPromptSetup,
-    ReadExtensions, ReadGlobalPrompt, ResolveGlobalPrompt, SaveGlobalPrompt, SetExtensionEnabled,
+    AdoptExtension, ConnectorStatus, EXTENSION_CATALOG_MAX, EXTENSION_ENGINES_MAX, EngineInventory,
+    Extension, ExtensionCatalog, ExtensionEngineState, ExtensionEngineStatus, ExtensionError,
+    ExtensionKind, ExtensionLinkSupport, ExtensionOrigin, GLOBAL_PROMPT_CANDIDATES_MAX,
+    GLOBAL_PROMPT_ENGINES_MAX, GlobalPrompt, GlobalPromptCandidate, GlobalPromptEngineState,
+    GlobalPromptEngineStatus, GlobalPromptError, GlobalPromptResolution, GlobalPromptRevision,
+    GlobalPromptSetup, INVENTORIES_MAX, INVENTORY_ITEMS_MAX, InventoryConnector, InventorySkill,
+    InventorySkillSource, ReadExtensions, ReadGlobalPrompt, ResolveGlobalPrompt, SaveGlobalPrompt,
+    SetExtensionEnabled,
 };
 
 use crate::artisan_capnp::{
@@ -179,7 +181,9 @@ pub(crate) fn encode_extension_catalog(
         }
     });
     let field = "extensions.extensions";
-    let mut extensions = builder.init_extensions(list_length(field, catalog.extensions().len())?);
+    let mut extensions = builder
+        .reborrow()
+        .init_extensions(list_length(field, catalog.extensions().len())?);
     for (index, extension) in catalog.extensions().iter().enumerate() {
         let mut encoded = extensions.reborrow().get(list_index(field, index)?);
         encoded.set_id(&extension.id);
@@ -207,7 +211,146 @@ pub(crate) fn encode_extension_catalog(
             engine.set_reason(state.reason.as_deref().unwrap_or_default());
         }
     }
+    encode_inventories(builder, catalog.inventories())
+}
+
+fn encode_inventories(
+    builder: extension_catalog::Builder<'_>,
+    inventories: &[EngineInventory],
+) -> Result<(), ProtocolEncodeError> {
+    let field = "extensions.inventories";
+    let mut encoded = builder.init_inventories(list_length(field, inventories.len())?);
+    for (index, inventory) in inventories.iter().enumerate() {
+        let mut entry = encoded.reborrow().get(list_index(field, index)?);
+        entry.set_engine_id(&inventory.engine_id);
+        entry.set_project_id(inventory.project_id.as_deref().unwrap_or_default());
+        let skills_field = "extensions.inventories.skills";
+        let mut skills = entry
+            .reborrow()
+            .init_skills(list_length(skills_field, inventory.skills.len())?);
+        for (position, skill) in inventory.skills.iter().enumerate() {
+            let mut encoded_skill = skills.reborrow().get(list_index(skills_field, position)?);
+            encoded_skill.set_name(&skill.name);
+            encoded_skill.set_description(&skill.description);
+            encoded_skill.set_source(match skill.source {
+                InventorySkillSource::User => artisan_capnp::InventorySkillSource::User,
+                InventorySkillSource::Project => artisan_capnp::InventorySkillSource::Project,
+                InventorySkillSource::Plugin => artisan_capnp::InventorySkillSource::Plugin,
+                InventorySkillSource::System => artisan_capnp::InventorySkillSource::System,
+            });
+            encoded_skill.set_plugin(skill.plugin.as_deref().unwrap_or_default());
+        }
+        let connectors_field = "extensions.inventories.connectors";
+        let mut connectors =
+            entry.init_connectors(list_length(connectors_field, inventory.connectors.len())?);
+        for (position, connector) in inventory.connectors.iter().enumerate() {
+            let mut encoded_connector = connectors
+                .reborrow()
+                .get(list_index(connectors_field, position)?);
+            encoded_connector.set_name(&connector.name);
+            encoded_connector.set_status(match connector.status {
+                ConnectorStatus::Connected => artisan_capnp::ConnectorStatus::Connected,
+                ConnectorStatus::Pending => artisan_capnp::ConnectorStatus::Pending,
+                ConnectorStatus::NeedsAuth => artisan_capnp::ConnectorStatus::NeedsAuth,
+                ConnectorStatus::Failed => artisan_capnp::ConnectorStatus::Failed,
+                ConnectorStatus::Disabled => artisan_capnp::ConnectorStatus::Disabled,
+            });
+            encoded_connector.set_plugin(connector.plugin.as_deref().unwrap_or_default());
+        }
+    }
     Ok(())
+}
+
+fn decode_inventories(
+    value: extension_catalog::Reader<'_>,
+) -> Result<Vec<EngineInventory>, ProtocolDecodeError> {
+    let inventories = value.get_inventories()?;
+    if inventories.len() as usize > INVENTORIES_MAX {
+        return Err(extension_error(ExtensionError::TooMany));
+    }
+    let optional = |value: capnp::Result<capnp::text::Reader<'_>>, field| {
+        read_text(value, field).map(|text| (!text.is_empty()).then_some(text))
+    };
+    inventories
+        .iter()
+        .map(|inventory| {
+            let skills = inventory.get_skills()?;
+            let connectors = inventory.get_connectors()?;
+            if skills.len() as usize > INVENTORY_ITEMS_MAX
+                || connectors.len() as usize > INVENTORY_ITEMS_MAX
+            {
+                return Err(extension_error(ExtensionError::TooMany));
+            }
+            Ok(EngineInventory {
+                engine_id: read_text(inventory.get_engine_id(), "extensions.inventories.engineId")?,
+                project_id: optional(
+                    inventory.get_project_id(),
+                    "extensions.inventories.projectId",
+                )?,
+                skills: skills
+                    .iter()
+                    .map(|skill| {
+                        Ok(InventorySkill {
+                            name: read_text(
+                                skill.get_name(),
+                                "extensions.inventories.skills.name",
+                            )?,
+                            description: read_text(
+                                skill.get_description(),
+                                "extensions.inventories.skills.description",
+                            )?,
+                            source: match skill.get_source()? {
+                                artisan_capnp::InventorySkillSource::User => {
+                                    InventorySkillSource::User
+                                }
+                                artisan_capnp::InventorySkillSource::Project => {
+                                    InventorySkillSource::Project
+                                }
+                                artisan_capnp::InventorySkillSource::Plugin => {
+                                    InventorySkillSource::Plugin
+                                }
+                                artisan_capnp::InventorySkillSource::System => {
+                                    InventorySkillSource::System
+                                }
+                            },
+                            plugin: optional(
+                                skill.get_plugin(),
+                                "extensions.inventories.skills.plugin",
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProtocolDecodeError>>()?,
+                connectors: connectors
+                    .iter()
+                    .map(|connector| {
+                        Ok(InventoryConnector {
+                            name: read_text(
+                                connector.get_name(),
+                                "extensions.inventories.connectors.name",
+                            )?,
+                            status: match connector.get_status()? {
+                                artisan_capnp::ConnectorStatus::Connected => {
+                                    ConnectorStatus::Connected
+                                }
+                                artisan_capnp::ConnectorStatus::Pending => ConnectorStatus::Pending,
+                                artisan_capnp::ConnectorStatus::NeedsAuth => {
+                                    ConnectorStatus::NeedsAuth
+                                }
+                                artisan_capnp::ConnectorStatus::Failed => ConnectorStatus::Failed,
+                                artisan_capnp::ConnectorStatus::Disabled => {
+                                    ConnectorStatus::Disabled
+                                }
+                            },
+                            plugin: optional(
+                                connector.get_plugin(),
+                                "extensions.inventories.connectors.plugin",
+                            )?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ProtocolDecodeError>>()?,
+            })
+        })
+        .collect()
 }
 
 const fn encode_extension_status(
@@ -297,7 +440,10 @@ pub(crate) fn decode_extension_catalog(
             ExtensionLinkSupport::DeveloperModeRequired
         }
     };
-    ExtensionCatalog::new(decoded, links).map_err(extension_error)
+    let inventories = decode_inventories(value)?;
+    ExtensionCatalog::new(decoded, links)
+        .and_then(|catalog| catalog.with_inventories(inventories))
+        .map_err(extension_error)
 }
 
 /// Encodes the global prompt, shared by the answer and the push.

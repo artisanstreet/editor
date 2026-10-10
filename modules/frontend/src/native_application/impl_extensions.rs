@@ -63,6 +63,11 @@ impl NativeApplication {
         }
     }
 
+    /// The catalog as last served, if any.
+    pub(super) fn extensions_catalog(&self) -> Option<&ExtensionCatalog> {
+        self.extensions.catalog.as_ref()
+    }
+
     /// Applies a pushed or served catalog.
     pub(super) fn apply_extension_catalog(
         &mut self,

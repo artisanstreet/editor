@@ -75,6 +75,8 @@ pub(crate) struct ExtensionSync {
     publish: Arc<dyn Fn() + Send + Sync>,
     current: Mutex<Snapshots>,
     reconciling: tokio::sync::Mutex<()>,
+    /// What engines reported they can use; served with the catalog.
+    inventory: Arc<crate::engine_inventory::EngineInventoryBoard>,
 }
 
 impl std::fmt::Debug for ExtensionSync {
@@ -89,18 +91,60 @@ impl std::fmt::Debug for ExtensionSync {
 impl ExtensionSync {
     /// Creates the sync for the Forge whose database lives in `state_root`.
     /// `publish` wakes the connections after a visible change.
+    #[cfg(test)]
     pub(crate) fn new(
         state_root: PathBuf,
         repository: Repository,
         publish: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Self::with_inventory(
+            state_root,
+            repository,
+            publish,
+            crate::engine_inventory::EngineInventoryBoard::new(),
+        )
+    }
+
+    /// Creates the sync serving `inventory` with its catalog: the board's
+    /// cache lives under `state_root`, and every change it records is
+    /// published like a catalog change.
+    pub(crate) fn with_inventory(
+        state_root: PathBuf,
+        repository: Repository,
+        publish: impl Fn() + Send + Sync + 'static,
+        inventory: Arc<crate::engine_inventory::EngineInventoryBoard>,
+    ) -> Arc<Self> {
+        inventory.attach_cache(&state_root);
+        let sync = Arc::new(Self {
             state_root,
             repository,
             publish: Arc::new(publish),
             current: Mutex::new(Snapshots::default()),
             reconciling: tokio::sync::Mutex::new(()),
-        })
+            inventory,
+        });
+        let weak = Arc::downgrade(&sync);
+        sync.inventory.set_listener(Arc::new(move || {
+            if let Some(sync) = weak.upgrade() {
+                sync.refresh_inventories();
+            }
+        }));
+        sync
+    }
+
+    /// Serves the board's latest reports with the catalog as last
+    /// reconciled, publishing when they changed.
+    fn refresh_inventories(&self) {
+        let changed = {
+            let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+            let catalog = with_inventories(current.catalog.clone(), self.inventory.snapshot());
+            let changed = catalog != current.catalog;
+            current.catalog = catalog;
+            changed
+        };
+        if changed {
+            (self.publish)();
+        }
     }
 
     /// Starts the sync for the Forge whose database is `database`, keeps it
@@ -111,14 +155,18 @@ impl ExtensionSync {
         database: &std::path::Path,
         notifier: &crate::conversation_commit_notifier::ConversationCommitNotifier,
         cancel: &Arc<CancelHandle>,
+        inventory: Arc<crate::engine_inventory::EngineInventoryBoard>,
     ) -> (crate::RequestHandler, tokio::task::JoinHandle<()>) {
         let state_root = database
             .parent()
             .map_or_else(PathBuf::new, std::path::Path::to_path_buf);
         let notifier = notifier.clone();
-        let sync = Self::new(state_root, handler.repository().clone(), move || {
-            notifier.publish_host_state();
-        });
+        let sync = Self::with_inventory(
+            state_root,
+            handler.repository().clone(),
+            move || notifier.publish_host_state(),
+            inventory,
+        );
         let keeper = tokio::spawn(Arc::clone(&sync).keep_current(Arc::clone(cancel)));
         (handler.with_extension_sync(sync), keeper)
     }
@@ -183,8 +231,13 @@ impl ExtensionSync {
             discovered.clear();
             ExtensionCatalog::default()
         });
+        self.inventory.set_placed_skills(placed_skills(&catalog));
         let changed = {
             let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+            // Read the inventories under the lock: an inventory recorded
+            // meanwhile on another worker refreshes under the same lock, so
+            // it is either already in this snapshot or applied after it.
+            let catalog = with_inventories(catalog, self.inventory.snapshot());
             let changed = current.catalog != catalog || current.prompt != prompt;
             *current = Snapshots {
                 catalog,
@@ -599,6 +652,44 @@ fn validated_prompt(
             GlobalPrompt::default()
         },
     )
+}
+
+/// Serves engine reports with `catalog`; reports that do not validate are
+/// left out rather than losing the catalog.
+fn with_inventories(
+    catalog: ExtensionCatalog,
+    inventories: Vec<artisan_domain::EngineInventory>,
+) -> ExtensionCatalog {
+    let fallback = catalog.clone();
+    catalog
+        .with_inventories(inventories)
+        .unwrap_or_else(|error| {
+            eprintln!("engine inventories are invalid: {}", ErrorChain(&error));
+            fallback
+        })
+}
+
+/// The skill names each engine holds by the catalog: Artisan's own and
+/// adopted skills placed there, and discovered skills it has itself.
+fn placed_skills(catalog: &ExtensionCatalog) -> std::collections::BTreeMap<String, Vec<String>> {
+    use artisan_domain::ExtensionEngineStatus;
+    let mut placed = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for extension in catalog.extensions() {
+        for state in &extension.engines {
+            if matches!(
+                state.status,
+                ExtensionEngineStatus::Synced
+                    | ExtensionEngineStatus::Native
+                    | ExtensionEngineStatus::Conflict
+            ) {
+                placed
+                    .entry(state.engine_id.clone())
+                    .or_default()
+                    .push(extension.name.clone());
+            }
+        }
+    }
+    placed
 }
 
 fn storage_refusal(step: &str, error: &artisan_database::RepositoryError) -> SyncRefusal {

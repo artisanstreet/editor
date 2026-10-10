@@ -35,14 +35,11 @@ pub const CODEX_PROTOCOL_VERSION: &str = "v1";
 
 /// Notification methods Artisan opts out of at `initialize` time.
 ///
-/// Mirrors `codex_opt_out_notification_methods` in
-/// `modules/engines/src/codex/protocol.ts`. Opted-out bookkeeping frames
-/// must never occupy the run observation stream.
-pub const CODEX_OPT_OUT_NOTIFICATION_METHODS: &[&str] = &[
-    "account/rateLimits/updated",
-    "mcpServer/startupStatus/updated",
-    "remoteControl/status/changed",
-];
+/// Opted-out bookkeeping frames must never occupy the run observation
+/// stream. MCP startup states stay subscribed: a run reports them as the
+/// engine's connectors, outside the run's observations.
+pub const CODEX_OPT_OUT_NOTIFICATION_METHODS: &[&str] =
+    &["account/rateLimits/updated", "remoteControl/status/changed"];
 
 /// Payload-free failure while resolving or probing a Codex launch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -401,11 +398,7 @@ mod tests {
         assert_eq!(CODEX_MINIMUM_CLI_VERSION, "0.142.5");
         assert_eq!(
             CODEX_OPT_OUT_NOTIFICATION_METHODS,
-            &[
-                "account/rateLimits/updated",
-                "mcpServer/startupStatus/updated",
-                "remoteControl/status/changed",
-            ]
+            &["account/rateLimits/updated", "remoteControl/status/changed",]
         );
     }
 

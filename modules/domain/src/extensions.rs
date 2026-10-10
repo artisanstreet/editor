@@ -211,11 +211,13 @@ pub enum ExtensionLinkSupport {
     DeveloperModeRequired,
 }
 
-/// Every extension the Forge manages or discovered.
+/// Every extension the Forge manages or discovered, and what each engine
+/// last reported it can use.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct ExtensionCatalog {
     extensions: Vec<Extension>,
     links: ExtensionLinkSupport,
+    inventories: Vec<EngineInventory>,
 }
 
 impl ExtensionCatalog {
@@ -239,7 +241,58 @@ impl ExtensionCatalog {
                 return Err(ExtensionError::Duplicate);
             }
         }
-        Ok(Self { extensions, links })
+        Ok(Self {
+            extensions,
+            links,
+            inventories: Vec::new(),
+        })
+    }
+
+    /// Adds what the engines reported they can use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtensionError`] for too many inventories, an engine and
+    /// project reported twice, or an invalid inventory.
+    pub fn with_inventories(
+        mut self,
+        inventories: Vec<EngineInventory>,
+    ) -> Result<Self, ExtensionError> {
+        if inventories.len() > INVENTORIES_MAX {
+            return Err(ExtensionError::TooMany);
+        }
+        let mut seen = std::collections::HashSet::with_capacity(inventories.len());
+        for inventory in &inventories {
+            inventory.validate()?;
+            if !seen.insert((
+                inventory.engine_id.as_str(),
+                inventory.project_id.as_deref(),
+            )) {
+                return Err(ExtensionError::Duplicate);
+            }
+        }
+        self.inventories = inventories;
+        Ok(self)
+    }
+
+    /// What each engine last reported it can use, per project.
+    #[must_use]
+    pub fn inventories(&self) -> &[EngineInventory] {
+        &self.inventories
+    }
+
+    /// What `engine_id` last reported for `project_id`, else for no
+    /// project.
+    #[must_use]
+    pub fn inventory(&self, engine_id: &str, project_id: Option<&str>) -> Option<&EngineInventory> {
+        let find = |project: Option<&str>| {
+            self.inventories.iter().find(|inventory| {
+                inventory.engine_id == engine_id && inventory.project_id.as_deref() == project
+            })
+        };
+        project_id
+            .and_then(|project| find(Some(project)))
+            .or_else(|| find(None))
     }
 
     /// Returns the extensions: managed first, then discovered, each by name.
@@ -259,6 +312,141 @@ impl ExtensionCatalog {
     pub const fn links(&self) -> ExtensionLinkSupport {
         self.links
     }
+}
+
+/// Maximum engine inventories in one catalog.
+pub const INVENTORIES_MAX: usize = 64;
+/// Maximum skills or connectors in one engine inventory.
+pub const INVENTORY_ITEMS_MAX: usize = 512;
+/// Maximum bytes of one reported skill or connector name.
+pub const INVENTORY_NAME_MAX_BYTES: usize = 128;
+
+/// Where an engine found a skill it reported.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InventorySkillSource {
+    /// The user's own skills folder in the engine's home.
+    User,
+    /// The project's skills folder.
+    Project,
+    /// A plugin the engine has installed.
+    Plugin,
+    /// Shipped with the engine.
+    System,
+}
+
+/// One skill an engine reported it can load.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InventorySkill {
+    /// The name the engine invokes it by (`plugin:skill` for plugin skills).
+    pub name: String,
+    /// What it does; empty when unknown.
+    pub description: String,
+    /// Where the engine found it.
+    pub source: InventorySkillSource,
+    /// The plugin that provides it, for [`InventorySkillSource::Plugin`].
+    pub plugin: Option<String>,
+}
+
+/// How a connector stood when its engine last reported it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ConnectorStatus {
+    /// Connected; its tools are available.
+    Connected,
+    /// Starting or not yet started.
+    Pending,
+    /// The user must sign in before it can connect.
+    NeedsAuth,
+    /// It failed to start or connect.
+    Failed,
+    /// Turned off in the engine.
+    Disabled,
+}
+
+/// One MCP server an engine reported.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct InventoryConnector {
+    /// The server's name as the engine knows it.
+    pub name: String,
+    /// How it stood.
+    pub status: ConnectorStatus,
+    /// The plugin that provides it, if any.
+    pub plugin: Option<String>,
+}
+
+/// What one engine reported it can use while running in one project.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct EngineInventory {
+    /// Engine identifier.
+    pub engine_id: String,
+    /// The project the engine ran in; `None` when it ran in none.
+    pub project_id: Option<String>,
+    /// Skills, by name.
+    pub skills: Vec<InventorySkill>,
+    /// Connectors, by name.
+    pub connectors: Vec<InventoryConnector>,
+}
+
+impl EngineInventory {
+    /// Validates bounds and names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtensionError`] for an invalid engine, too many items, or
+    /// an invalid name or description.
+    pub fn validate(&self) -> Result<(), ExtensionError> {
+        crate::engine_install::validate_engine_id(&self.engine_id)
+            .map_err(|_| ExtensionError::EngineId)?;
+        if self
+            .project_id
+            .as_ref()
+            .is_some_and(|project| project.is_empty() || project.len() > EXTENSION_ID_MAX_BYTES)
+        {
+            return Err(ExtensionError::Id);
+        }
+        if self.skills.len() > INVENTORY_ITEMS_MAX || self.connectors.len() > INVENTORY_ITEMS_MAX {
+            return Err(ExtensionError::TooMany);
+        }
+        for skill in &self.skills {
+            if !valid_inventory_name(&skill.name)
+                || skill
+                    .plugin
+                    .as_deref()
+                    .is_some_and(|plugin| !valid_inventory_name(plugin))
+            {
+                return Err(ExtensionError::Name);
+            }
+            if skill.description.len() > EXTENSION_DESCRIPTION_MAX_BYTES
+                || skill
+                    .description
+                    .chars()
+                    .any(|character| character.is_control() && character != '\n')
+            {
+                return Err(ExtensionError::Description);
+            }
+        }
+        for connector in &self.connectors {
+            if !valid_inventory_name(&connector.name)
+                || connector
+                    .plugin
+                    .as_deref()
+                    .is_some_and(|plugin| !valid_inventory_name(plugin))
+            {
+                return Err(ExtensionError::Name);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `name` can name a reported skill, connector, or plugin: one
+/// line, at most [`INVENTORY_NAME_MAX_BYTES`], without surrounding
+/// whitespace.
+#[must_use]
+pub fn valid_inventory_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= INVENTORY_NAME_MAX_BYTES
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
 }
 
 /// Reads the extension catalog. The connection that read it receives later
@@ -452,5 +640,52 @@ mod tests {
             assert!(!valid_skill_name(invalid), "{invalid}");
         }
         assert!(!valid_skill_name(&"a".repeat(EXTENSION_NAME_MAX_BYTES + 1)));
+    }
+
+    #[test]
+    fn inventories_are_bounded_and_keyed_by_engine_and_project() {
+        let inventory = |project: Option<&str>, name: &str| EngineInventory {
+            engine_id: "claude".to_owned(),
+            project_id: project.map(str::to_owned),
+            skills: vec![InventorySkill {
+                name: name.to_owned(),
+                description: String::new(),
+                source: InventorySkillSource::Plugin,
+                plugin: Some("cloudflare".to_owned()),
+            }],
+            connectors: vec![InventoryConnector {
+                name: "claude.ai Notion".to_owned(),
+                status: ConnectorStatus::NeedsAuth,
+                plugin: None,
+            }],
+        };
+        let catalog = ExtensionCatalog::default()
+            .with_inventories(vec![
+                inventory(Some("p1"), "cloudflare:wrangler"),
+                inventory(None, "cloudflare:wrangler"),
+            ])
+            .expect("valid inventories");
+        assert_eq!(
+            catalog
+                .inventory("claude", Some("p1"))
+                .and_then(|found| found.project_id.as_deref()),
+            Some("p1")
+        );
+        assert_eq!(
+            catalog
+                .inventory("claude", Some("p2"))
+                .map(|found| found.project_id.clone()),
+            Some(None),
+            "an unknown project falls back to the engine's projectless report"
+        );
+        assert_eq!(
+            ExtensionCatalog::default()
+                .with_inventories(vec![inventory(None, "a"), inventory(None, "b")]),
+            Err(ExtensionError::Duplicate)
+        );
+        assert_eq!(
+            ExtensionCatalog::default().with_inventories(vec![inventory(None, " padded")]),
+            Err(ExtensionError::Name)
+        );
     }
 }
