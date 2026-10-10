@@ -1,8 +1,10 @@
-//! `nix run .#dev`: build the whole product with Nix and deploy it through
-//! the shipping installer.
+//! `nix run .#dev`: build the whole product and deploy it through the
+//! shipping installer.
 //!
 //! The Linux runner (the `dev` app of the flake) builds the stage outputs of
-//! the checkout with Nix, then deploys two halves, each a `dev`-channel
+//! the checkout, the Debug stage with Cargo in the checkout's Nix dev shells
+//! ([`cargo`]) and the Production stage with Nix ([`nix`]), then deploys two
+//! halves, each a `dev`-channel
 //! release signed with its installation's local key and installed by
 //! `artisan-install`, the code that installs published releases:
 //!
@@ -26,6 +28,7 @@
 
 pub mod args;
 pub mod binaries;
+pub mod cargo;
 pub mod editor;
 pub mod error;
 pub mod host;

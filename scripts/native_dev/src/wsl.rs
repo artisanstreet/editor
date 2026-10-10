@@ -2,7 +2,7 @@
 //!
 //! Inside WSL the Editor is the Windows build: the Linux runner runs the
 //! cross-built Windows runner through WSL interop, handing it Windows paths
-//! of the Nix store payload and of the Linux Forge's host invitation. Paths
+//! of the Windows payload and of the Linux Forge's host invitation. Paths
 //! under a mounted drive (`/mnt/c/...`) become drive paths; everything else
 //! is reached through the distribution's `\\wsl.localhost` share.
 
@@ -18,7 +18,7 @@ use crate::error::DevError;
 pub struct EditorInvocation<'a> {
     /// `run`, `stage`, `where`, or `prune`.
     pub command: &'a str,
-    /// The Windows payload in the Nix store.
+    /// The Windows payload.
     pub payload: Option<&'a Path>,
     /// The Linux Forge's host invitation.
     pub invitation: Option<&'a Path>,

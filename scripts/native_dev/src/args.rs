@@ -41,6 +41,9 @@ pub struct DevArgs {
     pub command: Command,
     /// Build stage.
     pub stage: Stage,
+    /// Build the Debug stage in the Nix sandbox instead of with Cargo
+    /// (Production always builds in the sandbox).
+    pub sandboxed: bool,
     /// Editor platform; `None` picks Windows inside WSL, Linux otherwise.
     pub editor: Option<EditorPlatform>,
     /// Linux installation root; defaults to the per-user `Artisan Street Dev`.
@@ -124,6 +127,7 @@ pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
     let mut options = DevArgs {
         command: Command::Run,
         stage: Stage::Debug,
+        sandboxed: false,
         editor: None,
         root: None,
         windows_root: None,
@@ -147,6 +151,7 @@ pub fn parse(argv: &[OsString]) -> Result<Action, DevError> {
             "-h" | "--help" => return Ok(Action::Help),
             "--debug" => options.stage = Stage::Debug,
             "--production" => options.stage = Stage::Production,
+            "--nix" => options.sandboxed = true,
             "--windows" => options.editor = Some(EditorPlatform::Windows),
             "--linux" => options.editor = Some(EditorPlatform::Linux),
             "--root" => options.root = Some(value("--root")?.into()),
@@ -215,9 +220,11 @@ fn text(value: OsString, name: &str) -> Result<String, DevError> {
 pub fn usage() -> &'static str {
     "usage: nix run .#dev -- [run|stage|where|prune] [options]\n\
      \n\
-     Builds the Debug (or Production) stage with Nix and deploys both halves\n\
-     through the shipping installer: the Linux installation, whose Forge runs\n\
-     as the systemd user service artisan-forge-dev.service and publishes a\n\
+     Builds the Debug stage with Cargo in the checkout's Nix dev shells,\n\
+     incrementally into target/dev (or the Production stage with Nix), and\n\
+     deploys both halves through the shipping installer: the Linux\n\
+     installation, whose Forge runs as the systemd user service\n\
+     artisan-forge-dev.service and publishes a\n\
      host invitation, and the Editor, registered with that host and launched.\n\
      Inside WSL the Editor is the Windows build, installed into\n\
      %LOCALAPPDATA%\\Artisan Street Dev through WSL interop. Rerunning\n\
@@ -229,6 +236,7 @@ pub fn usage() -> &'static str {
      prune               remove superseded versions\n\
      \n\
      --production        the Production stage instead of Debug\n\
+     --nix               build the Debug stage in the Nix sandbox instead of with Cargo\n\
      --windows|--linux   Editor platform (default: Windows inside WSL, else Linux)\n\
      --root PATH         Linux installation root (default: $XDG_DATA_HOME/Artisan Street Dev)\n\
      --windows-root PATH Windows installation root (default: %LOCALAPPDATA%\\Artisan Street Dev)\n\

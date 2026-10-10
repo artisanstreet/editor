@@ -7,7 +7,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::{ffi::OsString, path::PathBuf, process::ExitCode};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use artisan_build_info::BuildIdentity;
 use artisan_editor_cli::{
@@ -17,9 +21,10 @@ use artisan_editor_cli::{
 use native_dev::{
     Action, Command, DEV_ROOT_ENV, DevArgs, DevError, DevPaths, EditorArgs, EditorPlatform,
     HostAccess, Progress,
+    cargo,
     editor::{self, EditorOptions, EditorOutcome},
     host::{self, HostOptions},
-    nix::{self, Checkout, Target},
+    nix::{self, Checkout, Stage, Target},
     parse, prune, resolve_dev_root, staged_editor, staged_forge, usage, wsl,
 };
 
@@ -67,8 +72,8 @@ fn orchestrate(options: &DevArgs) -> Result<u8, DevError> {
     let windows = platform == EditorPlatform::Windows;
     let checkout = || Checkout::locate(&std::env::current_dir().unwrap_or_default());
     let windows_maintenance = |command: &str| {
-        let runner = build(&checkout()?, &[nix::runner_attribute(Target::Windows)], 1)?;
-        windows_half(&runner[0], command, None, None, options)
+        let runner = windows_runner(options, &checkout()?)?;
+        windows_half(&runner, command, None, None, options)
     };
     match options.command {
         Command::Where => {
@@ -96,13 +101,11 @@ fn deploy(
     paths: &DevPaths,
     windows: bool,
 ) -> Result<u8, DevError> {
-    checkout.require_tracked_sources()?;
-    let mut attributes = vec![nix::payload_attribute(Target::Linux, options.stage)];
-    if windows {
-        attributes.push(nix::payload_attribute(Target::Windows, options.stage));
-        attributes.push(nix::runner_attribute(Target::Windows));
-    }
-    let outputs = build(checkout, &attributes, options.stage.concurrent_builds())?;
+    let built = if uses_cargo(options) {
+        build_with_cargo(checkout, windows)?
+    } else {
+        build_with_nix(checkout, options.stage, windows)?
+    };
     let default_root = options.root.is_none() && std::env::var_os(DEV_ROOT_ENV).is_none();
     let wsl_host = wsl::interop_available() || wsl::distribution().is_some();
     let access = HostAccess {
@@ -123,7 +126,7 @@ fn deploy(
     let deployment = host::deploy(
         &HostOptions {
             paths: paths.clone(),
-            payload: outputs[0].clone(),
+            payload: built.forge_payload,
             access,
             keep: options.keep,
             default_root,
@@ -135,11 +138,11 @@ fn deploy(
     } else {
         "stage"
     };
-    if windows {
+    if let Some((runner, payload)) = &built.windows {
         return windows_half(
-            &outputs[2],
+            runner,
             command,
-            Some(&outputs[1]),
+            Some(payload),
             Some(&deployment.invitation),
             options,
         );
@@ -158,7 +161,63 @@ fn deploy(
     Ok(exit_code(outcome))
 }
 
-fn build(
+/// What one dev run built: the Linux payload the Forge installs from, and,
+/// when the Editor runs on Windows, the Windows runner and payload.
+struct Built {
+    forge_payload: PathBuf,
+    windows: Option<(PathBuf, PathBuf)>,
+}
+
+/// Whether this run builds with Cargo (the Debug loop) rather than Nix.
+fn uses_cargo(options: &DevArgs) -> bool {
+    options.stage == Stage::Debug && !options.sandboxed
+}
+
+/// Builds the Debug stage with Cargo, one platform after the other: each
+/// build already fills every core, and two Debug builds at once exceed the
+/// memory of a 16 GB machine.
+fn build_with_cargo(checkout: &Checkout, windows: bool) -> Result<Built, DevError> {
+    let forge_payload = cargo::payload(checkout, Target::Linux)?;
+    let windows = if windows {
+        let payload = cargo::payload(checkout, Target::Windows)?;
+        Some((cargo::runner(checkout, Target::Windows)?, payload))
+    } else {
+        None
+    };
+    Ok(Built {
+        forge_payload,
+        windows,
+    })
+}
+
+fn build_with_nix(checkout: &Checkout, stage: Stage, windows: bool) -> Result<Built, DevError> {
+    checkout.require_tracked_sources()?;
+    let mut attributes = vec![nix::payload_attribute(Target::Linux, stage)];
+    if windows {
+        attributes.push(nix::payload_attribute(Target::Windows, stage));
+        attributes.push(nix::runner_attribute(Target::Windows));
+    }
+    let outputs = nix_build(checkout, &attributes, stage.concurrent_builds())?;
+    Ok(Built {
+        forge_payload: outputs[0].clone(),
+        windows: windows.then(|| (nix_runner_executable(&outputs[2]), outputs[1].clone())),
+    })
+}
+
+/// The Windows runner, built the way this run builds.
+fn windows_runner(options: &DevArgs, checkout: &Checkout) -> Result<PathBuf, DevError> {
+    if uses_cargo(options) {
+        return cargo::runner(checkout, Target::Windows);
+    }
+    let outputs = nix_build(checkout, &[nix::runner_attribute(Target::Windows)], 1)?;
+    Ok(nix_runner_executable(&outputs[0]))
+}
+
+fn nix_runner_executable(output: &Path) -> PathBuf {
+    output.join("bin").join("dev.exe")
+}
+
+fn nix_build(
     checkout: &Checkout,
     attributes: &[String],
     concurrent: u8,
@@ -173,10 +232,10 @@ fn build(
 
 /// Runs the Windows runner's Editor half through WSL interop.
 fn windows_half(
-    runner: &std::path::Path,
+    executable: &Path,
     command: &str,
-    payload: Option<&std::path::Path>,
-    invitation: Option<&std::path::Path>,
+    payload: Option<&Path>,
+    invitation: Option<&Path>,
     options: &DevArgs,
 ) -> Result<u8, DevError> {
     let distribution = wsl::distribution().ok_or_else(|| DevError::Stage {
@@ -194,8 +253,7 @@ fn windows_half(
         },
         &distribution,
     )?;
-    let executable = runner.join("bin").join("dev.exe");
-    let status = std::process::Command::new(&executable)
+    let status = std::process::Command::new(executable)
         .args(&arguments)
         .status()
         .map_err(|error| DevError::Stage {

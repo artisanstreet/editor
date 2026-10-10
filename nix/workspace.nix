@@ -258,7 +258,7 @@ let
     program = "${derivation}/bin/${name}";
   };
   closure = pkgs.closureInfo { rootPaths = [ production ]; };
-  devApp = import ./dev.nix { runner = stageBuilds.packages.linux-runner; };
+  devApp = import ./dev.nix { inherit pkgs releaseTrust graphicsLibraryPath; };
   parity = craneLib.buildPackage (
     base
     // {
@@ -447,6 +447,8 @@ in
   '';
   devShells = {
     default = shell [ ];
+    cargo-linux = stageBuilds.cargoShells.linux;
+    cargo-windows = stageBuilds.cargoShells.windows;
     maintenance = shell [ pkgs.gh ];
     performance = shell [
       pkgs.linuxPackages.perf

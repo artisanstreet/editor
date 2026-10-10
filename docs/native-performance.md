@@ -1,12 +1,14 @@
 # Native frame measurements
 
-Measure the stages Nix builds, never raw Cargo output: `nix run .#dev` (Debug)
-or `nix run .#dev -- --production` (Production). Production is the shipped
-codegen (opt-level 3, fat LTO, one codegen unit, `panic = "abort"`, mimalloc,
-x86-64-v3). Debug keeps opt-level 3 but builds for speed (crate-local ThinLTO,
-16 codegen units) and adds debug info, debug assertions, overflow checks, and
-the GPUI inspector, so it runs somewhat slower; quote Production numbers for
-performance. Report which stage a number came from.
+Measure the stages, never ad-hoc Cargo output: `nix run .#dev` (Debug, built
+with Cargo in the stage's dev shell) or `nix run .#dev -- --production`
+(Production, built with Nix). Production is the shipped codegen (opt-level 3,
+fat LTO, one codegen unit, `panic = "abort"`, mimalloc, x86-64-v3). Debug
+builds for speed (dependencies at opt-level 3, the workspace's own crates at
+opt-level 1, crate-local ThinLTO, 16 codegen units, incremental Cargo builds)
+and adds debug info, debug assertions, overflow checks, and the GPUI inspector,
+so it runs slower; quote Production numbers for performance. Report which stage
+a number came from.
 
 
 The top-right counter measures presentation submissions during scheduled
