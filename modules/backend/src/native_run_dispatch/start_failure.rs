@@ -29,6 +29,9 @@ use super::{ClaimExecution, ClaimIds};
 pub(super) enum StartFailure {
     /// The engine owner refused to admit the turn.
     NotAdmitted,
+    /// The thread's history, which a fresh provider session must start
+    /// from, could not be read.
+    HandoffUnavailable,
     /// The provider did not announce its session within the launch deadline.
     DeadlineElapsed(Duration),
     /// The owner reported a typed startup failure, with the engine's own
@@ -115,6 +118,12 @@ pub(super) fn describe(engine: EngineId, failure: &StartFailure) -> (&'static st
                 format!("{name} could not be started: the engine owner is unavailable."),
             );
         }
+        StartFailure::HandoffUnavailable => {
+            return (
+                "provider_handoff_unavailable",
+                format!("{name} could not take over this thread: its history could not be read."),
+            );
+        }
         StartFailure::DeadlineElapsed(deadline) => {
             return (
                 "provider_start_timeout",
@@ -190,6 +199,9 @@ pub(super) async fn settle_unstarted_claim(
     // cause beside it says which startup stage failed.
     let cause = match failure {
         StartFailure::NotAdmitted => String::from("the engine owner refused to admit the turn"),
+        StartFailure::HandoffUnavailable => {
+            String::from("reading the thread's history for the handoff failed")
+        }
         StartFailure::DeadlineElapsed(deadline) => format!(
             "the provider did not announce its session within {} ms",
             deadline.as_millis()

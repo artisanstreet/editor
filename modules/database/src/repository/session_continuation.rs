@@ -559,7 +559,7 @@ fn validate_run_row(
     Ok(())
 }
 
-fn load_run_config(
+pub(super) fn load_run_config(
     run: &entities::assistant_run::Model,
 ) -> Result<artisan_domain::EngineRunConfig, RepositoryError> {
     if run.engine_run_config_version != Some(1) && run.engine_run_config_version != Some(2)

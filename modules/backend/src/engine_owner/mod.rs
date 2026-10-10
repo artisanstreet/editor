@@ -48,17 +48,20 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod consts;
 pub(crate) mod cursor;
+pub(crate) mod engine_image;
 pub(crate) mod event;
 pub(crate) mod framing;
 pub(crate) mod grok;
+pub(crate) mod handoff;
 pub mod http;
 pub(crate) mod interaction;
 pub(crate) mod observation;
-pub(crate) mod shell_tail;
 pub(crate) mod opencode_event;
+pub(crate) mod opencode_speed;
 pub(crate) mod operation;
 mod process;
 pub mod readiness;
+pub(crate) mod shell_tail;
 mod shutdown;
 pub(crate) mod socket;
 pub(crate) mod stream;
@@ -112,6 +115,7 @@ mod engine_owner_cursor;
 #[path = "../../../../tests/backend/engine_owner_grok.rs"]
 mod engine_owner_grok;
 
+pub(crate) use handoff::EngineHandoff;
 use operation::{HealthState as OwnerHealth, Job, LaunchAdmissionError, run_owner};
 use process::LaunchRecipe;
 
@@ -172,6 +176,10 @@ pub(crate) struct EngineTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedOpenCode2ProfileLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -298,6 +306,10 @@ pub(crate) struct EngineCodexTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedCodexLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -326,12 +338,16 @@ pub(crate) struct EngineClaudeTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: VerifiedClaudeLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
-    /// The thread still carries its placeholder title, so a completed turn
-    /// generates one.
-    pub(crate) awaits_title: bool,
+    /// Present while the thread still carries its placeholder title: a
+    /// completed turn generates one after it settles and sends it here.
+    pub(crate) title_sink: Option<TitleSink>,
 }
 
 impl std::fmt::Debug for EngineClaudeTurnInput {
@@ -358,6 +374,10 @@ pub(crate) struct EngineGrokTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: grok::GrokLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -386,6 +406,10 @@ pub(crate) struct EngineCursorTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: cursor::CursorLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
@@ -413,12 +437,33 @@ pub(crate) struct InternalTurnInput {
     pub(crate) settings: ThreadEngineSettings,
     pub(crate) launch: InternalLaunch,
     pub(crate) continuation: Option<EngineContinuation>,
+    /// History for a fresh provider session when the thread's previous
+    /// session belongs to another engine or profile; never set beside
+    /// `continuation`.
+    pub(crate) handoff: Option<EngineHandoff>,
     pub(crate) prompt_delivery: String,
     pub(crate) stream_after: u64,
     pub(crate) control_capacity: usize,
-    /// Whether the executor should generate a title when the harness supplies
-    /// none. Only the Claude executor consults it.
-    pub(crate) awaits_title: bool,
+    /// Where a title generated after the turn settles is delivered, present
+    /// when the harness supplies none. Only the Claude executor consults it.
+    pub(crate) title_sink: Option<TitleSink>,
+}
+
+/// Carries a thread title generated after its turn settled back to the
+/// dispatcher, which records and publishes it. Naming never holds the turn.
+pub(crate) type TitleSink = tokio::sync::oneshot::Sender<artisan_domain::ThreadTitle>;
+
+impl InternalTurnInput {
+    /// The prompt text the engine receives: the user's text, framed after
+    /// the portable history when this turn hands the thread over from
+    /// another provider session.
+    pub(crate) fn engine_prompt_text(&self) -> Option<String> {
+        let text = self.prompt.text().map(artisan_domain::AuthoredText::as_str);
+        match &self.handoff {
+            None => text.map(str::to_owned),
+            Some(handoff) => Some(handoff.frame(text.unwrap_or_default())),
+        }
+    }
 }
 
 impl std::fmt::Debug for InternalTurnInput {
@@ -947,10 +992,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Codex(Box::new(input.launch)),
             continuation: input.continuation,
+            handoff: input.handoff,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: false,
+            title_sink: None,
         };
         self.admit_internal(internal, budget)
     }
@@ -976,10 +1022,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Claude(Box::new(input.launch)),
             continuation: input.continuation,
+            handoff: input.handoff,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: input.awaits_title,
+            title_sink: input.title_sink,
         };
         self.admit_internal(internal, budget)
     }
@@ -1005,10 +1052,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Grok(Box::new(input.launch)),
             continuation: input.continuation,
+            handoff: input.handoff,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: false,
+            title_sink: None,
         };
         self.admit_internal(internal, budget)
     }
@@ -1034,10 +1082,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Cursor(Box::new(input.launch)),
             continuation: input.continuation,
+            handoff: input.handoff,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: false,
+            title_sink: None,
         };
         self.admit_internal(internal, budget)
     }
@@ -1062,10 +1111,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Verified(Box::new(input.launch)),
             continuation: input.continuation,
+            handoff: input.handoff,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: false,
+            title_sink: None,
         };
         self.admit_internal(internal, budget)
     }
@@ -1189,10 +1239,11 @@ impl EngineOwner {
             settings: input.settings,
             launch: InternalLaunch::Fixture(input.fixture),
             continuation: None,
+            handoff: None,
             prompt_delivery: input.prompt_delivery,
             stream_after: input.stream_after,
             control_capacity: input.control_capacity,
-            awaits_title: false,
+            title_sink: None,
         };
         self.admit_internal(internal, budget)
     }

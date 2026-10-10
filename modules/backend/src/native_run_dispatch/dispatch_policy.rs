@@ -10,10 +10,14 @@ use std::time::Duration;
 
 use artisan_database::sqlite_write_retry;
 use artisan_database::{
-    LaunchClaimedRunOutcome, RepositoryError, RunLaunchError, SessionContinuationIncompatibility,
-    SessionContinuationIncompatible, SessionContinuationUnavailable,
-    SessionContinuationUnavailableReason,
+    LaunchClaimedRunOutcome, RepositoryError, RunLaunchError, SessionContinuationLookup,
+    SessionContinuationUnavailable, SessionContinuationUnavailableReason,
 };
+
+use crate::engine_owner::EngineContinuation;
+
+use super::ClaimContinuation;
+use super::handoff::HandoffSource;
 
 /// Decision made before any provider launch is permitted.
 #[derive(Debug, Eq, PartialEq)]
@@ -123,30 +127,40 @@ pub(crate) fn continuation_unavailable_reason(
     }
 }
 
-/// Precise, bounded dispatcher diagnostic for a scope-mismatched continuation.
+/// Decides how a new run continues from the newest provider history.
 ///
-/// A mismatch fails closed: the dispatcher never resumes across engines or
-/// profiles and never starts silently on a fresh session here. Only runs that
-/// reached their provider get this far (never-started runs are not history),
-/// so the engine refusal tells the reader how to proceed.
-pub(crate) fn continuation_incompatible_reason(
-    incompatible: &SessionContinuationIncompatible,
-) -> &'static str {
-    match incompatible.reason {
-        SessionContinuationIncompatibility::Engine => {
-            "provider continuation incompatible: this chat already has replies from another engine; switch back to that engine or start a new chat"
+/// The thread's own session is resumed when it is usable. History the new
+/// run cannot resume (another engine or profile, an unsupported binding, a
+/// settled run that never bound a session, or an interrupted run of an
+/// engine that cannot reopen one) is handed over: a fresh session starts
+/// from the thread's history. Only a still-active run or an over-long
+/// history scan refuses the launch.
+pub(super) fn continuation_plan(
+    lookup: SessionContinuationLookup,
+) -> Result<ClaimContinuation, &'static str> {
+    match lookup {
+        SessionContinuationLookup::NoHistory => Ok(ClaimContinuation::Fresh),
+        SessionContinuationLookup::Usable(continuation) => {
+            EngineContinuation::new(continuation.session_id.as_str().to_owned())
+                .map(ClaimContinuation::Resume)
+                .ok_or("provider continuation corrupt")
         }
-        SessionContinuationIncompatibility::Profile => {
-            "provider continuation incompatible: the prior run used a different profile"
-        }
-        SessionContinuationIncompatibility::ProviderBindingVersion => {
-            "provider continuation incompatible: the prior binding version is unsupported"
-        }
-        SessionContinuationIncompatibility::ProviderBindingEngine => {
-            "provider continuation incompatible: the prior binding names a different engine"
-        }
-        SessionContinuationIncompatibility::ProviderBindingProfile => {
-            "provider continuation incompatible: the prior binding names a different profile"
+        SessionContinuationLookup::Unavailable(unavailable) => match unavailable.reason {
+            SessionContinuationUnavailableReason::UnboundSettledRun
+            | SessionContinuationUnavailableReason::AmbiguousRun => {
+                Ok(ClaimContinuation::Handoff(HandoffSource {
+                    run_id: unavailable.run_id,
+                }))
+            }
+            SessionContinuationUnavailableReason::ActiveRun
+            | SessionContinuationUnavailableReason::CandidateLimit => {
+                Err(continuation_unavailable_reason(&unavailable))
+            }
+        },
+        SessionContinuationLookup::Incompatible(incompatible) => {
+            Ok(ClaimContinuation::Handoff(HandoffSource {
+                run_id: incompatible.run_id,
+            }))
         }
     }
 }
@@ -329,21 +343,80 @@ mod settings_decision_tests {
 
 #[cfg(test)]
 mod continuation_reason_tests {
-    use super::{continuation_incompatible_reason, continuation_unavailable_reason};
+    use super::{ClaimContinuation, continuation_plan, continuation_unavailable_reason};
     use artisan_database::{
         SessionContinuationIncompatibility, SessionContinuationIncompatible,
-        SessionContinuationUnavailable, SessionContinuationUnavailableReason,
+        SessionContinuationLookup, SessionContinuationUnavailable,
+        SessionContinuationUnavailableReason,
     };
 
-    fn unavailable(reason: SessionContinuationUnavailableReason) -> SessionContinuationUnavailable {
-        SessionContinuationUnavailable {
-            run_id: artisan_domain::RunId::parse("run-a").expect("run id"),
-            reason,
+    fn handed_over_from(plan: Result<ClaimContinuation, &'static str>) -> Option<String> {
+        match plan {
+            Ok(ClaimContinuation::Handoff(source)) => Some(source.run_id.as_str().to_owned()),
+            _ => None,
         }
     }
 
-    fn incompatible(reason: SessionContinuationIncompatibility) -> SessionContinuationIncompatible {
-        SessionContinuationIncompatible {
+    #[test]
+    fn a_thread_without_history_starts_fresh() {
+        assert!(matches!(
+            continuation_plan(SessionContinuationLookup::NoHistory),
+            Ok(ClaimContinuation::Fresh)
+        ));
+    }
+
+    #[test]
+    fn history_the_run_cannot_resume_is_handed_over() {
+        for reason in [
+            SessionContinuationIncompatibility::Engine,
+            SessionContinuationIncompatibility::Profile,
+            SessionContinuationIncompatibility::ProviderBindingVersion,
+            SessionContinuationIncompatibility::ProviderBindingEngine,
+            SessionContinuationIncompatibility::ProviderBindingProfile,
+        ] {
+            let plan = continuation_plan(SessionContinuationLookup::Incompatible(
+                SessionContinuationIncompatible {
+                    run_id: artisan_domain::RunId::parse("run-a").expect("run id"),
+                    reason,
+                },
+            ));
+            assert_eq!(
+                handed_over_from(plan).as_deref(),
+                Some("run-a"),
+                "{reason:?}"
+            );
+        }
+        for reason in [
+            SessionContinuationUnavailableReason::UnboundSettledRun,
+            SessionContinuationUnavailableReason::AmbiguousRun,
+        ] {
+            let plan =
+                continuation_plan(SessionContinuationLookup::Unavailable(unavailable(reason)));
+            assert_eq!(
+                handed_over_from(plan).as_deref(),
+                Some("run-a"),
+                "{reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_active_run_or_an_unbounded_scan_still_refuses_the_launch() {
+        for reason in [
+            SessionContinuationUnavailableReason::ActiveRun,
+            SessionContinuationUnavailableReason::CandidateLimit,
+        ] {
+            let plan =
+                continuation_plan(SessionContinuationLookup::Unavailable(unavailable(reason)));
+            assert_eq!(
+                plan.err(),
+                Some(continuation_unavailable_reason(&unavailable(reason)))
+            );
+        }
+    }
+
+    fn unavailable(reason: SessionContinuationUnavailableReason) -> SessionContinuationUnavailable {
+        SessionContinuationUnavailable {
             run_id: artisan_domain::RunId::parse("run-a").expect("run id"),
             reason,
         }
@@ -378,40 +451,6 @@ mod continuation_reason_tests {
                 SessionContinuationUnavailableReason::CandidateLimit
             )),
             "provider continuation unavailable: history limit reached"
-        );
-    }
-
-    #[test]
-    fn scope_mismatches_name_the_exact_fence() {
-        assert_eq!(
-            continuation_incompatible_reason(&incompatible(
-                SessionContinuationIncompatibility::Engine
-            )),
-            "provider continuation incompatible: this chat already has replies from another engine; switch back to that engine or start a new chat"
-        );
-        assert_eq!(
-            continuation_incompatible_reason(&incompatible(
-                SessionContinuationIncompatibility::Profile
-            )),
-            "provider continuation incompatible: the prior run used a different profile"
-        );
-        assert_eq!(
-            continuation_incompatible_reason(&incompatible(
-                SessionContinuationIncompatibility::ProviderBindingVersion
-            )),
-            "provider continuation incompatible: the prior binding version is unsupported"
-        );
-        assert_eq!(
-            continuation_incompatible_reason(&incompatible(
-                SessionContinuationIncompatibility::ProviderBindingEngine
-            )),
-            "provider continuation incompatible: the prior binding names a different engine"
-        );
-        assert_eq!(
-            continuation_incompatible_reason(&incompatible(
-                SessionContinuationIncompatibility::ProviderBindingProfile
-            )),
-            "provider continuation incompatible: the prior binding names a different profile"
         );
     }
 }

@@ -4028,6 +4028,7 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         assistant_item: Some(item1),
         assistant_revision: Revision::new(0),
         assistant_body: String::from("hello assistant"),
+        turn_activated: true,
     };
     let source1 = Observation::Tool(
         ToolObservation::new(
@@ -4207,6 +4208,7 @@ async fn dispatch_activity_commits_persist_thread_scoped_history_across_runs() {
         assistant_item: Some(item2),
         assistant_revision: Revision::new(0),
         assistant_body: String::from("hello assistant"),
+        turn_activated: true,
     };
     let source2 = Observation::Tool(
         ToolObservation::new(
@@ -4596,6 +4598,7 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
         assistant_item: Some(item1),
         assistant_revision: Revision::new(0),
         assistant_body: String::from("hello assistant"),
+        turn_activated: true,
     };
     // Provider activity advances the transcript without advancing the interaction ledger.
     for index in 0..2 {
@@ -4731,6 +4734,142 @@ async fn dispatch_approval_is_persisted_and_can_be_answered() {
             "custom answers must follow the current transcript, including activity during delivery"
         );
     }
+}
+
+/// A steer that lands before the reply carries text retires the still-empty
+/// assistant item, so the next activity row opens a fresh one. The turn is
+/// already active by then: that commit must not carry the activation patch,
+/// which the repository rejects after the first activation and which used to
+/// interrupt the run.
+#[tokio::test(flavor = "current_thread")]
+async fn activity_after_a_steer_retired_the_empty_item_opens_without_reactivating() {
+    use crate::SystemCommandOrigin;
+    use crate::native_run_dispatch::{SubagentCommitCursor, commit_activity_observation};
+    use artisan_domain::{
+        EngineId, Observation, ObservationId, ObservationSequence, Revision, ToolAction,
+        ToolObservation,
+    };
+
+    let (database, repository, _temp) = temp_repository("steer-reactivation").await;
+    seed_project_and_thread(&database, &repository, "thread-steer-reactivation").await;
+    let thread = ThreadId::parse("thread-steer-reactivation").expect("tid");
+    let config = config_for_fixture_dispatch(ConversationCommitNotifier::new()).expect("config");
+    let origin = SystemCommandOrigin;
+    repository
+        .queue_first_message(QueueFirstMessageInput {
+            request_id: RequestId::parse("req-steer-reactivation").expect("req"),
+            message_id: MessageId::parse("message-steer-reactivation").expect("mid"),
+            thread_id: thread.clone(),
+            body: MessageBody::parse("plan it").expect("body"),
+            accepted_at: UnixMillis::from_millis(50),
+        })
+        .await
+        .expect("message should queue");
+    // Activity commits stamp wall-clock `operated_at`, so the lease is
+    // wall-clock wide.
+    let wall_ms = origin
+        .acceptance_instant()
+        .expect("clock should succeed")
+        .as_millis();
+    let claimed = repository
+        .claim_next_message_dispatch(ClaimMessageDispatch {
+            owner: artisan_database::DispatchLeaseOwner::new([DISPATCH_OWNER_BYTE; 32]),
+            claimed_at: UnixMillis::from_millis(100),
+            lease_expires_at: UnixMillis::from_millis(wall_ms.saturating_add(3_600_000)),
+        })
+        .await
+        .expect("claim")
+        .expect("dispatch claimed");
+    let mut start_bytes = [0x3cu8; 32];
+    start_bytes[0] = 0x51;
+    let start_key = RunStartKey::new(start_bytes);
+    let credentials = RunLaunchCredentials::new(OWNER_BYTES, LEASE_BYTES, CLAIM_TOKEN_BYTES);
+    let engine_settings = repository
+        .read_thread_engine_settings(&thread)
+        .await
+        .expect("engine settings read")
+        .expect("engine settings present");
+    let artisan_database::LaunchClaimedRunOutcome::Started(launched) = repository
+        .launch_claimed_run(artisan_database::LaunchClaimedRun {
+            claimed: &claimed,
+            run_id: &RunId::parse("run-steer-reactivation").expect("run"),
+            turn_id: &TurnId::parse("turn-steer-reactivation").expect("turn"),
+            item_id: &ItemId::parse("item-run-steer-reactivation").expect("item"),
+            first_patch_id: &PatchId::parse("patch-steer-reactivation-a").expect("patch"),
+            second_patch_id: &PatchId::parse("patch-steer-reactivation-b").expect("patch"),
+            operated_at: UnixMillis::from_millis(150),
+            run_start_key: &start_key,
+            credentials: &credentials,
+            engine_settings: &engine_settings,
+        })
+        .await
+        .expect("run should launch")
+    else {
+        panic!("launch should be fresh");
+    };
+    let bound = bind_running(&repository, &claimed, &launched, &start_key, &credentials).await;
+    let mut cursor = SubagentCommitCursor {
+        scope: artisan_database::RunBatchScope {
+            claimed: &claimed,
+            launched: &launched,
+            bound: &bound,
+            run_start_key: &start_key,
+            credentials: &credentials,
+            expected_launch_at: UnixMillis::from_millis(150),
+            expected_updated_at: UnixMillis::from_millis(200),
+        },
+        engine: EngineId::Claude,
+        batch_sequence: 1,
+        assistant_item: None,
+        assistant_revision: Revision::new(0),
+        assistant_body: String::new(),
+        assistant_phase: AssistantMessagePhase::Unspecified,
+        turn_activated: false,
+    };
+    let tool = |label: &str| {
+        Observation::Tool(
+            ToolObservation::new(
+                ObservationId::parse(format!("source-{label}")).expect("source id"),
+                ObservationSequence::new(1).expect("source sequence"),
+                ObservationId::parse(format!("tool-{label}")).expect("tool id"),
+                String::from("bash"),
+                ToolAction::Completed,
+                None,
+            )
+            .expect("source row"),
+        )
+    };
+
+    // The first activity opens the empty assistant item and activates the turn.
+    commit_activity_observation(&repository, &config, &origin, &mut cursor, tool("first"))
+        .await
+        .expect("the first activity batch must commit");
+    assert!(cursor.turn_activated, "the first batch activates the turn");
+    let first_item = cursor.assistant_item.clone().expect("item opened");
+
+    // A steer retires the still-empty item (`retire_unwritten_item`).
+    cursor.assistant_item = None;
+    cursor.assistant_revision = Revision::new(0);
+
+    commit_activity_observation(&repository, &config, &origin, &mut cursor, tool("second"))
+        .await
+        .expect("activity after the steer must commit without reactivating the turn");
+    let second_item = cursor.assistant_item.clone().expect("fresh item opened");
+    assert_ne!(first_item, second_item, "the reply reopens below the steer");
+
+    let after = fetch_all(&database).await;
+    let activations = after
+        .patches
+        .iter()
+        .filter(|patch| patch.kind == ConversationPatchKind::TurnLifecycle)
+        .count();
+    assert_eq!(activations, 1, "the turn is activated exactly once");
+    let assistant_items = after
+        .items
+        .iter()
+        .filter(|item| item.item_kind == ConversationItemKind::AssistantMessage)
+        .count();
+    assert_eq!(assistant_items, 2);
 }
 
 #[path = "native_run_dispatch_start.rs"]

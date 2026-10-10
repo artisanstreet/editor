@@ -14,7 +14,7 @@ use artisan_domain::{
     EngineConfigRevision, EngineConfigUpdatePrecondition, EngineId, EngineModelId,
     EnginePermissionPolicy, EngineProfileId, EngineRunConfig, EngineRuntimeControls,
     EngineRuntimeControlsInput, EngineSelection, FilesystemAccess, FiniteMillis, NetworkAccess,
-    PermissionId, RequestId, RunId, ThreadId, UnixMillis, WebSearchAccess,
+    PermissionId, RequestId, RunId, ThreadId, TurnId, UnixMillis, WebSearchAccess,
 };
 use artisan_migrations::migrate_to_current;
 use sea_orm::{ActiveModelTrait, ActiveValue::Set, DatabaseConnection, EntityTrait};
@@ -299,6 +299,7 @@ async fn seed_run_item(
         body: Set("item body".to_owned()),
         created_at_ms: Set(1),
         updated_at_ms: Set(1),
+        text_after_sequence: Set(None),
     }
     .insert(database)
     .await
@@ -1068,4 +1069,245 @@ async fn bound_interrupted_claude_run_resumes_its_stored_session() {
         panic!("recovery must still reject a different profile");
     };
     assert_eq!(mismatch.reason, SessionContinuationIncompatibility::Profile);
+}
+
+/// Adds one item with `body` at an explicit `ordinal` to `run_id`'s seeded
+/// turn, so transcript order is under the test's control.
+async fn seed_transcript_item(
+    database: &DatabaseConnection,
+    run_id: &str,
+    item_kind: entities::ConversationItemKind,
+    ordinal: i64,
+    body: &str,
+    lifecycle: EntityLifecycle,
+) {
+    let item_id = format!("item-{run_id}-{ordinal}");
+    entities::conversation_ordinal::ActiveModel {
+        thread_id: Set(THREAD_ID.to_owned()),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Item),
+        entity_id: Set(item_id.clone()),
+    }
+    .insert(database)
+    .await
+    .expect("item ordinal should insert");
+    let is_user = item_kind == entities::ConversationItemKind::UserMessage;
+    entities::conversation_item::ActiveModel {
+        item_id: Set(item_id),
+        thread_id: Set(THREAD_ID.to_owned()),
+        turn_id: Set(format!("turn-{run_id}")),
+        ordinal: Set(ordinal),
+        kind: Set(OrdinalKind::Item),
+        revision: Set(0),
+        lifecycle: Set(lifecycle),
+        item_kind: Set(item_kind),
+        source_message_id: Set(is_user.then(|| format!("message-{run_id}"))),
+        run_id: Set((!is_user).then(|| run_id.to_owned())),
+        native_item_key: Set(None),
+        phase: Set((!is_user).then_some(entities::RenderPhase::Final)),
+        body: Set(body.to_owned()),
+        created_at_ms: Set(1),
+        updated_at_ms: Set(1),
+        text_after_sequence: Set(None),
+    }
+    .insert(database)
+    .await
+    .expect("item should insert");
+}
+
+/// Two settled runs: a question and answer each, plus an unfinished
+/// commentary item that is not history.
+async fn seed_two_turn_transcript(database: &DatabaseConnection) {
+    use entities::ConversationItemKind::{AssistantMessage, UserMessage};
+    seed_run(
+        database,
+        "run-a",
+        100,
+        AssistantRunLifecycle::Completed,
+        "profile-fixture",
+        Some("session-a"),
+        None,
+    )
+    .await;
+    seed_run(
+        database,
+        "run-b",
+        200,
+        AssistantRunLifecycle::Completed,
+        "profile-fixture",
+        Some("session-a"),
+        None,
+    )
+    .await;
+    let completed = EntityLifecycle::Completed;
+    seed_transcript_item(
+        database,
+        "run-a",
+        UserMessage,
+        1,
+        "first question",
+        completed.clone(),
+    )
+    .await;
+    seed_transcript_item(
+        database,
+        "run-a",
+        AssistantMessage,
+        2,
+        "first answer",
+        completed.clone(),
+    )
+    .await;
+    seed_transcript_item(
+        database,
+        "run-b",
+        UserMessage,
+        3,
+        "second question",
+        completed.clone(),
+    )
+    .await;
+    seed_transcript_item(
+        database,
+        "run-b",
+        AssistantMessage,
+        4,
+        "still typing",
+        EntityLifecycle::Streaming,
+    )
+    .await;
+    seed_transcript_item(
+        database,
+        "run-b",
+        AssistantMessage,
+        5,
+        "second answer",
+        completed,
+    )
+    .await;
+}
+
+fn transcript_texts(
+    transcript: &artisan_database::HandoffTranscript,
+) -> Vec<(artisan_database::HandoffRole, &str)> {
+    transcript
+        .entries
+        .iter()
+        .map(|entry| (entry.role, entry.text.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn handoff_transcript_reads_settled_messages_in_order_without_the_launching_turn() {
+    use artisan_database::HandoffRole::{Assistant, User};
+    let (database, repository) = migrated_memory_database().await;
+    seed_two_turn_transcript(&database).await;
+    let thread = ThreadId::parse(THREAD_ID).expect("thread id is valid");
+
+    let whole = repository
+        .read_handoff_transcript(
+            &thread,
+            &TurnId::parse("turn-unrelated").expect("turn id is valid"),
+            1024 * 1024,
+            1024,
+        )
+        .await
+        .expect("transcript read should succeed");
+    assert_eq!(
+        transcript_texts(&whole),
+        vec![
+            (User, "first question"),
+            (Assistant, "first answer"),
+            (User, "second question"),
+            (Assistant, "second answer"),
+        ]
+    );
+    assert_eq!(whole.total_entries, 4);
+    assert_eq!(whole.first_user_message.as_deref(), Some("first question"));
+
+    let before_launch = repository
+        .read_handoff_transcript(
+            &thread,
+            &TurnId::parse("turn-run-b").expect("turn id is valid"),
+            1024 * 1024,
+            1024,
+        )
+        .await
+        .expect("transcript read should succeed");
+    assert_eq!(
+        transcript_texts(&before_launch),
+        vec![(User, "first question"), (Assistant, "first answer")]
+    );
+    assert_eq!(before_launch.total_entries, 2);
+}
+
+#[tokio::test]
+async fn handoff_transcript_stops_at_its_budget_but_keeps_the_objective() {
+    let (database, repository) = migrated_memory_database().await;
+    seed_two_turn_transcript(&database).await;
+    let budgeted = repository
+        .read_handoff_transcript(
+            &ThreadId::parse(THREAD_ID).expect("thread id is valid"),
+            &TurnId::parse("turn-unrelated").expect("turn id is valid"),
+            10,
+            1024,
+        )
+        .await
+        .expect("transcript read should succeed");
+    assert_eq!(
+        transcript_texts(&budgeted),
+        vec![(artisan_database::HandoffRole::Assistant, "second answer")]
+    );
+    assert_eq!(budgeted.total_entries, 4);
+    assert_eq!(
+        budgeted.first_user_message.as_deref(),
+        Some("first question")
+    );
+}
+
+#[tokio::test]
+async fn run_engine_selection_reads_the_runs_own_snapshot() {
+    let (database, repository) = migrated_memory_database().await;
+    let claude = select_config(&database, &repository, claude_config(), 1).await;
+    seed_run_with_snapshot(
+        &database,
+        "run-claude",
+        100,
+        AssistantRunLifecycle::Completed,
+        "profile-claude",
+        Some(r#"{"engine":"claude","profile_id":"profile-claude","session_id":"claude-session"}"#),
+        None,
+        Some(claude),
+    )
+    .await;
+    let thread = ThreadId::parse(THREAD_ID).expect("thread id is valid");
+    let selection = repository
+        .read_run_engine_selection(
+            &thread,
+            &RunId::parse("run-claude").expect("run id is valid"),
+        )
+        .await
+        .expect("selection read should succeed")
+        .expect("the run exists");
+    assert_eq!(selection.engine_id(), EngineId::Claude);
+    assert_eq!(
+        repository
+            .read_run_engine_selection(
+                &thread,
+                &RunId::parse("run-missing").expect("run id is valid")
+            )
+            .await
+            .expect("selection read should succeed"),
+        None
+    );
+    assert_eq!(
+        repository
+            .read_run_engine_selection(
+                &ThreadId::parse("thread-other").expect("thread id is valid"),
+                &RunId::parse("run-claude").expect("run id is valid"),
+            )
+            .await
+            .expect("selection read should succeed"),
+        None
+    );
 }

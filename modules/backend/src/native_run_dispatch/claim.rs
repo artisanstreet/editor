@@ -15,8 +15,7 @@ use std::time::Duration;
 use artisan_database::{
     BindRunProvider, BindRunProviderOutcome, ClaimedMessageDispatch, DispatchFailureReason,
     FailMessageDispatch, LaunchClaimedRun, LaunchClaimedRunOutcome, ProviderBindingBytes,
-    Repository, RequeueMessageDispatch, RunBatchScope, SessionContinuationLookup,
-    SessionContinuationQuery,
+    Repository, RequeueMessageDispatch, RunBatchScope, SessionContinuationQuery,
 };
 use artisan_domain::{EngineId, EngineSelection, ErrorChain, UnixMillis};
 #[cfg(test)]
@@ -37,8 +36,8 @@ use crate::{
     engine_owner::grok::GrokLaunch,
     engine_owner::operation::AcceptedTurn,
     engine_owner::{
-        EngineClaudeTurnInput, EngineCodexTurnInput, EngineContinuation, EngineCursorTurnInput,
-        EngineGrokTurnInput, EngineTurnInput,
+        EngineClaudeTurnInput, EngineCodexTurnInput, EngineCursorTurnInput, EngineGrokTurnInput,
+        EngineTurnInput,
     },
     lifecycle_control::ActivityLease,
     run_cancellation::RunCancellationLease,
@@ -49,20 +48,21 @@ use super::claim_lease::{ClaimLease, drive_with_claim_lease};
 use super::diagnostics::{StepError, report_abandoned, report_claim_failure};
 use super::dispatch_policy::{
     LaunchAuthority, PromptAuthorization, SettingsLoadDecision, classify_launch_result,
-    classify_settings_load, continuation_incompatible_reason, continuation_unavailable_reason,
-    is_permanent_configuration_error, prompt_authorization_after_binding,
+    classify_settings_load, continuation_plan, is_permanent_configuration_error,
+    prompt_authorization_after_binding,
 };
 use super::dispatch_support::{
     add_duration, at_or_after, mint_item_id, mint_patch_id, mint_run_capabilities, mint_run_id,
     mint_turn_id, wall_clock,
 };
+use super::handoff::{HandoffRequest, prepare_handoff};
 use super::start_failure::{
     ProviderStart, StartFailure, await_provider_start, settle_unstarted_claim,
 };
 use super::turn::{TurnConsumptionContext, consume_turn, is_unresolved_reap};
 use super::{
-    BoundClaim, ClaimCustody, ClaimExecution, ClaimIds, ClaimLaunchMode, LaunchedClaim,
-    LoadedClaim, NativeRunDispatcherConfig, PROVIDER_BINDING_VERSION, PreparedClaim,
+    BoundClaim, ClaimContinuation, ClaimCustody, ClaimExecution, ClaimIds, ClaimLaunchMode,
+    LaunchedClaim, LoadedClaim, NativeRunDispatcherConfig, PROVIDER_BINDING_VERSION, PreparedClaim,
     ResolvedLaunch, RetainedActivity, binding_bytes_vec, binding_matches_bytes,
 };
 
@@ -245,17 +245,29 @@ async fn load_claim(
     let launch = match settings.config().selection() {
         EngineSelection::OpenCode2(selection) => match launch_mode {
             ClaimLaunchMode::Configured => {
-                let profile_id = selection.profile_id();
-                let launch = match context
-                    .config
-                    .authority
-                    .resolve_profile_launch(context.database_path, profile_id)
-                {
-                    Ok(launch) => launch,
-                    Err(error) => {
+                let authority = context.config.authority;
+                let database_path = context.database_path.to_path_buf();
+                let profile_id = selection.profile_id().clone();
+                let resolved = off_event_loop(move || {
+                    authority.resolve_profile_launch(&database_path, &profile_id)
+                })
+                .await;
+                let launch = match resolved {
+                    Some(Ok(launch)) => launch,
+                    Some(Err(error)) => {
                         report_claim_failure(
                             &context.claimed.message_id,
                             &StepError::failed("resolving the engine profile's launch", error),
+                        );
+                        context.requeue("engine profile unavailable").await;
+                        return None;
+                    }
+                    None => {
+                        report_claim_failure(
+                            &context.claimed.message_id,
+                            &StepError::refused(
+                                "resolving the engine profile's launch: the Forge is shutting down",
+                            ),
                         );
                         context.requeue("engine profile unavailable").await;
                         return None;
@@ -359,18 +371,22 @@ async fn load_claim(
     })
 }
 
-/// Resolves the provider session the new run continues, if any.
+/// Resolves how the new run continues the thread's provider session.
 ///
 /// Every engine resumes only its own durable provider session: the lookup is
 /// scoped to the selected engine tag and profile, and the owner reopens the
 /// session only after that engine's continuation gate (same engine, explicit
-/// target model, minimum CLI). Incompatible or ambiguous history fails
-/// closed; a fresh session starts only when the thread has no history, which
-/// includes runs that never reached their provider.
+/// target model, minimum CLI). History the new run cannot resume (another
+/// engine or profile, an unsupported binding, a settled run without a
+/// binding, or an interrupted run of an engine that cannot reopen one) is
+/// handed over instead: a fresh session starts from the thread's history. A
+/// still-active run or an unreadable history fails closed; a plain fresh
+/// session starts only when the thread has no history, which includes runs
+/// that never reached their provider.
 async fn resolve_continuation(
     claim: &LoadedClaim<'_>,
     ids: &ClaimIds,
-) -> Result<Option<EngineContinuation>, &'static str> {
+) -> Result<ClaimContinuation, &'static str> {
     let selection = claim.settings.config().selection();
     let launch_engine = match &claim.launch {
         ResolvedLaunch::Configured(_) => EngineId::OpenCode2,
@@ -379,7 +395,7 @@ async fn resolve_continuation(
         ResolvedLaunch::Cursor(_) => EngineId::Cursor,
         ResolvedLaunch::Grok(_) => EngineId::Grok,
         #[cfg(test)]
-        ResolvedLaunch::Fixture(_) => return Ok(None),
+        ResolvedLaunch::Fixture(_) => return Ok(ClaimContinuation::Fresh),
     };
     if selection.engine_id() != launch_engine {
         return Err("engine unavailable");
@@ -401,20 +417,7 @@ async fn resolve_continuation(
             );
             "provider continuation lookup failed"
         })?;
-    match lookup {
-        SessionContinuationLookup::NoHistory => Ok(None),
-        SessionContinuationLookup::Usable(continuation) => {
-            EngineContinuation::new(continuation.session_id.as_str().to_owned())
-                .map(Some)
-                .ok_or("provider continuation corrupt")
-        }
-        SessionContinuationLookup::Unavailable(unavailable) => {
-            Err(continuation_unavailable_reason(&unavailable))
-        }
-        SessionContinuationLookup::Incompatible(incompatible) => {
-            Err(continuation_incompatible_reason(&incompatible))
-        }
-    }
+    continuation_plan(lookup)
 }
 
 fn mint_claim_ids(
@@ -467,7 +470,7 @@ pub(super) async fn launch_claim(
     loaded: LoadedClaim<'_>,
     mut ids: ClaimIds,
     cancellation: RunCancellationLease,
-    continuation: Option<EngineContinuation>,
+    continuation: ClaimContinuation,
 ) -> Option<LaunchedClaim<'_>> {
     // Launch fences the exact lease window: hold it so the heartbeat cannot
     // move it mid-command, and stamp no earlier than a renewal while leased.
@@ -566,12 +569,63 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
     } = claim;
     let attempt_budget = Duration::from_millis(settings.config().runtime().attempt_budget().get());
     let prompt_id = payload.message_id.as_str().to_owned();
-    let prompt = payload.payload;
+    // The stored message keeps the user's text; only the engine's copy
+    // names the mentioned skills in the engine's own terms.
+    let engine_id = settings.config().selection().engine_id();
+    let project = context
+        .repository
+        .read_thread_project(&payload.thread_id)
+        .await
+        .ok();
+    let known_skills = context.config.engine_inventory().known_skills(
+        engine_id.as_str(),
+        project.as_ref().map(artisan_domain::ProjectId::as_str),
+    );
+    let prompt =
+        crate::prompt_mentions::directed_payload(engine_id, payload.payload, &known_skills);
     let prompt_delivery = context.config.prompt_delivery.clone();
     let stream_after = context.config.stream_after;
     let control_capacity = context.config.queue_capacity.get();
     let run_cancel = cancellation.cancel_handle();
     let engine = settings.config().selection().engine_id();
+    // A run that cannot resume the previous provider session starts a fresh
+    // one from the thread's history. It is built after launch, so the
+    // user's turn already shows while a long history is summarized.
+    let (continuation, handoff) = match continuation {
+        ClaimContinuation::Fresh => (None, None),
+        ClaimContinuation::Resume(continuation) => (Some(continuation), None),
+        ClaimContinuation::Handoff(source) => {
+            let prepared = prepare_handoff(HandoffRequest {
+                repository: context.repository,
+                database_path: context.database_path,
+                thread_id: &payload.thread_id,
+                turn_id: &ids.turn_id,
+                run_id: &receipt.run_id,
+                source: &source,
+                project_root: &project_root,
+                target_launch: &launch,
+                target_selection: settings.config().selection(),
+                stops: [run_cancel.as_ref(), context.stop, context.process_cancel],
+            })
+            .await;
+            match prepared {
+                Ok(handoff) => (None, handoff),
+                Err(error) => {
+                    report_claim_failure(&context.claimed.message_id, &error);
+                    settle_unstarted_claim(
+                        &context,
+                        &ids,
+                        &receipt,
+                        engine,
+                        &StartFailure::HandoffUnavailable,
+                    )
+                    .await;
+                    return (None, ClaimCustody::Released);
+                }
+            }
+        }
+    };
+    let mut title = None;
     let turn_result = match launch {
         ResolvedLaunch::Configured(launch) => context.owner.admit_turn(
             EngineTurnInput {
@@ -583,6 +637,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 settings: settings.clone(),
                 launch: *launch,
                 continuation,
+                handoff,
                 prompt_delivery,
                 stream_after,
                 control_capacity,
@@ -599,6 +654,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 settings: settings.clone(),
                 launch: *launch,
                 continuation,
+                handoff,
                 prompt_delivery,
                 stream_after,
                 control_capacity,
@@ -633,10 +689,15 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                     settings: settings.clone(),
                     launch: *launch,
                     continuation,
+                    handoff,
                     prompt_delivery,
                     stream_after,
                     control_capacity,
-                    awaits_title,
+                    title_sink: awaits_title.then(|| {
+                        let (sink, pending) = tokio::sync::oneshot::channel();
+                        title = Some(pending);
+                        sink
+                    }),
                 },
                 attempt_budget,
             )
@@ -651,6 +712,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 settings: settings.clone(),
                 launch: *launch,
                 continuation,
+                handoff,
                 prompt_delivery,
                 stream_after,
                 control_capacity,
@@ -667,6 +729,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
                 settings: settings.clone(),
                 launch: *launch,
                 continuation,
+                handoff,
                 prompt_delivery,
                 stream_after,
                 control_capacity,
@@ -729,6 +792,7 @@ async fn admit_claim(claim: LaunchedClaim<'_>) -> (Option<PreparedClaim<'_>>, Cl
             turn,
             session,
             cancellation,
+            title,
         }),
         ClaimCustody::Released,
     )
@@ -747,6 +811,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
         mut turn,
         session,
         cancellation,
+        title,
     } = claim;
     let run_cancel = cancellation.cancel_handle();
     if run_cancel.is_cancelled() {
@@ -956,6 +1021,7 @@ async fn bind_claim(claim: PreparedClaim<'_>) -> (Option<BoundClaim<'_>>, ClaimC
             },
             turn,
             cancellation,
+            title,
         }),
         ClaimCustody::Released,
     )
@@ -971,6 +1037,7 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         engine,
         turn,
         cancellation,
+        title,
     } = bound;
     let scope = RunBatchScope {
         claimed: &context.claimed,
@@ -1018,6 +1085,15 @@ async fn consume_bound_claim(bound: BoundClaim<'_>) -> ClaimCustody {
         inbox.as_mut(),
     ))
     .await;
+    // The turn has settled; its title follows whenever naming finishes.
+    if let Some(title) = title {
+        deliver_title_when_named(
+            context.repository.clone(),
+            context.config.notifier.clone(),
+            receipt.thread_id.clone(),
+            title,
+        );
+    }
     if let Some(receiver) = inbox.as_mut() {
         drain_interactions(receiver);
     }
@@ -1241,12 +1317,28 @@ async fn bind_with_retry(
     Err(last_error.expect("positive retry count always records a result"))
 }
 
+/// Runs engine-install work on the blocking pool.
+///
+/// Resolving a launch reads install state from disk, hashes the engine
+/// binary once per process, and takes install and engine-use file locks that
+/// wait by sleeping while an install or update holds them. On the Forge's
+/// single event-loop thread any of that would stall lease renewals, request
+/// deadlines and delivery for every thread. Returns `None` only when the
+/// runtime is shutting down; a panic in `work` propagates unchanged.
+async fn off_event_loop<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(value) => Some(value),
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => None,
+    }
+}
+
 /// Why a managed engine's launch could not be resolved before a run.
 ///
 /// Each cause maps to one fixed requeue reason: no path, OS message, or
 /// probe output ever reaches the dispatch row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaunchProbeFailure {
+pub(super) enum LaunchProbeFailure {
     /// The Forge-managed install could not be resolved.
     NotInstalled,
     /// The managed launch environment could not be built.
@@ -1266,7 +1358,7 @@ enum LaunchProbeFailure {
 }
 
 impl LaunchProbeFailure {
-    const fn reason(self) -> &'static str {
+    pub(super) const fn reason(self) -> &'static str {
         match self {
             Self::NotInstalled => "engine is not installed",
             Self::EnvironmentUnavailable => "engine environment unavailable",
@@ -1306,13 +1398,20 @@ async fn probe_managed_version(
     engine: artisan_native_engine::ManagedEngine,
     database_path: &Path,
 ) -> Result<(std::path::PathBuf, String), LaunchProbeFailure> {
-    let target = artisan_native_engine::resolve_launch_target_in(engine, database_path, &|name| {
-        std::env::var_os(name)
+    let database_path = database_path.to_path_buf();
+    let (target, environment) = off_event_loop(move || {
+        let target =
+            artisan_native_engine::resolve_launch_target_in(engine, &database_path, &|name| {
+                std::env::var_os(name)
+            })
+            .map_err(|_| LaunchProbeFailure::NotInstalled)?;
+        let environment = target
+            .environment()
+            .map_err(|_| LaunchProbeFailure::EnvironmentUnavailable)?;
+        Ok((target, environment))
     })
-    .map_err(|_| LaunchProbeFailure::NotInstalled)?;
-    let environment = target
-        .environment()
-        .map_err(|_| LaunchProbeFailure::EnvironmentUnavailable)?;
+    .await
+    .unwrap_or(Err(LaunchProbeFailure::NotInstalled))?;
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new(target.executable())
@@ -1340,21 +1439,27 @@ async fn probe_managed_version(
 /// Fails with the typed reason when the executable is unavailable, the probe
 /// times out or fails, or the version predates the minimum; the caller
 /// requeues the claim with that reason.
-async fn resolve_codex_launch(
+pub(super) async fn resolve_codex_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
 ) -> Result<VerifiedCodexLaunch, LaunchProbeFailure> {
     use artisan_native_engine::NativeCodexLaunchError as Refusal;
     let (_, stdout) =
         probe_managed_version(artisan_native_engine::ManagedEngine::Codex, database_path).await?;
-    NativeCodexAuthority::new()
-        .resolve_launch(database_path, profile_id, &stdout)
-        .map_err(|error| {
-            LaunchProbeFailure::from_authority(
-                matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
-                matches!(error, Refusal::ExecutableUnavailable),
-            )
-        })
+    let database_path = database_path.to_path_buf();
+    let profile_id = profile_id.clone();
+    off_event_loop(move || {
+        NativeCodexAuthority::new()
+            .resolve_launch(&database_path, &profile_id, &stdout)
+            .map_err(|error| {
+                LaunchProbeFailure::from_authority(
+                    matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
+                    matches!(error, Refusal::ExecutableUnavailable),
+                )
+            })
+    })
+    .await
+    .unwrap_or(Err(LaunchProbeFailure::LaunchRejected))
 }
 
 /// Resolves one Claude profile into a verified launch with a bounded
@@ -1363,21 +1468,27 @@ async fn resolve_codex_launch(
 /// Fails with the typed reason when the executable is unavailable, the probe
 /// times out or fails, or the version predates the minimum; the caller
 /// requeues the claim with that reason.
-async fn resolve_claude_launch(
+pub(super) async fn resolve_claude_launch(
     database_path: &Path,
     profile_id: &artisan_domain::EngineProfileId,
 ) -> Result<VerifiedClaudeLaunch, LaunchProbeFailure> {
     use artisan_native_engine::NativeClaudeLaunchError as Refusal;
     let (_, stdout) =
         probe_managed_version(artisan_native_engine::ManagedEngine::Claude, database_path).await?;
-    NativeClaudeAuthority::new()
-        .resolve_launch(database_path, profile_id, &stdout)
-        .map_err(|error| {
-            LaunchProbeFailure::from_authority(
-                matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
-                matches!(error, Refusal::ExecutableUnavailable),
-            )
-        })
+    let database_path = database_path.to_path_buf();
+    let profile_id = profile_id.clone();
+    off_event_loop(move || {
+        NativeClaudeAuthority::new()
+            .resolve_launch(&database_path, &profile_id, &stdout)
+            .map_err(|error| {
+                LaunchProbeFailure::from_authority(
+                    matches!(error, Refusal::VersionTooOld | Refusal::VersionUnparseable),
+                    matches!(error, Refusal::ExecutableUnavailable),
+                )
+            })
+    })
+    .await
+    .unwrap_or(Err(LaunchProbeFailure::LaunchRejected))
 }
 
 /// Resolves one Grok profile into a probe-certified launch with a bounded
@@ -1430,4 +1541,31 @@ async fn drain_turn(
         }
     }
     true
+}
+
+/// Records and publishes a title the engine names the thread with after its
+/// turn settled, exactly as a title arriving mid-run is. A naming run that
+/// fails or is cancelled drops its sink, and nothing is recorded.
+fn deliver_title_when_named(
+    repository: artisan_database::Repository,
+    notifier: crate::conversation_commit_notifier::ConversationCommitNotifier,
+    thread_id: artisan_domain::ThreadId,
+    title: super::PendingTitle,
+) {
+    tokio::spawn(async move {
+        let Ok(title) = title.await else {
+            return;
+        };
+        if let Err(error) = repository
+            .record_generated_thread_title(&thread_id, &title)
+            .await
+        {
+            eprintln!(
+                "Generated title could not be recorded (thread {thread_id}): {}",
+                ErrorChain(&error)
+            );
+            return;
+        }
+        let _ = notifier.publish(&thread_id);
+    });
 }

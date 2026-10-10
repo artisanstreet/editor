@@ -54,6 +54,8 @@ mod diagnostics;
 mod dispatch_policy;
 #[path = "native_run_dispatch/dispatch_support.rs"]
 mod dispatch_support;
+#[path = "native_run_dispatch/handoff.rs"]
+mod handoff;
 #[path = "native_run_dispatch/interaction_intent.rs"]
 mod interaction_intent;
 mod message_parts;
@@ -108,6 +110,7 @@ const PROMPT_DELIVERY_MAX_BYTES: usize = 256;
 const PROVIDER_BINDING_VERSION: i64 = 1;
 const PROVIDER_FAILURE_CODE: &str = "provider_failed";
 const PROVIDER_FAILURE_MESSAGE: &str = "The provider run failed.";
+const PROVIDER_REFUSED_CODE: &str = "provider_refused";
 const INTERRUPTED_CODE: &str = "provider_interrupted";
 const INTERRUPTED_MESSAGE: &str = "The provider session was interrupted.";
 
@@ -193,6 +196,9 @@ pub struct NativeRunDispatcherConfig {
     /// The shell jobs of every thread's runs. The dispatcher writes it and
     /// publishes through `notifier`; request delivery reads it.
     terminals: crate::thread_terminals::TerminalBoard,
+    /// What each engine reported it can use; runs write it, the extension
+    /// catalog serves it.
+    engine_inventory: Arc<crate::engine_inventory::EngineInventoryBoard>,
     /// Claims this Forge's dispatch workers are executing right now; the
     /// live recovery sweep never reaps them.
     live_claims: LiveClaims,
@@ -250,6 +256,11 @@ impl NativeRunDispatcherConfig {
         self.terminals.clone()
     }
 
+    /// Shares the process-owned record of engine reports.
+    pub(crate) fn engine_inventory(&self) -> Arc<crate::engine_inventory::EngineInventoryBoard> {
+        Arc::clone(&self.engine_inventory)
+    }
+
     /// Creates a complete injected scheduler policy.
     ///
     /// # Errors
@@ -303,6 +314,7 @@ impl NativeRunDispatcherConfig {
             notifier,
             live_thinking: crate::live_thinking::LiveThinkingBoard::new(),
             terminals: crate::thread_terminals::TerminalBoard::new(),
+            engine_inventory: crate::engine_inventory::EngineInventoryBoard::new(),
             live_claims: LiveClaims::default(),
             claim_lease,
             launch_deadline,
@@ -942,10 +954,23 @@ struct LaunchedClaim<'a> {
     settings: artisan_database::ThreadEngineSettings,
     project_root: RootPath,
     launch: ResolvedLaunch,
-    continuation: Option<EngineContinuation>,
+    continuation: ClaimContinuation,
     ids: ClaimIds,
     receipt: LaunchedRunReceipt,
     cancellation: RunCancellationLease,
+}
+
+/// How a new run relates to the thread's previous provider session.
+#[derive(Debug)]
+enum ClaimContinuation {
+    /// No earlier run reached a provider: the session starts fresh.
+    Fresh,
+    /// The previous provider session is resumed.
+    Resume(EngineContinuation),
+    /// The previous session cannot be resumed (another engine or profile,
+    /// or no resumable binding): a fresh session starts from the thread's
+    /// history.
+    Handoff(handoff::HandoffSource),
 }
 
 struct PreparedClaim<'a> {
@@ -956,7 +981,13 @@ struct PreparedClaim<'a> {
     turn: AcceptedTurn,
     session: PreparedSession,
     cancellation: RunCancellationLease,
+    /// The title a completed turn names its thread with, delivered after the
+    /// turn settles; `None` when the thread needs no title.
+    title: Option<PendingTitle>,
 }
+
+/// A thread title the engine generates after its turn settled.
+type PendingTitle = tokio::sync::oneshot::Receiver<artisan_domain::ThreadTitle>;
 
 struct BoundClaim<'a> {
     context: ClaimExecution<'a>,
@@ -967,6 +998,7 @@ struct BoundClaim<'a> {
     engine: EngineId,
     turn: AcceptedTurn,
     cancellation: RunCancellationLease,
+    title: Option<PendingTitle>,
 }
 
 enum ClaimCustody {
