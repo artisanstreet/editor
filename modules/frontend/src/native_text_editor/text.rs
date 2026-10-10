@@ -1,6 +1,7 @@
 //! Pure text and geometry helpers for the native text editor: UTF-8/UTF-16
 //! offset conversion, character and line boundaries, logical vertical
-//! movement, word ranges, and the byte bound.
+//! movement, and the byte bound. Word units live in
+//! [`artisan_ui::text_navigation`].
 
 #![forbid(unsafe_code)]
 
@@ -185,45 +186,4 @@ pub(super) fn logical_vertical_target(
         target_offset = byte_offset + character.len_utf8();
     }
     target_start + target_offset
-}
-
-fn is_word_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
-}
-
-/// The word (or run of non-word, non-newline characters) around `offset`,
-/// used by double-click selection.
-pub(super) fn word_range_at(text: &str, offset: usize) -> Range<usize> {
-    let offset = floor_char_boundary(text, offset);
-    let class_at = |character: char| {
-        if is_word_character(character) {
-            Some(true)
-        } else if character == '\n' {
-            None
-        } else {
-            Some(false)
-        }
-    };
-    let class = text[offset..]
-        .chars()
-        .next()
-        .and_then(class_at)
-        .or_else(|| text[..offset].chars().next_back().and_then(class_at));
-    let Some(class) = class else {
-        return offset..offset;
-    };
-    let start = text[..offset]
-        .char_indices()
-        .rev()
-        .take_while(|(_, character)| class_at(*character) == Some(class))
-        .last()
-        .map_or(offset, |(index, _)| index);
-    let end = text[offset..]
-        .char_indices()
-        .take_while(|(_, character)| class_at(*character) == Some(class))
-        .last()
-        .map_or(offset, |(index, character)| {
-            offset + index + character.len_utf8()
-        });
-    start..end
 }

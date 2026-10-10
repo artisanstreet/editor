@@ -2,14 +2,15 @@
 
 #![forbid(unsafe_code)]
 
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, ops::Range, rc::Rc};
 
+use artisan_ui::text_navigation::WordBehavior;
 use gpui::{
-    ClipboardItem, Entity, EntityInputHandler as _, Subscription, TestAppContext,
-    VisualTestContext, px, size,
+    ClipboardItem, Entity, EntityInputHandler as _, Pixels, Point, Subscription, TestAppContext,
+    VisualTestContext, point, px, size,
 };
 
-use super::text::{logical_column, logical_vertical_target, truncate_to_bytes, word_range_at};
+use super::text::{logical_column, logical_vertical_target, truncate_to_bytes};
 use super::{
     NATIVE_TEXT_EDITOR_PLACEHOLDER_SELECTOR, NATIVE_TEXT_EDITOR_SELECTOR, NativeTextEditor,
     NativeTextEditorEvent,
@@ -287,10 +288,148 @@ fn logical_vertical_target_keeps_the_goal_column() {
 fn helpers_respect_character_boundaries() {
     assert_eq!(truncate_to_bytes("aé", 2), "a");
     assert_eq!(truncate_to_bytes("aé", 3), "aé");
-    assert_eq!(word_range_at("hello world", 2), 0..5);
-    assert_eq!(word_range_at("hello world", 5), 5..6);
-    assert_eq!(word_range_at("hello world", 11), 6..11);
-    assert_eq!(word_range_at("a\n\nb", 2), 2..2);
+}
+
+/// Whether word movement skips the spaces after a word (Windows and WSL).
+fn skips_spaces() -> bool {
+    WordBehavior::platform() == WordBehavior::SkipSpaces
+}
+
+fn selection(cx: &mut VisualTestContext, view: &Entity<NativeTextEditor>) -> (Range<usize>, bool) {
+    cx.update(|_, app| {
+        let editor = view.read(app);
+        (editor.selection.clone(), editor.selection_reversed)
+    })
+}
+
+#[gpui::test]
+fn ctrl_arrows_move_by_word_from_the_selection_head(cx: &mut TestAppContext) {
+    let (view, cx) = mount(cx, "hello world foo");
+    cx.simulate_keystrokes("ctrl-home ctrl-right");
+    let first_stop = if skips_spaces() { 6 } else { 5 };
+    assert_eq!(selection(cx, &view), (first_stop..first_stop, false));
+
+    cx.simulate_keystrokes("ctrl-end ctrl-left");
+    assert_eq!(selection(cx, &view), (12..12, false));
+    cx.simulate_keystrokes("alt-left");
+    assert_eq!(selection(cx, &view), (6..6, false));
+
+    // A word move starts at the head of a selection and collapses it,
+    // where a plain arrow would collapse to the selection's edge.
+    cx.simulate_keystrokes("ctrl-end shift-left shift-left");
+    assert_eq!(selection(cx, &view), (13..15, true));
+    cx.simulate_keystrokes("ctrl-left");
+    assert_eq!(selection(cx, &view), (12..12, false));
+}
+
+#[gpui::test]
+fn ctrl_shift_arrows_extend_by_word_keeping_the_anchor(cx: &mut TestAppContext) {
+    let (view, cx) = mount(cx, "hello world foo");
+    cx.simulate_keystrokes("ctrl-shift-left");
+    assert_eq!(selection(cx, &view), (12..15, true));
+    cx.simulate_keystrokes("ctrl-shift-left");
+    assert_eq!(selection(cx, &view), (6..15, true));
+    cx.simulate_keystrokes("ctrl-shift-right");
+    let stop = if skips_spaces() { 12 } else { 11 };
+    assert_eq!(selection(cx, &view), (stop..15, true));
+    cx.simulate_keystrokes("alt-shift-right alt-shift-right");
+    assert_eq!(selection(cx, &view), (15..15, false));
+}
+
+#[gpui::test]
+fn ctrl_backspace_and_delete_remove_words_as_one_undo_step(cx: &mut TestAppContext) {
+    let (view, cx) = mount(cx, "hello world foo");
+    let (changes, _subscription) = count_changes(cx, &view);
+    cx.simulate_keystrokes("ctrl-backspace");
+    assert_eq!(text(cx, &view), "hello world ");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(cx, &view), "hello world foo");
+
+    cx.simulate_keystrokes("ctrl-home ctrl-delete");
+    let expected = if skips_spaces() {
+        "world foo"
+    } else {
+        " world foo"
+    };
+    assert_eq!(text(cx, &view), expected);
+    assert_eq!(selection(cx, &view), (0..0, false));
+    assert_eq!(changes.get(), 3);
+
+    // A selection is deleted whole, not extended by a word.
+    cx.simulate_keystrokes("ctrl-end shift-left alt-backspace");
+    assert_eq!(text(cx, &view), &expected[..expected.len() - 1]);
+    cx.simulate_keystrokes("ctrl-home shift-right alt-delete");
+    assert_eq!(text(cx, &view), &expected[1..expected.len() - 1]);
+
+    cx.update(|_, app| {
+        view.update(app, |editor, editor_cx| {
+            editor.set_disabled(true, editor_cx)
+        });
+    });
+    let before = text(cx, &view);
+    cx.simulate_keystrokes("ctrl-end ctrl-backspace ctrl-home ctrl-delete");
+    assert_eq!(text(cx, &view), before);
+}
+
+/// The window point a quarter of the way into the character at `index`
+/// (`fraction` 0.25) or three quarters in (0.75), vertically centred.
+fn point_in_character(
+    cx: &mut VisualTestContext,
+    view: &Entity<NativeTextEditor>,
+    index: usize,
+    fraction: f32,
+) -> Point<Pixels> {
+    cx.update(|_, app| {
+        let layout = view.read(app).layout.clone().expect("painted layout");
+        let start = layout.position_for_index(index).expect("start position");
+        let end = layout.position_for_index(index + 1).expect("end position");
+        point(
+            start.x + (end.x - start.x) * fraction,
+            start.y + layout.line_height() / 2.0,
+        )
+    })
+}
+
+#[gpui::test]
+fn clicks_place_the_nearest_caret_and_select_words_and_paragraphs(cx: &mut TestAppContext) {
+    let (view, cx) = mount(cx, "hello world foo\nnext line");
+    // The right half of "e" puts the caret after it, the left half before.
+    let right_half = point_in_character(cx, &view, 1, 0.75);
+    let left_half = point_in_character(cx, &view, 1, 0.25);
+    cx.update(|_, app| {
+        view.update(app, |editor, editor_cx| {
+            editor.mouse_down(right_half, false, 1, editor_cx);
+            assert_eq!(editor.selection, 2..2);
+            editor.mouse_up();
+            editor.mouse_down(left_half, false, 1, editor_cx);
+            assert_eq!(editor.selection, 1..1);
+            editor.mouse_up();
+        });
+    });
+
+    // Double click selects the word; dragging grows it by whole words.
+    let word_end = if skips_spaces() { 12 } else { 11 };
+    let in_world = point_in_character(cx, &view, 7, 0.25);
+    let in_foo = point_in_character(cx, &view, 13, 0.25);
+    let in_hello = point_in_character(cx, &view, 2, 0.25);
+    cx.update(|_, app| {
+        view.update(app, |editor, editor_cx| {
+            editor.mouse_down(in_world, false, 2, editor_cx);
+            assert_eq!(editor.selection, 6..word_end);
+            editor.mouse_drag(in_foo, editor_cx);
+            assert_eq!(editor.selection, 6..15);
+            assert!(!editor.selection_reversed);
+            editor.mouse_drag(in_hello, editor_cx);
+            assert_eq!(editor.selection, 0..word_end);
+            assert!(editor.selection_reversed);
+            editor.mouse_up();
+
+            // Triple click selects the paragraph with its line break.
+            editor.mouse_down(in_world, false, 3, editor_cx);
+            assert_eq!(editor.selection, 0..16);
+            editor.mouse_up();
+        });
+    });
 }
 
 #[gpui::test]
@@ -312,4 +451,32 @@ fn down_follows_soft_wrapped_visual_lines(cx: &mut TestAppContext) {
     });
     cx.simulate_keystrokes("up");
     cx.update(|_, app| assert_eq!(view.read(app).selection, 0..0));
+}
+
+#[gpui::test]
+fn a_single_line_field_submits_on_enter_and_flattens_breaks(cx: &mut TestAppContext) {
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        NativeTextEditor::new("Old\nname", "Thread name", cx).single_line()
+    });
+    cx.update(|window, app| {
+        NativeTextEditor::bind_actions(app);
+        let focus = view.read(app).focus_handle.clone();
+        window.focus(&focus, app);
+    });
+    cx.run_until_parked();
+    assert_eq!(text(cx, &view), "Old name");
+    let submitted = Rc::new(Cell::new(0));
+    let observed = submitted.clone();
+    let _subscription = cx.update(|_, app| {
+        app.subscribe(&view, move |_, event: &NativeTextEditorEvent, _| {
+            if *event == NativeTextEditorEvent::Submitted {
+                observed.set(observed.get() + 1);
+            }
+        })
+    });
+    cx.update(|_, app| view.update(app, NativeTextEditor::select_whole_text));
+    cx.write_to_clipboard(ClipboardItem::new_string("New\r\nname".to_owned()));
+    cx.simulate_keystrokes("ctrl-v tab enter");
+    assert_eq!(text(cx, &view), "New name");
+    assert_eq!(submitted.get(), 1);
 }

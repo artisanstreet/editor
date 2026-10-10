@@ -5,20 +5,24 @@
 
 use std::ops::Range;
 
+use artisan_ui::text_navigation::{
+    WordBehavior, caret_index_for_position, next_word_position, previous_word_position,
+};
 use gpui::{App, ClipboardItem, Context, KeyBinding, Pixels, Point, Window, point, px};
 
 use super::text::{
     floor_char_boundary, logical_column, logical_line_end, logical_line_start,
     logical_vertical_target, next_character_boundary, previous_character_boundary, splice,
     truncate_to_bytes, utf16_offset_to_utf8, utf16_range_to_utf8, valid_bounds, valid_point,
-    word_range_at,
 };
 use super::{
-    Backspace, Copy, Cut, Delete, DocumentEnd, DocumentHome, Down, End, Home, InsertNewline,
-    InsertTab, Left, NATIVE_TEXT_EDITOR_KEY_CONTEXT, NativeTextEditor, NativeTextEditorEvent,
-    Paste, Redo, Right, SelectAll, SelectDocumentEnd, SelectDocumentHome, SelectDown, SelectEnd,
-    SelectHome, SelectLeft, SelectRight, SelectUp, Snapshot, TAB_TEXT, UNDO_LIMIT, Undo, Up,
+    Backspace, BackspaceWord, Copy, Cut, Delete, DeleteWord, DocumentEnd, DocumentHome, Down, End,
+    Home, InsertNewline, InsertTab, Left, NATIVE_TEXT_EDITOR_KEY_CONTEXT, NativeTextEditor,
+    NativeTextEditorEvent, Paste, Redo, Right, SelectAll, SelectDocumentEnd, SelectDocumentHome,
+    SelectDown, SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft,
+    SelectWordRight, Snapshot, TAB_TEXT, UNDO_LIMIT, Undo, Up, WordLeft, WordRight,
 };
+use artisan_ui::text_navigation::SelectionUnit;
 
 impl NativeTextEditor {
     /// Registers the editor's key bindings. They apply only inside the
@@ -39,6 +43,20 @@ impl NativeTextEditor {
             KeyBinding::new("right", Right, context),
             KeyBinding::new("shift-left", SelectLeft, context),
             KeyBinding::new("shift-right", SelectRight, context),
+            // Word movement and deletion: ctrl on Windows and Linux, alt
+            // (option) on macOS, as in Chrome.
+            KeyBinding::new("ctrl-left", WordLeft, context),
+            KeyBinding::new("ctrl-right", WordRight, context),
+            KeyBinding::new("ctrl-shift-left", SelectWordLeft, context),
+            KeyBinding::new("ctrl-shift-right", SelectWordRight, context),
+            KeyBinding::new("ctrl-backspace", BackspaceWord, context),
+            KeyBinding::new("ctrl-delete", DeleteWord, context),
+            KeyBinding::new("alt-left", WordLeft, context),
+            KeyBinding::new("alt-right", WordRight, context),
+            KeyBinding::new("alt-shift-left", SelectWordLeft, context),
+            KeyBinding::new("alt-shift-right", SelectWordRight, context),
+            KeyBinding::new("alt-backspace", BackspaceWord, context),
+            KeyBinding::new("alt-delete", DeleteWord, context),
             KeyBinding::new("cmd-a", SelectAll, context),
             KeyBinding::new("ctrl-a", SelectAll, context),
             KeyBinding::new("cmd-v", Paste, context),
@@ -89,6 +107,15 @@ impl NativeTextEditor {
         if self.disabled {
             return;
         }
+        // A line break or tab is one byte, as is the space replacing it, so
+        // marked offsets into the replacement still hold.
+        let flattened;
+        let replacement = if self.single_line && replacement.contains(['\r', '\n', '\t']) {
+            flattened = replacement.replace(['\r', '\n', '\t'], " ");
+            flattened.as_str()
+        } else {
+            replacement
+        };
         let retained = self.text.len().saturating_sub(range.len());
         let fitted = truncate_to_bytes(replacement, Self::MAX_BYTES.saturating_sub(retained));
         if fitted.is_empty() && !replacement.is_empty() {
@@ -239,10 +266,17 @@ impl NativeTextEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.single_line {
+            cx.emit(NativeTextEditorEvent::Submitted);
+            return;
+        }
         self.insert("\n", cx);
     }
 
     pub(super) fn insert_tab(&mut self, _: &InsertTab, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return;
+        }
         self.insert(TAB_TEXT, cx);
     }
 
@@ -350,7 +384,64 @@ impl NativeTextEditor {
         self.move_right(true, cx);
     }
 
-    fn delete_toward(&mut self, forward: bool, cx: &mut Context<Self>) {
+    /// Moves the caret one word left or right from the selection's head
+    /// (Chrome's `ctrl`+arrow), or with `extend` moves only the head.
+    pub(super) fn move_word(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let cursor = self.cursor_offset();
+        let target = if forward {
+            next_word_position(&self.text, cursor, WordBehavior::platform())
+        } else {
+            previous_word_position(&self.text, cursor)
+        };
+        if extend {
+            self.extend_to(target, cx);
+        } else {
+            self.move_to(target, cx);
+        }
+    }
+
+    pub(super) fn word_left_action(
+        &mut self,
+        _: &WordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(false, false, cx);
+    }
+
+    pub(super) fn word_right_action(
+        &mut self,
+        _: &WordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(true, false, cx);
+    }
+
+    pub(super) fn select_word_left_action(
+        &mut self,
+        _: &SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(false, true, cx);
+    }
+
+    pub(super) fn select_word_right_action(
+        &mut self,
+        _: &SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(true, true, cx);
+    }
+
+    /// Deletes the marked text or the selection, else one character (or,
+    /// with `word`, up to the next word stop) before or after the caret.
+    fn delete_toward(&mut self, forward: bool, word: bool, cx: &mut Context<Self>) {
         if self.disabled {
             return;
         }
@@ -361,12 +452,15 @@ impl NativeTextEditor {
             .or_else(|| (!self.selection.is_empty()).then(|| self.selection.clone()))
             .or_else(|| {
                 let cursor = self.cursor_offset();
-                if forward {
-                    (cursor < self.text.len())
-                        .then(|| cursor..next_character_boundary(&self.text, cursor))
-                } else {
-                    (cursor > 0).then(|| previous_character_boundary(&self.text, cursor)..cursor)
-                }
+                let range = match (forward, word) {
+                    (true, false) => cursor..next_character_boundary(&self.text, cursor),
+                    (true, true) => {
+                        cursor..next_word_position(&self.text, cursor, WordBehavior::platform())
+                    }
+                    (false, false) => previous_character_boundary(&self.text, cursor)..cursor,
+                    (false, true) => previous_word_position(&self.text, cursor)..cursor,
+                };
+                (!range.is_empty()).then_some(range)
             });
         if let Some(range) = range {
             self.replace_range(range, "", None, cx);
@@ -374,11 +468,24 @@ impl NativeTextEditor {
     }
 
     pub(super) fn backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_toward(false, cx);
+        self.delete_toward(false, false, cx);
     }
 
     pub(super) fn delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        self.delete_toward(true, cx);
+        self.delete_toward(true, false, cx);
+    }
+
+    pub(super) fn backspace_word(
+        &mut self,
+        _: &BackspaceWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(false, true, cx);
+    }
+
+    pub(super) fn delete_word(&mut self, _: &DeleteWord, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_toward(true, true, cx);
     }
 
     pub(super) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -557,7 +664,8 @@ impl NativeTextEditor {
     }
 
     /// Starts a mouse selection: one click places the caret (shift extends),
-    /// a double click selects a word and a triple click a line.
+    /// a double click selects a word and a triple click a paragraph; the
+    /// drag that follows grows the selection by that unit.
     pub(super) fn mouse_down(
         &mut self,
         position: Point<Pixels>,
@@ -573,32 +681,16 @@ impl NativeTextEditor {
         };
         self.marked_range = None;
         self.reset_transient_state();
-        match click_count {
-            0 | 1 => {
-                if shift {
-                    self.select_to(index);
-                } else {
-                    self.selection = index..index;
-                    self.selection_reversed = false;
-                    self.selection_anchor = None;
-                }
-                self.selection_dragging = true;
-            }
-            2 => {
-                self.selection = word_range_at(&self.text, index);
-                self.selection_reversed = false;
-                self.selection_anchor = None;
-                self.selection_dragging = false;
-            }
-            _ => {
-                let start = logical_line_start(&self.text, index);
-                let end = logical_line_end(&self.text, index);
-                self.selection = start..end;
-                self.selection_reversed = false;
-                self.selection_anchor = None;
-                self.selection_dragging = false;
-            }
+        let unit = SelectionUnit::from_click_count(click_count);
+        if unit == SelectionUnit::Character && shift {
+            self.select_to(index);
+        } else {
+            self.selection = unit.range_at(&self.text, index);
+            self.selection_reversed = false;
+            self.selection_anchor = None;
         }
+        self.drag_origin = (unit, self.selection.clone());
+        self.selection_dragging = true;
         cx.notify();
     }
 
@@ -610,7 +702,15 @@ impl NativeTextEditor {
             return;
         };
         let before = (self.selection.clone(), self.selection_reversed);
-        self.select_to(index);
+        let unit = self.drag_origin.0;
+        if unit == SelectionUnit::Character {
+            self.select_to(index);
+        } else {
+            let (selection, reversed) = unit.extend(&self.text, &self.drag_origin.1, index);
+            self.selection = selection;
+            self.selection_reversed = reversed;
+            self.selection_anchor = None;
+        }
         if before != (self.selection.clone(), self.selection_reversed) {
             cx.notify();
         }
@@ -620,8 +720,9 @@ impl NativeTextEditor {
         self.selection_dragging = false;
     }
 
-    /// The text offset under a window point. A drag clamps points outside
-    /// the field to its edges; a click outside the field has no offset.
+    /// The caret offset nearest a window point. A drag clamps points
+    /// outside the field to its edges; a click outside the field has no
+    /// offset.
     pub(super) fn index_for_point(&self, position: Point<Pixels>, clamp: bool) -> Option<usize> {
         let bounds = self.painted_bounds.filter(valid_bounds)?;
         if !valid_point(position) {
@@ -646,9 +747,7 @@ impl NativeTextEditor {
         } else if position.y >= layout_bounds.bottom() {
             self.text.len()
         } else {
-            match layout.index_for_position(position) {
-                Ok(index) | Err(index) => index,
-            }
+            caret_index_for_position(layout, position)
         };
         Some(floor_char_boundary(&self.text, index))
     }

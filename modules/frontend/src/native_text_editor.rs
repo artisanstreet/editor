@@ -11,6 +11,11 @@
 //! would exceed it is truncated at a character boundary, or refused when
 //! nothing fits. Every user edit emits [`NativeTextEditorEvent::Changed`];
 //! programmatic [`NativeTextEditor::set_text`] does not.
+//!
+//! [`NativeTextEditor::single_line`] makes a compact field for one line of
+//! text, such as a name: Enter emits [`NativeTextEditorEvent::Submitted`]
+//! instead of breaking the line, Tab inserts nothing, and any line break or
+//! tab typed, pasted, or composed becomes a space.
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +27,8 @@ use gpui::{
 };
 
 use artisan_ui::theme::DesktopTheme;
+
+use artisan_ui::text_navigation::SelectionUnit;
 
 mod editing;
 mod render;
@@ -62,6 +69,12 @@ actions!(
         Right,
         SelectLeft,
         SelectRight,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        BackspaceWord,
+        DeleteWord,
         SelectAll,
         Paste,
         Copy,
@@ -103,6 +116,8 @@ const TAB_TEXT: &str = "  ";
 pub enum NativeTextEditorEvent {
     /// The user changed the text (typing, deletion, paste, cut, undo, redo).
     Changed,
+    /// The user pressed Enter in a single-line editor.
+    Submitted,
 }
 
 /// One undo or redo step: the whole text and the selection it had.
@@ -113,6 +128,10 @@ struct Snapshot {
 }
 
 /// Native GPUI multiline plain-text editor.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "disabled, single-line, reversed-selection, and dragging are independent editor flags; an enum per flag would add nothing"
+)]
 pub struct NativeTextEditor {
     text: String,
     /// Shared copy of `text` handed to the text element; rebuilt only after
@@ -132,9 +151,14 @@ pub struct NativeTextEditor {
     vertical_goal_x: Option<Pixels>,
     vertical_goal_column: Option<usize>,
     selection_dragging: bool,
+    /// The unit the current mouse selection started with and the range its
+    /// click selected; a drag grows the selection by that unit.
+    drag_origin: (SelectionUnit, Range<usize>),
     marked_range: Option<Range<usize>>,
     layout: Option<TextLayout>,
     painted_bounds: Option<Bounds<Pixels>>,
+    /// Whether the editor is a compact one-line field.
+    single_line: bool,
 }
 
 impl EventEmitter<NativeTextEditorEvent> for NativeTextEditor {}
@@ -169,10 +193,30 @@ impl NativeTextEditor {
             vertical_goal_x: None,
             vertical_goal_column: None,
             selection_dragging: false,
+            drag_origin: (SelectionUnit::Character, end..end),
             marked_range: None,
             layout: None,
             painted_bounds: None,
+            single_line: false,
         }
+    }
+
+    /// Makes the editor a compact field for one line of text: Enter
+    /// submits, and line breaks become spaces.
+    #[must_use]
+    pub fn single_line(mut self) -> Self {
+        self.single_line = true;
+        self.text = self.text.replace(['\r', '\n', '\t'], " ");
+        self
+    }
+
+    /// Selects the whole text, as for replacing it outright.
+    pub fn select_whole_text(&mut self, cx: &mut Context<Self>) {
+        self.selection = 0..self.text.len();
+        self.selection_reversed = false;
+        self.selection_anchor = None;
+        self.reset_transient_state();
+        cx.notify();
     }
 
     /// The current text.

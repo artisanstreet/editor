@@ -31,6 +31,44 @@ const TEXT_SIZE_PX: f32 = 16.0;
 const LINE_HEIGHT_PX: f32 = 24.0;
 /// Visible lines of an empty editor.
 const MIN_VISIBLE_LINES: f32 = 8.0;
+/// Text size and line height of a single-line field, matching control text.
+const SINGLE_LINE_TEXT_SIZE_PX: f32 = 14.0;
+const SINGLE_LINE_HEIGHT_PX: f32 = 20.0;
+
+/// The editor's type size and chrome: a document, or a compact one-line
+/// field.
+struct EditorMetrics {
+    text_size: Pixels,
+    line_height: Pixels,
+    visible_lines: f32,
+    padding_x: Pixels,
+    padding_y: Pixels,
+    radius: Pixels,
+}
+
+impl EditorMetrics {
+    fn of(single_line: bool, style: &TextareaStyle) -> Self {
+        if single_line {
+            Self {
+                text_size: px(SINGLE_LINE_TEXT_SIZE_PX),
+                line_height: px(SINGLE_LINE_HEIGHT_PX),
+                visible_lines: 1.0,
+                padding_x: px(6.0),
+                padding_y: px(2.0),
+                radius: px(6.0),
+            }
+        } else {
+            Self {
+                text_size: px(TEXT_SIZE_PX),
+                line_height: px(LINE_HEIGHT_PX),
+                visible_lines: MIN_VISIBLE_LINES,
+                padding_x: style.horizontal_padding,
+                padding_y: style.vertical_padding,
+                radius: style.corner_radius,
+            }
+        }
+    }
+}
 
 impl NativeTextEditor {
     /// Selection highlight, or the underline of an IME composition.
@@ -81,7 +119,8 @@ impl Render for NativeTextEditor {
         self.layout = Some(text.layout().clone());
         self.painted_bounds = None;
 
-        let line_height = px(LINE_HEIGHT_PX);
+        let metrics = EditorMetrics::of(self.single_line, &style);
+        let line_height = metrics.line_height;
         let mut content = div()
             .relative()
             .w_full()
@@ -101,8 +140,8 @@ impl Render for NativeTextEditor {
             );
         }
 
-        let min_height = line_height * MIN_VISIBLE_LINES
-            + style.vertical_padding * 2.0
+        let min_height = line_height * metrics.visible_lines
+            + metrics.padding_y * 2.0
             + style.border_width * 2.0;
         let focus_border = style.focus_border;
         let mut root = div()
@@ -111,17 +150,17 @@ impl Render for NativeTextEditor {
             .w_full()
             .min_w(px(0.0))
             .min_h(min_height)
-            .px(style.horizontal_padding)
-            .py(style.vertical_padding)
-            .rounded(style.corner_radius)
+            .px(metrics.padding_x)
+            .py(metrics.padding_y)
+            .rounded(metrics.radius)
             .border(style.border_width)
             .border_color(style.border)
             .bg(style.background)
             .text_color(desktop.foreground)
-            .text_size(px(TEXT_SIZE_PX))
+            .text_size(metrics.text_size)
             .line_height(line_height)
             .font_weight(ProseTypography::BODY_WEIGHT)
-            .letter_spacing(px(ProseTypography::body_tracking_px(TEXT_SIZE_PX)))
+            .tracking(ProseTypography::TRACKING_EM)
             .child(content);
         if self.disabled {
             root = root.opacity(style.disabled_opacity);
@@ -137,6 +176,12 @@ impl Render for NativeTextEditor {
                 .on_action(cx.listener(Self::right_action))
                 .on_action(cx.listener(Self::select_left_action))
                 .on_action(cx.listener(Self::select_right_action))
+                .on_action(cx.listener(Self::word_left_action))
+                .on_action(cx.listener(Self::word_right_action))
+                .on_action(cx.listener(Self::select_word_left_action))
+                .on_action(cx.listener(Self::select_word_right_action))
+                .on_action(cx.listener(Self::backspace_word))
+                .on_action(cx.listener(Self::delete_word))
                 .on_action(cx.listener(Self::select_all))
                 .on_action(cx.listener(Self::home))
                 .on_action(cx.listener(Self::end))

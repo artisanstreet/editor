@@ -4,6 +4,7 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use artisan_ui::text_navigation::{WordBehavior, next_word_position, previous_word_position};
 
 /// A real GPUI command-menu dialog over [`CommandMenuState`].
 pub struct NativeCommandMenu {
@@ -139,6 +140,44 @@ impl NativeCommandMenu {
             KeyBinding::new("right", Right, Some(COMMAND_MENU_KEY_CONTEXT)),
             KeyBinding::new("shift-left", SelectLeft, Some(COMMAND_MENU_KEY_CONTEXT)),
             KeyBinding::new("shift-right", SelectRight, Some(COMMAND_MENU_KEY_CONTEXT)),
+            // Word movement and deletion: ctrl on Windows and Linux, alt
+            // (option) on macOS, as in Chrome.
+            KeyBinding::new("ctrl-left", WordLeft, Some(COMMAND_MENU_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-right", WordRight, Some(COMMAND_MENU_KEY_CONTEXT)),
+            KeyBinding::new(
+                "ctrl-shift-left",
+                SelectWordLeft,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-shift-right",
+                SelectWordRight,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-backspace",
+                BackspaceWord,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new("ctrl-delete", DeleteWord, Some(COMMAND_MENU_KEY_CONTEXT)),
+            KeyBinding::new("alt-left", WordLeft, Some(COMMAND_MENU_KEY_CONTEXT)),
+            KeyBinding::new("alt-right", WordRight, Some(COMMAND_MENU_KEY_CONTEXT)),
+            KeyBinding::new(
+                "alt-shift-left",
+                SelectWordLeft,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "alt-shift-right",
+                SelectWordRight,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new(
+                "alt-backspace",
+                BackspaceWord,
+                Some(COMMAND_MENU_KEY_CONTEXT),
+            ),
+            KeyBinding::new("alt-delete", DeleteWord, Some(COMMAND_MENU_KEY_CONTEXT)),
             KeyBinding::new("cmd-a", SelectAll, Some(COMMAND_MENU_KEY_CONTEXT)),
             KeyBinding::new("ctrl-a", SelectAll, Some(COMMAND_MENU_KEY_CONTEXT)),
             KeyBinding::new("cmd-v", Paste, Some(COMMAND_MENU_KEY_CONTEXT)),
@@ -273,36 +312,101 @@ impl NativeCommandMenu {
         cx.notify();
     }
 
-    fn delete_backward_action(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+    /// Moves the caret one word left or right from the selection's head
+    /// (Chrome's `ctrl`+arrow), or with `extend` moves only the head.
+    fn move_word(&mut self, forward: bool, extend: bool, cx: &mut Context<Self>) {
+        let query = self.state.query();
+        let cursor = self.cursor_offset();
+        let target = if forward {
+            next_word_position(query, cursor, WordBehavior::platform())
+        } else {
+            previous_word_position(query, cursor)
+        };
+        if extend {
+            self.select_to(target);
+            self.marked_range = None;
+            cx.notify();
+        } else {
+            self.move_to(target, cx);
+        }
+    }
+
+    /// Deletes the marked text or the selection, else one character (or,
+    /// with `word`, up to the next word stop) before or after the caret.
+    fn delete_toward(&mut self, forward: bool, word: bool, cx: &mut Context<Self>) {
         let range = self
             .marked_range
             .clone()
             .filter(|range| !range.is_empty())
             .or_else(|| (!self.input_selection.is_empty()).then_some(self.input_selection.clone()))
             .or_else(|| {
+                let query = self.state.query();
                 let cursor = self.cursor_offset();
-                (cursor > 0)
-                    .then(|| previous_character_boundary(self.state.query(), cursor)..cursor)
+                let range = match (forward, word) {
+                    (true, false) => cursor..next_character_boundary(query, cursor),
+                    (true, true) => {
+                        cursor..next_word_position(query, cursor, WordBehavior::platform())
+                    }
+                    (false, false) => previous_character_boundary(query, cursor)..cursor,
+                    (false, true) => previous_word_position(query, cursor)..cursor,
+                };
+                (!range.is_empty()).then_some(range)
             });
         if let Some(range) = range {
             self.replace_query_range(range, "", None, cx);
         }
     }
 
+    fn delete_backward_action(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
+        self.delete_toward(false, false, cx);
+    }
+
     fn delete_forward_action(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-        let range = self
-            .marked_range
-            .clone()
-            .filter(|range| !range.is_empty())
-            .or_else(|| (!self.input_selection.is_empty()).then_some(self.input_selection.clone()))
-            .or_else(|| {
-                let cursor = self.cursor_offset();
-                (cursor < self.state.query().len())
-                    .then(|| cursor..next_character_boundary(self.state.query(), cursor))
-            });
-        if let Some(range) = range {
-            self.replace_query_range(range, "", None, cx);
-        }
+        self.delete_toward(true, false, cx);
+    }
+
+    fn delete_word_backward_action(
+        &mut self,
+        _: &BackspaceWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(false, true, cx);
+    }
+
+    fn delete_word_forward_action(
+        &mut self,
+        _: &DeleteWord,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_toward(true, true, cx);
+    }
+
+    fn word_left_action(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_word(false, false, cx);
+    }
+
+    fn word_right_action(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_word(true, false, cx);
+    }
+
+    fn select_word_left_action(
+        &mut self,
+        _: &SelectWordLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(false, true, cx);
+    }
+
+    fn select_word_right_action(
+        &mut self,
+        _: &SelectWordRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_word(true, true, cx);
     }
 
     fn move_left_action(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -675,6 +779,12 @@ impl NativeCommandMenu {
                 .on_action(cx.listener(Self::move_right_action))
                 .on_action(cx.listener(Self::select_left_action))
                 .on_action(cx.listener(Self::select_right_action))
+                .on_action(cx.listener(Self::word_left_action))
+                .on_action(cx.listener(Self::word_right_action))
+                .on_action(cx.listener(Self::select_word_left_action))
+                .on_action(cx.listener(Self::select_word_right_action))
+                .on_action(cx.listener(Self::delete_word_backward_action))
+                .on_action(cx.listener(Self::delete_word_forward_action))
                 .on_action(cx.listener(Self::select_all))
                 .on_action(cx.listener(Self::move_home))
                 .on_action(cx.listener(Self::move_end))
@@ -742,6 +852,12 @@ impl NativeCommandMenu {
             .on_action(cx.listener(Self::move_right_action))
             .on_action(cx.listener(Self::select_left_action))
             .on_action(cx.listener(Self::select_right_action))
+            .on_action(cx.listener(Self::word_left_action))
+            .on_action(cx.listener(Self::word_right_action))
+            .on_action(cx.listener(Self::select_word_left_action))
+            .on_action(cx.listener(Self::select_word_right_action))
+            .on_action(cx.listener(Self::delete_word_backward_action))
+            .on_action(cx.listener(Self::delete_word_forward_action))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::move_home))
             .on_action(cx.listener(Self::move_end))

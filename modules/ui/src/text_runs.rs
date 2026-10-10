@@ -143,7 +143,7 @@ pub fn compile_text_runs(
             style.font_family = family;
         }
         if let Some(spacing) = active_spacing {
-            style.letter_spacing = Some(spacing);
+            style.letter_spacing = Some(spacing.into());
         }
         let run = style.to_run(end - start);
         if let Some(last) = runs.last_mut()

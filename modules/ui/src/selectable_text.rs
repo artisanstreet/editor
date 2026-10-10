@@ -1,70 +1,64 @@
 //! Reusable native selectable text for transcript bodies.
 //!
-//! Pinned GPUI ships hit-testing (`TextLayout::index_for_position`) and
-//! platform clipboard writes but no selection concept (`docs/ui/`
-//! `GPUI_CAPABILITIES.md` §2.11), while the transcript surface renders user
-//! bodies as plain `Div` text and assistant bodies as inert `StyledText`.
-//! This module closes that gap with one coherent primitive usable for both:
-//! plain user body text and styled Markdown text/code blocks.
+//! Pinned GPUI ships hit-testing and platform clipboard writes but no
+//! selection concept (`docs/ui/GPUI_CAPABILITIES.md` §2.11), while the
+//! transcript renders user bodies and assistant Markdown as many separate
+//! text leaves. This module gives every leaf browser selection behavior:
 //!
-//! Two ownership modes share one element and one behavior:
+//! - One selection per window ([`document`]), so a drag that starts in one
+//!   paragraph extends through list items, code blocks, and later messages
+//!   exactly like a drag in Chrome, and `ctrl`+C copies all of it with
+//!   block separators.
+//! - Chrome click units: a click places the caret at the nearest character
+//!   boundary, a double-click selects the word under the pointer (plus its
+//!   trailing spaces on Windows), a triple-click the paragraph, and a drag
+//!   after a double/triple-click extends by whole words/paragraphs (see
+//!   [`crate::text_navigation`]). Shift+click extends the selection.
+//! - A press outside any text clears the selection.
+//! - The selection paints as boxes behind the glyphs in the theme's
+//!   selection color, so text runs never recompile while selecting and
+//!   glyph metrics never change.
 //!
-//! - Controlled (`SelectableText::new`): the caller owns one
-//!   [`SelectableTextState`] handle per text element — the same seam as
-//!   [`crate::input_state::TextInputState`] — and hands it over on every
-//!   render. Useful for tests and for callers that already retain per-view
-//!   state.
-//! - Retained (`SelectableText::retained`): the default for transcript
-//!   rendering. Selection, drag latch, text fingerprint, and focus live in
-//!   GPUI element state keyed by the caller's stable `ElementId`, so
-//!   `MarkdownRenderer::render_source` stays synchronous and stateless
-//!   across many messages with no caller-side per-block caches. Unpainted
-//!   state is discarded by the framework, so scrolled-away messages release
-//!   their selection without transcript-level bookkeeping.
+//! Elements are retained (`SelectableText::retained`): focus and the
+//! compiled [`TextRun`]s live in GPUI element state keyed by the caller's
+//! stable `ElementId`, so `MarkdownRenderer::render_source` stays
+//! synchronous and stateless. Compiled runs are reused while the text,
+//! inherited style, caller ranges, and overrides are unchanged; callers
+//! that keep their ranges across frames (the Markdown renderer) hand them
+//! over as shared slices, so an unchanged leaf compares pointers.
 //!
-//! Selection is painted by overlaying only foreground/background onto the
-//! caller ranges it intersects, so consumer weight, style, and underline
-//! survive selection and glyph metrics never change while selecting. The
-//! retained range is validated against a text fingerprint on every layout:
-//! any content change — including same-length replacements — clears it, so
-//! no stale byte range can survive a streaming update. While a drag is in
-//! flight the normalized anchor/head range is live, so the wash tracks the
-//! pointer before release.
-//!
-//! Layout does no per-frame work for an unchanged leaf. Validation skips
-//! the content hash when the text is the very allocation validated last
-//! time, and the compiled [`TextRun`]s are kept beside the selection state
-//! and reused while the text, inherited style, caller ranges, selection,
-//! and wash are unchanged. Callers that keep their ranges across frames
-//! (the Markdown renderer) hand them over as shared slices, so an unchanged
-//! leaf compares pointers instead of copying or re-merging highlights.
+//! Pointer handling: each leaf reports itself from capture-phase listeners
+//! (which run in paint order, and which cached rows replay), and the first
+//! bubble-phase listener processes the event once for all of them. A
+//! gesture that leaves a selection consumes its release, so selecting
+//! across a link never follows it; a clean click on a link activates it.
 //!
 //! Deliberate limits: read-only selection only — no caret, no editing, no
-//! IME/composition handling. Pointer capture is emulated the same way
-//! GPUI's own interactive text does it: a left press latches the anchor and
-//! every later move updates the head through the layout's nearest-index
-//! mapping, even outside the hitbox, until left-button release ends the
-//! drag. A drag that produces a selection consumes its release, and
-//! [`SelectableTextState::suppresses_click`] stays true for the whole live
-//! range, so selection gestures never fire links/actions.
+//! IME/composition handling, no keyboard extension of the selection, and
+//! no auto-scroll while dragging past the viewport edge.
 
 #![allow(clippy::module_name_repetitions)]
 
+mod document;
+
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId,
-    FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, SharedString, StyledText, TextRun, TextStyle, Window,
+    EntityId, FocusHandle, GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla,
+    InspectorElementId, IntoElement, KeyDownEvent, LayoutId, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText,
+    TextLayout, TextRun, TextStyle, Window,
 };
 
 use crate::markdown_cache::same_allocation;
+use crate::text_navigation::{SelectionUnit, caret_index_for_position};
 use crate::theme::ArtisanTheme;
+
+use document::{LeafKey, LiveLeaf, Observed, document};
 
 pub use crate::text_runs::{TextRunOverride, compile_text_runs};
 
@@ -80,23 +74,6 @@ pub fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
         clamped -= 1;
     }
     clamped
-}
-
-/// Normalizes two raw byte indices into an ordered selection range.
-///
-/// Both endpoints are clamped with [`clamp_to_char_boundary`]. Returns
-/// `None` when the result is collapsed, so callers never retain an empty
-/// selection.
-#[must_use]
-pub fn normalize_selection(anchor: usize, head: usize, text: &str) -> Option<Range<usize>> {
-    let first = clamp_to_char_boundary(text, anchor);
-    let second = clamp_to_char_boundary(text, head);
-    let (start, end) = if first <= second {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    (start < end).then_some(start..end)
 }
 
 /// Returns whether a keystroke copies the current selection.
@@ -123,164 +100,27 @@ pub fn is_select_all_keystroke(key: &str, modifiers: &Modifiers) -> bool {
         && key.eq_ignore_ascii_case("a")
 }
 
-/// Overlays a selection wash onto one caller style.
-///
-/// Only foreground and background are replaced (wherever the wash defines
-/// them); weight, font style, underline, strikethrough, and fade survive,
-/// so selecting bold/italic/code text never changes glyph metrics.
-#[must_use]
-fn overlay_style(base: &HighlightStyle, wash: &HighlightStyle) -> HighlightStyle {
-    HighlightStyle {
-        color: wash.color.or(base.color),
-        background_color: wash.background_color.or(base.background_color),
-        ..*base
-    }
+/// The placeholder that reserves an inline image slot; never copied.
+const INLINE_IMAGE_PLACEHOLDER: &str = "\u{2003}\u{2060}\u{00a0}";
+
+/// Activation for one link range inside selectable text.
+pub type SelectableLinkHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// A color square painted in a reserved slot of selectable text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineSwatch {
+    /// Byte offset of the slot's em space.
+    pub offset: usize,
+    /// The color, as painted.
+    pub color: Hsla,
+    /// Whether the square stands alone for its value (centered in the slot)
+    /// or precedes the value it decorates (set left, a gap after it).
+    pub alone: bool,
 }
 
-/// Merges caller highlight ranges with the selection wash for [`StyledText`].
-///
-/// The result is sorted and non-overlapping, every range is clamped to a
-/// character boundary inside `text`, and caller ranges keep their own
-/// styles outside the selection. Inside the selection each intersecting
-/// caller range keeps its style with only foreground/background overlaid,
-/// and gaps with no caller range paint the pure wash. With no selection
-/// the sanitized caller ranges pass through unchanged, so plain and
-/// syntax-highlighted bodies render exactly as before.
-///
-/// `base` is expected sorted and non-overlapping, as produced by the
-/// Markdown syntax seam; the merge is one ordered pass over it. Overlapping
-/// input still resolves deterministically without panicking, but overlapping
-/// coverage is not normalized — callers keep their ranges disjoint.
-#[must_use]
-pub fn merge_selection_highlight(
-    text: &str,
-    base: Vec<(Range<usize>, HighlightStyle)>,
-    selection: Option<Range<usize>>,
-    wash: &HighlightStyle,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    merge_selection_highlight_slice(text, &base, selection, wash)
-}
-
-/// [`merge_selection_highlight`] over borrowed caller ranges, so callers that
-/// keep their ranges across frames never copy them to merge.
-fn merge_selection_highlight_slice(
-    text: &str,
-    base: &[(Range<usize>, HighlightStyle)],
-    selection: Option<Range<usize>>,
-    wash: &HighlightStyle,
-) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut sanitized: Vec<(Range<usize>, HighlightStyle)> = base
-        .iter()
-        .filter_map(|(range, style)| {
-            let start = clamp_to_char_boundary(text, range.start);
-            let end = clamp_to_char_boundary(text, range.end);
-            (start < end).then_some((start..end, *style))
-        })
-        .collect();
-    sanitized.sort_by(|left, right| {
-        left.0
-            .start
-            .cmp(&right.0.start)
-            .then_with(|| left.0.end.cmp(&right.0.end))
-    });
-
-    let Some(selection) = selection else {
-        return sanitized;
-    };
-    let start = clamp_to_char_boundary(text, selection.start);
-    let end = clamp_to_char_boundary(text, selection.end);
-    let Some(selection) = (start < end).then_some(start..end) else {
-        return sanitized;
-    };
-
-    let mut merged = Vec::with_capacity(sanitized.len().saturating_add(2));
-    let mut covered = selection.start;
-    for (range, style) in &sanitized {
-        if range.end <= selection.start || range.start >= selection.end {
-            merged.push((range.clone(), *style));
-            continue;
-        }
-        if range.start < selection.start {
-            merged.push((range.start..selection.start, *style));
-        }
-        let segment_start = range.start.max(selection.start);
-        if covered < segment_start {
-            merged.push((covered..segment_start, *wash));
-        }
-        let segment_end = range.end.min(selection.end);
-        merged.push((segment_start..segment_end, overlay_style(style, wash)));
-        covered = segment_end;
-        if range.end > selection.end {
-            merged.push((selection.end..range.end, *style));
-        }
-    }
-    if covered < selection.end {
-        merged.push((covered..selection.end, *wash));
-    }
-
-    merged.sort_by_key(|left| left.0.start);
-    merged
-}
-
-/// Resolves the theme `::selection` wash for selectable text.
-///
-/// Background and foreground come from the audited interaction tokens
-/// (`oklch(0.48 0.13 250 / 42%)` over `--foreground`), matching the legacy
-/// `::selection` treatment recorded in `INVENTORY` §2.
-#[must_use]
-pub fn selection_style_for_theme(theme: ArtisanTheme) -> HighlightStyle {
-    HighlightStyle {
-        background_color: Some(theme.interaction.selection_background.to_paint()),
-        color: Some(theme.interaction.selection_foreground.to_paint()),
-        ..Default::default()
-    }
-}
-
-/// Fingerprints rendered text for selection validation.
-///
-/// Length plus a 64-bit hash. Collision policy: an accidental collision is
-/// ~2^-64 per comparison, and adversarial collisions are not a threat model
-/// for locally rendered transcript text; a match is treated as identical
-/// content, any difference clears the selection.
-fn text_fingerprint(text: &str) -> (usize, u64) {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    (text.len(), hasher.finish())
-}
-
-/// Per-element selection state shared between the caller and [`SelectableText`].
-///
-/// The handle is cheap to clone: every clone observes the same selection.
-/// Controlled callers retain one handle for the lifetime of one text
-/// element and hand it to the element on every render; retained mode keeps
-/// one inside GPUI element state instead. Either way the range is validated
-/// against the rendered text fingerprint on every layout and cleared the
-/// moment the content changes, which bounds the selection lifetime without
-/// a parallel transcript store.
-#[derive(Clone, Debug, Default)]
-pub struct SelectableTextState {
-    inner: Rc<RefCell<SelectionInner>>,
-    /// Runs compiled for the last layout, reused while their inputs hold.
-    compiled: Rc<RefCell<Option<CompiledRuns>>>,
-    /// Compilations performed, so tests can prove reuse.
-    #[cfg(test)]
-    compilations: Rc<std::cell::Cell<u64>>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct SelectionInner {
-    anchor: Option<usize>,
-    head: Option<usize>,
-    down_index: Option<usize>,
-    dragging: bool,
-    selection: Option<(usize, usize)>,
-    fingerprint: (usize, u64),
-    /// The shared text `fingerprint` was last computed from. While a layout
-    /// hands over this same allocation the content cannot have changed, so
-    /// validation skips the hash; holding it keeps the address from being
-    /// reused by other text meanwhile.
-    validated: Option<SharedString>,
-}
+/// A right-click on one context range inside selectable text, with the
+/// pointer's window position.
+pub type SelectableContextHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 
 /// Caller ranges held either for one frame or shared across frames.
 #[derive(Clone, Debug)]
@@ -321,8 +161,6 @@ struct CompiledRuns {
     default_style: TextStyle,
     highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
     overrides: RangeSlice<TextRunOverride>,
-    selection: Option<Range<usize>>,
-    wash: HighlightStyle,
     runs: Vec<TextRun>,
 }
 
@@ -332,15 +170,11 @@ struct RunInputs<'a> {
     default_style: &'a TextStyle,
     highlights: &'a mut RangeSlice<(Range<usize>, HighlightStyle)>,
     overrides: &'a mut RangeSlice<TextRunOverride>,
-    selection: Option<Range<usize>>,
-    wash: &'a HighlightStyle,
 }
 
 impl CompiledRuns {
     fn matches(&self, inputs: &RunInputs<'_>) -> bool {
-        self.selection == inputs.selection
-            && self.wash == *inputs.wash
-            && self.text.len() == inputs.text.len()
+        self.text.len() == inputs.text.len()
             && (same_allocation(&self.text, inputs.text) || self.text == *inputs.text)
             && self.highlights.same(inputs.highlights)
             && self.overrides.same(inputs.overrides)
@@ -348,62 +182,46 @@ impl CompiledRuns {
     }
 }
 
-impl SelectableTextState {
-    /// Creates empty selection state with no retained fingerprint.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Compiles runs for one layout.
+fn compile_runs(inputs: &RunInputs<'_>) -> Vec<TextRun> {
+    compile_text_runs(
+        inputs.text,
+        inputs.default_style,
+        inputs.highlights.as_slice(),
+        inputs.overrides.as_slice(),
+    )
+}
 
-    /// Validates the retained range against freshly rendered text.
-    ///
-    /// When the fingerprint differs from the last validated render — an
-    /// append, a correction, or even a same-length replacement — any
-    /// selection and drag latch are dropped: new bytes must never keep a
-    /// range that addressed older content.
-    pub fn validate_for_text(&self, text: &str) {
-        let next = text_fingerprint(text);
-        let Some(mut inner) = self.inner.try_borrow_mut().ok() else {
-            return;
-        };
-        // Borrowed text carries no identity to trust on the next layout.
-        inner.validated = None;
-        inner.apply_fingerprint(next);
-    }
+/// Framework-retained state of one leaf, stored through
+/// `Window::with_element_state` under the element's stable id, so it
+/// persists exactly while the element keeps painting.
+#[derive(Clone, Default)]
+struct RetainedLeaf {
+    focus: Option<FocusHandle>,
+    /// Runs compiled for the last layout, reused while their inputs hold.
+    compiled: Rc<RefCell<Option<CompiledRuns>>>,
+    /// Compilations performed, so tests can prove reuse.
+    #[cfg(test)]
+    compilations: Rc<std::cell::Cell<u64>>,
+}
 
-    /// Validates like [`Self::validate_for_text`], skipping the content hash
-    /// when `text` is the allocation validated last time.
-    fn validate_for_shared(&self, text: &SharedString) {
-        let Some(mut inner) = self.inner.try_borrow_mut().ok() else {
-            return;
-        };
-        if inner
-            .validated
-            .as_ref()
-            .is_some_and(|validated| same_allocation(validated, text))
-        {
-            return;
-        }
-        inner.apply_fingerprint(text_fingerprint(text));
-        inner.validated = Some(text.clone());
-    }
-
-    /// Returns the runs for one layout, compiling only when an input changed
-    /// since the previous layout.
+impl RetainedLeaf {
+    /// Returns the runs for one layout, compiling only when an input
+    /// changed since the previous layout.
     ///
     /// A miss moves the caller ranges into the cache (the element is
     /// consumed by this frame and never reads them again), so neither path
     /// copies them.
-    fn compiled_runs(&self, inputs: RunInputs<'_>) -> Vec<TextRun> {
+    fn compiled_runs(&self, inputs: &mut RunInputs<'_>) -> Vec<TextRun> {
         let Ok(mut compiled) = self.compiled.try_borrow_mut() else {
-            return compile_runs(&inputs);
+            return compile_runs(inputs);
         };
         if let Some(cached) = compiled.as_ref()
-            && cached.matches(&inputs)
+            && cached.matches(inputs)
         {
             return cached.runs.clone();
         }
-        let runs = compile_runs(&inputs);
+        let runs = compile_runs(inputs);
         #[cfg(test)]
         self.compilations.set(self.compilations.get() + 1);
         *compiled = Some(CompiledRuns {
@@ -411,303 +229,53 @@ impl SelectableTextState {
             default_style: inputs.default_style.clone(),
             highlights: std::mem::take(inputs.highlights),
             overrides: std::mem::take(inputs.overrides),
-            selection: inputs.selection,
-            wash: *inputs.wash,
             runs: runs.clone(),
         });
         runs
     }
-
-    /// Returns the normalized selected byte range, if any.
-    ///
-    /// While a drag is in flight this is the live anchor/head range, so the
-    /// wash tracks the pointer before release; otherwise it is the retained
-    /// range. A press that has not moved yet keeps reporting the previous
-    /// retained range.
-    #[must_use]
-    pub fn selection_range(&self) -> Option<Range<usize>> {
-        let inner = self.inner.borrow();
-        if inner.dragging
-            && let (Some(anchor), Some(head)) = (inner.anchor, inner.head)
-            && anchor != head
-        {
-            let (start, end) = if anchor < head {
-                (anchor, head)
-            } else {
-                (head, anchor)
-            };
-            return Some(start..end);
-        }
-        inner.selection.map(|(start, end)| start..end)
-    }
-
-    /// Returns whether a non-empty selection is retained or live.
-    #[must_use]
-    pub fn has_selection(&self) -> bool {
-        self.selection_range().is_some()
-    }
-
-    /// Returns whether a link/action activation must stand down.
-    ///
-    /// Consumers check this in their own click handlers: while a selection
-    /// exists — including a live drag — a press-release inside a link range
-    /// is a selection gesture, not an activation. The element also consumes
-    /// the drag release itself as a best-effort guard; this predicate is the
-    /// deterministic one.
-    #[must_use]
-    pub fn suppresses_click(&self) -> bool {
-        self.selection_range().is_some()
-    }
-
-    /// Returns whether a drag latch is currently held.
-    #[must_use]
-    pub fn is_dragging(&self) -> bool {
-        self.inner.borrow().dragging
-    }
-
-    /// Returns the selected slice of `text`, or an empty string.
-    ///
-    /// Reads the live-or-retained range (see [`Self::selection_range`]);
-    /// out-of-date callers still get a safe empty slice rather than a
-    /// panic.
-    #[must_use]
-    pub fn selected_text<'text>(&self, text: &'text str) -> &'text str {
-        self.selection_range()
-            .and_then(|range| text.get(range))
-            .unwrap_or("")
-    }
-
-    /// Returns owned selected bytes for a clipboard write, if any.
-    #[must_use]
-    pub fn copy_text(&self, text: &str) -> Option<String> {
-        let selected = self.selected_text(text);
-        (!selected.is_empty()).then(|| selected.to_owned())
-    }
-
-    /// Latches a press at `index` as a potential drag.
-    ///
-    /// Callers pass indices already clamped with
-    /// [`clamp_to_char_boundary`]; the element handlers always do.
-    pub fn begin_drag(&self, index: usize) {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            inner.anchor = Some(index);
-            inner.head = Some(index);
-            inner.down_index = Some(index);
-            inner.dragging = true;
-        }
-    }
-
-    /// Moves the drag head; returns whether the head actually changed.
-    #[must_use]
-    pub fn update_drag(&self, index: usize) -> bool {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            if !inner.dragging {
-                return false;
-            }
-            if inner.head == Some(index) {
-                return false;
-            }
-            inner.head = Some(index);
-            return true;
-        }
-        false
-    }
-
-    /// Releases the drag latch.
-    ///
-    /// A drag that moved finalizes the live range into the retained
-    /// selection; a press without movement collapses (clears) it, matching
-    /// native click-clears-selection behavior. A release with no latched
-    /// press leaves the retained selection untouched. Returns whether a
-    /// non-empty selection is retained afterward.
-    #[must_use]
-    pub fn end_drag(&self, text: &str) -> bool {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            inner.dragging = false;
-            if let Some((anchor, head)) = inner.anchor.zip(inner.head) {
-                inner.selection =
-                    normalize_selection(anchor, head, text).map(|range| (range.start, range.end));
-            }
-            inner.anchor = None;
-            inner.head = None;
-            return inner.selection.is_some();
-        }
-        self.has_selection()
-    }
-
-    /// Returns the press index latched by [`Self::begin_drag`], if any.
-    #[must_use]
-    pub fn down_index(&self) -> Option<usize> {
-        self.inner.borrow().down_index
-    }
-
-    /// Clears the press latch without touching the selection.
-    pub fn clear_press(&self) {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            inner.down_index = None;
-            inner.dragging = false;
-            inner.anchor = None;
-            inner.head = None;
-        }
-    }
-
-    /// Clears any retained selection and drag latch.
-    pub fn clear_selection(&self) {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            inner.selection = None;
-            inner.anchor = None;
-            inner.head = None;
-            inner.down_index = None;
-            inner.dragging = false;
-        }
-    }
-
-    /// Selects the whole validated text; a no-op on empty text.
-    pub fn select_all(&self) {
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            let len = inner.fingerprint.0;
-            inner.selection = (len > 0).then_some((0, len));
-            inner.anchor = None;
-            inner.head = None;
-            inner.down_index = None;
-            inner.dragging = false;
-        }
-    }
 }
 
-impl SelectionInner {
-    /// Drops the selection and drag latch when the content fingerprint
-    /// changed: new bytes must never keep a range that addressed older
-    /// content.
-    fn apply_fingerprint(&mut self, next: (usize, u64)) {
-        if self.fingerprint != next {
-            self.fingerprint = next;
-            self.selection = None;
-            self.anchor = None;
-            self.head = None;
-            self.down_index = None;
-            self.dragging = false;
-        }
-    }
-}
-
-/// Merges the selection wash and compiles runs for one layout.
-fn compile_runs(inputs: &RunInputs<'_>) -> Vec<TextRun> {
-    let merged = merge_selection_highlight_slice(
-        inputs.text,
-        inputs.highlights.as_slice(),
-        inputs.selection.clone(),
-        inputs.wash,
-    );
-    compile_text_runs(
-        inputs.text,
-        inputs.default_style,
-        &merged,
-        inputs.overrides.as_slice(),
-    )
-}
-
-/// Activation for one link range inside selectable text.
-pub type SelectableLinkHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-
-/// Which ownership mode an element uses.
-enum SelectionSource {
-    /// Caller-retained handle plus optional caller focus handle.
-    Controlled {
-        state: SelectableTextState,
-        focus: Option<FocusHandle>,
-    },
-    /// Framework-retained state keyed by the element id.
-    Retained,
-}
-
-/// Framework-retained selection for [`SelectionSource::Retained`].
-///
-/// Stored through `Window::with_element_state` under the element's stable
-/// id, so it persists across frames exactly while the element keeps
-/// painting and is discarded when it stops — no caller cache, no transcript
-/// authority.
-#[derive(Clone, Default)]
-struct RetainedSelection {
-    state: SelectableTextState,
-    focus: Option<FocusHandle>,
-}
-
-/// Per-frame paint inputs resolved during `request_layout`.
+/// The selection identity of a painted leaf.
 #[derive(Clone)]
-struct PaintFrame {
-    state: SelectableTextState,
-    focus: Option<FocusHandle>,
-    text: SharedString,
-    links: Rc<[Range<usize>]>,
-    on_link: Option<SelectableLinkHandler>,
-    /// Whether to attach the focus handle to the dispatch tree in
-    /// `prepaint`. True for retained mode, which owns its handle, and for
-    /// controlled mode when the caller supplied one through `.focus()`.
-    register_focus: bool,
+struct LeafFrame {
+    key: LeafKey,
+    focus: FocusHandle,
 }
-
-/// The retained selection range and the prepared paint frame resolved from
-/// element state.
-type RetainedFramePaint = (Option<Range<usize>>, PaintFrame);
 
 /// Read-only selectable text element for transcript bodies.
 ///
-/// Construct one per render from the owning view, exactly like the shared
-/// input surfaces: pointer drag, focused keyboard copy/select-all, and
-/// link-range activation that stands down during selection are all owned
-/// here, so plain user bodies and styled Markdown/code blocks share one
-/// behavior.
+/// Construct one per render from the owning view. Pointer selection
+/// (shared across every leaf in the window), focused keyboard copy and
+/// select-all, and link activation that stands down during selection are
+/// all owned here, so plain user bodies and styled Markdown/code blocks
+/// share one behavior.
 pub struct SelectableText {
     id: ElementId,
     text: SharedString,
     base_highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
     text_run_overrides: RangeSlice<TextRunOverride>,
     inline_images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
-    selection_style: HighlightStyle,
-    source: SelectionSource,
+    selection_color: Hsla,
     link_ranges: Rc<[Range<usize>]>,
     on_link: Option<SelectableLinkHandler>,
-    snapshot: Option<Range<usize>>,
+    context_ranges: Rc<[Range<usize>]>,
+    on_context: Option<SelectableContextHandler>,
+    inline_swatches: Rc<[InlineSwatch]>,
+    swatch_edge: Hsla,
+    copies: Rc<[(Range<usize>, SharedString)]>,
     styled: Option<StyledText>,
-    frame: Option<PaintFrame>,
+    leaf: Option<LeafFrame>,
 }
 
 impl SelectableText {
-    /// Constructs controlled selectable text for one render frame.
-    ///
-    /// `base_highlights` are caller ranges already addressing `text` (for
-    /// example inline-code or syntax ranges); the retained selection is
-    /// validated against `text` on every layout and painted over them with
-    /// the theme `::selection` wash.
-    #[must_use]
-    pub fn new(
-        id: impl Into<ElementId>,
-        text: impl Into<SharedString>,
-        state: &SelectableTextState,
-        theme: ArtisanTheme,
-        base_highlights: Vec<(Range<usize>, HighlightStyle)>,
-    ) -> Self {
-        Self::build(
-            id,
-            text,
-            &theme,
-            base_highlights,
-            SelectionSource::Controlled {
-                state: state.clone(),
-                focus: None,
-            },
-        )
-    }
-
     /// Constructs retained selectable text for one render frame.
     ///
-    /// The default for transcript rendering: no caller state, no caller
-    /// focus handle. Selection, drag latch, text fingerprint, and focus
+    /// `base_highlights` are caller ranges already addressing `text` (for
+    /// example inline-code or syntax ranges). Focus and compiled runs
     /// persist in framework element state under `id` across frames and are
     /// released when the element stops painting. Ids must be unique per
     /// text element, like all GPUI element ids; without a view-backed
-    /// identity the element degrades to ephemeral per-frame state.
+    /// identity the element paints but cannot be selected.
     #[must_use]
     pub fn retained(
         id: impl Into<ElementId>,
@@ -715,52 +283,61 @@ impl SelectableText {
         theme: ArtisanTheme,
         base_highlights: Vec<(Range<usize>, HighlightStyle)>,
     ) -> Self {
-        Self::build(id, text, &theme, base_highlights, SelectionSource::Retained)
-    }
-
-    fn build(
-        id: impl Into<ElementId>,
-        text: impl Into<SharedString>,
-        theme: &ArtisanTheme,
-        base_highlights: Vec<(Range<usize>, HighlightStyle)>,
-        source: SelectionSource,
-    ) -> Self {
         Self {
             id: id.into(),
             text: text.into(),
             base_highlights: RangeSlice::Owned(base_highlights),
             text_run_overrides: RangeSlice::default(),
             inline_images: Vec::new(),
-            selection_style: selection_style_for_theme(*theme),
-            source,
+            selection_color: theme.interaction.selection_background.to_paint(),
             link_ranges: Rc::from([]),
             on_link: None,
-            snapshot: None,
+            context_ranges: Rc::from([]),
+            on_context: None,
+            inline_swatches: Rc::from([]),
+            swatch_edge: theme.colors.foreground.with_alpha(0.22).to_paint(),
+            copies: Rc::from([]),
             styled: None,
-            frame: None,
+            leaf: None,
         }
     }
 
-    /// Supplies the focus handle used for keyboard copy/select-all gating.
-    ///
-    /// Controlled mode only: a press inside the text focuses this handle,
-    /// so a later `control/command-c` copies without extra wiring. Without
-    /// a handle, pointer selection still works but keyboard shortcuts stay
-    /// disabled. Retained mode owns its handle and ignores this.
+    /// Paints color squares in reserved em-space slots, preserving text
+    /// layout and selection.
     #[must_use]
-    pub fn focus(mut self, focus: FocusHandle) -> Self {
-        if let SelectionSource::Controlled { focus: slot, .. } = &mut self.source {
-            *slot = Some(focus);
-        }
+    pub fn with_inline_swatches(mut self, swatches: Rc<[InlineSwatch]>) -> Self {
+        self.inline_swatches = swatches;
+        self
+    }
+
+    /// Ranges of the text that copy as other text, sorted and disjoint: a
+    /// swatch slot copies as its color value, or as nothing beside a shown
+    /// value.
+    #[must_use]
+    pub fn with_copy_substitutions(mut self, copies: Rc<[(Range<usize>, SharedString)]>) -> Self {
+        self.copies = copies;
+        self
+    }
+
+    /// Supplies ranges that answer a right-click, such as color values,
+    /// plus the handler that receives the range's index and the pointer's
+    /// window position. A right-click elsewhere in the text passes through.
+    #[must_use]
+    pub fn shared_context_ranges(
+        mut self,
+        ranges: Rc<[Range<usize>]>,
+        on_context: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.context_ranges = ranges;
+        self.on_context = Some(Rc::new(on_context));
         self
     }
 
     /// Supplies link ranges plus their activation handler.
     ///
     /// Activation fires only when press and release land in the same range
-    /// and the gesture produced no selection, so drag-selecting across a
-    /// link never follows it. Consumers must additionally consult
-    /// [`SelectableTextState::suppresses_click`] in overlapping handlers.
+    /// and the gesture left no selection, so drag-selecting across a link
+    /// never follows it.
     #[must_use]
     pub fn links(
         self,
@@ -798,10 +375,8 @@ impl SelectableText {
     /// Supplies per-range font family and letter-spacing overrides.
     ///
     /// Code ranges pass their mono family with `Some(px(0.0))` spacing
-    /// while code weight travels in the highlight ranges; the selection
-    /// wash still only touches foreground/background, so selecting never
-    /// changes shaping. Overrides are validated fail-closed at layout
-    /// time (see [`compile_text_runs`]).
+    /// while code weight travels in the highlight ranges. Overrides are
+    /// validated fail-closed at layout time (see [`compile_text_runs`]).
     #[must_use]
     pub fn with_text_run_overrides(mut self, overrides: Vec<TextRunOverride>) -> Self {
         self.text_run_overrides = RangeSlice::Owned(overrides);
@@ -832,78 +407,25 @@ impl SelectableText {
         self.text.as_ref()
     }
 
-    /// Returns the selection snapshot painted this frame.
-    #[must_use]
-    pub fn selection(&self) -> Option<Range<usize>> {
-        self.snapshot.clone()
-    }
-
-    /// Returns whether this frame paints a selection wash.
-    #[must_use]
-    pub fn shows_selection(&self) -> bool {
-        self.snapshot.is_some()
-    }
-
-    /// Resolves the paint frame for retained mode from element state.
-    fn retained_frame(
-        &self,
+    /// Resolves the retained state, creating the focus handle on first use.
+    fn retained_state(
         global_id: Option<&GlobalElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> RetainedFramePaint {
-        let (snapshot, frame, needs_focus) = window.with_optional_element_state(
+    ) -> Option<RetainedLeaf> {
+        window.with_optional_element_state(
             global_id,
-            |stored: Option<Option<RetainedSelection>>, _: &mut Window| {
-                let Some(inner) = stored else {
-                    let state = SelectableTextState::default();
-                    state.validate_for_shared(&self.text);
-                    let snapshot = state.selection_range();
-                    let frame = PaintFrame {
-                        state,
-                        focus: None,
-                        text: self.text.clone(),
-                        links: self.link_ranges.clone(),
-                        on_link: self.on_link.clone(),
-                        register_focus: false,
-                    };
-                    return ((snapshot, frame, false), None);
+            |stored: Option<Option<RetainedLeaf>>, _: &mut Window| {
+                let Some(stored) = stored else {
+                    return (None, None);
                 };
-                let retained: RetainedSelection = inner.unwrap_or_default();
-                retained.state.validate_for_shared(&self.text);
-                let snapshot = retained.state.selection_range();
-                let needs_focus = retained.focus.is_none();
-                let frame = PaintFrame {
-                    state: retained.state.clone(),
-                    focus: retained.focus.clone(),
-                    text: self.text.clone(),
-                    links: self.link_ranges.clone(),
-                    on_link: self.on_link.clone(),
-                    register_focus: true,
-                };
-                ((snapshot, frame, needs_focus), Some(retained))
+                let mut retained = stored.unwrap_or_default();
+                if retained.focus.is_none() {
+                    retained.focus = Some(cx.focus_handle());
+                }
+                (Some(retained.clone()), Some(retained))
             },
-        );
-        let frame = if needs_focus {
-            let focus = cx.focus_handle();
-            window.with_optional_element_state(
-                global_id,
-                |stored: Option<Option<RetainedSelection>>, _: &mut Window| {
-                    let Some(inner) = stored else {
-                        return ((), None);
-                    };
-                    let mut retained = inner.unwrap_or_default();
-                    retained.focus = Some(focus.clone());
-                    ((), Some(retained))
-                },
-            );
-            PaintFrame {
-                focus: Some(focus),
-                ..frame
-            }
-        } else {
-            frame
-        };
-        (snapshot, frame)
+        )
     }
 }
 
@@ -926,32 +448,25 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let (snapshot, frame) = match &self.source {
-            SelectionSource::Controlled { state, focus } => {
-                state.validate_for_shared(&self.text);
-                let frame = PaintFrame {
-                    state: state.clone(),
-                    focus: focus.clone(),
-                    text: self.text.clone(),
-                    links: self.link_ranges.clone(),
-                    on_link: self.on_link.clone(),
-                    register_focus: focus.is_some(),
-                };
-                (state.selection_range(), frame)
-            }
-            SelectionSource::Retained => self.retained_frame(global_id, window, cx),
-        };
+        let retained = Self::retained_state(global_id, window, cx);
         let default_style = window.text_style();
-        let runs = frame.state.compiled_runs(RunInputs {
+        let mut inputs = RunInputs {
             text: &self.text,
             default_style: &default_style,
             highlights: &mut self.base_highlights,
             overrides: &mut self.text_run_overrides,
-            selection: snapshot.clone(),
-            wash: &self.selection_style,
-        });
-        self.snapshot = snapshot;
-        self.frame = Some(frame);
+        };
+        let runs = match retained.as_ref() {
+            Some(retained) => retained.compiled_runs(&mut inputs),
+            None => compile_runs(&inputs),
+        };
+        self.leaf = retained
+            .and_then(|retained| retained.focus)
+            .zip(global_id)
+            .map(|(focus, global_id)| LeafFrame {
+                key: LeafKey::new(global_id),
+                focus,
+            });
         let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
         let (layout_id, ()) = styled.request_layout(None, inspector_id, window, cx);
         self.styled = Some(styled);
@@ -983,23 +498,33 @@ impl Element for SelectableText {
             let _ = styled.request_layout(None, inspector_id, window, cx);
             self.styled = Some(styled);
         }
-        if let Some(frame) = self.frame.as_ref()
-            && frame.register_focus
-            && let Some(focus) = frame.focus.as_ref()
-        {
-            window.set_focus_handle(focus, cx);
+        if let Some(leaf) = self.leaf.as_ref() {
+            window.set_focus_handle(&leaf.focus, cx);
         }
-        if let Some(styled) = self.styled.as_mut() {
-            styled.prepaint(None, inspector_id, bounds, state, window, cx);
+        let Some(styled) = self.styled.as_mut() else {
+            return window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        };
+        styled.prepaint(None, inspector_id, bounds, state, window, cx);
+        if let Some(leaf) = self.leaf.as_ref() {
+            let window_id = window.window_handle().window_id();
+            let doc = document(cx, window_id);
+            if doc.is_active() {
+                let observed = Observed {
+                    key: leaf.key,
+                    text: self.text.clone(),
+                    copies: Rc::clone(&self.copies),
+                    view: window.current_view(),
+                    bounds: styled.layout().bounds(),
+                    line_height: styled.layout().line_height(),
+                };
+                if doc.observe_in_frame(observed) {
+                    cx.defer(move |cx| document(cx, window_id).flush_frame());
+                }
+            }
         }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "paint keeps retained/controlled selection, hover, and link handling in one \
-                  sequential pass sharing one frame snapshot; extraction would thread frame locals"
-    )]
     fn paint(
         &mut self,
         _id: Option<&GlobalElementId>,
@@ -1010,165 +535,64 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let Some(frame) = self.frame.clone() else {
-            if let Some(styled) = self.styled.as_mut() {
-                styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
-            }
-            return;
-        };
         let Some(layout) = self.styled.as_ref().map(|styled| styled.layout().clone()) else {
             return;
         };
-        let current_view = window.current_view();
-        let hitbox_snapshot = hitbox.clone();
 
-        if hitbox_snapshot.is_hovered(window) {
+        if hitbox.is_hovered(window) {
             let hovered = layout.index_for_position(window.mouse_position()).ok();
-            let over_link =
-                hovered.is_some_and(|index| frame.links.iter().any(|range| range.contains(&index)));
+            let over_link = hovered
+                .is_some_and(|index| self.link_ranges.iter().any(|range| range.contains(&index)));
             window.set_cursor_style(
                 if over_link {
                     CursorStyle::PointingHand
                 } else {
                     CursorStyle::IBeam
                 },
-                &hitbox_snapshot,
+                hitbox,
             );
         }
 
-        let state = frame.state.clone();
-        let focus = frame.focus.clone();
-        let down_layout = layout.clone();
-        let down_text = frame.text.clone();
-        window.on_mouse_event(
-            move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                    return;
-                }
-                if !hitbox_snapshot.is_hovered(window) {
-                    return;
-                }
-                let index = clamp_to_char_boundary(
-                    &down_text,
-                    match down_layout.index_for_position(event.position) {
-                        Ok(exact) | Err(exact) => exact,
-                    },
-                );
-                state.begin_drag(index);
-                if let Some(focus) = focus.as_ref() {
-                    window.focus(focus, cx);
-                    // Native `Div` convention (`div.rs` auto-focus): taking
-                    // focus here must suppress ancestor refocus during
-                    // bubbling, or a focusable parent such as the transcript
-                    // `ScrollArea` steals it back. No `stop_propagation` —
-                    // other listeners still run.
-                    window.prevent_default();
-                }
-                window.refresh();
-                cx.notify(current_view);
-            },
-        );
-
-        let state = frame.state.clone();
-        let move_layout = layout.clone();
-        let move_text = frame.text.clone();
-        window.on_mouse_event(
-            move |event: &MouseMoveEvent, phase, window: &mut Window, cx: &mut App| {
-                if phase != DispatchPhase::Bubble || !state.is_dragging() {
-                    return;
-                }
-                let index = clamp_to_char_boundary(
-                    &move_text,
-                    match move_layout.index_for_position(event.position) {
-                        Ok(exact) | Err(exact) => exact,
-                    },
-                );
-                if state.update_drag(index) {
-                    window.refresh();
-                    cx.notify(current_view);
-                }
-            },
-        );
-
-        let state = frame.state.clone();
-        let up_layout = layout.clone();
-        let up_text = frame.text.clone();
-        let link_ranges = frame.links.clone();
-        let on_link = frame.on_link.clone();
-        window.on_mouse_event(
-            move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
-                if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
-                    return;
-                }
-                if !state.is_dragging() {
-                    return;
-                }
-                let down = state.down_index();
-                let index = clamp_to_char_boundary(
-                    &up_text,
-                    match up_layout.index_for_position(event.position) {
-                        Ok(exact) | Err(exact) => exact,
-                    },
-                );
-                let _ = state.update_drag(index);
-                if state.end_drag(&up_text) {
-                    state.clear_press();
-                    cx.stop_propagation();
-                    window.refresh();
-                    cx.notify(current_view);
-                    return;
-                }
-                state.clear_press();
-                if let (Some(down), Some(on_link)) = (down, on_link.as_ref()) {
-                    for (range_index, range) in link_ranges.iter().enumerate() {
-                        if range.contains(&down) && range.contains(&index) {
-                            on_link(range_index, window, cx);
-                            break;
-                        }
-                    }
-                }
-                window.refresh();
-                cx.notify(current_view);
-            },
-        );
-
-        if let Some(focus) = frame.focus.clone() {
-            let state = frame.state.clone();
-            let key_text = frame.text.clone();
-            window.on_key_event(
-                move |event: &KeyDownEvent, phase, window: &mut Window, cx: &mut App| {
-                    if phase != DispatchPhase::Bubble || !focus.is_focused(window) {
-                        return;
-                    }
-                    let key = event.keystroke.key.as_str();
-                    let modifiers = &event.keystroke.modifiers;
-                    if is_select_all_keystroke(key, modifiers) {
-                        state.select_all();
-                        window.prevent_default();
-                        cx.stop_propagation();
-                        window.refresh();
-                        cx.notify(current_view);
-                    } else if is_copy_keystroke(key, modifiers)
-                        && let Some(copied) = state.copy_text(&key_text)
-                    {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            copied.replace("\u{2003}\u{2060}\u{00a0}", ""),
-                        ));
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }
+        if let Some(leaf) = self.leaf.clone() {
+            let doc = document(cx, window.window_handle().window_id());
+            // Every prepaint of this frame has run, so leaves new to this
+            // frame already have their place in the order.
+            doc.flush_frame();
+            if let Some(range) = doc.range_in(leaf.key, &self.text) {
+                paint_selection(&layout, &range, self.selection_color, window);
+            }
+            let live = LiveLeaf {
+                observed: Observed {
+                    key: leaf.key,
+                    text: self.text.clone(),
+                    copies: Rc::clone(&self.copies),
+                    view: window.current_view(),
+                    bounds: layout.bounds(),
+                    line_height: layout.line_height(),
                 },
-            );
+                layout: layout.clone(),
+                hovered: false,
+                focus: Some(leaf.focus.clone()),
+                links: self.link_ranges.clone(),
+                on_link: self.on_link.clone(),
+            };
+            register_pointer_listeners(&live, hitbox, window);
+            if let Some(on_context) = self.on_context.clone()
+                && !self.context_ranges.is_empty()
+            {
+                register_context_listener(
+                    layout.clone(),
+                    Rc::clone(&self.context_ranges),
+                    on_context,
+                    hitbox,
+                    window,
+                );
+            }
+            register_key_listener(&leaf, live.observed.clone(), window);
         }
 
         if let Some(styled) = self.styled.as_mut() {
-            if self.snapshot.is_some() {
-                window.with_text_color_map(None, |window| {
-                    styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
-                });
-            } else {
-                styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
-            }
+            styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
         }
         for (index, image) in &self.inline_images {
             if let (Some(origin), Some(end)) = (
@@ -1192,6 +616,9 @@ impl Element for SelectableText {
                 }
             }
         }
+        for swatch in self.inline_swatches.iter() {
+            paint_swatch(&layout, swatch, self.swatch_edge, window);
+        }
     }
 }
 
@@ -1203,6 +630,414 @@ impl IntoElement for SelectableText {
     }
 }
 
+/// Paints one color square in its slot: as wide as most of the slot and no
+/// taller than a little over half the line, rounded, with a hairline edge
+/// so dark colors hold their shape on a dark canvas.
+fn paint_swatch(layout: &TextLayout, swatch: &InlineSwatch, edge: Hsla, window: &mut Window) {
+    let (Some(origin), Some(end)) = (
+        layout.position_for_index(swatch.offset),
+        layout.position_for_index(swatch.offset + '\u{2003}'.len_utf8()),
+    ) else {
+        return;
+    };
+    let slot = end.x - origin.x;
+    if slot <= Pixels::ZERO {
+        return;
+    }
+    let side = (slot * 0.78).min(layout.line_height() * 0.62);
+    let inset = if swatch.alone {
+        (slot - side) / 2.0
+    } else {
+        Pixels::ZERO
+    };
+    let bounds = Bounds::new(
+        origin + gpui::point(inset, (layout.line_height() - side) / 2.0),
+        gpui::size(side, side),
+    );
+    window.paint_quad(
+        gpui::fill(bounds, swatch.color)
+            .corner_radii(side * 0.22)
+            .border_widths(gpui::px(1.0))
+            .border_color(edge),
+    );
+}
+
+/// Paints the selection behind the glyphs of `range`, one box per visual
+/// row at full line height, the way Chrome highlights a text selection. A
+/// selected line break adds a quarter-line sliver after the row.
+fn paint_selection(layout: &TextLayout, range: &Range<usize>, color: Hsla, window: &mut Window) {
+    let bounds = layout.bounds();
+    let line_height = layout.line_height();
+    let mut row_top = bounds.top();
+    let mut line_start = 0usize;
+    for line in layout.line_layouts() {
+        let unwrapped = &line.unwrapped_layout;
+        let line_end = line_start + line.len();
+        let row_starts: Vec<usize> =
+            std::iter::once(0)
+                .chain(line.wrap_boundaries().iter().map(|boundary| {
+                    unwrapped.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index
+                }))
+                .collect();
+        for (row, &row_start) in row_starts.iter().enumerate() {
+            let row_end = row_starts.get(row + 1).copied().unwrap_or(line.len());
+            let start = range.start.max(line_start + row_start);
+            let end = range.end.min(line_start + row_end);
+            let last_row = row + 1 == row_starts.len();
+            let selects_break = last_row && range.start <= line_end && range.end > line_end;
+            if start < end || selects_break {
+                let origin_x = unwrapped.x_for_index(row_start);
+                let left = unwrapped.x_for_index(start - line_start) - origin_x;
+                let right = if start < end {
+                    unwrapped.x_for_index(end - line_start) - origin_x
+                } else {
+                    left
+                };
+                let sliver = if selects_break {
+                    line_height * 0.25
+                } else {
+                    Pixels::ZERO
+                };
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a row index is far below f32's exact integer range"
+                )]
+                let top = row_top + line_height * row as f32;
+                window.paint_quad(gpui::fill(
+                    Bounds::new(
+                        gpui::point(bounds.left() + left, top),
+                        gpui::size(right - left + sliver, line_height),
+                    ),
+                    color,
+                ));
+            }
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a line's visual row count is far below f32's exact integer range"
+        )]
+        let rows = row_starts.len() as f32;
+        row_top += line_height * rows;
+        line_start = line_end + 1;
+    }
+}
+
+const PRESS: u8 = 0;
+const MOVE: u8 = 1;
+const RELEASE: u8 = 2;
+
+/// Registers the leaf's mouse listeners: a capture-phase check-in and a
+/// bubble-phase handler that processes the event once for every leaf.
+fn register_pointer_listeners(live: &LiveLeaf, hitbox: &Hitbox, window: &mut Window) {
+    let leaf = live.clone();
+    let leaf_hitbox = hitbox.clone();
+    window.on_mouse_event(
+        move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            let stamp = (PRESS, event.position);
+            let window_id = window.window_handle().window_id();
+            match phase {
+                DispatchPhase::Capture => {
+                    let mut live = leaf.clone();
+                    live.hovered = leaf_hitbox.is_hovered(window);
+                    document(cx, window_id).check_in(stamp, live);
+                }
+                DispatchPhase::Bubble => {
+                    if let Some(roster) = document(cx, window_id).take_roster(stamp) {
+                        press(&roster, event, window, cx);
+                    }
+                }
+            }
+        },
+    );
+
+    let leaf = live.clone();
+    let leaf_hitbox = hitbox.clone();
+    window.on_mouse_event(
+        move |event: &MouseMoveEvent, phase, window: &mut Window, cx: &mut App| {
+            let window_id = window.window_handle().window_id();
+            if !document(cx, window_id).is_dragging() {
+                return;
+            }
+            let stamp = (MOVE, event.position);
+            match phase {
+                DispatchPhase::Capture => {
+                    let mut live = leaf.clone();
+                    live.hovered = leaf_hitbox.is_hovered(window);
+                    document(cx, window_id).check_in(stamp, live);
+                }
+                DispatchPhase::Bubble => {
+                    if let Some(roster) = document(cx, window_id).take_roster(stamp) {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            drag(&roster, event.position, window, cx);
+                        } else {
+                            // The release happened where no leaf listened.
+                            release(&roster, event.position, window, cx);
+                        }
+                    }
+                }
+            }
+        },
+    );
+
+    let leaf = live.clone();
+    let leaf_hitbox = hitbox.clone();
+    window.on_mouse_event(
+        move |event: &MouseUpEvent, phase, window: &mut Window, cx: &mut App| {
+            let window_id = window.window_handle().window_id();
+            if event.button != MouseButton::Left || !document(cx, window_id).is_dragging() {
+                return;
+            }
+            let stamp = (RELEASE, event.position);
+            match phase {
+                DispatchPhase::Capture => {
+                    let mut live = leaf.clone();
+                    live.hovered = leaf_hitbox.is_hovered(window);
+                    document(cx, window_id).check_in(stamp, live);
+                }
+                DispatchPhase::Bubble => {
+                    if let Some(roster) = document(cx, window_id).take_roster(stamp) {
+                        release(&roster, event.position, window, cx);
+                    }
+                }
+            }
+        },
+    );
+}
+
+/// A right-click over one of `ranges` calls `on_context` with its index.
+fn register_context_listener(
+    layout: TextLayout,
+    ranges: Rc<[Range<usize>]>,
+    on_context: SelectableContextHandler,
+    hitbox: &Hitbox,
+    window: &mut Window,
+) {
+    let hitbox = hitbox.clone();
+    window.on_mouse_event(
+        move |event: &MouseDownEvent, phase, window: &mut Window, cx: &mut App| {
+            if phase != DispatchPhase::Bubble
+                || event.button != MouseButton::Right
+                || !hitbox.is_hovered(window)
+            {
+                return;
+            }
+            let Ok(index) = layout.index_for_position(event.position) else {
+                return;
+            };
+            if let Some(range) = ranges.iter().position(|range| range.contains(&index)) {
+                cx.stop_propagation();
+                on_context(range, event.position, window, cx);
+            }
+        },
+    );
+}
+
+/// `ctrl`+A selects this leaf, `ctrl`+C copies the window's selection.
+fn register_key_listener(leaf: &LeafFrame, observed: Observed, window: &mut Window) {
+    let leaf = leaf.clone();
+    window.on_key_event(
+        move |event: &KeyDownEvent, phase, window: &mut Window, cx: &mut App| {
+            if phase != DispatchPhase::Bubble || !leaf.focus.is_focused(window) {
+                return;
+            }
+            let key = event.keystroke.key.as_str();
+            let modifiers = &event.keystroke.modifiers;
+            let window_id = window.window_handle().window_id();
+            if is_select_all_keystroke(key, modifiers) {
+                let observed = observed.clone();
+                change_selection(window_id, cx, |doc| doc.select_leaf(observed));
+                window.prevent_default();
+                cx.stop_propagation();
+            } else if is_copy_keystroke(key, modifiers)
+                && let Some(copied) = document(cx, window_id).selected_text()
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(
+                    copied.replace(INLINE_IMAGE_PLACEHOLDER, ""),
+                ));
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        },
+    );
+}
+
+fn observed(roster: &[LiveLeaf]) -> Vec<Observed> {
+    roster.iter().map(|live| live.observed.clone()).collect()
+}
+
+/// The glyph under `position`, as links and word units address text.
+fn glyph_index(live: &LiveLeaf, position: Point<Pixels>) -> usize {
+    let index = match live.layout.index_for_position(position) {
+        Ok(index) | Err(index) => index,
+    };
+    clamp_to_char_boundary(&live.observed.text, index)
+}
+
+/// Applies `change` to the window's selection and repaints every view
+/// whose leaves paint a different range afterwards.
+fn change_selection(
+    window_id: gpui::WindowId,
+    cx: &mut App,
+    change: impl FnOnce(&mut document::Document),
+) {
+    let doc = document(cx, window_id);
+    let before = doc.painted();
+    change(doc);
+    let after = doc.painted();
+    let mut views: Vec<EntityId> = Vec::new();
+    let before_by_key: HashMap<_, _> = before
+        .iter()
+        .map(|(view, key, range)| (*key, (*view, range.clone())))
+        .collect();
+    let after_by_key: HashMap<_, _> = after
+        .iter()
+        .map(|(view, key, range)| (*key, (*view, range.clone())))
+        .collect();
+    for (key, (view, range)) in &before_by_key {
+        if after_by_key.get(key).map(|(_, range)| range) != Some(range) {
+            views.push(*view);
+        }
+    }
+    for (key, (view, range)) in &after_by_key {
+        if before_by_key.get(key).map(|(_, range)| range) != Some(range) {
+            views.push(*view);
+        }
+    }
+    views.sort_unstable();
+    views.dedup();
+    for view in views {
+        cx.notify(view);
+    }
+}
+
+/// A left press: start a selection in the leaf under the pointer, or clear
+/// the selection when the press is outside any text.
+fn press(roster: &[LiveLeaf], event: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+    let window_id = window.window_handle().window_id();
+    let Some(hit) = roster.iter().find(|live| live.hovered) else {
+        if document(cx, window_id).is_active() {
+            change_selection(window_id, cx, document::Document::clear);
+        }
+        return;
+    };
+    let unit = SelectionUnit::from_click_count(event.click_count);
+    let offset = match unit {
+        SelectionUnit::Character => caret_index_for_position(&hit.layout, event.position),
+        SelectionUnit::Word | SelectionUnit::Paragraph => glyph_index(hit, event.position),
+    };
+    let glyph = glyph_index(hit, event.position);
+    let extend = event.modifiers.shift && document(cx, window_id).has_selection();
+    let live = observed(roster);
+    let key = hit.observed.key;
+    change_selection(window_id, cx, |doc| {
+        if extend {
+            doc.observe(&live);
+        } else {
+            doc.reset_to(&live);
+        }
+        doc.press(key, offset, unit, extend);
+        doc.set_pressed(key, glyph, event.click_count);
+    });
+    if let Some(focus) = hit.focus.as_ref() {
+        window.focus(focus, cx);
+        // Native `Div` convention (`div.rs` auto-focus): taking focus here
+        // must suppress ancestor refocus during bubbling, or a focusable
+        // parent such as the transcript `ScrollArea` steals it back.
+        window.prevent_default();
+    }
+}
+
+/// The leaf and caret offset a drag at `position` extends to: the leaf
+/// whose rows span the pointer's height (nearest horizontally), else the
+/// end of the nearest leaf above, else the start of the first leaf.
+///
+/// Returns the caret offset and the glyph under the pointer; word and
+/// paragraph drags extend by the unit around the glyph.
+fn drag_target(roster: &[LiveLeaf], position: Point<Pixels>) -> Option<(LeafKey, usize, usize)> {
+    let distance = |live: &LiveLeaf| {
+        let bounds = live.observed.bounds;
+        if position.x < bounds.left() {
+            bounds.left() - position.x
+        } else if position.x > bounds.right() {
+            position.x - bounds.right()
+        } else {
+            Pixels::ZERO
+        }
+    };
+    let spanning = roster
+        .iter()
+        .filter(|live| {
+            let bounds = live.observed.bounds;
+            position.y >= bounds.top() && position.y < bounds.bottom()
+        })
+        .min_by(|left, right| f32::from(distance(left)).total_cmp(&f32::from(distance(right))));
+    if let Some(live) = spanning {
+        let caret = caret_index_for_position(&live.layout, position);
+        return Some((live.observed.key, caret, glyph_index(live, position)));
+    }
+    let above = roster
+        .iter()
+        .filter(|live| live.observed.bounds.bottom() <= position.y)
+        .max_by(|left, right| {
+            f32::from(left.observed.bounds.bottom())
+                .total_cmp(&f32::from(right.observed.bounds.bottom()))
+        });
+    if let Some(live) = above {
+        let end = live.observed.text.len();
+        return Some((live.observed.key, end, end));
+    }
+    roster.first().map(|live| (live.observed.key, 0, 0))
+}
+
+fn drag(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    let window_id = window.window_handle().window_id();
+    let live = observed(roster);
+    let target = drag_target(roster, position);
+    change_selection(window_id, cx, |doc| {
+        doc.observe(&live);
+        if let Some((key, caret, glyph)) = target {
+            doc.drag_to(key, caret, glyph);
+        }
+    });
+}
+
+/// Ends the gesture. A gesture that left a selection consumes the release;
+/// a clean single click inside one link range activates the link.
+fn release(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    let window_id = window.window_handle().window_id();
+    drag(roster, position, window, cx);
+    let pressed = document(cx, window_id).take_pressed();
+    let mut selected = false;
+    change_selection(window_id, cx, |doc| selected = doc.release());
+    if selected {
+        cx.stop_propagation();
+        return;
+    }
+    let Some((key, down, 1)) = pressed else {
+        return;
+    };
+    let Some(hit) = roster
+        .iter()
+        .find(|live| live.hovered && live.observed.key == key)
+    else {
+        return;
+    };
+    let up = glyph_index(hit, position);
+    let Some(on_link) = hit.on_link.clone() else {
+        return;
+    };
+    if let Some(index) = hit
+        .links
+        .iter()
+        .position(|range| range.contains(&down) && range.contains(&up))
+    {
+        on_link(index, window, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -1210,7 +1045,7 @@ mod tests {
 
     use gpui::{FontWeight, HighlightStyle, SharedString, TextStyle};
 
-    use super::{RangeSlice, RunInputs, SelectableTextState, compile_runs};
+    use super::{RangeSlice, RetainedLeaf, RunInputs, compile_runs};
 
     fn bold() -> HighlightStyle {
         HighlightStyle {
@@ -1219,124 +1054,48 @@ mod tests {
         }
     }
 
-    fn wash() -> HighlightStyle {
-        HighlightStyle {
-            background_color: Some(gpui::black()),
-            ..Default::default()
-        }
-    }
-
     const BODY: &str = "a shared body long enough to live on the heap";
 
     #[test]
-    fn same_allocation_keeps_selection_and_changed_bytes_clear_it() {
-        let state = SelectableTextState::new();
-        let text = SharedString::from(BODY.to_owned());
-        state.validate_for_shared(&text);
-        state.begin_drag(2);
-        let _ = state.update_drag(8);
-        assert!(state.end_drag(&text));
-
-        state.validate_for_shared(&text);
-        assert_eq!(state.selection_range(), Some(2..8));
-        // Equal bytes in a new allocation still keep the selection.
-        let copy = SharedString::from(BODY.to_owned());
-        state.validate_for_shared(&copy);
-        assert_eq!(state.selection_range(), Some(2..8));
-        // New bytes clear it.
-        state.validate_for_shared(&SharedString::from(format!("{BODY}!")));
-        assert_eq!(state.selection_range(), None);
-    }
-
-    #[test]
-    fn borrowed_validation_forgets_the_trusted_allocation() {
-        let state = SelectableTextState::new();
-        let text = SharedString::from(BODY.to_owned());
-        state.validate_for_shared(&text);
-        // Borrowed validation of other bytes moves the fingerprint on; the
-        // old allocation must not then pass as unchanged.
-        state.validate_for_text("different content entirely");
-        state.select_all();
-        assert_eq!(
-            state.selection_range(),
-            Some(0.."different content entirely".len())
-        );
-        state.validate_for_shared(&text);
-        assert_eq!(state.selection_range(), None);
-    }
-
-    fn inputs<'a>(
-        text: &'a SharedString,
-        style: &'a TextStyle,
-        highlights: &'a mut RangeSlice<(Range<usize>, HighlightStyle)>,
-        overrides: &'a mut RangeSlice<super::TextRunOverride>,
-        selection: Option<Range<usize>>,
-        wash: &'a HighlightStyle,
-    ) -> RunInputs<'a> {
-        RunInputs {
-            text,
-            default_style: style,
-            highlights,
-            overrides,
-            selection,
-            wash,
-        }
-    }
-
-    #[test]
     fn unchanged_layout_reuses_its_compiled_runs() {
-        let state = SelectableTextState::new();
+        let leaf = RetainedLeaf::default();
         let text = SharedString::from(BODY.to_owned());
         let style = TextStyle::default();
-        let wash = wash();
         let shared: Rc<[(Range<usize>, HighlightStyle)]> = Rc::from(vec![(2..8, bold())]);
-        let compile = |selection: Option<Range<usize>>| {
-            let mut highlights = RangeSlice::Shared(Rc::clone(&shared));
+        let compile = |text: &SharedString, highlights: RangeSlice<_>| {
+            let mut highlights = highlights;
             let mut overrides = RangeSlice::default();
-            state.compiled_runs(inputs(
-                &text,
-                &style,
-                &mut highlights,
-                &mut overrides,
-                selection,
-                &wash,
-            ))
+            leaf.compiled_runs(&mut RunInputs {
+                text,
+                default_style: &style,
+                highlights: &mut highlights,
+                overrides: &mut overrides,
+            })
         };
-        let first = compile(None);
-        let second = compile(None);
+        let first = compile(&text, RangeSlice::Shared(Rc::clone(&shared)));
+        let second = compile(&text, RangeSlice::Shared(Rc::clone(&shared)));
         assert_eq!(first, second);
-        assert_eq!(state.compilations.get(), 1);
-
-        // A selection change recompiles, and matches a direct compilation.
-        let selected = compile(Some(4..12));
-        assert_eq!(state.compilations.get(), 2);
-        let mut highlights = RangeSlice::Shared(Rc::clone(&shared));
-        let mut overrides = RangeSlice::default();
-        let direct = compile_runs(&inputs(
-            &text,
-            &style,
-            &mut highlights,
-            &mut overrides,
-            Some(4..12),
-            &wash,
-        ));
-        assert_eq!(selected, direct);
-        assert_ne!(selected, first);
+        assert_eq!(leaf.compilations.get(), 1);
 
         // Equal per-frame ranges and equal text in a fresh allocation reuse
         // the compiled runs too.
         let fresh_text = SharedString::from(BODY.to_owned());
-        let mut owned = RangeSlice::Owned(vec![(2..8, bold())]);
+        let reused = compile(&fresh_text, RangeSlice::Owned(vec![(2..8, bold())]));
+        assert_eq!(reused, first);
+        assert_eq!(leaf.compilations.get(), 1);
+
+        // New bytes recompile, matching a direct compilation.
+        let changed = SharedString::from(format!("{BODY}!"));
+        let recompiled = compile(&changed, RangeSlice::Shared(Rc::clone(&shared)));
+        assert_eq!(leaf.compilations.get(), 2);
+        let mut highlights = RangeSlice::Shared(Rc::clone(&shared));
         let mut overrides = RangeSlice::default();
-        let reused = state.compiled_runs(inputs(
-            &fresh_text,
-            &style,
-            &mut owned,
-            &mut overrides,
-            Some(4..12),
-            &wash,
-        ));
-        assert_eq!(reused, selected);
-        assert_eq!(state.compilations.get(), 2);
+        let direct = compile_runs(&RunInputs {
+            text: &changed,
+            default_style: &style,
+            highlights: &mut highlights,
+            overrides: &mut overrides,
+        });
+        assert_eq!(recompiled, direct);
     }
 }
