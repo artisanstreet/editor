@@ -540,3 +540,174 @@ async fn generated_inline_image_is_stored_and_observed_by_path() {
     assert!(path.is_file(), "the inline image is written to the store");
     assert!(receiver.recv().await.is_none());
 }
+
+/// Replays `lines` against a tracker bound to `t-fixture`, returning every
+/// emitted observation and each frame's terminal outcome.
+async fn replay(lines: &[String]) -> (Vec<EngineObservation>, Vec<Option<TerminalState>>) {
+    let run = activity_run_id();
+    let (sender, mut receiver) = mpsc::channel(128);
+    let mut tracker = CodexPendingTracker::new();
+    tracker.bind_native_thread("t-fixture");
+    let mut active: Option<String> = None;
+    let mut terminals = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let sequence = index as u64 + 1;
+        let event = parse_frame(line, sequence).expect("fixture frame decodes");
+        terminals.push(
+            apply_event(
+                event,
+                &run,
+                &mut tracker,
+                &mut active,
+                &sender,
+                sequence,
+                None,
+            )
+            .await,
+        );
+    }
+    drop(sender);
+    let mut observations = Vec::new();
+    while let Ok(observation) = receiver.try_recv() {
+        observations.push(observation);
+    }
+    (observations, terminals)
+}
+
+/// The subagent rows among `observations`: thread, name and action.
+fn agent_rows(observations: &[EngineObservation]) -> Vec<(String, Option<String>, &'static str)> {
+    observations
+        .iter()
+        .filter_map(|observation| match observation {
+            EngineObservation::Activity(Observation::Tool(row))
+                if row.tool_name() == "subagent" =>
+            {
+                Some((
+                    row.tool_id().as_str().to_owned(),
+                    row.detail().map(str::to_owned),
+                    row.action().as_str(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn root_text(observations: &[EngineObservation]) -> String {
+    observations
+        .iter()
+        .filter_map(|observation| match observation {
+            EngineObservation::TextDelta(delta) => Some(delta.delta()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn spawn_call(method: &str, status: &str, receivers: &str, agent_states: &str) -> String {
+    notification(
+        method,
+        &format!(
+            r#"{{"threadId":"t-fixture","turnId":"turn-fixture","item":{{"type":"collabAgentToolCall","id":"call-1","tool":"spawnAgent","status":"{status}","senderThreadId":"t-fixture","receiverThreadIds":[{receivers}],"prompt":"Build the R700","agentsStates":{{{agent_states}}}}}}}"#
+        ),
+    )
+}
+
+fn child_started(thread: &str, parent: &str, nickname: &str) -> String {
+    notification(
+        "thread/started",
+        &format!(
+            r#"{{"thread":{{"id":"{thread}","parentThreadId":"{parent}","agentNickname":"{nickname}"}}}}"#
+        ),
+    )
+}
+
+#[tokio::test]
+async fn subagent_threads_show_as_agents_and_never_speak_for_the_root() {
+    let lines = [
+        turn_started(),
+        spawn_call("item/started", "inProgress", "", ""),
+        child_started("child-1", "t-fixture", "Ampere"),
+        spawn_call(
+            "item/completed",
+            "completed",
+            r#""child-1""#,
+            r#""child-1":{"status":"pendingInit"}"#,
+        ),
+        notification(
+            "turn/started",
+            r#"{"threadId":"child-1","turn":{"id":"turn-child","status":"inProgress"}}"#,
+        ),
+        notification(
+            "item/agentMessage/delta",
+            r#"{"delta":"I own only the R700 files.","itemId":"msg-c","threadId":"child-1","turnId":"turn-child"}"#,
+        ),
+        notification(
+            "thread/tokenUsage/updated",
+            r#"{"threadId":"child-1","turnId":"turn-child","tokenUsage":{"total":{"inputTokens":40,"outputTokens":9},"last":{"totalTokens":49},"modelContextWindow":200000}}"#,
+        ),
+        notification(
+            "item/agentMessage/delta",
+            r#"{"delta":"The agent is working.","itemId":"msg-1","threadId":"t-fixture","turnId":"turn-fixture"}"#,
+        ),
+        notification(
+            "turn/completed",
+            r#"{"threadId":"child-1","turn":{"id":"turn-child","status":"completed"}}"#,
+        ),
+        notification(
+            "turn/completed",
+            r#"{"threadId":"t-fixture","turn":{"id":"turn-fixture","status":"completed"}}"#,
+        ),
+    ];
+    let (observations, terminals) = replay(&lines).await;
+
+    assert!(
+        terminals[..terminals.len() - 1].iter().all(Option::is_none),
+        "a subagent's turn never settles the root turn: {terminals:?}"
+    );
+    assert_eq!(terminals.last(), Some(&Some(TerminalState::Completed)));
+    assert_eq!(root_text(&observations), "The agent is working.");
+    assert!(
+        !observations
+            .iter()
+            .any(|observation| matches!(observation, EngineObservation::Usage(_))),
+        "a subagent's usage is not the root's"
+    );
+    let ampere = Some("Ampere".to_owned());
+    assert_eq!(
+        agent_rows(&observations),
+        [
+            ("child-1".to_owned(), ampere.clone(), "started"),
+            ("child-1".to_owned(), ampere.clone(), "progress"),
+            ("child-1".to_owned(), ampere, "completed"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_late_agent_name_renames_its_row_and_nested_agents_stay_hidden() {
+    let lines = [
+        turn_started(),
+        spawn_call("item/completed", "completed", r#""child-1""#, ""),
+        child_started("child-1", "t-fixture", "Ampere"),
+        child_started("grandchild-1", "child-1", "Noether"),
+        notification(
+            "turn/completed",
+            r#"{"threadId":"grandchild-1","turn":{"id":"turn-grandchild","status":"failed"}}"#,
+        ),
+        notification(
+            "item/completed",
+            r#"{"threadId":"t-fixture","turnId":"turn-fixture","item":{"type":"collabAgentToolCall","id":"call-2","tool":"wait","status":"completed","senderThreadId":"t-fixture","receiverThreadIds":["child-1"],"agentsStates":{"child-1":{"status":"errored","message":"boom"}}}}"#,
+        ),
+    ];
+    let (observations, terminals) = replay(&lines).await;
+
+    assert!(terminals.iter().all(Option::is_none), "{terminals:?}");
+    assert_eq!(
+        agent_rows(&observations),
+        [
+            ("child-1".to_owned(), None, "started"),
+            ("child-1".to_owned(), Some("Ampere".to_owned()), "started"),
+            ("child-1".to_owned(), Some("Ampere".to_owned()), "failed"),
+        ]
+    );
+}

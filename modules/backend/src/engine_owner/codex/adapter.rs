@@ -23,8 +23,9 @@ use super::continuation::{
 };
 use super::protocol::{
     CodexEvent, CodexFileChange, CodexFileKind, CodexImage, CodexPendingTracker, CodexPlanEntry,
-    CodexPlanStatus, CodexQuestion, CodexSafety, CodexSearchLifecycle, CodexTerminalLifecycle,
-    CodexToolAction, CodexTurnError, CodexTurnState, prompt_input, request_line, write_line,
+    CodexPlanStatus, CodexQuestion, CodexSafety, CodexSearchLifecycle, CodexSubagentRow,
+    CodexTerminalLifecycle, CodexToolAction, CodexTurnError, CodexTurnState, prompt_input,
+    request_line, write_line,
 };
 
 // ---------------------------------------------------------------------------
@@ -366,6 +367,27 @@ fn tool_rows(
         .ok()
         .map(DomainObservation::Tool)
         .into_iter()
+        .collect()
+}
+
+/// Builds the agent rows for the root agent's subagents, one tool row per
+/// subagent thread, named as Codex named the agent.
+fn subagent_rows(
+    run_id: &RunId,
+    frame_sequence: u64,
+    rows: impl IntoIterator<Item = CodexSubagentRow>,
+) -> Vec<DomainObservation> {
+    rows.into_iter()
+        .flat_map(|row| {
+            tool_rows(
+                run_id,
+                frame_sequence,
+                &row.thread_id,
+                "subagent",
+                row.action,
+                row.name.as_deref(),
+            )
+        })
         .collect()
 }
 
@@ -731,10 +753,15 @@ pub(crate) async fn apply_event(
         }
 
         CodexEvent::AgentMessageDelta {
+            thread_id,
             item_id,
             turn_id,
             delta,
         } => {
+            // A subagent's words are its own, never the root reply.
+            if !tracker.claims_root(thread_id.as_deref()) {
+                return None;
+            }
             if active_turn.is_none() {
                 *active_turn = Some(turn_id.clone());
             }
@@ -753,10 +780,23 @@ pub(crate) async fn apply_event(
             None
         }
         CodexEvent::TurnState {
+            thread_id,
             turn_id,
             state,
             refusal,
         } => {
+            // A subagent's turn says where that agent stands; it never
+            // starts or settles the root turn.
+            if let Some(child) = thread_id.filter(|child| !tracker.claims_root(Some(child))) {
+                let action = match state {
+                    CodexTurnState::Started => CodexToolAction::Progress,
+                    CodexTurnState::Completed => CodexToolAction::Completed,
+                    CodexTurnState::Failed | CodexTurnState::Cancelled => CodexToolAction::Failed,
+                };
+                let row = tracker.advance_subagent(&child, action);
+                return emit_activity(observations, subagent_rows(run_id, frame_sequence, row))
+                    .await;
+            }
             // A refusal is said before the turn settles, so the reader
             // learns why it failed.
             if let Some(refusal) = refusal
@@ -774,7 +814,14 @@ pub(crate) async fn apply_event(
                 CodexTurnState::Started => None,
             }
         }
-        CodexEvent::TokenUsage { turn_id, sample } => {
+        CodexEvent::TokenUsage {
+            thread_id,
+            turn_id,
+            sample,
+        } => {
+            if !tracker.claims_root(thread_id.as_deref()) {
+                return None;
+            }
             let scope = usage?;
             let observed_at = current_unix_millis()?;
             let report = codex_usage_report(
@@ -842,10 +889,32 @@ pub(crate) async fn apply_event(
         CodexEvent::SubagentDiscovered {
             agent_thread_id,
             parent_thread_id,
+            name,
         } => {
-            // Discovery only: never adopt the root turn, never emit root text.
-            tracker.note_subagent(&agent_thread_id, &parent_thread_id);
-            None
+            // Never adopt the root turn, never emit root text.
+            let row = tracker.note_subagent(&agent_thread_id, &parent_thread_id, name.as_deref());
+            emit_activity(observations, subagent_rows(run_id, frame_sequence, row)).await
+        }
+        CodexEvent::AgentCall {
+            thread_id,
+            turn_id,
+            spawn,
+            receivers,
+            states,
+        } => {
+            if !activity_frame_authorized(&thread_id, &turn_id, tracker, active_turn) {
+                return None;
+            }
+            let mut rows = Vec::new();
+            if spawn {
+                for receiver in &receivers {
+                    rows.extend(tracker.note_subagent(receiver, &thread_id, None));
+                }
+            }
+            for (agent, action) in states {
+                rows.extend(tracker.advance_subagent(&agent, action));
+            }
+            emit_activity(observations, subagent_rows(run_id, frame_sequence, rows)).await
         }
         CodexEvent::ReasoningSummaryDelta {
             thread_id,

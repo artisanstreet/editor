@@ -355,12 +355,18 @@ pub(crate) enum CodexEvent {
         text: String,
         phase: artisan_domain::AssistantMessagePhase,
     },
+    /// One streamed fragment of an agent message. `thread_id` is the thread
+    /// it claims, absent when the frame names none.
     AgentMessageDelta {
+        thread_id: Option<String>,
         item_id: String,
         turn_id: String,
         delta: String,
     },
+    /// A turn starting or settling on `thread_id`, absent when the frame
+    /// names none. A child agent's turn is never the root turn.
     TurnState {
+        thread_id: Option<String>,
         turn_id: String,
         state: CodexTurnState,
         /// Why a failed turn failed, when a policy screen refused it.
@@ -379,6 +385,7 @@ pub(crate) enum CodexEvent {
     /// Projected best-effort onto the shared usage vocabulary; an empty
     /// measurement never becomes a report (see [`parse_thread_token_usage`]).
     TokenUsage {
+        thread_id: Option<String>,
         turn_id: String,
         sample: CodexTokenUsageSample,
     },
@@ -391,9 +398,24 @@ pub(crate) enum CodexEvent {
         thread_id: String,
         request: CodexQuestionRequest,
     },
+    /// A subagent's thread started (`thread/started` naming a parent).
     SubagentDiscovered {
         agent_thread_id: String,
         parent_thread_id: String,
+        /// The name Codex gave the agent, or its role when it has none.
+        name: Option<String>,
+    },
+    /// One step of a `collabAgentToolCall` item: the agent on `thread_id`
+    /// spawning, messaging, waiting on, or closing subagents.
+    AgentCall {
+        thread_id: String,
+        turn_id: String,
+        /// Whether the call spawned the receiving agents.
+        spawn: bool,
+        /// The agents the call addressed.
+        receivers: Vec<String>,
+        /// Where each addressed agent stands, when Codex reported it.
+        states: Vec<(String, CodexToolAction)>,
     },
     /// One published reasoning-summary fragment (`summaryTextDelta`).
     ///
@@ -863,6 +885,7 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 return CodexEvent::UnknownMethod;
             }
             CodexEvent::AgentMessageDelta {
+                thread_id: raw_text(params, "threadId"),
                 item_id,
                 turn_id,
                 delta,
@@ -897,6 +920,7 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 _ => None,
             };
             CodexEvent::TurnState {
+                thread_id: raw_text(params, "threadId"),
                 turn_id,
                 state,
                 refusal,
@@ -977,7 +1001,11 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 return CodexEvent::UnknownMethod;
             }
             match parse_thread_token_usage(params) {
-                Some(sample) => CodexEvent::TokenUsage { turn_id, sample },
+                Some(sample) => CodexEvent::TokenUsage {
+                    thread_id: raw_text(params, "threadId"),
+                    turn_id,
+                    sample,
+                },
                 // An empty measurement stays observable without a report.
                 None => CodexEvent::UnknownMethod,
             }
@@ -1073,17 +1101,22 @@ fn decode_method(method: &str, envelope: &Value, params: &Value) -> CodexEvent {
                 questions,
             })
         }
-        "item/subAgent/discovered" | "item/collabAgent/discovered" => {
-            let agent_thread_id = raw_text(params, "agentThreadId").unwrap_or_default();
-            let parent_thread_id = raw_text(params, "parentThreadId")
-                .or_else(|| raw_text(params, "senderThreadId"))
-                .unwrap_or_default();
-            if agent_thread_id.is_empty() || parent_thread_id.is_empty() {
+        "thread/started" => {
+            // Only a subagent's thread names a parent.
+            let Some(thread) = params.get("thread").and_then(Value::as_object) else {
                 return CodexEvent::UnknownMethod;
-            }
+            };
+            let (Some(agent_thread_id), Some(parent_thread_id)) = (
+                nested_text(thread, "id"),
+                nested_text(thread, "parentThreadId"),
+            ) else {
+                return CodexEvent::UnknownMethod;
+            };
             CodexEvent::SubagentDiscovered {
                 agent_thread_id,
                 parent_thread_id,
+                name: nested_text(thread, "agentNickname")
+                    .or_else(|| nested_text(thread, "agentRole")),
             }
         }
         "thread/closed" => CodexEvent::ThreadClosed,
@@ -1343,6 +1376,17 @@ fn decode_mcp_server_status(params: &Value) -> Option<CodexEvent> {
     })
 }
 
+/// Maps a `CollabAgentStatus` to where the subagent stands. An agent that
+/// was shut down had finished; one interrupted or lost did not.
+fn collab_agent_action(status: &str) -> Option<CodexToolAction> {
+    match status {
+        "pendingInit" | "running" => Some(CodexToolAction::Progress),
+        "completed" | "shutdown" => Some(CodexToolAction::Completed),
+        "errored" | "interrupted" | "notFound" => Some(CodexToolAction::Failed),
+        _ => None,
+    }
+}
+
 /// Decodes one `item/started` / `item/completed` envelope into a typed
 /// activity event, mirroring the TypeScript item union.
 ///
@@ -1351,9 +1395,9 @@ fn decode_mcp_server_status(params: &Value) -> Option<CodexEvent> {
 /// `dynamicToolCall`), `commandExecution`, `fileChange`, `webSearch`, and
 /// plan, `contextCompaction` lifecycle steps, and completed
 /// `imageGeneration` items (`imageView` is acknowledged silently). Agent messages preserve
-/// authoritative text and phase alongside the delta path. User and subagent
-/// items stay on the tracker path and remain [`CodexEvent::UnknownMethod`]
-/// without disturbing the turn.
+/// authoritative text and phase alongside the delta path, and
+/// `collabAgentToolCall` items report the subagents a call addressed. User
+/// items remain [`CodexEvent::UnknownMethod`] without disturbing the turn.
 #[expect(
     clippy::too_many_lines,
     reason = "single item-type dispatch table over the Codex item vocabulary; extracting arms would add indirection without reuse"
@@ -1491,6 +1535,43 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
                 tool_name,
                 action,
                 detail: None,
+            }
+        }
+        "collabAgentToolCall" => {
+            let Some(tool) = item.get("tool").and_then(Value::as_str) else {
+                return CodexEvent::UnknownMethod;
+            };
+            let receivers = item
+                .get("receiverThreadIds")
+                .and_then(Value::as_array)
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|id| !id.is_empty() && id.len() <= CODEX_MAX_TEXT_FIELD_BYTES)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let states = item
+                .get("agentsStates")
+                .and_then(Value::as_object)
+                .map(|states| {
+                    states
+                        .iter()
+                        .filter(|(id, _)| !id.is_empty() && id.len() <= CODEX_MAX_TEXT_FIELD_BYTES)
+                        .filter_map(|(id, state)| {
+                            let status = state.get("status").and_then(Value::as_str)?;
+                            Some((id.clone(), collab_agent_action(status)?))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            CodexEvent::AgentCall {
+                thread_id,
+                turn_id,
+                spawn: tool == "spawnAgent",
+                receivers,
+                states,
             }
         }
         "fileChange" => {
@@ -1647,20 +1728,38 @@ fn decode_item_envelope(started: bool, params: &Value) -> CodexEvent {
     }
 }
 
+/// One subagent thread seen during the turn.
+#[derive(Debug)]
+struct CodexSubagent {
+    thread_id: String,
+    parent_thread_id: String,
+    name: Option<String>,
+    /// Where its row last said it stood; [`None`] until it is shown.
+    shown: Option<CodexToolAction>,
+}
+
+/// One subagent row to show: the root agent's subagent, by thread.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodexSubagentRow {
+    pub(crate) thread_id: String,
+    pub(crate) name: Option<String>,
+    pub(crate) action: CodexToolAction,
+}
+
 /// In-memory pending interaction tracker for one live Codex turn.
 ///
 /// Permission requests land as pending approvals and `requestUserInput`
 /// frames land as pending questions. Resolutions apply through the durable
 /// resolve path; a deny records the decision with no turn side effect while
-/// the run continues. Subagent discoveries are retained for transcript
-/// projection but never adopt the root turn.
+/// the run continues. Subagents are tracked so their frames never reach the
+/// root channel and the root agent's own subagents show as agent rows.
 #[derive(Debug, Default)]
 pub(crate) struct CodexPendingTracker {
     approvals: HashMap<String, CodexApprovalRequest>,
     /// Open question requests by questionnaire, each with the answers
     /// recorded so far by provider question id.
     question_requests: HashMap<String, PendingQuestionRequest>,
-    subagents: Vec<(String, String)>,
+    subagents: Vec<CodexSubagent>,
     /// The root native thread bound by the pump from `thread/start` (or the
     /// resumed thread). Rich activity frames must claim exactly this thread;
     /// an unbound tracker emits no activity at all.
@@ -1826,10 +1925,82 @@ impl CodexPendingTracker {
         Ok(Some(request.handoff()))
     }
 
-    /// Notes one subagent discovery without adopting the root turn.
-    pub(crate) fn note_subagent(&mut self, agent_thread_id: &str, parent_thread_id: &str) {
-        self.subagents
-            .push((agent_thread_id.to_owned(), parent_thread_id.to_owned()));
+    /// Returns whether a frame claiming `thread_id` speaks for the root
+    /// thread. A frame that names no thread does; so does every frame while
+    /// no root is bound.
+    pub(crate) fn claims_root(&self, thread_id: Option<&str>) -> bool {
+        if let (Some(claimed), Some(root)) = (thread_id, self.native_thread_id.as_deref()) {
+            return claimed == root;
+        }
+        true
+    }
+
+    /// Notes one subagent thread, never adopting the root turn.
+    ///
+    /// Returns the row to show when the root agent's own subagent is new or
+    /// was renamed; a subagent of a subagent is tracked but never shown.
+    pub(crate) fn note_subagent(
+        &mut self,
+        agent_thread_id: &str,
+        parent_thread_id: &str,
+        name: Option<&str>,
+    ) -> Option<CodexSubagentRow> {
+        let known = self
+            .subagents
+            .iter()
+            .position(|agent| agent.thread_id == agent_thread_id);
+        let index = if let Some(index) = known {
+            let agent = &mut self.subagents[index];
+            if name.is_none() || agent.name.as_deref() == name {
+                return None;
+            }
+            agent.name = name.map(str::to_owned);
+            index
+        } else {
+            self.subagents.push(CodexSubagent {
+                thread_id: agent_thread_id.to_owned(),
+                parent_thread_id: parent_thread_id.to_owned(),
+                name: name.map(str::to_owned),
+                shown: None,
+            });
+            self.subagents.len() - 1
+        };
+        let action = self.subagents[index]
+            .shown
+            .unwrap_or(CodexToolAction::Started);
+        self.show_subagent(index, action)
+    }
+
+    /// Records where a subagent stands. Returns its row when the root
+    /// agent's own subagent moved; unknown threads and unchanged states show
+    /// nothing.
+    pub(crate) fn advance_subagent(
+        &mut self,
+        agent_thread_id: &str,
+        action: CodexToolAction,
+    ) -> Option<CodexSubagentRow> {
+        let index = self
+            .subagents
+            .iter()
+            .position(|agent| agent.thread_id == agent_thread_id)?;
+        if self.subagents[index].shown == Some(action) {
+            return None;
+        }
+        self.show_subagent(index, action)
+    }
+
+    fn show_subagent(&mut self, index: usize, action: CodexToolAction) -> Option<CodexSubagentRow> {
+        let root = self.native_thread_id.as_deref()?;
+        let agent = &mut self.subagents[index];
+        if agent.parent_thread_id != root {
+            return None;
+        }
+        agent.shown = Some(action);
+        Some(CodexSubagentRow {
+            thread_id: agent.thread_id.clone(),
+            name: agent.name.clone(),
+            action,
+        })
     }
 
     /// Returns whether a native thread identity belongs to a discovered
@@ -1839,7 +2010,7 @@ impl CodexPendingTracker {
     pub(crate) fn is_known_child_thread(&self, thread_id: &str) -> bool {
         self.subagents
             .iter()
-            .any(|(agent_thread_id, _)| agent_thread_id == thread_id)
+            .any(|agent| agent.thread_id == thread_id)
     }
 
     /// Resolves one approval; returns whether it was pending.

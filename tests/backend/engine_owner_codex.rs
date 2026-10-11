@@ -435,7 +435,7 @@ fn delta_turn_approval_question_subagent_frames_decode() {
     }
 
     let subagent = parse_frame(
-        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-1","parentThreadId":"t-1"}}"#,
+        r#"{"method":"thread/started","params":{"thread":{"id":"child-1","parentThreadId":"t-1","agentNickname":"Ampere"}}}"#,
         5,
     )
     .expect("subagent decodes");
@@ -949,7 +949,7 @@ async fn subagent_frames_never_adopt_the_root_turn() {
     let run = run_id();
     let mut tracker = CodexPendingTracker::new();
     let event = parse_frame(
-        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-1","parentThreadId":"t-1"}}"#,
+        r#"{"method":"thread/started","params":{"thread":{"id":"child-1","parentThreadId":"t-1","agentNickname":"Ampere"}}}"#,
         1,
     )
     .expect("subagent decodes");
@@ -1327,7 +1327,7 @@ async fn fixture_approval_question_steer_shapes_before_close() {
         "{INIT_LINE}\n{THREAD_LINE}\n{TURN_LINE}\n{}\n{}\n{}\n{}\n",
         r#"{"id":20,"method":"item/commandExecution/requestApproval","params":{"itemId":"approval-21","command":"echo hi","reason":"say hi"}}"#,
         r#"{"id":21,"method":"item/tool/requestUserInput","params":{"itemId":"q-1","threadId":"thread-fixture-1","turnId":"turn-1","questions":[{"id":"q1","question":"Which?"}]}}"#,
-        r#"{"method":"item/subAgent/discovered","params":{"agentThreadId":"child-9","parentThreadId":"thread-fixture-1"}}"#,
+        r#"{"method":"thread/started","params":{"thread":{"id":"child-9","parentThreadId":"thread-fixture-1","agentNickname":"Ampere"}}}"#,
         r#"{"method":"turn/completed","params":{"threadId":"thread-fixture-1","turn":{"id":"turn-1","status":"completed"}}}"#,
     );
     let outcome = tokio::time::timeout(
@@ -1777,7 +1777,10 @@ fn token_usage_frames_decode_to_a_cumulative_sample() {
         1,
     )
     .expect("usage decodes");
-    let CodexEvent::TokenUsage { turn_id, sample } = event else {
+    let CodexEvent::TokenUsage {
+        turn_id, sample, ..
+    } = event
+    else {
         panic!("expected token usage");
     };
     assert_eq!(turn_id, "turn-1");
@@ -3430,7 +3433,7 @@ async fn foreign_child_and_malformed_frames_never_reach_root() {
     );
 
     // Child-thread activity is never coerced into the root channel.
-    tracker.note_subagent("child-9", "t-1");
+    tracker.note_subagent("child-9", "t-1", None);
     assert!(tracker.is_known_child_thread("child-9"));
     assert!(
         !tracker.is_known_child_thread("t-1"),
