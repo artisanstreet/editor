@@ -1,1 +1,0 @@
-ALTER TABLE `session_defaults` ADD `agent_name_dataset` text DEFAULT 'norwegian' NOT NULL;

@@ -1,0 +1,31 @@
+[package]
+name = "editor-conversation"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "The open thread: the item window, the transcript and the live run."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+editor-ui = { path = "../editor-ui" }
+editor-composer = { path = "../editor-composer" }
+editor-core = { path = "../editor-core" }
+gpui.workspace = true
+serde_json.workspace = true
+statig.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+forge-engines = { path = "../forge-engines" }
+forge-http = { path = "../forge-http" }
+forge-store = { path = "../forge-store" }
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
+
+[lints]
+workspace = true

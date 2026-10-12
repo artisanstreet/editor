@@ -1,0 +1,216 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"steer\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode/mimo-v2.6-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "call_d1191fbbe7184435b8e173a2",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 8 && echo first",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_d1191fbbe7184435b8e173a2",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 8 && echo first",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        head: "first\n\nCommand exited with code 0.",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 50,
+                output: 36,
+                reasoning: 28,
+                cache_read: 3008,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    3058,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        SteerAccepted {
+            id: ItemId(
+                "steer-2",
+            ),
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
+            },
+            text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 449,
+                output: 58,
+                reasoning: 39,
+                cache_read: 5760,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    3151,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        SteerAccepted {
+            id: ItemId(
+                "steer-3",
+            ),
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_129d7a1c70015V4linelfEWy40/text-0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_129d7a1c70015V4linelfEWy40/text-0",
+            },
+            text: "cherry",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_129d7a1c70015V4linelfEWy40/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "cherry",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 501,
+                output: 62,
+                reasoning: 55,
+                cache_read: 8896,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    3188,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_129d7a1c70015V4linelfEWy40/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "cherry",
+                phase: Final,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

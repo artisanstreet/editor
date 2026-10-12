@@ -1,0 +1,5 @@
+# SVG sources keep LF on every platform.
+svg/**/*.svg text eol=lf
+# TrueType binaries must never see line-ending conversion.
+fonts/**/*.ttf binary
+fonts/FONTS.md text eol=lf

@@ -1,3 +1,9 @@
+# Packages, checks and shells of the workspace.
+#
+# Two shipped binaries: `ae` (crates/ae: CLI, installer and Forge) and
+# `artisan-editor` (crates/editor), built for Linux and cross-built for
+# Windows (x86_64-pc-windows-gnu, MinGW-w64). `release` lays them out the way
+# `ae install` expects (nix/release.nix); signing is `scripts/release`.
 {
   self,
   pkgs,
@@ -6,48 +12,46 @@
 }:
 let
   inherit (pkgs) lib;
-  version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
+  manifest = builtins.fromTOML (builtins.readFile ../Cargo.toml);
+  inherit (manifest.workspace.package) version;
   rust = pkgs.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml;
   craneLib = (crane.mkLib pkgs).overrideToolchain rust;
-  # Keep embedded fonts, licenses, schemas, JSON, external tests and the
-  # first-party skills the Forge embeds. Never copy
-  # local build products, captures, databases or the private handoff ledger.
+
+  # The crates plus what they embed (skills/) and Cargo's configuration.
+  roots = [
+    "crates"
+    "skills"
+    ".cargo"
+    ".config"
+  ];
+  topFiles = [
+    "Cargo.toml"
+    "Cargo.lock"
+    "rust-toolchain.toml"
+    "rustfmt.toml"
+  ];
   src = lib.cleanSourceWith {
     src = ../.;
     filter =
       path: type:
       let
         relative = lib.removePrefix (toString ../. + "/") (toString path);
+        under = root: relative == root || lib.hasPrefix "${root}/" relative;
         parts = lib.splitString "/" relative;
-        root = builtins.head parts;
       in
-      (builtins.elem root [
-        "Cargo.toml"
-        "Cargo.lock"
-        "rust-toolchain.toml"
-        "rustfmt.toml"
-        ".cargo"
-        ".config"
-        "modules"
-        "tests"
-        "scripts"
-        "packaging"
-        "skills"
-      ])
+      (builtins.elem relative topFiles || builtins.any under roots)
       && !(builtins.any (
         part:
         builtins.elem part [
           "target"
-          "__pycache__"
-          ".dist"
           ".git"
         ]
-      ) parts)
-      && !(lib.hasSuffix ".pyc" relative);
+      ) parts);
   };
+
+  # Libraries the Linux Editor links or loads (GPUI: Wayland, X11/xcb,
+  # xkbcommon, Vulkan, fontconfig/freetype).
   libraries = with pkgs; [
-    openssl
-    sqlite
     fontconfig
     freetype
     libxkbcommon
@@ -59,24 +63,21 @@ let
     libxcb
     vulkan-loader
     libGL
+    openssl
+    sqlite
   ];
+  graphicsLibraryPath = lib.makeLibraryPath (libraries ++ [ pkgs.mesa ]);
   nativeTools = with pkgs; [
     git
     pkg-config
     clang
     cmake
-    ninja
-    python3
-    capnproto
+    perl
   ];
   # A build script that copies a file out of the read-only vendor directory
-  # (libsqlite3-sys and its prebuilt bindings) leaves a read-only file in its
-  # output directory and cannot run a second time: the copy fails with
-  # "Permission denied". Cargo reruns a build script whenever it judges one
-  # of its dependencies newer than the script, which a wall clock stepping
-  # backwards mid-build makes happen. The target directory is therefore made
-  # writable before every Cargo build: between the `check` and `build` of a
-  # dependency derivation, and after the cached artifacts are unpacked.
+  # leaves a read-only file behind and cannot run a second time (a clock
+  # stepping backwards makes Cargo rerun it), so the target directory is made
+  # writable before every Cargo build.
   writableTarget = ''
     if [ -d "''${CARGO_TARGET_DIR:-target}" ]; then
       chmod -R u+w "''${CARGO_TARGET_DIR:-target}"
@@ -86,372 +87,292 @@ let
     preBuild = writableTarget;
     cargoBuildCommand = "${writableTarget} cargoWithProfile build";
   };
-  common = rerunnableBuild // {
-    inherit src;
-    pname = "artisan-workspace";
-    inherit version;
-    strictDeps = true;
-    nativeBuildInputs = nativeTools;
-    buildInputs = libraries;
-    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-    CARGO_PROFILE_DEV_DEBUG = "0";
-    CARGO_PROFILE_TEST_DEBUG = "0";
-  };
-  vendor = craneLib.vendorCargoDeps { inherit src; };
-  base = common // {
-    cargoVendorDir = vendor;
-  };
-  publicTrust = builtins.listToAttrs (
-    map
-      (
-        line:
+
+  # Commit for `ae --version` (the sandbox has no .git).
+  commit =
+    let
+      rev = self.rev or self.dirtyRev or null;
+    in
+    if rev == null then "unknown" else builtins.substring 0 10 rev;
+
+  platforms = {
+    linux = rec {
+      target = pkgs.stdenv.hostPlatform.rust.rustcTarget;
+      exe = name: name;
+      craneLib = (crane.mkLib pkgs).overrideToolchain (
+        p: p.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml
+      );
+      build = craneLib.buildPackage;
+      deps = craneLib.buildDepsOnly;
+      environment = {
+        nativeBuildInputs = nativeTools;
+        buildInputs = libraries;
+        LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+      };
+      # mold, wrapped by nixpkgs like the default linker, for the dev loop.
+      fastLinker = environment // {
+        nativeBuildInputs = nativeTools ++ [ pkgs.mold ];
+        NIX_CFLAGS_LINK = "-fuse-ld=mold";
+      };
+    };
+    windows = rec {
+      target = "x86_64-pc-windows-gnu";
+      exe = name: "${name}.exe";
+      craneLib = (crane.mkLib windowsPkgs).overrideToolchain (
+        p: p.rust-bin.fromRustupToolchainFile ../rust-toolchain.toml
+      );
+      build = attrs: windowsPkgs.callPackage ({ ... }: craneLib.buildPackage attrs) { };
+      deps = attrs: windowsPkgs.callPackage ({ ... }: craneLib.buildDepsOnly attrs) { };
+      # nixpkgs builds MinGW GCC with the mcf thread model: C code using
+      # thread-locals (mimalloc) pulls in emutls, which needs mcfgthread.
+      # Link its static archive and the NT libraries it calls, so every .exe
+      # imports only Windows system DLLs. This replaces the target's
+      # rustflags from .cargo/config.toml, so it repeats them.
+      rustflags = [
+        "-C target-cpu=x86-64-v3"
+        "-C target-feature=+crt-static"
+        "-C link-arg=-l:libmcfgthread.a"
+        "-C link-arg=-lntdll"
+        "-C link-arg=-lkernel32"
+      ];
+      environment =
         let
-          pieces = lib.splitString "=" line;
+          cc = windowsPkgs.stdenv.cc;
         in
         {
-          name = builtins.head pieces;
-          value = lib.concatStringsSep "=" (builtins.tail pieces);
-        }
-      )
-      (
-        lib.filter (line: line != "" && !(lib.hasPrefix "#" line)) (
-          lib.splitString "\n" (builtins.readFile ../modules/installer/release/trust_anchor.env)
-        )
-      )
-  );
-  releaseTrust = {
-    ARTISAN_INSTALLER_RELEASE = "1";
-    inherit (publicTrust) ARTISAN_RELEASE_KEY_ID ARTISAN_RELEASE_PUBLIC_KEY_HEX;
-  };
-
-  # Libraries the Nix-built Linux Editor and graphical tools load at runtime.
-  graphicsLibraryPath = lib.makeLibraryPath (libraries ++ [ pkgs.mesa ]);
-
-  # The product: Debug and Production payloads per platform (nix/stages.nix).
-  stageBuilds = import ./stages.nix {
-    inherit
-      self
-      lib
-      pkgs
-      windowsPkgs
-      crane
-      src
-      version
-      libraries
-      nativeTools
-      releaseTrust
-      graphicsLibraryPath
-      rerunnableBuild
-      ;
-  };
-  production = stageBuilds.packages.linux-production;
-
-  # Tests, fixtures, and tools build in Cargo's dev profile against one shared
-  # dependency cache; they are never shipped.
-  allTargets = "--locked --offline --workspace --all-targets --features artisan-frontend/visual-proof";
-  devDeps = craneLib.buildDepsOnly (
-    base
-    // {
-      pname = "artisan-dependencies-dev";
-      CARGO_PROFILE = "dev";
-      cargoExtraArgs = allTargets;
-      doCheck = false;
-    }
-  );
-  # Each tool compiles only its own dependency graph, so a small tool never
-  # waits on the workspace-wide cache.
-  tool =
-    package: name:
-    let
-      attrs = base // {
-        pname = "artisan-${name}";
-        CARGO_PROFILE = "dev";
-        cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
-        doCheck = false;
+          depsBuildBuild = [ pkgs.stdenv.cc ];
+          nativeBuildInputs = nativeTools;
+          CARGO_BUILD_TARGET = target;
+          buildInputs = [
+            windowsPkgs.windows.pthreads
+            windowsPkgs.windows.mcfgthreads
+          ];
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " rustflags;
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "${cc}/bin/${cc.targetPrefix}cc";
+          TARGET_CC = "${cc}/bin/${cc.targetPrefix}cc";
+          TARGET_CXX = "${cc}/bin/${cc.targetPrefix}c++";
+          TARGET_AR = "${cc.bintools.bintools}/bin/${cc.targetPrefix}ar";
+          HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+        };
+      # LLVM's lld in MinGW mode for the dev loop: GCC finds it as its `ld`
+      # in a directory of its own (`-B`), so the other LLVM binutils don't
+      # shadow the GNU tools build scripts expect. MinGW GCC asks for `-pie`,
+      # which only GNU ld understands; lld's PE output is relocatable anyway.
+      lld = pkgs.runCommand "x86_64-w64-mingw32-lld" { } ''
+        mkdir -p "$out/bin"
+        ln -s ${windowsPkgs.buildPackages.llvmPackages.bintools}/bin/${windowsPkgs.stdenv.cc.targetPrefix}ld.lld "$out/bin/ld"
+      '';
+      fastLinker = environment // {
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " (
+          rustflags
+          ++ [
+            "-C link-arg=-B${lld}/bin/"
+            "-C link-arg=-no-pie"
+          ]
+        );
       };
+    };
+  };
+
+  # One shipped binary for one platform, in Cargo's `release` profile
+  # (Cargo.toml). Each binary compiles only its own dependency graph, so
+  # `ae` never waits on GPUI.
+  binary =
+    {
+      platform,
+      package,
+      name,
+    }:
+    let
+      host = platforms.${platform};
+      common =
+        host.environment
+        // rerunnableBuild
+        // {
+          inherit src version;
+          pname = "${name}-${platform}";
+          strictDeps = true;
+          CARGO_PROFILE = "release";
+          cargoExtraArgs = "--locked --offline -p ${package} --bin ${name}";
+          doCheck = false;
+        };
+      profileDirectory = "target/${
+        lib.optionalString (platform == "windows") "${host.target}/"
+      }release";
     in
-    craneLib.buildPackage (
-      attrs
+    host.build (
+      common
       // {
-        cargoArtifacts = craneLib.buildDepsOnly (attrs // { pname = "artisan-${name}-dependencies"; });
+        cargoArtifacts = host.deps (
+          common
+          // {
+            pname = "${name}-${platform}-dependencies";
+            # Only `cargo build` reads the cache; crane's extra `check` pass
+            # costs minutes.
+            cargoCheckCommand = "true";
+          }
+        );
+        # The dependencies are cached; what is left ends in one fat-LTO link
+        # (the Editor's peaks near 5.5 GB), so one job at a time.
+        CARGO_BUILD_JOBS = 1;
+        # Only here: in the dependency cache it would rebuild it per commit.
+        AE_COMMIT = commit;
+        doNotPostBuildInstallCargoBinaries = true;
+        installPhaseCommand = ''
+          mkdir -p "$out/bin"
+          install -m755 "${profileDirectory}/${host.exe name}" "$out/bin/${host.exe name}"
+        '';
         meta.mainProgram = name;
       }
     );
-  generator = tool "artisan-packaging" "payload-manifest-generator";
-  releaseTool = tool "artisan-packaging" "release-tool";
-  plugin = tool "artisan-capnp-codegen" "artisan-capnp-codegen";
-  hostLauncher = tool "artisan-native-dev" "forge-host";
-  screenDemo = tool "artisan-screen-demo" "screen-demo";
-  # Remote-host fixtures run the product binaries; test builds do not need
-  # the Production codegen.
-  testProduct = craneLib.buildPackage (
-    base
-    // {
-      pname = "artisan-test-product";
-      CARGO_PROFILE = "dev";
-      cargoArtifacts = devDeps;
-      cargoExtraArgs = "--locked --offline ${
-        lib.concatMapStringsSep " " (
-          binary: "-p ${binary.package} --bin ${binary.name}"
-        ) stageBuilds.binaries
-      }";
-      doCheck = false;
-    }
-  );
 
-  # Cap'n Proto bindings: the Nix-pinned compiler with the Cargo-pinned plugin.
-  generateBindings = output: ''
-    mkdir -p "${output}"
-    capnp compile --no-standard-import --src-prefix=schema \
-      -o${plugin}/bin/artisan-capnp-codegen:"${output}" \
-      schema/phase1_proof.capnp schema/artisan.capnp schema/composer_state.capnp
-  '';
-  bindings =
-    pkgs.runCommand "artisan-generated-bindings" { nativeBuildInputs = [ pkgs.capnproto ]; }
+  ae = binary {
+    platform = "linux";
+    package = "ae";
+    name = "ae";
+  };
+  editorUnwrapped = binary {
+    platform = "linux";
+    package = "editor";
+    name = "artisan-editor";
+  };
+  # The Nix Editor finds its graphics libraries in the store, plus the host
+  # GPU drivers (NixOS, WSLg).
+  editor =
+    pkgs.runCommand "artisan-editor-${version}"
+      {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+        passthru.unwrapped = editorUnwrapped;
+        meta.mainProgram = "artisan-editor";
+      }
       ''
-        cd ${src}/modules/protocol
-        ${generateBindings "$out"}
+        makeWrapper ${editorUnwrapped}/bin/artisan-editor "$out/bin/artisan-editor" \
+          --prefix LD_LIBRARY_PATH : ${graphicsLibraryPath} \
+          --run 'for dir in /run/opengl-driver/lib /usr/lib/wsl/lib; do [ -d "$dir" ] && LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$dir"; done; export LD_LIBRARY_PATH'
       '';
-
-  # Portable payload archive of a payload's binaries: stored ZIP plus
-  # payload-manifest.json, byte-reproducible (payload-manifest-generator).
-  payloadArchive =
-    payload:
-    pkgs.runCommand "artisan-payload.zip" { } ''
-      ${generator}/bin/payload-manifest-generator \
-        --layout ${../packaging/portable/versioned_layout.txt} --archive "$out" \
-        ${lib.concatMapStringsSep " " (
-          binary: "--file bin/${binary.name} ${payload}/bin/${binary.name}"
-        ) stageBuilds.binaries}
-    '';
-  archive = payloadArchive production;
-  architecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
-  releaseMetadata = (builtins.fromJSON (builtins.readFile ../packaging/release/development.json)) // {
-    "product-version" = version;
-    "editor-forge-compatibility-version" = version;
-    "platform" = "linux";
-    "architecture" = architecture;
-    "libc" = "glibc";
-    "artifact-id" = "linux-${architecture}-nix";
-    "file-name" = "artisan-nix-payload.zip";
-    "signing-key-id" = releaseTrust.ARTISAN_RELEASE_KEY_ID;
+  windows = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
+    ae-windows = binary {
+      platform = "windows";
+      package = "ae";
+      name = "ae";
+    };
+    artisan-editor-windows = binary {
+      platform = "windows";
+      package = "editor";
+      name = "artisan-editor";
+    };
   };
-  unsignedManifest = pkgs.runCommand "artisan-unsigned-release.json" { } ''
-    ${releaseTool}/bin/release-tool generate --archive ${archive} --output "$out" \
-      ${lib.cli.toGNUCommandLineShell { } releaseMetadata}
-  '';
-
-  graphicalEnvironment = ''
-    export LD_LIBRARY_PATH="${graphicsLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    if [ -d /usr/lib/wsl/lib ]; then
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/lib/wsl/lib"
-    fi
-    if [ -d /run/opengl-driver/lib ]; then
-      export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/run/opengl-driver/lib"
-    fi
-  '';
-  shellApp =
-    name: runtimeInputs: text:
-    pkgs.writeShellApplication { inherit name runtimeInputs text; };
-  app = derivation: name: {
-    type = "app";
-    program = "${derivation}/bin/${name}";
+  release = lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
+    release = import ./release.nix {
+      inherit pkgs version;
+      linux = {
+        inherit ae;
+        editor = editorUnwrapped;
+      };
+      windows = {
+        ae = windows.ae-windows;
+        editor = windows.artisan-editor-windows;
+      };
+    };
   };
-  closure = pkgs.closureInfo { rootPaths = [ production ]; };
-  devApp = import ./dev.nix { inherit pkgs releaseTrust graphicsLibraryPath; };
-  parity = craneLib.buildPackage (
-    base
-    // {
-      pname = "artisan-parity-visual-proof";
-      CARGO_PROFILE = "dev";
-      cargoArtifacts = devDeps;
-      cargoExtraArgs = "--locked --offline -p artisan-frontend --example parity-visual-proof --features visual-proof";
-      doCheck = false;
-      installPhaseCommand = ''
-        mkdir -p "$out/bin"
-        cp target/debug/examples/parity-visual-proof "$out/bin/"
-      '';
-    }
-  );
-  visualApp = shellApp "artisan-visual-proof" [ pkgs.coreutils ] (
-    graphicalEnvironment
-    + ''
-      output="''${ARTISAN_VISUAL_OUTPUT:-$PWD/evidence/visual}"
-      mkdir -p "$output"
-      cd "$output"
-      exec timeout --signal=TERM --kill-after=5s 45s ${parity}/bin/parity-visual-proof "$@"
-    ''
-  );
-  # Rewrites the checked-in bindings in the working tree.
-  codegenApp = shellApp "artisan-codegen" [ pkgs.capnproto pkgs.git ] ''
-    cd "$(git rev-parse --show-toplevel)/modules/protocol"
-    ${generateBindings "src"}
-  '';
-  pinApp = shellApp "artisan-verify-gpui-pin" [ pkgs.python3 pkgs.gh ] ''
-    exec python "$PWD/scripts/verify_gpui_pin.py" "$@"
-  '';
-  checkBase = base // {
+
+  # Checks: clippy and the tests over the workspace, in the dev profile, on
+  # one shared dependency cache.
+  checkBase = platforms.linux.environment // {
+    inherit src version;
+    pname = "artisan-workspace";
+    strictDeps = true;
     CARGO_PROFILE = "dev";
-    cargoArtifacts = devDeps;
-    cargoExtraArgs = allTargets;
+    CARGO_PROFILE_DEV_DEBUG = "0";
+    CARGO_PROFILE_TEST_DEBUG = "0";
+    cargoExtraArgs = "--locked --offline --workspace --all-targets";
   };
-  simpleCheck =
-    name: inputs: command:
-    pkgs.runCommand name { nativeBuildInputs = inputs; } ''
-      cd ${src}
-      ${command}
-      touch "$out"
-    '';
-  # Test fixtures for a Cargo test run over target/debug: the example
-  # fixture programs, and two independently produced payload archives of
-  # small stand-in binaries (debug UI binaries exceed a gigabyte and obscure
-  # the archive structure and tampering proofs).
-  testFixtures = ''
-    export ARTISAN_ENGINE_OWNER_FIXTURE="$PWD/target/debug/examples/engine-owner-fixture"
-    export ARTISAN_CODEX_WIRE_FIXTURE="$PWD/target/debug/examples/codex-wire-fixture"
-    export ARTISAN_DIRECTORY_CONTROLLER_FIXTURE="$PWD/target/debug/examples/directory-controller-fixture"
-    fixtures="$(mktemp -d)"
-    files=()
-    for name in ae editor forge installer; do
-      printf 'archive fixture: %s' "$name" > "$fixtures/$name"
-      files+=(--file "bin/$name" "$fixtures/$name")
-      export "ARTISAN_VERSIONED_PAYLOAD_''${name^^}_BINARY=$fixtures/$name"
-    done
-    for archive in payload repeat; do
-      target/debug/payload-manifest-generator --layout packaging/portable/versioned_layout.txt \
-        --archive "$fixtures/$archive.zip" "''${files[@]}"
-    done
-    export ARTISAN_VERSIONED_PAYLOAD_ARCHIVE="$fixtures/payload.zip"
-    export ARTISAN_VERSIONED_PAYLOAD_ARCHIVE_REPRODUCIBILITY="$fixtures/repeat.zip"
-  '';
-  nextest =
-    scope: features:
-    "cargo nextest run --locked --offline --no-fail-fast ${scope} --all-targets ${features} --test-threads=1";
+  checkDeps = craneLib.buildDepsOnly (
+    checkBase // rerunnableBuild // { pname = "artisan-workspace-dependencies"; }
+  );
+  checks = {
+    # Cargo.toml owns lint policy.
+    clippy = craneLib.cargoClippy (
+      checkBase
+      // {
+        cargoArtifacts = checkDeps;
+        cargoClippyExtraArgs = "";
+      }
+    );
+    tests = craneLib.cargoTest (
+      checkBase
+      // {
+        cargoArtifacts = checkDeps;
+        # Snapshot mismatches fail instead of writing `.snap.new` files.
+        INSTA_UPDATE = "no";
+        CI = "true";
+      }
+    );
+  };
+
   shell =
     extra:
     craneLib.devShell {
-      checks = { inherit (checks) clippy; };
       packages = [
-        rust
-        pkgs.git
-        pkgs.python3
-        pkgs.capnproto
         pkgs.nixfmt
         pkgs.nix-direnv
         pkgs.cargo-nextest
+        pkgs.python3
+        pkgs.shellcheck
       ]
       ++ nativeTools
       ++ extra;
       buildInputs = libraries;
-      LIBCLANG_PATH = common.LIBCLANG_PATH;
-      shellHook = graphicalEnvironment + ''
+      inherit (platforms.linux.environment) LIBCLANG_PATH;
+      shellHook = ''
+        export LD_LIBRARY_PATH="${graphicsLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        for dir in /usr/lib/wsl/lib /run/opengl-driver/lib; do
+          if [ -d "$dir" ]; then export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$dir"; fi
+        done
         export CARGO_BUILD_JOBS="''${CARGO_BUILD_JOBS:-2}"
       '';
     };
-  # Every stage payload and dev runner builds as a check, Windows included.
-  stageChecks = lib.mapAttrs' (
-    name: value: lib.nameValuePair "stage-${name}" value
-  ) stageBuilds.packages;
-  checks = stageChecks // {
-    rustfmt = craneLib.cargoFmt {
-      inherit src;
-      pname = "artisan-rustfmt";
-      inherit version;
-    };
-    # Cargo.toml owns lint policy.
-    clippy = craneLib.cargoClippy (checkBase // { cargoClippyExtraArgs = ""; });
-    registration = craneLib.mkCargoDerivation (
-      checkBase
+  # Shells for the dev loop's Cargo builds (`nix develop .#cargo-<platform>`):
+  # each platform's toolchain, libraries, fast linker and cross environment
+  # as the packages have them, outside the sandbox so a persistent target
+  # directory compiles incrementally. The Windows shell builds for its target
+  # by default.
+  cargoShells = {
+    linux = pkgs.mkShell (
+      platforms.linux.fastLinker
       // {
-        pname = "artisan-test-registration";
-        buildPhaseCargoCommand = "python scripts/audit_rust_target_registration.py";
-        doInstallCargoArtifacts = false;
-        installPhaseCommand = ''touch "$out"'';
+        nativeBuildInputs = platforms.linux.fastLinker.nativeBuildInputs ++ [ rust ];
       }
     );
-    file-sizes = simpleCheck "artisan-file-sizes" [
-      pkgs.python3
-    ] "python scripts/file_size_ratchet.py";
-    remote-hosts = simpleCheck "artisan-remote-hosts" [ pkgs.python3 pkgs.git pkgs.getent ] ''
-      python ${src}/scripts/test_remote_host.py --bin-dir ${testProduct}/bin --helper ${hostLauncher}/bin/forge-host
-    '';
-    python = simpleCheck "artisan-python-tests" [
-      pkgs.python3
-    ] "python -B -m unittest discover -s scripts/tests";
-    codegen = pkgs.runCommand "artisan-codegen-drift" { } ''
-      diff -u ${src}/modules/protocol/src/artisan_capnp.rs ${bindings}/artisan_capnp.rs
-      diff -u ${src}/modules/protocol/src/phase1_proof_capnp.rs ${bindings}/phase1_proof_capnp.rs
-      diff -u ${src}/modules/protocol/src/composer_state_capnp.rs ${bindings}/composer_state_capnp.rs
-      touch "$out"
-    '';
-    tests = craneLib.mkCargoDerivation (
-      checkBase
+    windows = windowsPkgs.mkShell (
+      platforms.windows.fastLinker
       // {
-        pname = "artisan-tests";
-        NEXTEST_SHOW_PROGRESS = "counter";
-        nativeBuildInputs = nativeTools ++ [ pkgs.cargo-nextest ];
-        buildPhaseCargoCommand = ''
-          cargo build --locked --offline --workspace --bins --examples --features artisan-frontend/visual-proof
-          ${testFixtures}
-          ${nextest "--workspace" "--features artisan-frontend/visual-proof"}
-        '';
-        doInstallCargoArtifacts = false;
-        installPhaseCommand = ''touch "$out"'';
+        nativeBuildInputs = platforms.windows.fastLinker.nativeBuildInputs ++ [ rust ];
       }
     );
-    packaging = craneLib.mkCargoDerivation (
-      checkBase
-      // {
-        pname = "artisan-packaging-tests";
-        nativeBuildInputs = nativeTools ++ [ pkgs.cargo-nextest ];
-        NEXTEST_SHOW_PROGRESS = "counter";
-        buildPhaseCargoCommand = ''
-          cargo build --locked --offline -p artisan-packaging --bins
-          ${testFixtures}
-          ${nextest "-p artisan-packaging" ""}
-        '';
-        doInstallCargoArtifacts = false;
-        installPhaseCommand = ''touch "$out"'';
-      }
-    );
-    visual-fixtures = craneLib.cargoTest (
-      checkBase
-      // {
-        pname = "artisan-visual-fixtures";
-        cargoExtraArgs = "--locked --offline -p artisan-frontend --lib --features visual-proof";
-        cargoTestExtraArgs = "parity_visual_proof::tests -- --test-threads=1";
-      }
-    );
-    doc-tests = craneLib.cargoDocTest (
-      checkBase // { cargoExtraArgs = "--locked --offline --workspace"; }
-    );
-    workflows =
-      pkgs.runCommand "artisan-workflow-validation" { nativeBuildInputs = [ pkgs.actionlint ]; }
-        ''
-          actionlint -config-file ${../.github/actionlint.yaml} ${../.github/workflows/ci.yml} ${../.github/workflows/desktop.yml}
-          touch "$out"
-        '';
-    nixfmt = pkgs.runCommand "artisan-nix-format" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
-      nixfmt --check ${../flake.nix} ${./workspace.nix} ${./stages.nix} ${./dev.nix} ${./forge-service.nix}
-      touch "$out"
-    '';
   };
+  dev = import ./dev.nix { inherit pkgs graphicsLibraryPath; };
 in
 {
   inherit checks;
-  formatter = shellApp "artisan-nixfmt" [ pkgs.nixfmt ] ''
-    if [ "$#" -eq 0 ]; then
-      set -- flake.nix nix/*.nix
-    fi
-    exec nixfmt "$@"
-  '';
+  formatter = pkgs.writeShellApplication {
+    name = "artisan-nixfmt";
+    runtimeInputs = [ pkgs.nixfmt ];
+    text = ''
+      if [ "$#" -eq 0 ]; then
+        set -- flake.nix nix/*.nix
+      fi
+      exec nixfmt "$@"
+    '';
+  };
   devShells = {
     default = shell [ ];
-    cargo-linux = stageBuilds.cargoShells.linux;
-    cargo-windows = stageBuilds.cargoShells.windows;
+    cargo-linux = cargoShells.linux;
+    cargo-windows = cargoShells.windows;
     maintenance = shell [ pkgs.gh ];
     performance = shell [
-      pkgs.linuxPackages.perf
+      pkgs.perf
       pkgs.hyperfine
     ];
     visual = shell [
@@ -459,85 +380,15 @@ in
       pkgs.mesa-demos
     ];
   };
-  packages = stageBuilds.packages // {
-    default = production;
-    dev-dependencies = devDeps;
-    payload-manifest-generator = generator;
-    release-tool = releaseTool;
-    capnp-codegen = plugin;
-    generated-bindings = bindings;
-    forge-host = hostLauncher;
-    screen-demo = screenDemo;
-    parity-visual-proof = parity;
-    nix-payload = archive;
-    unsigned-release = unsignedManifest;
-    # Registration data and path list for the complete Nix runtime closure.
-    inherit closure;
-    forge-container = pkgs.dockerTools.buildLayeredImage {
-      name = "artisan-forge";
-      tag = version;
-      contents = [
-        pkgs.git
-        pkgs.getent
-        pkgs.coreutils
-        pkgs.cacert
-      ];
-      config = {
-        Entrypoint = [ "${production}/bin/forge" ];
-        WorkingDir = "/data";
-        User = "65532:65532";
-        Env = [
-          "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-          "HOME=/data"
-          "PATH=${
-            lib.makeBinPath [
-              pkgs.git
-              pkgs.getent
-              pkgs.coreutils
-            ]
-          }"
-        ];
-      };
-    };
-  };
+  packages = {
+    default = ae;
+    inherit ae;
+    artisan-editor = editor;
+  }
+  // windows
+  // release;
   apps = {
-    default = devApp;
-    dev = devApp;
-    codegen = app codegenApp "artisan-codegen";
-    verify-gpui-pin = app pinApp "artisan-verify-gpui-pin";
-    visual-proof = app visualApp "artisan-visual-proof";
-    visual-proof-software = app (shellApp "artisan-visual-proof-software" [ ] ''
-      export VK_DRIVER_FILES="${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json"
-      exec ${visualApp}/bin/artisan-visual-proof "$@"
-    '') "artisan-visual-proof-software";
-    capture-screen-demo = app (shellApp "artisan-capture-screen-demo"
-      [ pkgs.python3 pkgs.xdotool pkgs.imagemagick ]
-      (
-        graphicalEnvironment
-        + ''
-          exec python ${src}/scripts/capture_window.py \
-            --program ${screenDemo}/bin/screen-demo \
-            --software-icd ${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json "$@"
-        ''
-      )
-    ) "artisan-capture-screen-demo";
-    screen-demo = app (shellApp "artisan-screen-demo" [ ] (
-      graphicalEnvironment
-      + ''
-        exec ${screenDemo}/bin/screen-demo "$@"
-      ''
-    )) "artisan-screen-demo";
-    release-tool = app releaseTool "release-tool";
-    export-closure = app (shellApp "artisan-export-closure" [ pkgs.nix ] ''
-      if [ "$#" -ne 1 ]; then
-        echo 'usage: nix run .#export-closure -- /absolute/output.nar' >&2
-        exit 2
-      fi
-      mapfile -t paths < ${closure}/store-paths
-      nix-store --export "''${paths[@]}" > "$1"
-    '') "artisan-export-closure";
-    sign-release = app (shellApp "artisan-sign-release" [ ] ''
-      exec ${releaseTool}/bin/release-tool sign "$@"
-    '') "artisan-sign-release";
+    default = dev;
+    inherit dev;
   };
 }

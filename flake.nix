@@ -1,5 +1,5 @@
 {
-  description = "Artisan Editor: Cargo builds, development tools and Linux packages";
+  description = "Artisan: ae and the Editor for Linux and Windows, the release, the dev loop and a NixOS Forge service";
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";

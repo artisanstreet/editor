@@ -1,0 +1,328 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 131
+expression: "replay(Profile::Cursor, \"plan-question\")"
+---
+[
+    Response {
+        method: "initialize",
+        result: Ok(
+            "protocolVersion,agentCapabilities,authMethods",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Session {
+            id: "6f1c2a7e-3d4b-4c55-9a1e-0b7d2f9c8e11",
+        },
+    ),
+    Event(
+        Model {
+            id: "composer-2.5",
+        },
+    ),
+    Response {
+        method: "session/new",
+        result: Ok(
+            "sessionId,modes,models,configOptions",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Item {
+            key: "tool_s",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: Some(
+                    "Explore schema",
+                ),
+                description: "Find the existing tables",
+                prompt: None,
+                agent_id: None,
+                background: false,
+                result: None,
+                label: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_s",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: Some(
+                    "Explore schema",
+                ),
+                description: "Find the existing tables",
+                prompt: None,
+                agent_id: None,
+                background: false,
+                result: Some(
+                    "Found 3 tables.",
+                ),
+                label: None,
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{}}",
+    ),
+    Event(
+        Item {
+            key: "tool_q",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: true,
+                questions: [
+                    Question {
+                        id: "q1",
+                        header: Some(
+                            "Database",
+                        ),
+                        text: "Which database?",
+                        multi_select: false,
+                        options: [
+                            QuestionOption {
+                                label: "SQLite",
+                                description: None,
+                            },
+                            QuestionOption {
+                                label: "Postgres",
+                                description: None,
+                            },
+                        ],
+                    },
+                ],
+                answers: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_q",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: true,
+                questions: [
+                    Question {
+                        id: "q1",
+                        header: Some(
+                            "Database",
+                        ),
+                        text: "Which database?",
+                        multi_select: false,
+                        options: [
+                            QuestionOption {
+                                label: "SQLite",
+                                description: None,
+                            },
+                            QuestionOption {
+                                label: "Postgres",
+                                description: None,
+                            },
+                        ],
+                    },
+                ],
+                answers: Some(
+                    [
+                        Some(
+                            [
+                                "Postgres",
+                            ],
+                        ),
+                    ],
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"outcome\":{\"outcome\":\"answered\",\"answers\":[{\"questionId\":\"q1\",\"selectedOptionIds\":[\"o2\"]}]}}}",
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: [
+                    PlanStep {
+                        text: "Add schema",
+                        status: Pending,
+                    },
+                    PlanStep {
+                        text: "Wire queries",
+                        status: Pending,
+                    },
+                ],
+                proposal: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: AwaitingUser,
+            kind: Plan {
+                steps: [
+                    PlanStep {
+                        text: "Add schema",
+                        status: Pending,
+                    },
+                    PlanStep {
+                        text: "Wire queries",
+                        status: Pending,
+                    },
+                ],
+                proposal: Some(
+                    "# Add DB\n1. Add schema\n2. Wire queries",
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: "Add Postgres storage",
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: [
+                    PlanStep {
+                        text: "Add schema",
+                        status: Pending,
+                    },
+                    PlanStep {
+                        text: "Wire queries",
+                        status: Pending,
+                    },
+                ],
+                proposal: Some(
+                    "# Add DB\n1. Add schema\n2. Wire queries",
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: "Add Postgres storage",
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"outcome\":{\"outcome\":\"accepted\"}}}",
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: [
+                    PlanStep {
+                        text: "Add schema",
+                        status: Done,
+                    },
+                    PlanStep {
+                        text: "Wire queries",
+                        status: InProgress,
+                    },
+                ],
+                proposal: Some(
+                    "# Add DB\n1. Add schema\n2. Wire queries",
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: "Add Postgres storage",
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}",
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":9,\"error\":{\"code\":-32601,\"message\":\"method not found: fs/read_text_file\"}}",
+    ),
+    Event(
+        Item {
+            key: "message:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:1",
+            },
+            text: "The plan is approved; schema is done.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "message:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "The plan is approved; schema is done.",
+                phase: Final,
+            },
+        },
+    ),
+    Response {
+        method: "session/prompt",
+        result: Ok(
+            "stopReason",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Status {
+            key: "plan",
+            status: Done,
+        },
+    ),
+]

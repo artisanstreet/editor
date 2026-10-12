@@ -1,0 +1,27 @@
+[package]
+name = "editor-inspector"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Shells, agents, changed files, context and usage of the open thread."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+editor-ui = { path = "../editor-ui" }
+editor-core = { path = "../editor-core" }
+gpui.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+editor-conversation = { path = "../editor-conversation" }
+
+[dev-dependencies]
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+forge-http = { path = "../forge-http" }
+forge-store = { path = "../forge-store" }
+gpui = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

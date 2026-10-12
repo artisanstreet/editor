@@ -1,0 +1,89 @@
+---
+source: crates/forge-engines/src/account.rs
+expression: seen
+---
+[
+    (
+        SignedOut,
+        [],
+    ),
+    (
+        LoggingIn {
+            url: None,
+            code: None,
+        },
+        [
+            StartLogin,
+        ],
+    ),
+    (
+        LoggingIn {
+            url: Some(
+                "https://auth.example/device",
+            ),
+            code: None,
+        },
+        [],
+    ),
+    (
+        LoggingIn {
+            url: Some(
+                "https://auth.example/device",
+            ),
+            code: Some(
+                "ABCD-1234",
+            ),
+        },
+        [],
+    ),
+    (
+        LoggingIn {
+            url: Some(
+                "https://auth.example/device",
+            ),
+            code: Some(
+                "ABCD-1234",
+            ),
+        },
+        [],
+    ),
+    (
+        Unknown,
+        [
+            Check,
+        ],
+    ),
+    (
+        SignedIn {
+            account: Some(
+                "user@example.com",
+            ),
+        },
+        [],
+    ),
+    (
+        Unknown,
+        [
+            Logout,
+        ],
+    ),
+    (
+        SignedOut,
+        [],
+    ),
+    (
+        LoggingIn {
+            url: None,
+            code: None,
+        },
+        [
+            StartLogin,
+        ],
+    ),
+    (
+        Failed {
+            message: "Codex sign-in failed: denied",
+        },
+        [],
+    ),
+]

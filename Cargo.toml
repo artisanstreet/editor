@@ -1,25 +1,22 @@
 [workspace]
 members = [
-    "packaging",
-    "scripts/screen_demo",
-    "modules/assets",
-    "modules/backend",
-    "modules/build_info",
-    "modules/catalog",
-    "modules/cli",
-    "modules/database",
-    "modules/domain",
-    "modules/frontend",
-    "modules/installer",
-    "modules/migrations",
-    "modules/native_engine",
-    "modules/protocol",
-    "modules/transport",
-    "modules/tracing",
-    "modules/ui",
-    "modules/audio",
-    "scripts/capnp_codegen",
-    "scripts/native_dev",
+    "crates/ae",
+    "crates/artisan-api",
+    "crates/editor",
+    "crates/editor-assets",
+    "crates/editor-audio",
+    "crates/editor-composer",
+    "crates/editor-conversation",
+    "crates/editor-core",
+    "crates/editor-inspector",
+    "crates/editor-marketplace",
+    "crates/editor-settings",
+    "crates/editor-sidebar",
+    "crates/editor-ui",
+    "crates/forge-engines",
+    "crates/forge-http",
+    "crates/forge-runs",
+    "crates/forge-store",
 ]
 resolver = "3"
 
@@ -31,19 +28,25 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
+anyhow = "=1.0.104"
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
+clap = { version = "=4.6.6", features = ["derive", "env"] }
+dirs = "=5.0.1"
+ed25519-dalek = "=2.2.0"
+flate2 = "=1.1.10"
+insta = { version = "=1.49.0", features = ["json"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
+tokio-stream = { version = "=0.1.19", features = ["sync"] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+tower = { version = "=0.5.3", default-features = false }
+tracing = "=0.1.44"
 base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
-bytes = { version = "=1.12.1", default-features = false }
-capnp = "=0.27.0"
-capnpc = "=0.27.0"
 cpal = { version = "=0.18.2", default-features = false }
-command-group = { version = "=5.0.1", default-features = false, features = ["with-tokio"] }
 fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
 getrandom = { version = "=0.4.3", default-features = false }
 gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b" }
 gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b", features = ["wgpu"] }
-http = { version = "=1.5.0", default-features = false, features = ["std"] }
-http-body-util = { version = "=0.1.5", default-features = false }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
@@ -51,41 +54,21 @@ mimalloc = { version = "=0.1.52", default-features = false }
 native-dialog = { version = "=0.9.7", default-features = false, features = [
     "windows_dpi_awareness",
 ] }
-processkit = { version = "=3.3.4", default-features = false, features = [
-    "process-control",
-] }
 pulseaudio = "=0.3.1"
 pulldown-cmark = { version = "=0.13.4", default-features = false }
-quinn = { version = "=0.11.11", default-features = false, features = [
-    "runtime-tokio",
-    "rustls-ring",
-] }
 rcgen = { version = "=0.14.9", default-features = false, features = [
     "crypto",
     "ring",
 ] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "std"] }
 rustls = { version = "=0.23.43", default-features = false, features = [
     "logging",
     "ring",
     "std",
 ] }
-rustls-pki-types = "=1.15.1"
-sea-orm = { version = "=2.0.2", default-features = false, features = [
-    "sqlx-sqlite",
-    "runtime-tokio",
-    "macros",
-    "sqlite-use-returning-for-3_35",
-] }
-sea-orm-migration = { version = "=2.0.2", default-features = false, features = [
-    "runtime-tokio",
-    "sqlx-sqlite",
-    "sqlite-use-returning-for-3_35",
-] }
 serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
-serde_json = "=1.0.151"
-sqlx-sqlite = { version = "=0.9.0", default-features = false, features = [
-    "offline",
-] }
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 statig = "=0.4.1"
 symphonia = { version = "=0.5.5", default-features = false, features = [
     "aac",
@@ -102,89 +85,66 @@ syntect = { version = "=5.3.0", default-features = false, features = [
     "default-syntaxes",
     "regex-fancy",
 ] }
-subtle = { version = "=2.6.1", default-features = false }
 roxmltree = "=0.20.0"
+image = { version = "=0.25.10", default-features = false }
+webp = { version = "=0.3.1", default-features = false }
+rusqlite = { version = "=0.39.0", features = ["bundled"] }
 sha2 = "=0.11.0"
+similar = "=2.7.0"
+tar = "=0.4.46"
+tempfile = "=3.27.0"
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.1", default-features = false }
 toml = "=1.1.4"
 unicode-segmentation = "=1.13.3"
-url = "=2.5.8"
 uuid = { version = "=1.26.0", default-features = false, features = ["std", "v7"] }
-winapi-util = "=0.1.11"
-x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
-zeroize = "=1.9.0"
+zip = { version = "=4.6.1", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
-# Two build stages share one codegen.
+# Two build modes: Debug (`dev`, the default, into target/debug) and Release
+# (`release`, into target/release). Tests and benches inherit them.
 #
-# Production: every stable rustc setting that trades build time for runtime
-# speed. Whole-program (fat) LTO over one codegen unit lets LLVM inline and
-# optimize across every crate, including GPUI and wgpu; panics abort instead
-# of unwinding (nothing in the product catches panics). Line tables are split
-# out of the shipped binary for symbolicated crash reports. The CPU baseline
-# lives in .cargo/config.toml so every build of a target shares it.
-[profile.production]
-inherits = "release"
+# Debug: the development loop's build, so it trades runtime speed for build
+# time. Dependencies (GPUI, wgpu, and the rest) build at opt-level 3: they are
+# compiled once and cached, and an unoptimized GPUI Editor renders at a small
+# fraction of its frame rate. The workspace's own crates, recompiled on every
+# change, build at opt-level 1. Line tables only, everywhere: backtraces name
+# file and line in every frame, and the Windows Editor stays small enough to
+# copy and start quickly (full debug info made it 530 MB).
+[profile.dev]
+opt-level = 1
+codegen-units = 16
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Release: every stable setting that trades build time for a faster, smaller
+# binary. Speed wins where the two conflict, so opt-level 3 rather than "s" or
+# "z". Whole-program (fat) LTO over one codegen unit lets LLVM inline and drop
+# dead code across every crate, including GPUI and wgpu. Panics abort instead
+# of unwinding, which also removes the unwind tables; the panic message still
+# names file and line, but `catch_unwind` (the Mermaid guard in editor-ui)
+# catches nothing. No debug info and no symbols. The CPU baseline (x86-64-v3)
+# lives in .cargo/config.toml.
+[profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-incremental = false
-debug-assertions = false
-overflow-checks = false
-debug = "line-tables-only"
-split-debuginfo = "packed"
-strip = "debuginfo"
-
-# Debug: the development loop's build, so it trades runtime speed for build
-# time. Dependencies (GPUI, wgpu, and the rest) stay at opt-level 3: they are
-# compiled once and cached, and an unoptimized GPUI Editor renders at a small
-# fraction of its frame rate. The workspace's own crates, recompiled on every
-# change, build at opt-level 1, which keeps them reasonably fast while cutting
-# most of LLVM's time over half a million lines. No whole-program LTO, Cargo's
-# default 16 codegen units per crate, and incremental compilation for Cargo
-# builds with a persistent target directory (`nix run .#dev` builds Debug that
-# way; Nix sandbox builds disable incremental). Debug adds debugging
-# facilities: debug assertions, overflow checks, full debug info (variables,
-# stepping) for the workspace's own crates and line tables for dependencies,
-# so backtraces and breakpoints reach every frame without linking gigabytes of
-# dependency type information. The Debug stage also enables the `debug-tools`
-# features (GPUI inspector).
-[profile.production-debug]
-inherits = "production"
-opt-level = 1
-incremental = true
-lto = false
-codegen-units = 16
-debug = "full"
-split-debuginfo = "off"
-strip = "none"
-debug-assertions = true
-overflow-checks = true
-
-[profile.production-debug.package."*"]
-opt-level = 3
-debug = "line-tables-only"
-
-# Payload integrity hashing covers every binary of a payload, several times
-# per install; unoptimized SHA-256 made that the slowest part of installer
-# tests and dev-profile tools. Optimizing only the hash crates keeps debug
-# builds of everything else unchanged.
-[profile.dev.package.sha2]
-opt-level = 3
-
-[profile.dev.package.digest]
-opt-level = 3
-
-[profile.dev.package.block-buffer]
-opt-level = 3
+debug = false
+strip = true
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
+# Pedantic lints advise; they don't block a build.
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"
 
 [workspace.metadata.gpui-fork]
 repository = "https://github.com/artisanstreet/gpui-ce"

@@ -1,0 +1,167 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "fc9df913-1d62-4473-a523-fc9a16bc6856",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
+            },
+            text: "ok",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "ok",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "ok",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25677,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 2,
+                output: 4,
+                reasoning: 0,
+                cache_read: 25675,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    25677,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.00025895,
+                ),
+            },
+        ),
+        SteerAccepted {
+            id: ItemId(
+                "steer-2",
+            ),
+        },
+        Item {
+            key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
+            },
+            text: "two",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "two",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "two",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 2,
+                output: 4,
+                reasoning: 0,
+                cache_read: 25675,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    27705,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.00025895,
+                ),
+            },
+        ),
+        Usage(
+            Usage {
+                input: 4,
+                output: 7,
+                reasoning: 0,
+                cache_read: 40780,
+                cache_write: Some(
+                    12598,
+                ),
+                context_used: Some(
+                    27705,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.0031902500000000004,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

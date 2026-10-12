@@ -1,2 +1,0 @@
-ALTER TABLE `orchestration_coordinators` ADD `policy_service_tier` text DEFAULT 'standard' NOT NULL;--> statement-breakpoint
-ALTER TABLE `orchestration_coordinators` ADD `policy_workflow_mode` text DEFAULT 'build' NOT NULL;

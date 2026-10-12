@@ -1,0 +1,46 @@
+---
+source: crates/forge-engines/src/account.rs
+expression: results
+---
+[
+    (
+        "claude",
+        (
+            Some(
+                "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=y",
+            ),
+            None,
+        ),
+    ),
+    (
+        "codex",
+        (
+            Some(
+                "https://auth.openai.com/codex/device",
+            ),
+            Some(
+                "QES3-C7POE",
+            ),
+        ),
+    ),
+    (
+        "grok",
+        (
+            Some(
+                "https://accounts.x.ai/oauth2/device?user_code=3XW5-WYV2",
+            ),
+            Some(
+                "3XW5-WYV2",
+            ),
+        ),
+    ),
+    (
+        "cursor",
+        (
+            Some(
+                "https://cursor.com/loginDeepControl?challenge=abc&uuid=def&mode=login",
+            ),
+            None,
+        ),
+    ),
+]

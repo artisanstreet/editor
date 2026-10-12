@@ -1,0 +1,91 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "fe47a460-b1e7-4cb7-995b-0daa410d4326",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Title {
+            title: "Ok",
+        },
+        Item {
+            key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
+            },
+            text: "ok",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "ok",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "ok",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25759,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 2,
+                output: 4,
+                reasoning: 0,
+                cache_read: 12050,
+                cache_write: Some(
+                    13707,
+                ),
+                context_used: Some(
+                    25759,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.0029875,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

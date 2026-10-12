@@ -1,0 +1,48 @@
+[package]
+name = "ae"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Artisan's host binary: CLI, installer and Forge (`ae forge serve`)."
+
+[[bin]]
+name = "ae"
+path = "src/main.rs"
+# Tests run the real binary from tests/ae.rs.
+test = false
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+base64.workspace = true
+clap.workspace = true
+ed25519-dalek.workspace = true
+flate2.workspace = true
+forge-engines = { path = "../forge-engines" }
+forge-http = { path = "../forge-http" }
+forge-store = { path = "../forge-store" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+base64.workspace = true
+ed25519-dalek.workspace = true
+flate2.workspace = true
+forge-http = { path = "../forge-http" }
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

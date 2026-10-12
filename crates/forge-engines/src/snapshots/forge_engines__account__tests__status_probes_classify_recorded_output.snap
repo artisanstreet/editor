@@ -1,0 +1,56 @@
+---
+source: crates/forge-engines/src/account.rs
+expression: results
+---
+[
+    (
+        "claude",
+        SignedIn {
+            account: Some(
+                "user@example.com",
+            ),
+        },
+    ),
+    (
+        "claude",
+        SignedOut,
+    ),
+    (
+        "claude",
+        Failed {
+            message: "Claude Code sign-in status is unavailable: error: unknown command 'auth'",
+        },
+    ),
+    (
+        "codex",
+        SignedIn {
+            account: None,
+        },
+    ),
+    (
+        "codex",
+        SignedOut,
+    ),
+    (
+        "grok",
+        SignedOut,
+    ),
+    (
+        "grok",
+        SignedIn {
+            account: None,
+        },
+    ),
+    (
+        "cursor",
+        SignedOut,
+    ),
+    (
+        "cursor",
+        SignedIn {
+            account: Some(
+                "user@example.com",
+            ),
+        },
+    ),
+]

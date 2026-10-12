@@ -1,0 +1,41 @@
+---
+source: crates/forge-engines/src/usage.rs
+expression: "[split, single,\ndisplay].iter().map(|r| parse_cursor_usage(r).unwrap()).collect::<Vec<_>>()"
+---
+[
+    [
+        UsageWindow {
+            label: "Cursor models",
+            used_percent: 40.0,
+            resets_at: Some(
+                1792000000000,
+            ),
+        },
+        UsageWindow {
+            label: "Other models",
+            used_percent: 10.0,
+            resets_at: Some(
+                1792000000000,
+            ),
+        },
+    ],
+    [
+        UsageWindow {
+            label: "Included usage",
+            used_percent: 50.0,
+            resets_at: None,
+        },
+        UsageWindow {
+            label: "On-demand",
+            used_percent: 25.0,
+            resets_at: None,
+        },
+    ],
+    [
+        UsageWindow {
+            label: "Included usage",
+            used_percent: 73.0,
+            resets_at: None,
+        },
+    ],
+]
