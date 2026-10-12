@@ -20,7 +20,7 @@ Fast
   they arrive, with syntax-highlighted code, math, images and diffs.
 
 Stay in control of a running agent
-  Steer a turn while it works, queue follow-ups, and approve or deny tool
+  Steer a turn while it works and approve or deny tool
   calls as they come in. Reasoning and tool work are shown as they happen,
   folded away once the turn settles.
 

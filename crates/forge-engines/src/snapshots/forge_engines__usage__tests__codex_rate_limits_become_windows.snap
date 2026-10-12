@@ -1,0 +1,29 @@
+---
+source: crates/forge-engines/src/usage.rs
+expression: "(parse_codex_limits(&recorded), parse_codex_limits(&two_slots))"
+---
+(
+    [
+        UsageWindow {
+            label: "Week",
+            used_percent: 2.0,
+            resets_at: Some(
+                1792296124000,
+            ),
+        },
+    ],
+    [
+        UsageWindow {
+            label: "GPT-5 (Session)",
+            used_percent: 42.5,
+            resets_at: Some(
+                1791720000000,
+            ),
+        },
+        UsageWindow {
+            label: "GPT-5 (Week)",
+            used_percent: 100.0,
+            resets_at: None,
+        },
+    ],
+)

@@ -1,0 +1,199 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "7ffd576e-1c4f-4678-a87d-94594ac08ada",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "toolu_01NQbVVgJK7uXnNKZTnpqcms",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch created.txt",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Create empty file created.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "toolu_01NQbVVgJK7uXnNKZTnpqcms",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch created.txt",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Create empty file created.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch created.txt",
+                            cwd: None,
+                        },
+                        reason: Some(
+                            "Create empty file created.txt",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25691,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_01NQbVVgJK7uXnNKZTnpqcms",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch created.txt",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Create empty file created.txt",
+                ),
+                output: Some(
+                    Output {
+                        head: "(Bash completed with no output)",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch created.txt",
+                            cwd: None,
+                        },
+                        reason: Some(
+                            "Create empty file created.txt",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+        Item {
+            key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
+            },
+            text: "done",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "done",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "done",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    27799,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 4,
+                output: 229,
+                reasoning: 145,
+                cache_read: 51378,
+                cache_write: Some(
+                    2108,
+                ),
+                context_used: Some(
+                    27799,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.0010502800000000002,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

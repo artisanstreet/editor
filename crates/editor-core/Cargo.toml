@@ -1,0 +1,28 @@
+[package]
+name = "editor-core"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "The Editor's Forge client: hosts, pairing, the connection to each Forge, the store of what Forge sent, and navigation."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+dirs.workspace = true
+futures.workspace = true
+gpui.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+statig.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+tracing.workspace = true
+
+[dev-dependencies]
+forge-http = { path = "../forge-http" }
+forge-store = { path = "../forge-store" }
+tempfile.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

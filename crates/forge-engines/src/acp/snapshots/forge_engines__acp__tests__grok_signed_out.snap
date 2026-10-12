@@ -1,0 +1,20 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+expression: "replay(Profile::Grok, \"signed-out\")"
+---
+[
+    Response {
+        method: "initialize",
+        result: Ok(
+            "protocolVersion,agentCapabilities,authMethods,_meta",
+        ),
+        sign_in: false,
+    },
+    Response {
+        method: "session/new",
+        result: Err(
+            "Authentication required: no auth method id provided",
+        ),
+        sign_in: true,
+    },
+]

@@ -1,0 +1,229 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 150
+expression: "replay(\"subagent\")"
+---
+[
+    Event(
+        Session {
+            id: "01a12bc9-c512-7a41-8647-94a48e90382e",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Response {
+        method: "turn/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Live {
+            target: Reasoning,
+            text: "**Inspecting tools for subagent availability**",
+            append: true,
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 3566,
+                output: 65,
+                reasoning: 24,
+                cache_read: 9984,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13615,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "**Clarifying process spawn and wait behavior**",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-5e0ef6fb-716e-4279-aa99-f71ae97d6627",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: "Reply with the word pong.",
+                prompt: None,
+                agent_id: None,
+                background: false,
+                result: None,
+                label: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0199c7bee5cc8400016acbb8cded648191b1622d22bbb762b5",
+            parent: Some(
+                "exec-5e0ef6fb-716e-4279-aa99-f71ae97d6627",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0199c7bee5cc8400016acbb8cded648191b1622d22bbb762b5",
+            },
+            text: "pong",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0199c7bee5cc8400016acbb8cded648191b1622d22bbb762b5",
+            parent: Some(
+                "exec-5e0ef6fb-716e-4279-aa99-f71ae97d6627",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: "pong",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 9601,
+                output: 70,
+                reasoning: 24,
+                cache_read: 19968,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13615,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "exec-5e0ef6fb-716e-4279-aa99-f71ae97d6627",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: None,
+                description: "Reply with the word pong.",
+                prompt: None,
+                agent_id: None,
+                background: false,
+                result: Some(
+                    "pong",
+                ),
+                label: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 19356,
+                output: 149,
+                reasoning: 36,
+                cache_read: 33024,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    22890,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_0ec659dbdea50c42016acbb8d0f3508191bb88f05b6ac28bfe",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0ec659dbdea50c42016acbb8d0f3508191bb88f05b6ac28bfe",
+            },
+            text: "pong",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0ec659dbdea50c42016acbb8d0f3508191bb88f05b6ac28bfe",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "pong",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 20082,
+                output: 154,
+                reasoning: 36,
+                cache_read: 55296,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    23003,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

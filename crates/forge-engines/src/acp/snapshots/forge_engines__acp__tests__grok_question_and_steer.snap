@@ -1,0 +1,319 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+expression: "replay(Profile::Grok, \"question-steer\")"
+---
+[
+    Response {
+        method: "initialize",
+        result: Ok(
+            "protocolVersion,agentCapabilities,authMethods",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Session {
+            id: "01a129d3-aeb7-7c31-8328-5b5ff65ce977",
+        },
+    ),
+    Response {
+        method: "session/new",
+        result: Ok(
+            "sessionId",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Item {
+            key: "question:1",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: false,
+                questions: [
+                    Question {
+                        id: "colour",
+                        header: Some(
+                            "Colour",
+                        ),
+                        text: "Colour",
+                        multi_select: false,
+                        options: [
+                            QuestionOption {
+                                label: "red",
+                                description: None,
+                            },
+                            QuestionOption {
+                                label: "blue",
+                                description: None,
+                            },
+                        ],
+                    },
+                    Question {
+                        id: "notes",
+                        header: None,
+                        text: "Anything else?",
+                        multi_select: false,
+                        options: [],
+                    },
+                ],
+                answers: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: [
+                    PlanStep {
+                        text: "Ask for the colour",
+                        status: Done,
+                    },
+                    PlanStep {
+                        text: "Write notes.txt",
+                        status: InProgress,
+                    },
+                ],
+                proposal: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "question:1",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: false,
+                questions: [
+                    Question {
+                        id: "colour",
+                        header: Some(
+                            "Colour",
+                        ),
+                        text: "Colour",
+                        multi_select: false,
+                        options: [
+                            QuestionOption {
+                                label: "red",
+                                description: None,
+                            },
+                            QuestionOption {
+                                label: "blue",
+                                description: None,
+                            },
+                        ],
+                    },
+                    Question {
+                        id: "notes",
+                        header: None,
+                        text: "Anything else?",
+                        multi_select: false,
+                        options: [],
+                    },
+                ],
+                answers: Some(
+                    [
+                        Some(
+                            [
+                                "blue",
+                            ],
+                        ),
+                        None,
+                    ],
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"action\":\"accept\",\"content\":{\"colour\":\"blue\"}}}",
+    ),
+    Event(
+        Item {
+            key: "message:m1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:m1",
+            },
+            text: "Writing the file now.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "message:m1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "Writing the file now.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_2",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Edit {
+                    changes: [
+                        FileChange {
+                            path: "/tmp/scratch/notes.txt",
+                            op: Add,
+                            diff: Some(
+                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                            ),
+                        },
+                    ],
+                },
+                title: Some(
+                    "Write notes.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_2",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Edit {
+                    changes: [
+                        FileChange {
+                            path: "/tmp/scratch/notes.txt",
+                            op: Add,
+                            diff: Some(
+                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                            ),
+                        },
+                    ],
+                },
+                title: Some(
+                    "Write notes.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_2",
+            parent: None,
+            status: Cancelled,
+            kind: Tool {
+                tool: Edit {
+                    changes: [
+                        FileChange {
+                            path: "/tmp/scratch/notes.txt",
+                            op: Add,
+                            diff: Some(
+                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                            ),
+                        },
+                    ],
+                },
+                title: Some(
+                    "Write notes.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            Cancelled,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"outcome\":{\"outcome\":\"cancelled\"}}}",
+    ),
+    Response {
+        method: "session/prompt",
+        result: Ok(
+            "stopReason",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Item {
+            key: "message:m2",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:m2",
+            },
+            text: "Red it is.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "message:m2",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "Red it is.",
+                phase: Final,
+            },
+        },
+    ),
+    Response {
+        method: "session/prompt",
+        result: Ok(
+            "stopReason",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Status {
+            key: "plan",
+            status: Done,
+        },
+    ),
+]

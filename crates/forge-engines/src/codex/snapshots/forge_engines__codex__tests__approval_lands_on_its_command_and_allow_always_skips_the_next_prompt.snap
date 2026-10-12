@@ -1,0 +1,349 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+expression: "replay(\"approval\")"
+---
+[
+    Event(
+        Session {
+            id: "01a129cf-53b1-7d63-92db-25c9281f4dfa",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Response {
+        method: "turn/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "msg_0afb52a7e8a41c07016acb372027bc8191b814b71bc355bc16",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0afb52a7e8a41c07016acb372027bc8191b814b71bc355bc16",
+            },
+            text: "I’ll run the two requested shell calls separately, requesting escalation for each.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0afb52a7e8a41c07016acb372027bc8191b814b71bc355bc16",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "I’ll run the two requested shell calls separately, requesting escalation for each.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch a.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I create a.txt in the workspace as requested?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch a.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I create a.txt in the workspace as requested?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            AllowAlways,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(0),
+            "result": Object {
+                "decision": String("acceptForSession"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: Some(
+                    0,
+                ),
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch a.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I create a.txt in the workspace as requested?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            AllowAlways,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4323,
+                output: 136,
+                reasoning: 17,
+                cache_read: 9984,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    14443,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "exec-fc0750ea-5fb6-4820-8300-d2658a83fcd0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-fc0750ea-5fb6-4820-8300-d2658a83fcd0",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch a.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4713,
+                output: 232,
+                reasoning: 17,
+                cache_read: 24064,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    14566,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_0afb52a7e8a41c07016acb37229f38819180080ededfefb0c8",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0afb52a7e8a41c07016acb37229f38819180080ededfefb0c8",
+            },
+            text: "done",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0afb52a7e8a41c07016acb37229f38819180080ededfefb0c8",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "done",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 5226,
+                output: 237,
+                reasoning: 17,
+                cache_read: 38144,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    14598,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

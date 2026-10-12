@@ -1,0 +1,170 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "4d2e38a1-9a5d-4509-ac0c-9015fcd1f22b",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "toolu_01JQgSreq3Vk1prBZpVMLz69",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "List files in current directory",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25696,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_01JQgSreq3Vk1prBZpVMLz69",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "List files in current directory",
+                ),
+                output: Some(
+                    Output {
+                        head: "notes.txt",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+        Item {
+            key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            },
+            text: "The current",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            },
+            text: " directory contains one",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            },
+            text: " file, `notes.txt",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            },
+            text: "`.",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "The current directory contains one file, `notes.txt`.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "The current directory contains one file, `notes.txt`.",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    27792,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 4,
+                output: 154,
+                reasoning: 61,
+                cache_read: 40336,
+                cache_write: Some(
+                    13148,
+                ),
+                context_used: Some(
+                    27792,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.0031103600000000004,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

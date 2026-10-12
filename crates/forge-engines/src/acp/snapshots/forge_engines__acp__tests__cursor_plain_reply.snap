@@ -1,0 +1,208 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+expression: "replay(Profile::Cursor, \"plain-reply\")"
+---
+[
+    Response {
+        method: "initialize",
+        result: Ok(
+            "protocolVersion,agentCapabilities,authMethods",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Session {
+            id: "6f1c2a7e-3d4b-4c55-9a1e-0b7d2f9c8e11",
+        },
+    ),
+    Event(
+        Model {
+            id: "composer-2.5",
+        },
+    ),
+    Response {
+        method: "session/new",
+        result: Ok(
+            "sessionId,modes,models,configOptions",
+        ),
+        sign_in: false,
+    },
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Read the README first.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "message:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:1",
+            },
+            text: "Let me ",
+            append: true,
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:1",
+            },
+            text: "look.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "message:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "Let me look.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_a",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Read {
+                    path: "/tmp/scratch/README.md",
+                    range: None,
+                },
+                title: Some(
+                    "Read README.md",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_a",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "/tmp/scratch/README.md",
+                    range: None,
+                },
+                title: Some(
+                    "Read README.md",
+                ),
+                output: Some(
+                    Output {
+                        head: "# Scratch\nA test directory.\n",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_b",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Search {
+                    pattern: "TODO",
+                    path: Some(
+                        "/tmp/scratch",
+                    ),
+                    mode: Grep,
+                },
+                title: Some(
+                    "grep \"TODO\"",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "tool_b",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Search {
+                    pattern: "TODO",
+                    path: Some(
+                        "/tmp/scratch",
+                    ),
+                    mode: Grep,
+                },
+                title: Some(
+                    "grep \"TODO\"",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "message:2",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "message:2",
+            },
+            text: "It says this is a test directory.",
+            append: true,
+        },
+    ),
+    Event(
+        Title {
+            title: "README summary",
+        },
+    ),
+    Event(
+        Item {
+            key: "message:2",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "It says this is a test directory.",
+                phase: Final,
+            },
+        },
+    ),
+    Response {
+        method: "session/prompt",
+        result: Ok(
+            "stopReason",
+        ),
+        sign_in: false,
+    },
+]

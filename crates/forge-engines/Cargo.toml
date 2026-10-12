@@ -1,0 +1,34 @@
+[package]
+name = "forge-engines"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Engine adapters: run Claude, Codex, OpenCode, Grok and Cursor and map their wiring onto artisan-api items."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+base64.workspace = true
+flate2.workspace = true
+fs2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+similar.workspace = true
+statig.workspace = true
+tar.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt", "time", "fs"] }
+tokio-util.workspace = true
+tracing.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net"] }
+
+[lints]
+workspace = true

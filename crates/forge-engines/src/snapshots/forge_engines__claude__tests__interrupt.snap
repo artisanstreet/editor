@@ -1,0 +1,86 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "cd440a1c-1f64-4371-a388-38c567c9625e",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "msg_011Cfv2ut3icUyuQGtTV3MU9:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2ut3icUyuQGtTV3MU9:0",
+            },
+            text: "#",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv2ut3icUyuQGtTV3MU9:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "#",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv2ut3icUyuQGtTV3MU9:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "#",
+                phase: Commentary,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25683,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    25683,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Cancelled,
+            error: None,
+        },
+    ),
+)

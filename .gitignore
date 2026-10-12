@@ -19,3 +19,4 @@ __pycache__/
 
 # Recorded protocol captures are test fixtures, not logs.
 !tests/fixtures/**/*.jsonl
+!crates/forge-engines/transcripts/**/*.jsonl

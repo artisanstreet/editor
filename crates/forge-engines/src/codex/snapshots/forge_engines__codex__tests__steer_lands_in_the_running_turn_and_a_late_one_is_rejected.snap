@@ -1,0 +1,217 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+expression: "replay(\"steer\")"
+---
+[
+    Event(
+        Session {
+            id: "01a129cf-6d6a-7172-bb27-e01ec3f435c5",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Response {
+        method: "turn/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Live {
+            target: Reasoning,
+            text: "**Planning initial shell command execution**",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_05100b27f8e118e6016acb372731208191a10f098f7f2a6986",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_05100b27f8e118e6016acb372731208191a10f098f7f2a6986",
+            },
+            text: "I’ll run the requested command now.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_05100b27f8e118e6016acb372731208191a10f098f7f2a6986",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "I’ll run the requested command now.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-5b7cc656-135a-49cc-a6c0-fbaf03cb6fb1",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 4",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Response {
+        method: "turn/steer",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Usage(
+            Usage {
+                input: 3554,
+                output: 88,
+                reasoning: 18,
+                cache_read: 9984,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13626,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "exec-5b7cc656-135a-49cc-a6c0-fbaf03cb6fb1",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 4",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4164,
+                output: 135,
+                reasoning: 32,
+                cache_read: 23040,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13713,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_05100b27f8e118e6016acb372c5134819186e146dd8fea8c4e",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_05100b27f8e118e6016acb372c5134819186e146dd8fea8c4e",
+            },
+            text: "done banana",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_05100b27f8e118e6016acb372c5134819186e146dd8fea8c4e",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "done banana",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4844,
+                output: 141,
+                reasoning: 32,
+                cache_read: 36096,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13742,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+    Response {
+        method: "turn/steer",
+        result: Err(
+            "no active turn to steer",
+        ),
+    },
+]

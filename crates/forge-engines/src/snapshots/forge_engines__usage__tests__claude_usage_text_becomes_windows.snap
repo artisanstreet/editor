@@ -1,0 +1,27 @@
+---
+source: crates/forge-engines/src/usage.rs
+expression: "parse_claude_usage(result, NOW)"
+---
+[
+    UsageWindow {
+        label: "Session",
+        used_percent: 3.0,
+        resets_at: Some(
+            1791719340000,
+        ),
+    },
+    UsageWindow {
+        label: "Week",
+        used_percent: 34.0,
+        resets_at: Some(
+            1791928740000,
+        ),
+    },
+    UsageWindow {
+        label: "Week (Fable)",
+        used_percent: 0.0,
+        resets_at: Some(
+            1791928800000,
+        ),
+    },
+]

@@ -1,1 +1,0 @@
-ALTER TABLE `session_model_defaults` ADD `service_tier` text;

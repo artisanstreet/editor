@@ -1,0 +1,367 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 503
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "8d966a0f-b135-4d40-8fd3-a04a54ddab42",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: "Slow job",
+                prompt: Some(
+                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                ),
+                agent_id: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: "Slow job",
+                prompt: Some(
+                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "msg_011CfxituuyHhuJ34hVTgMmv:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "LAUNCHED",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011CfxituuyHhuJ34hVTgMmv:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "LAUNCHED",
+                phase: Commentary,
+            },
+        },
+        Usage(
+            Usage {
+                input: 4,
+                output: 158,
+                reasoning: 0,
+                cache_read: 34648,
+                cache_write: Some(
+                    16011,
+                ),
+                context_used: None,
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.00362808,
+                ),
+            },
+        ),
+        Item {
+            key: "toolu_01VxsbM3h1iKz5DC6g9Qk9Wm",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 60 && echo finished",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Sleep 60 seconds then echo finished",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "toolu_01VxsbM3h1iKz5DC6g9Qk9Wm",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Failed,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 60 && echo finished",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Sleep 60 seconds then echo finished",
+                ),
+                output: Some(
+                    Output {
+                        head: "<tool_use_error>Blocked: sleep 60 followed by: echo finished. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "msg_011CfxitzkfjrbhPfvqF8wNm:1",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011CfxitzkfjrbhPfvqF8wNm:1",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "toolu_01CjjyYz3ZhPmREjmf2wBphq",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 60 && echo finished",
+                    cwd: None,
+                    background: true,
+                },
+                title: Some(
+                    "Sleep 60 seconds then echo finished",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "toolu_01CjjyYz3ZhPmREjmf2wBphq",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 60 && echo finished",
+                    cwd: None,
+                    background: true,
+                },
+                title: Some(
+                    "Sleep 60 seconds then echo finished",
+                ),
+                output: Some(
+                    Output {
+                        head: "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "msg_011CfxiuBTMqQR49na3cM2mH:1",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011CfxiuBTMqQR49na3cM2mH:1",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011CfxiuGbvLcAuCw1QCC5V7:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011CfxiuGbvLcAuCw1QCC5V7:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+                phase: Commentary,
+            },
+        },
+        Usage(
+            Usage {
+                input: 8,
+                output: 462,
+                reasoning: 244,
+                cache_read: 61245,
+                cache_write: Some(
+                    16562,
+                ),
+                context_used: None,
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.010881595,
+                ),
+            },
+        ),
+        Item {
+            key: "toolu_01CjjyYz3ZhPmREjmf2wBphq",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 60 && echo finished",
+                    cwd: None,
+                    background: true,
+                },
+                title: Some(
+                    "Sleep 60 seconds then echo finished",
+                ),
+                output: Some(
+                    Output {
+                        head: "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "msg_011Cfxiyc8mq8Nb8dqvBasGB:0",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Running,
+            kind: AssistantMessage {
+                text: "FINISHED",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfxiyc8mq8Nb8dqvBasGB:0",
+            parent: Some(
+                "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            ),
+            status: Done,
+            kind: AssistantMessage {
+                text: "FINISHED",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: None,
+                description: "Slow job",
+                prompt: Some(
+                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                background: true,
+                result: Some(
+                    "FINISHED",
+                ),
+                label: None,
+            },
+        },
+        Item {
+            key: "msg_011Cfxiyf2uXsZDzs6apBZ8y:0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfxiyf2uXsZDzs6apBZ8y:0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+                phase: Commentary,
+            },
+        },
+        Usage(
+            Usage {
+                input: 12,
+                output: 497,
+                reasoning: 244,
+                cache_read: 88393,
+                cache_write: Some(
+                    17306,
+                ),
+                context_used: None,
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.018828105,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

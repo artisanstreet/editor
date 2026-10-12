@@ -1,0 +1,20 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+expression: "replay(Profile::Cursor, \"signed-out\")"
+---
+[
+    Response {
+        method: "initialize",
+        result: Ok(
+            "protocolVersion,agentCapabilities,authMethods",
+        ),
+        sign_in: false,
+    },
+    Response {
+        method: "session/new",
+        result: Err(
+            "Authentication required. Please run 'agent login' first, then call authenticate() with methodId 'cursor_login'.",
+        ),
+        sign_in: true,
+    },
+]

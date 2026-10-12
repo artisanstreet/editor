@@ -1,0 +1,160 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+expression: "replay(\"command\")"
+---
+[
+    Event(
+        Session {
+            id: "01a12bc9-9151-7921-a2d6-1e7b08366259",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Response {
+        method: "turn/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Live {
+            target: Reasoning,
+            text: "**Planning single ls execution**",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-6d42e4a7-a958-49a1-8556-033875107f69",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-6d42e4a7-a958-49a1-8556-033875107f69",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        head: "notes.txt\nsrc\n",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 3555,
+                output: 68,
+                reasoning: 15,
+                cache_read: 9984,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13607,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_0ebe029d32f1a0cc016acbb8bd2950819192d0375269d22117",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0ebe029d32f1a0cc016acbb8bd2950819192d0375269d22117",
+            },
+            text: "2",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0ebe029d32f1a0cc016acbb8bd2950819192d0375269d22117",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "2",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4134,
+                output: 73,
+                reasoning: 15,
+                cache_read: 23040,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    13640,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

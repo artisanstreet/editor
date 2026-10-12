@@ -1,0 +1,292 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+expression: "replay(\"decline\")"
+---
+[
+    Event(
+        Session {
+            id: "01a12bc9-a98a-7e12-a482-d3917b3556c5",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Response {
+        method: "turn/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Live {
+            target: Reasoning,
+            text: "**Planning precise shell command usage**",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0ed5c64db33721b3016acbb8c1c1b087d286fec31de222db70",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0ed5c64db33721b3016acbb8c1c1b087d286fec31de222db70",
+            },
+            text: "I’m requesting permission to run the exact command `touch b.txt`.",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0ed5c64db33721b3016acbb8c1c1b087d286fec31de222db70",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "I’m requesting permission to run the exact command `touch b.txt`.",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch b.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch b.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch b.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I run the exact requested command `touch b.txt`?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            parent: None,
+            status: Declined,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch b.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch b.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I run the exact requested command `touch b.txt`?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            DenyOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(0),
+            "result": Object {
+                "decision": String("decline"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            parent: None,
+            status: Declined,
+            kind: Tool {
+                tool: Shell {
+                    command: "touch b.txt",
+                    cwd: Some(
+                        "/work",
+                    ),
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "touch b.txt",
+                            cwd: Some(
+                                "/work",
+                            ),
+                        },
+                        reason: Some(
+                            "May I run the exact requested command `touch b.txt`?",
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            DenyOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4297,
+                output: 107,
+                reasoning: 17,
+                cache_read: 9984,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    14388,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_0ed5c64db33721b3016acbb8c3e68087d29b8933ed2b24f92e",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_0ed5c64db33721b3016acbb8c3e68087d29b8933ed2b24f92e",
+            },
+            text: "declined",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_0ed5c64db33721b3016acbb8c3e68087d29b8933ed2b24f92e",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "declined",
+                phase: Final,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 4650,
+                output: 113,
+                reasoning: 17,
+                cache_read: 24064,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    14439,
+                ),
+                context_window: Some(
+                    258400,
+                ),
+                cost_usd: None,
+            },
+        ),
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

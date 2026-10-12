@@ -1,0 +1,196 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "e7a3c177-f775-44f0-9c15-85783e562093",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Item {
+            key: "toolu_01LJXXMs7UQjecrRiosLwZAA",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 3 && ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Wait 3 seconds then list files in current directory",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    25700,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Item {
+            key: "toolu_01LJXXMs7UQjecrRiosLwZAA",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "sleep 3 && ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "Wait 3 seconds then list files in current directory",
+                ),
+                output: Some(
+                    Output {
+                        head: "a.txt\ncreated.txt\nnotes.txt",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        SteerAccepted {
+            id: ItemId(
+                "steer-2",
+            ),
+        },
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+        Item {
+            key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: "The",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: " `ls` output show",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: "ed three files in the current directory",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: ": `a.txt`,",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: " `created.txt`, and",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: " `notes.txt`.",
+            append: true,
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            },
+            text: " banana",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    27916,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 4,
+                output: 388,
+                reasoning: 254,
+                cache_read: 40340,
+                cache_write: Some(
+                    13272,
+                ),
+                context_used: Some(
+                    27916,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.0032522,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

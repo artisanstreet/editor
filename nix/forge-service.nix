@@ -1,5 +1,10 @@
-# Opt-in only. Supply provisioned runtime credentials and the complete Forge
-# scheduler/listener policy; no secret bytes are evaluated into the store.
+# A Forge as a NixOS system service: `ae forge serve` with its data in
+# /var/lib/artisan-forge. Pair an Editor with it on the host:
+#
+#   sudo -u artisan-forge ae --data-dir /var/lib/artisan-forge forge pair --listen <reachable address>
+#
+# Forge makes its own TLS certificate in the data directory on first start;
+# no secret enters the Nix store.
 self:
 {
   config,
@@ -9,141 +14,83 @@ self:
 }:
 let
   cfg = config.services.artisan-forge;
-  credential = name: "/run/credentials/artisan-forge.service/${name}";
-  args = [
-    "--listen"
-    cfg.listenAddress
-    "--database"
-    "/var/lib/artisan-forge/forge.db"
-    "--custody"
-    "/var/lib/artisan-forge/custody"
-    "--ready-file"
-    "/run/artisan-forge/ready.json"
-    "--certificate-der"
-    (credential "certificate.der")
-    "--private-key-der"
-    (credential "private-key.der")
-    "--bootstrap-capability"
-    (credential "bootstrap")
-  ]
-  ++ lib.concatLists (
-    lib.mapAttrsToList (name: value: [
-      "--${name}"
-      (toString value)
-    ]) cfg.policy
-  );
-  requiredPolicy = [
-    "admission-timeout-ms"
-    "handshake-timeout-ms"
-    "request-timeout-ms"
-    "drain-timeout-ms"
-    "admission-capacity"
-    "requests-per-connection"
-    "native-run-claim-lease-ms"
-    "native-run-poll-interval-ms"
-    "native-run-retry-backoff-ms"
-    "native-run-shutdown-budget-ms"
-    "native-run-queue-capacity"
-    "native-run-max-command-retries"
-    "native-run-prompt-delivery"
-    "native-run-stream-after"
-  ];
+  port = lib.toInt (lib.last (lib.splitString ":" cfg.listenAddress));
 in
 {
   options.services.artisan-forge = {
-    enable = lib.mkEnableOption "the explicitly provisioned Artisan Forge service";
-    listenAddress = lib.mkOption {
-      type = lib.types.str;
-      default = "127.0.0.1:0";
-      description = "Explicit QUIC UDP listening address; configure a reachable interface for remote hosts.";
-    };
+    enable = lib.mkEnableOption "an Artisan Forge";
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.forge;
-      description = "Forge executable package.";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.ae;
+      defaultText = lib.literalExpression "artisan.packages.\${system}.ae";
+      description = "The package providing `ae`.";
     };
-    certificateFile = lib.mkOption {
+    listenAddress = lib.mkOption {
       type = lib.types.str;
-      description = "Absolute runtime path to leaf certificate DER (not a Nix path).";
+      default = "127.0.0.1:47900";
+      example = "0.0.0.0:47900";
+      description = "Address Forge listens on (HTTPS). Use a reachable interface for Editors on other machines.";
     };
-    privateKeyFile = lib.mkOption {
+    dataDir = lib.mkOption {
       type = lib.types.str;
-      description = "Absolute runtime path to PKCS#8 private key DER (not a Nix path).";
+      default = "/var/lib/artisan-forge";
+      description = "Forge's data: database, certificate, engine installs and homes.";
     };
-    bootstrapCapabilityFile = lib.mkOption {
-      type = lib.types.str;
-      description = "Absolute runtime path to the provisioned capability (not a Nix path).";
+    openFirewall = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Open the listen port in the firewall.";
     };
-    policy = lib.mkOption {
-      type = lib.types.attrsOf (lib.types.either lib.types.str lib.types.ints.unsigned);
-      description = "All Forge listener and native-run options, without the -- prefix. Required explicitly; no deployment defaults.";
-      example = {
-        admission-timeout-ms = 5000;
-        handshake-timeout-ms = 5000;
-        request-timeout-ms = 30000;
-        drain-timeout-ms = 5000;
-        admission-capacity = 32;
-        requests-per-connection = 32;
-        native-run-claim-lease-ms = 30000;
-        native-run-poll-interval-ms = 100;
-        native-run-retry-backoff-ms = 500;
-        native-run-shutdown-budget-ms = 5000;
-        native-run-queue-capacity = 32;
-        native-run-max-command-retries = 3;
-        native-run-prompt-delivery = "stdin";
-        native-run-stream-after = "0";
-      };
+    extraPackages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      description = "Tools the engines may run (git, bash and coreutils are always there).";
     };
   };
   config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion =
-          lib.sort builtins.lessThan (builtins.attrNames cfg.policy)
-          == lib.sort builtins.lessThan requiredPolicy;
-        message = "services.artisan-forge.policy must supply exactly every Forge listener/native-run option.";
-      }
-      {
-        assertion = builtins.all (path: lib.hasPrefix "/" path && !(lib.hasPrefix "/nix/store/" path)) [
-          cfg.certificateFile
-          cfg.privateKeyFile
-          cfg.bootstrapCapabilityFile
-        ];
-        message = "Forge credentials must be absolute runtime paths outside the Nix store.";
-      }
-    ];
     users.groups.artisan-forge = { };
     users.users.artisan-forge = {
       isSystemUser = true;
       group = "artisan-forge";
+      home = cfg.dataDir;
     };
+    environment.systemPackages = [ cfg.package ];
+    networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ port ];
     systemd.services.artisan-forge = {
       description = "Artisan Forge";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "network-online.target" ];
+      wants = [ "network-online.target" ];
       path = [
         pkgs.git
+        pkgs.bash
+        pkgs.coreutils
         pkgs.getent
-      ];
-      environment.HOME = "/var/lib/artisan-forge";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      ]
+      ++ cfg.extraPackages;
+      environment = {
+        HOME = cfg.dataDir;
+        ARTISAN_FORGE_DATA = cfg.dataDir;
+      };
       serviceConfig = {
-        ExecStart = lib.escapeShellArgs ([ "${cfg.package}/bin/forge" ] ++ args);
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe' cfg.package "ae")
+          "forge"
+          "serve"
+          "--listen"
+          cfg.listenAddress
+        ];
         User = "artisan-forge";
         Group = "artisan-forge";
-        StateDirectory = "artisan-forge";
+        StateDirectory = lib.mkIf (cfg.dataDir == "/var/lib/artisan-forge") "artisan-forge";
         StateDirectoryMode = "0700";
-        RuntimeDirectory = "artisan-forge";
-        RuntimeDirectoryMode = "0700";
-        LoadCredential = [
-          "certificate.der:${cfg.certificateFile}"
-          "private-key.der:${cfg.privateKeyFile}"
-          "bootstrap:${cfg.bootstrapCapabilityFile}"
-        ];
         UMask = "0077";
         Restart = "on-failure";
         RestartSec = 5;
+        TimeoutStopSec = 30;
         NoNewPrivileges = true;
         ProtectSystem = "strict";
+        ReadWritePaths = [ cfg.dataDir ];
         ProtectHome = true;
         PrivateTmp = true;
       };

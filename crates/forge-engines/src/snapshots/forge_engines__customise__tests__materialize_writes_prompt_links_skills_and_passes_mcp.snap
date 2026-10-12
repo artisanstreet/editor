@@ -1,0 +1,105 @@
+---
+source: crates/forge-engines/src/customise.rs
+expression: report
+---
+[
+    (
+        "claude",
+        Some(
+            (
+                ".claude/CLAUDE.md",
+                "Be brief.",
+                true,
+                [
+                    "deploy/",
+                    "mine/",
+                    "review -> data/extensions/skills/review",
+                ],
+            ),
+        ),
+        [
+            "--mcp-config",
+            "<root>/claude/.artisan/claude-mcp.json",
+        ],
+        [],
+        0,
+        Some(
+            "{\n  \"mcpServers\": {\n    \"files\": {\n      \"type\": \"stdio\",\n      \"command\": \"npx\",\n      \"args\": [\n        \"-y\",\n        \"@mcp/files\"\n      ],\n      \"env\": {\n        \"ROOT\": \"/srv \\\"x\\\"\"\n      }\n    },\n    \"docs.web\": {\n      \"type\": \"http\",\n      \"url\": \"https://mcp.example/docs\"\n    }\n  }\n}",
+        ),
+    ),
+    (
+        "codex",
+        Some(
+            (
+                ".codex/AGENTS.md",
+                "Be brief.",
+                true,
+                [
+                    "deploy/",
+                    "mine/",
+                    "review -> data/extensions/skills/review",
+                ],
+            ),
+        ),
+        [
+            "-c",
+            "mcp_servers.files={command=\"npx\",args=[\"-y\",\"@mcp/files\"],env={\"ROOT\"=\"/srv \\\"x\\\"\"}}",
+            "-c",
+            "mcp_servers.docs_web={url=\"https://mcp.example/docs\"}",
+        ],
+        [],
+        0,
+        None,
+    ),
+    (
+        "opencode",
+        Some(
+            (
+                "config/opencode/AGENTS.md",
+                "Be brief.",
+                true,
+                [
+                    "deploy/",
+                    "mine/",
+                    "review -> data/extensions/skills/review",
+                ],
+            ),
+        ),
+        [],
+        [
+            (
+                "OPENCODE_CONFIG_CONTENT",
+                "{\"mcp\":{\"files\":{\"type\":\"local\",\"command\":[\"npx\",\"-y\",\"@mcp/files\"],\"environment\":{\"ROOT\":\"/srv \\\"x\\\"\"},\"enabled\":true},\"docs.web\":{\"type\":\"remote\",\"url\":\"https://mcp.example/docs\",\"enabled\":true}}}",
+            ),
+        ],
+        0,
+        None,
+    ),
+    (
+        "grok",
+        Some(
+            (
+                ".grok/AGENTS.md",
+                "Be brief.",
+                true,
+                [
+                    "deploy/",
+                    "mine/",
+                    "review -> data/extensions/skills/review",
+                ],
+            ),
+        ),
+        [],
+        [],
+        2,
+        None,
+    ),
+    (
+        "cursor",
+        None,
+        [],
+        [],
+        2,
+        None,
+    ),
+]

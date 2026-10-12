@@ -1,0 +1,37 @@
+[package]
+name = "forge-http"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Forge's HTTPS API: mutual-TLS auth, JSON routes and the event stream."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api", features = ["tls"] }
+axum = { workspace = true }
+forge-engines = { path = "../forge-engines" }
+forge-runs = { path = "../forge-runs" }
+forge-store = { path = "../forge-store" }
+fs2.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["server", "server-auto", "http1", "http2", "service", "tokio"] }
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["net", "sync", "rt", "macros", "time", "fs", "io-util"] }
+tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+reqwest = { workspace = true, features = ["json"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

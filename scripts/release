@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Builds the release with Nix and signs it.
+#
+#   ARTISAN_RELEASE_SIGNING_KEY=<64 hex chars> scripts/release [<output dir>]
+#   ARTISAN_RELEASE_SIGNING_KEY_FILE=<file> scripts/release [<output dir>]
+#
+# The key is the raw 32-byte Ed25519 secret (hex) or a PKCS#8 PEM file; it
+# never enters the Nix store. The output directory (default
+# target/dist/<version>) receives release.json, release.json.sig (base64
+# Ed25519 signature of release.json's exact bytes, what
+# crates/ae/src/install/release.rs verifies), the archives and the bootstrap
+# installers: upload its files as the GitHub release's assets. The script
+# refuses a key whose public half is not the one `ae` is built with.
+# Needs nix and OpenSSL 3.
+set -euo pipefail
+
+root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml")"
+out="${1:-$root/target/dist/$version}"
+anchor="$(sed -n 's/^ *None => "\([0-9a-f]\{64\}\)",$/\1/p' "$root/crates/ae/src/install/release.rs")"
+[[ -n "$anchor" ]] || { echo "release: can't find the release key in crates/ae/src/install/release.rs" >&2; exit 1; }
+
+secrets="$(mktemp -d)"
+trap 'rm -rf "$secrets"' EXIT
+chmod 700 "$secrets"
+key="$secrets/key.pem"
+if [[ -n "${ARTISAN_RELEASE_SIGNING_KEY_FILE:-}" ]] && grep -q -- '-----BEGIN' "$ARTISAN_RELEASE_SIGNING_KEY_FILE"; then
+    cp "$ARTISAN_RELEASE_SIGNING_KEY_FILE" "$key"
+else
+    if [[ -n "${ARTISAN_RELEASE_SIGNING_KEY_FILE:-}" ]]; then
+        seed="$(tr -d ' \n\r' < "$ARTISAN_RELEASE_SIGNING_KEY_FILE")"
+    else
+        seed="${ARTISAN_RELEASE_SIGNING_KEY:?set ARTISAN_RELEASE_SIGNING_KEY or ARTISAN_RELEASE_SIGNING_KEY_FILE}"
+    fi
+    [[ "$seed" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "release: the signing key is not 64 hex characters" >&2; exit 1; }
+    # PKCS#8 wrapping of a raw Ed25519 secret (RFC 8410).
+    printf '%b' "$(printf '302e020100300506032b657004220420%s' "$seed" | sed 's/../\\x&/g')" > "$secrets/key.der"
+    openssl pkey -inform DER -in "$secrets/key.der" -out "$key"
+fi
+public="$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')"
+if [[ "$public" != "$anchor" ]]; then
+    echo "release: the signing key's public key $public is not the release key $anchor in crates/ae/src/install/release.rs" >&2
+    exit 1
+fi
+
+echo "Building release $version…"
+built="$(nice -n19 nix build --no-link --print-out-paths "$root#release")"
+mkdir -p "$out"
+rm -f "$out/release.json.sig"
+cp -f "$built"/* "$out/"
+chmod u+w "$out"/*
+
+openssl pkeyutl -sign -rawin -inkey "$key" -in "$out/release.json" -out "$secrets/signature"
+openssl pkeyutl -verify -rawin -pubin -inkey <(openssl pkey -in "$key" -pubout) \
+    -in "$out/release.json" -sigfile "$secrets/signature" > /dev/null
+base64 -w0 "$secrets/signature" > "$out/release.json.sig"
+echo "Signed release $version in $out:"
+ls -l "$out"

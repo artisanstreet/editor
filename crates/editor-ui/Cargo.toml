@@ -1,0 +1,27 @@
+[package]
+name = "editor-ui"
+edition.workspace = true
+license-file.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+editor-assets = { path = "../editor-assets" }
+editor-audio = { path = "../editor-audio" }
+base64.workspace = true
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] } # workspace-absent
+gpui.workspace = true
+image = { version = "=0.25.10", default-features = false } # workspace-absent
+mermaid-rs-renderer.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+syntect.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

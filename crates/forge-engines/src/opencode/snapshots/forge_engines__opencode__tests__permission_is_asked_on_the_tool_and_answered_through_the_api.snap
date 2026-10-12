@@ -1,0 +1,232 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+expression: "replay(\"permission\")"
+---
+[
+    Event(
+        Model {
+            id: "opencode/mimo-v2.6-flash-free",
+        },
+    ),
+    Event(
+        Item {
+            key: "call_3e600a814f3246509eace4e0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_3e600a814f3246509eace4e0",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "ls",
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_3e600a814f3246509eace4e0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "ls",
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Reply {
+            path: "/api/session/ses_ed62a3604ffejAaNU8xLLKCeqJ/permission/per_129d5dde1001QAGsPT25gHeIYH/reply",
+            body: Some(
+                Object {
+                    "reply": String("once"),
+                },
+            ),
+        },
+    ),
+    Event(
+        Item {
+            key: "call_3e600a814f3246509eace4e0",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: "ls",
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        head: "(no output)\nCommand exited with code 0.",
+                        tail: "",
+                        truncated_bytes: 0,
+                    },
+                ),
+                exit_code: Some(
+                    0,
+                ),
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: "ls",
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 273,
+                output: 19,
+                reasoning: 7,
+                cache_read: 2752,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    3025,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Text {
+                key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
+            },
+            text: "0",
+            append: true,
+        },
+    ),
+    Event(
+        Item {
+            key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "0",
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 333,
+                output: 22,
+                reasoning: 15,
+                cache_read: 5760,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    3068,
+                ),
+                context_window: None,
+                cost_usd: Some(
+                    0.0,
+                ),
+            },
+        ),
+    ),
+    Event(
+        Item {
+            key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "0",
+                phase: Final,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+]

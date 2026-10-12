@@ -1,0 +1,168 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "9960a959-3ccd-4d29-b38b-4bbda75dd628",
+        },
+        Model {
+            id: "claude-haiku-5-5",
+        },
+        Live {
+            target: Reasoning,
+            text: "",
+            append: false,
+        },
+        Live {
+            target: Reasoning,
+            text: "17",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "*",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "23",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: ":",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: " bre",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "aking it into 17*20",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "=",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "340 ",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "and 17*3=51 ",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "gives 391. Just",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: " need to",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: " answ",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "er with the",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: " number.",
+            append: true,
+        },
+        Live {
+            target: Reasoning,
+            text: "\n\n",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv3DPN3ecmaxwBBJFUqr:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "",
+                phase: Commentary,
+            },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv3DPN3ecmaxwBBJFUqr:1",
+            },
+            text: "391",
+            append: true,
+        },
+        Item {
+            key: "msg_011Cfv3DPN3ecmaxwBBJFUqr:1",
+            parent: None,
+            status: Running,
+            kind: AssistantMessage {
+                text: "391",
+                phase: Commentary,
+            },
+        },
+        Item {
+            key: "msg_011Cfv3DPN3ecmaxwBBJFUqr:1",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: "391",
+                phase: Final,
+            },
+        },
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: None,
+                context_used: Some(
+                    27422,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+        Usage(
+            Usage {
+                input: 2,
+                output: 104,
+                reasoning: 101,
+                cache_read: 14642,
+                cache_write: Some(
+                    12778,
+                ),
+                context_used: Some(
+                    27422,
+                ),
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    0.00275422,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

@@ -1,0 +1,13 @@
+{"dir":"note","text":"synthesized: the Grok engine home is signed out, so no prompt could run. Handshake follows grok/signed-out.jsonl; updates follow the ACP spec and the old adapter"}
+{"dir":"out","line":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"elicitation":{"form":{}}},"clientInfo":{"name":"Artisan","version":"0.1.0"}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":false,"audio":false,"embeddedContext":true},"mcpCapabilities":{"http":true,"sse":true}},"authMethods":[{"id":"grok.com","name":"Grok","description":"Sign in with Grok"}]}}}
+{"dir":"out","line":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp/scratch","mcpServers":[]}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"_x.ai/session/setup","params":{"method":"session/new","phase":"auth","sessionId":null}}}
+{"dir":"in","line":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","models":{"currentModelId":"grok-4.5","availableModels":[{"modelId":"grok-4.5","name":"Grok 4.5"}]}}}}
+{"dir":"out","line":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","prompt":[{"type":"text","text":"Reply with the word ok"}]}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"The user wants a one-word reply."},"messageId":"t1"}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"o"},"messageId":"m1"}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"k"},"messageId":"m1"}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","update":{"sessionUpdate":"session_info_update","title":"Reply with ok"}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"01a129d3-aeb7-7c31-8328-5b5ff65ce977","update":{"sessionUpdate":"usage_update","used":9120,"size":500000}}}}
+{"dir":"in","line":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn","usage":{"inputTokens":9100,"outputTokens":20,"thoughtTokens":12,"cachedReadTokens":8800,"totalTokens":9132}}}}
