@@ -1,39 +1,37 @@
 //! One native transcript row and its immutable Item model.
-//! Prepared prose and literal bodies publish independent native leaves.
-//! A row builds only its own visible content; the native list owns measurement.
+//! Text rows draw the body the conversation prepared for them; a row
+//! builds only its own visible content; the native list owns measurement.
 
 mod presenters;
 use presenters::{Action, Actions};
 
 use crate::Conversation;
 use crate::activity;
-use crate::content::{SourceField, SourceOwners, StoredText};
-use crate::fold::{PlainSection, Row, RunSummary, Slot, TextSection};
+use crate::body::{Body, Full, Markdown, Plain, TextBody};
+use crate::content::{SourceOwners, StoredText};
+use crate::disclosure::RowDisclosure;
+use crate::fold::{PlainSection, Row, RunSummary, Slot};
 use crate::motion::{
-    CompactionPhase, WorkMotion, eased, header_entering, phrase_or_text, tabular_figures,
-    with_entrance,
+    CompactionPhase, RevealQueue, WorkMotion, eased, header_entering, phrase_or_text,
+    tabular_figures, with_entrance,
 };
 use crate::phase::{self, Phase};
-use crate::source_actions::{CopySource, copy_action};
+use crate::source_actions::copy_action;
 use crate::thread::ItemUi;
-use artisan_api::{
-    BlobHash, Item, ItemId, ItemKind, LiveTarget, RunId, Status, TextContent, Timestamp,
-};
+use artisan_api::{BlobHash, Item, ItemId, ItemKind, LiveTarget, RunId, Status, Timestamp};
 use editor_ui::AssetId;
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::chat_bubble::{ChatBubbleSegment, SegmentPosition};
 use editor_ui::inline_code_text::inline_runs;
-use editor_ui::markdown_renderer::{MarkdownBodyTone, MarkdownRenderer, PreparedReveal};
+use editor_ui::markdown_renderer::{MarkdownRenderer, PreparedReveal};
 use editor_ui::motion::{MotionCurve, MotionPolicy};
-use editor_ui::selectable_text::{
-    SelectableText, SelectionLeaf, SelectionSource, register_selection_source,
-};
+use editor_ui::selectable_text::{SelectableText, register_selection_source};
 use editor_ui::shimmer_text::{ShimmerText, ShimmerTiming, ShimmerTone};
 use editor_ui::theme::{ArtisanTheme, ProseTypography, RadiusStep, RadiusTokens};
 use gpui::{
-    AnyElement, App, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px, svg,
+    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px, svg,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -53,123 +51,22 @@ const LIVE_OUTPUT_TAIL: usize = 8 * 1024;
 
 pub(crate) use editor_core::BlobImage as Blob;
 
-/// What every row shares: renderer, theme, the conversation it sends
-/// actions to, and per-body source state keyed by item and [`Slot`]. The
-/// conversation owns it and prunes it as items and rows go; rows read it
-/// and fill the preparation caches as they first paint a body.
-pub(crate) struct Shared {
-    pub markdown: Rc<MarkdownRenderer>,
-    pub reveal_queue: RefCell<crate::motion::RevealQueue>,
-    pub prose_arrivals: RefCell<HashMap<ItemId, crate::motion::LiveBlockArrivals>>,
-    pub row_heights: RefCell<HashMap<crate::fold::RowKey, gpui::Pixels>>,
-    pub disclosure_clips: RefCell<HashMap<crate::fold::RowKey, crate::disclosure::RowClip>>,
-    pub disclosure_hidden: RefCell<std::collections::HashSet<ItemId>>,
-    pub disclosure_fractions: RefCell<HashMap<crate::fold::RowKey, f32>>,
+/// What a row is drawn with, fixed when it is made: the theme, where its
+/// actions go, the renderer that draws prepared text, and the reveal order
+/// rows take turns in.
+#[derive(Clone)]
+pub(crate) struct RowEnv {
     pub theme: ArtisanTheme,
     pub conversation: WeakEntity<Conversation>,
-    /// Immutable body revisions shared by every block row of an Item.
-    pub sources: RefCell<HashMap<BodyKey, (artisan_api::Seq, Arc<str>)>>,
-    pub stored_sources: RefCell<HashMap<BodyKey, editor_ui::markdown_renderer::StoredSource>>,
-    pub prose_shapes: RefCell<HashMap<ItemId, (usize, u64)>>,
-    pub selection_scope: RefCell<SharedString>,
-    pub agent_scope: Cell<bool>,
-    pub plain_sources: RefCell<HashMap<BodyKey, PlainBody>>,
-    pub native_windows: RefCell<HashMap<crate::fold::RowKey, NativeBodyWindow>>,
-    pub source_frontiers: RefCell<HashMap<BodyKey, SourceFrontier>>,
-    pub literal_sources: RefCell<HashMap<(ItemId, Slot, usize), LiteralSelection>>,
-}
-
-/// One text body of one item.
-pub(crate) type BodyKey = (ItemId, Slot);
-/// The source a stored body's page moved for, the row at the top of the
-/// view then, and whether it moved toward the end: a page change must not
-/// undo itself while that row stays on top.
-pub(crate) type SourceFrontier = (artisan_api::ContentRef, crate::fold::RowKey, bool);
-
-pub(crate) const NATIVE_BODY_WINDOW: usize = 64;
-pub(crate) struct NativeBodyWindow {
-    pub reference: artisan_api::ContentRef,
-    pub range: std::ops::Range<usize>,
-    pub width: gpui::Pixels,
-    pub font_size: gpui::Pixels,
-    pub runs: Arc<[gpui::TextRun]>,
-    pub count: usize,
-    pub window: std::ops::Range<usize>,
-    pub frontier: Option<(crate::fold::RowKey, bool)>,
-    pub painted: std::collections::HashSet<usize>,
-    pub error: Option<String>,
-}
-pub(crate) struct LiteralSelection {
-    pub leaf: Arc<editor_ui::markdown_renderer::LiteralLeaf>,
-    pub source: Rc<SelectionSource>,
-    pub visible: SharedString,
-}
-
-pub(crate) struct PlainBody {
-    pub seq: artisan_api::Seq,
-    pub chunks: Vec<SharedString>,
-    pub source: Rc<SelectionSource>,
-}
-impl Shared {
-    pub(crate) fn prepare_plain(&self, item: &Item, section: PlainSection) -> usize {
-        let Some(text) = section.inline_text(item) else {
-            return 1;
-        };
-        let mut sources = self.plain_sources.borrow_mut();
-        let key = (item.id.clone(), section.slot());
-        if let Some(body) = sources.get_mut(&key)
-            && (body.seq == item.seq
-                || body
-                    .chunks
-                    .iter()
-                    .flat_map(|chunk| chunk.as_bytes().iter().copied())
-                    .eq(text.bytes()))
-        {
-            body.seq = item.seq;
-            return body.chunks.len();
-        }
-        {
-            let text: SharedString = text.to_owned().into();
-            let chunks: Vec<SharedString> = crate::fold::plain_ranges(&text)
-                .into_iter()
-                .map(|range| text[range].to_owned().into())
-                .collect();
-            let mut owner =
-                crate::fold::selection_order(self.agent_scope.get(), item.position, section.slot());
-            owner.push(section.order());
-            let source = SelectionSource::new(
-                self.selection_scope.borrow().clone(),
-                owner,
-                chunks
-                    .iter()
-                    .enumerate()
-                    .map(|(block, text)| SelectionLeaf {
-                        order: {
-                            let mut order = crate::fold::selection_order(
-                                self.agent_scope.get(),
-                                item.position,
-                                section.slot(),
-                            );
-                            order.extend([section.order(), block as u64]);
-                            order
-                        },
-                        text: text.clone(),
-                        separator: if block == 0 { "\n\n" } else { "" },
-                        copies: Rc::from([]),
-                    })
-                    .collect(),
-            );
-            sources.insert(
-                key.clone(),
-                PlainBody {
-                    seq: item.seq,
-                    chunks,
-                    source,
-                },
-            );
-        }
-        sources[&key].chunks.len()
-    }
+    pub markdown: Rc<MarkdownRenderer>,
+    /// Fresh rows reveal in transcript order: each holds while an earlier
+    /// one still settles. Rows check in as they draw.
+    pub reveal: Rc<RefCell<RevealQueue>>,
+    /// The selection document of the thread or agent shown.
+    pub scope: SharedString,
+    /// An agent's view orders its task and report around its work.
+    pub agent_scope: bool,
+    pub host: Option<WeakEntity<editor_core::HostData>>,
 }
 
 pub(crate) struct RowModel {
@@ -183,454 +80,20 @@ pub(crate) struct RowModel {
     pub agents: Arc<HashMap<ItemId, String>>,
     pub images: HashMap<BlobHash, Blob>,
     pub now: Timestamp,
-    /// Space above the row: the transcript rhythm (see `fold::gaps`).
+    /// Space above the row: the transcript rhythm (see `fold::gap`).
     pub gap: f32,
     /// Space below the row: the end space under the last row, else zero.
     pub end: f32,
-}
-
-#[derive(IntoElement)]
-struct PlainText {
-    source: Rc<SelectionSource>,
-    text: SharedString,
-    key: SharedString,
-    scope: SharedString,
-    order: Vec<u64>,
-    theme: ArtisanTheme,
-}
-impl RenderOnce for PlainText {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        register_selection_source(&self.source, window, cx);
-        SelectableText::retained(self.key, self.text, self.theme, Vec::new())
-            .selection_scope(self.scope)
-            .selection_order(self.order, "\n\n")
-    }
-}
-
-/// Lightweight deferred element; parsing and normalization stay on the renderer worker.
-#[derive(IntoElement)]
-struct PreparedText {
-    shared: Rc<Shared>,
-    source: Arc<str>,
-    key: SharedString,
-    order: Vec<u64>,
-    blocks: std::ops::Range<usize>,
-    tone: MarkdownBodyTone,
-}
-impl RenderOnce for PreparedText {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let source = self.source.clone();
-        let conversation = self.shared.conversation.clone();
-        let preparation =
-            self.shared
-                .markdown
-                .prepare_source(self.key.clone(), self.source, cx, move |cx| {
-                    let _ = conversation.update(cx, Conversation::reexpand);
-                });
-        let prepared = match preparation {
-            editor_ui::markdown_renderer::MarkdownPreparation::Ready(prepared) => Some(prepared),
-            editor_ui::markdown_renderer::MarkdownPreparation::Pending => {
-                self.shared.markdown.prepared_source(&self.key)
-            }
-            editor_ui::markdown_renderer::MarkdownPreparation::Failed(error) => {
-                return div()
-                    .child(error)
-                    .child(copy_action(
-                        format!("copy-full-{}", self.key),
-                        self.shared.theme,
-                        CopySource::Text(source),
-                    ))
-                    .into_any_element();
-            }
-        };
-        let Some(prepared) = prepared else {
-            return div()
-                .debug_selector(|| "text-loading".to_owned())
-                .child("Loading content…")
-                .into_any_element();
-        };
-        self.shared.markdown.set_selection_prefix(self.order);
-        let end = self.blocks.end.min(prepared.block_count());
-        let preview = prepared.is_preview() && end >= prepared.block_count();
-        let copy_key = format!("copy-full-{}", self.key);
-        let content = self.shared.markdown.render_prepared_range(
-            &prepared,
-            self.blocks.start.min(end)..end,
-            self.shared.theme,
-            self.key,
-            self.tone,
-        );
-        div()
-            .w_full()
-            .child(content)
-            .when(preview, |root| {
-                root.child(copy_action(
-                    copy_key,
-                    self.shared.theme,
-                    CopySource::Text(source),
-                ))
-            })
-            .into_any_element()
-    }
-}
-
-/// A native semantic row fetches only its indexed immutable source leaf.
-#[derive(IntoElement)]
-struct StoredPreparedText {
-    shared: Rc<Shared>,
-    source: artisan_api::ContentRef,
-    host: Option<WeakEntity<editor_core::HostData>>,
-    owners: SourceOwners,
-    id: ItemId,
-    slot: Slot,
-    order: Vec<u64>,
-    block: usize,
-    tone: MarkdownBodyTone,
-    literal: Option<PlainSection>,
-    visual: Option<usize>,
-    reveal: Option<Rc<PreparedReveal>>,
-    queue_key: Option<crate::fold::RowKey>,
-}
-impl RenderOnce for StoredPreparedText {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let Some(host) = self.host.clone().and_then(|host| host.upgrade()) else {
-            if let Some(reveal) = &self.reveal {
-                reveal.mark_presented();
-            }
-            return div()
-                .child("This Forge is no longer connected.")
-                .into_any_element();
-        };
-        let index_client = host.read(cx).client.clone();
-        let index_fetcher: editor_ui::markdown_renderer::MarkdownSourceIndexFetch =
-            Arc::new(move |reference, format, offset, limit| {
-                let client = index_client.clone();
-                Box::pin(async move {
-                    client
-                        .source_index_range(&reference, format, offset, limit)
-                        .await
-                        .map_err(|error| error.to_string())
-                })
-            });
-        let client = host.read(cx).client.clone();
-        let fetcher: editor_ui::markdown_renderer::MarkdownContentFetch =
-            Arc::new(move |reference, offset, limit| {
-                let client = client.clone();
-                Box::pin(async move {
-                    client
-                        .content_range(&reference, offset, limit)
-                        .await
-                        .map_err(|error| error.to_string())
-                })
-            });
-        let key: SharedString = format!("{}:{}:index", self.id, self.slot).into();
-        let owner = self.shared.conversation.clone();
-        // Keep the requested page as the source owner; bootstrap only once.
-        // Calling prepare(None) on every row would reset an older page to the tail.
-        let format = if self.literal.is_some() {
-            artisan_api::SourceIndexFormat::Literal
-        } else {
-            artisan_api::SourceIndexFormat::Markdown
-        };
-        let current = self
-            .shared
-            .stored_sources
-            .borrow()
-            .get(&(self.id.clone(), self.slot))
-            .cloned()
-            .filter(|source| source.source_ref() == &self.source && source.format() == format);
-        let indexed = current.map_or_else(
-            || {
-                self.shared.markdown.prepare_stored_source(
-                    key,
-                    self.source.clone(),
-                    format,
-                    fetcher,
-                    index_fetcher,
-                    cx,
-                    move |cx| {
-                        let _ = owner.update(cx, Conversation::reexpand);
-                    },
-                )
-            },
-            editor_ui::markdown_renderer::StoredPreparation::Ready,
-        );
-        let index = match indexed {
-            editor_ui::markdown_renderer::StoredPreparation::Ready(source) => source,
-            editor_ui::markdown_renderer::StoredPreparation::Pending => {
-                return div()
-                    .debug_selector(|| "text-loading".to_owned())
-                    .child("Loading formatted content…")
-                    .into_any_element();
-            }
-            editor_ui::markdown_renderer::StoredPreparation::Failed(error) => {
-                if let Some(reveal) = &self.reveal {
-                    reveal.mark_presented();
-                }
-                return div()
-                    .child(error)
-                    .child(StoredText {
-                        host: Some(host.downgrade()),
-                        source: self.source.clone(),
-                        theme: self.shared.theme,
-                        key: (self.id.clone(), SourceField::of_slot(self.slot)),
-                        owners: self.owners.clone(),
-                    })
-                    .into_any_element();
-            }
-        };
-        let changed = self
-            .shared
-            .stored_sources
-            .borrow_mut()
-            .insert((self.id.clone(), self.slot), index.clone())
-            .is_none_or(|old| {
-                old.source_ref() != index.source_ref() || old.revision() != index.revision()
-            });
-        if changed {
-            let owner = self.shared.conversation.clone();
-            cx.defer(move |cx| {
-                let _ = owner.update(cx, Conversation::reexpand);
-            });
-        }
-        if self.block >= index.block_count() {
-            return div()
-                .child("Content layout is updating…")
-                .into_any_element();
-        }
-        let key: SharedString = format!("{}:{}:leaf:{}", self.id, self.slot, self.block).into();
-        let owner = self.shared.conversation.clone();
-        let id = self.id.clone();
-        let slot = self.slot;
-        let block = self.block;
-        if let Some(section) = self.literal {
-            let prepared = self.shared.markdown.prepare_stored_literal_leaf(
-                key.clone(),
-                &index,
-                self.block,
-                cx,
-                move |cx| {
-                    let _ =
-                        owner.update(cx, |this, cx| this.source_leaf_ready(&id, slot, block, cx));
-                },
-            );
-            let leaf = match prepared {
-                editor_ui::markdown_renderer::LiteralPreparation::Ready(leaf) => leaf,
-                editor_ui::markdown_renderer::LiteralPreparation::Pending => {
-                    return div()
-                        .debug_selector(|| "text-loading".to_owned())
-                        .child("Loading content…")
-                        .into_any_element();
-                }
-                editor_ui::markdown_renderer::LiteralPreparation::Failed(error) => {
-                    return div()
-                        .child(error)
-                        .child(StoredText {
-                            host: Some(host.downgrade()),
-                            source: self.source.clone(),
-                            theme: self.shared.theme,
-                            key: (self.id.clone(), SourceField::Plain(section)),
-                            owners: self.owners.clone(),
-                        })
-                        .into_any_element();
-                }
-            };
-            let mut order = self.order;
-            order.extend([section.order(), self.block as u64]);
-            let scope = self.shared.selection_scope.borrow().clone();
-            let separator = if self.block == 0 { "\n\n" } else { "" };
-            let (source, visible) = {
-                let mut sources = self.shared.literal_sources.borrow_mut();
-                let entry = sources
-                    .entry((self.id.clone(), self.slot, self.block))
-                    .or_insert_with(|| LiteralSelection {
-                        leaf: leaf.clone(),
-                        visible: leaf
-                            .text
-                            .strip_suffix('\n')
-                            .map_or_else(|| leaf.text.clone(), |text| text.to_owned().into()),
-                        source: SelectionSource::new(
-                            scope.clone(),
-                            order.clone(),
-                            vec![SelectionLeaf {
-                                order: order.clone(),
-                                text: leaf.text.clone(),
-                                separator,
-                                copies: Rc::from([]),
-                            }],
-                        ),
-                    });
-                if entry.leaf.source_ref != leaf.source_ref
-                    || entry.leaf.source_range != leaf.source_range
-                {
-                    *entry = LiteralSelection {
-                        leaf: leaf.clone(),
-                        visible: leaf
-                            .text
-                            .strip_suffix('\n')
-                            .map_or_else(|| leaf.text.clone(), |text| text.to_owned().into()),
-                        source: SelectionSource::new(
-                            scope.clone(),
-                            order.clone(),
-                            vec![SelectionLeaf {
-                                order: order.clone(),
-                                text: leaf.text.clone(),
-                                separator,
-                                copies: Rc::from([]),
-                            }],
-                        ),
-                    };
-                }
-                (entry.source.clone(), entry.visible.clone())
-            };
-            register_selection_source(&source, window, cx);
-            // The source registry retains the exact raw LF; it separates this
-            // native row from the next. Painting that LF as an extra empty
-            // physical line would double the transcript's line spacing.
-            let visible_range = 0..visible.len();
-            let selectable = SelectableText::retained(
-                format!("{key}:native:{}", self.visual.unwrap_or(0)),
-                visible.clone(),
-                self.shared.theme,
-                Vec::new(),
-            )
-            .source_slice(visible_range)
-            .selection_scope(scope)
-            .selection_order(order, separator);
-            if visible.len() <= editor_ui::selectable_text::MAX_NATIVE_SOURCE {
-                return selectable.into_any_element();
-            }
-            let base = Row::PlainBlock {
-                id: self.id.clone(),
-                section,
-                block: self.block,
-            };
-            let base_key = base.key();
-            let window = self
-                .shared
-                .native_windows
-                .borrow()
-                .get(&base_key)
-                .map_or(0..NATIVE_BODY_WINDOW, |state| state.window.clone());
-            let visual = self.visual.unwrap_or(0);
-            let notify_owner = self.shared.conversation.clone();
-            let layout_owner = self.shared.conversation.clone();
-            let paint_owner = self.shared.conversation.clone();
-            let failure_owner = self.shared.conversation.clone();
-            let layout_base = base.clone();
-            let paint_base = base.clone();
-            let layout_leaf = leaf.clone();
-            let paint_leaf = leaf.clone();
-            let failed_leaf = leaf.clone();
-            let renderer = self.shared.markdown.clone();
-            return selectable
-                .native_window(
-                    renderer,
-                    key,
-                    visual,
-                    window,
-                    editor_ui::selectable_text::NativeWindowEvents {
-                        notify: Rc::new(move |cx| {
-                            let _ = notify_owner.update(cx, |this, cx| {
-                                this.source_leaf_ready(&self.id, self.slot, self.block, cx);
-                            });
-                        }),
-                        layout_ready: Rc::new(move |ready, cx| {
-                            let _ = layout_owner.update(cx, |this, cx| {
-                                this.native_body_ready(
-                                    &layout_base,
-                                    &layout_leaf,
-                                    ready,
-                                    false,
-                                    cx,
-                                );
-                            });
-                        }),
-                        ready: Rc::new(move |ready, cx| {
-                            let _ = paint_owner.update(cx, |this, cx| {
-                                this.native_body_ready(&paint_base, &paint_leaf, ready, true, cx);
-                            });
-                        }),
-                    },
-                )
-                .native_failure_handler(Rc::new(move |error, cx| {
-                    let _ = failure_owner.update(cx, |this, cx| {
-                        this.native_body_failed(&base, &failed_leaf, error, cx)
-                    });
-                }))
-                .into_any_element();
-        }
-        let prepared = self.shared.markdown.prepare_stored_leaf(
-            key.clone(),
-            &index,
-            self.block,
-            cx,
-            move |cx| {
-                let _ = owner.update(cx, |this, cx| this.source_leaf_ready(&id, slot, block, cx));
-            },
-        );
-        let prepared = match prepared {
-            editor_ui::markdown_renderer::MarkdownPreparation::Ready(prepared) => prepared,
-            editor_ui::markdown_renderer::MarkdownPreparation::Pending => {
-                return div()
-                    .debug_selector(|| "text-loading".to_owned())
-                    .child("Loading content…")
-                    .into_any_element();
-            }
-            editor_ui::markdown_renderer::MarkdownPreparation::Failed(error) => {
-                if let Some(reveal) = &self.reveal {
-                    reveal.mark_presented();
-                }
-                return div()
-                    .child(error)
-                    .child(StoredText {
-                        host: Some(host.downgrade()),
-                        source: self.source.clone(),
-                        theme: self.shared.theme,
-                        key: (self.id.clone(), SourceField::of_slot(self.slot)),
-                        owners: self.owners.clone(),
-                    })
-                    .into_any_element();
-            }
-        };
-        let mut order = self.order;
-        order.push(self.block as u64);
-        self.shared.markdown.set_selection_prefix(order);
-        if let Some(reveal) = &self.reveal {
-            let content = self.shared.markdown.render_prepared_revealing_range(
-                &prepared,
-                0..prepared.block_count(),
-                self.shared.theme,
-                key,
-                self.tone,
-                reveal,
-            );
-            if reveal.is_animating() {
-                window.request_animation_frame();
-            }
-            if let Some(key) = &self.queue_key {
-                self.shared
-                    .reveal_queue
-                    .borrow_mut()
-                    .finish(key, reveal.is_settling());
-            }
-            content
-        } else {
-            self.shared.markdown.render_prepared_range(
-                &prepared,
-                0..prepared.block_count(),
-                self.shared.theme,
-                key,
-                self.tone,
-            )
-        }
-    }
+    /// The text the row shows, as the conversation prepared it.
+    pub text: Option<TextBody>,
 }
 
 pub(crate) struct RowView {
     model: RowModel,
     version: u64,
-    shared: Rc<Shared>,
+    env: RowEnv,
+    /// Where a disclosure in flight clips this row.
+    disclosure: RowDisclosure,
     /// A local paint effect is running.
     pub animating: bool,
     /// Local opacity entrance and the finite compaction separator.
@@ -639,35 +102,26 @@ pub(crate) struct RowView {
     queue_held: bool,
     prose_fresh: bool,
     reported_height: Rc<Cell<Option<gpui::Pixels>>>,
+    /// The body height last told to the conversation.
+    reported_body: Rc<Cell<Option<gpui::Pixels>>>,
     stored: SourceOwners,
     collections: crate::collections::CollectionOwners,
-    source_host: Option<WeakEntity<editor_core::HostData>>,
+    /// Tool output and answers, selectable as one source each.
+    plain: presenters::text::PlainSources,
 }
 
 impl Drop for RowView {
     fn drop(&mut self) {
-        if !self
-            .shared
-            .disclosure_clips
-            .borrow()
-            .contains_key(&self.model.row.key())
-        {
-            self.shared
-                .row_heights
-                .borrow_mut()
-                .remove(&self.model.row.key());
-        }
-        self.shared
-            .reveal_queue
-            .borrow_mut()
-            .remove(&self.model.row.key());
+        self.env.reveal.borrow_mut().remove(&self.model.row.key());
     }
 }
 
 impl RowView {
     pub(crate) fn awaiting_reveal_admission(&self) -> bool {
         match self.model.row.semantic() {
-            Row::ProseBlock { .. } => self.prose_fresh && !self.prose_reveal.has_presented(),
+            Row::Text {
+                slot: Slot::Prose, ..
+            } => self.prose_fresh && !self.prose_reveal.has_presented(),
             Row::WorkEntry { .. } | Row::Chain { .. } | Row::Prompt(_) | Row::Image(_) => {
                 !self.motion.entrance_started()
                     && self
@@ -681,13 +135,16 @@ impl RowView {
     }
 
     fn actions(&self) -> Actions {
-        Actions::new(&self.shared)
+        Actions::new(self.env.conversation.clone(), self.env.scope.clone())
     }
     fn text(&self) -> presenters::text::TextPresenter<'_> {
         presenters::text::TextPresenter {
-            shared: &self.shared,
+            theme: self.env.theme,
             owners: &self.stored,
-            source_host: self.source_host.clone(),
+            host: self.env.host.clone(),
+            plain: &self.plain,
+            scope: &self.env.scope,
+            agent_scope: self.env.agent_scope,
         }
     }
     fn media(&self) -> presenters::media::MediaPresenter<'_> {
@@ -724,41 +181,49 @@ impl RowView {
             error: ui.and_then(|ui| ui.error.clone()),
         }
     }
-    pub(crate) fn new(model: RowModel, version: u64, shared: Rc<Shared>) -> Self {
-        let prose_fresh = match model.row.semantic() {
-            Row::ProseBlock { id, block } => {
-                let block = *block;
-                shared.prose_arrivals.borrow_mut().get_mut(id).map_or_else(
-                    || model.ui.get(id).is_some_and(ItemUi::fresh),
-                    |arrival| arrival.claim(block),
-                )
-            }
-            _ => false,
-        };
+    pub(crate) fn new(
+        model: RowModel,
+        version: u64,
+        env: RowEnv,
+        prose_fresh: bool,
+        disclosure: RowDisclosure,
+    ) -> Self {
         Self {
             model,
             version,
-            shared,
+            env,
+            disclosure,
             animating: false,
             motion: WorkMotion::default(),
             prose_reveal: Rc::new(PreparedReveal::default()),
             queue_held: false,
             prose_fresh,
             reported_height: Rc::default(),
+            reported_body: Rc::default(),
             stored: Rc::new(RefCell::new(HashMap::new())),
             collections: crate::collections::CollectionOwners::default(),
-            source_host: None,
+            plain: presenters::text::PlainSources::default(),
         }
     }
 
-    pub(crate) fn disclosure_finished(&mut self, cx: &mut Context<Self>) {
-        self.animating =
-            self.motion.end_frame() || self.prose_reveal.is_animating() || self.queue_held;
-        self.refresh(cx);
+    /// A disclosure's flight moved: where it clips this row, and whether
+    /// the row waits for it.
+    pub(crate) fn set_disclosure(&mut self, disclosure: RowDisclosure, cx: &mut Context<Self>) {
+        if self.disclosure == disclosure {
+            return;
+        }
+        let clip_changed = self.disclosure.clip != disclosure.clip;
+        self.disclosure = disclosure;
+        if clip_changed {
+            self.animating =
+                self.motion.end_frame() || self.prose_reveal.is_animating() || self.queue_held;
+            self.refresh(cx);
+        } else {
+            cx.notify();
+        }
     }
 
-    /// What it shows changed outside its model (a source finished
-    /// preparing): draw it fresh, and measure it again.
+    /// What it shows changed: draw it fresh, and measure it again.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.reported_height.set(None);
         cx.notify();
@@ -771,13 +236,7 @@ impl RowView {
     }
 
     pub(crate) fn ready_to_read(&self) -> bool {
-        !self.queue_held
-            && !self.prose_reveal.is_animating()
-            && !self
-                .model
-                .row
-                .anchor()
-                .is_some_and(|id| self.shared.disclosure_hidden.borrow().contains(id))
+        !self.queue_held && !self.prose_reveal.is_animating() && !self.disclosure.hidden
     }
 
     pub(crate) fn version(&self) -> u64 {
@@ -788,7 +247,7 @@ impl RowView {
     pub(crate) fn set(&mut self, model: RowModel, version: u64, cx: &mut Context<Self>) {
         self.stored.borrow_mut().retain(|(id, field), (_, owner)| {
             let source = model.items.get(id).and_then(|item| field.text(item));
-            let Some(TextContent::Stored(source)) = source else {
+            let Some(artisan_api::TextContent::Stored(source)) = source else {
                 return false;
             };
             owner.update(cx, |owner, cx| {
@@ -801,6 +260,12 @@ impl RowView {
         self.collections.reconcile(&model.items, cx);
         self.model = model;
         self.version = version;
+        self.refresh(cx);
+    }
+
+    /// Its body finished preparing, or its live text moved on.
+    pub(crate) fn set_body(&mut self, text: Option<TextBody>, cx: &mut Context<Self>) {
+        self.model.text = text;
         self.refresh(cx);
     }
 
@@ -863,18 +328,12 @@ impl RowView {
     }
 
     fn theme(&self) -> ArtisanTheme {
-        self.shared.theme
+        self.env.theme
     }
 
     /// Newly observed compact content fades in without changing its measured height.
     fn entering(&mut self, id: &ItemId, element: AnyElement) -> AnyElement {
-        if self.queue_held
-            || self
-                .shared
-                .disclosure_clips
-                .borrow()
-                .contains_key(&self.model.row.key())
-        {
+        if self.queue_held || self.disclosure.clip.is_some() {
             return element;
         }
         let fresh = self.ui(id).is_some_and(ItemUi::fresh);
@@ -882,44 +341,54 @@ impl RowView {
         with_entrance(element, entrance, px(self.model.gap))
     }
 
-    fn plain_block(
-        &self,
-        id: &ItemId,
-        section: PlainSection,
-        block: usize,
-        visual: Option<usize>,
+    /// The prepared body this row was given, drawn.
+    fn body(
+        &mut self,
+        body: &Body,
+        reveal: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(item) = self.item(id) else {
-            return div().into_any_element();
-        };
-        if let Some(TextContent::Stored(reference)) = section.text(item) {
-            let native_key = Row::PlainBlock {
-                id: id.clone(),
-                section,
-                block,
-            }
-            .key();
-            if let Some(state) = self.shared.native_windows.borrow().get(&native_key)
-                && let Some(error) = &state.error
-            {
-                if visual.unwrap_or(0) != state.window.start {
-                    return div().into_any_element();
-                }
-                let renderer = self.shared.markdown.clone();
-                let owner = self.shared.conversation.clone();
-                let retry_row = Row::PlainBlock {
-                    id: id.clone(),
-                    section,
-                    block,
-                };
-                let source_key: SharedString =
-                    format!("{id}:{}:leaf:{block}", section.slot()).into();
-                return div()
+        let theme = self.theme();
+        if reveal && matches!(body, Body::Failed { .. } | Body::Disconnected) {
+            self.prose_reveal.mark_presented();
+        }
+        match body {
+            Body::Empty => div().into_any_element(),
+            Body::Loading(text) => div()
+                .debug_selector(|| "text-loading".to_owned())
+                .child(*text)
+                .into_any_element(),
+            Body::Disconnected => div()
+                .child("This Forge is no longer connected.")
+                .into_any_element(),
+            Body::Failed { error, full } => div()
+                .child(error.clone())
+                .child(match full {
+                    Full::Copy(key, source) => copy_action(key.to_string(), theme, source.clone()),
+                    Full::Stored(source, field) => {
+                        let id = self.model.row.anchor().cloned().unwrap_or_default();
+                        StoredText {
+                            host: self.env.host.clone(),
+                            source: source.clone(),
+                            theme,
+                            key: (id, field.clone()),
+                            owners: self.stored.clone(),
+                        }
+                        .into_any_element()
+                    }
+                })
+                .into_any_element(),
+            Body::NativeFailed { error, key, row } => {
+                let renderer = self.env.markdown.clone();
+                let owner = self.env.conversation.clone();
+                let (retry_row, source_key) = (row.clone(), key.clone());
+                div()
                     .child(error.clone())
                     .child(
                         Button::text(
-                            format!("retry-native-{id}-{}-{block}", section.slot()),
-                            self.theme(),
+                            format!("retry-native-{}", key.replace(":leaf:", "-")),
+                            theme,
                             "Retry",
                         )
                         .on_activate(move |_, _, cx| {
@@ -928,270 +397,185 @@ impl RowView {
                                 owner.update(cx, |this, cx| this.retry_native_body(&retry_row, cx));
                         }),
                     )
+                    .into_any_element()
+            }
+            Body::Markdown(markdown) => self.markdown(markdown, reveal, window),
+            Body::Plain(plain) => self.plain(plain, window, cx),
+        }
+    }
+
+    fn markdown(&mut self, body: &Markdown, reveal: bool, window: &mut Window) -> AnyElement {
+        let theme = self.theme();
+        let renderer = &self.env.markdown;
+        renderer.set_selection_prefix(body.order.clone());
+        let content = if reveal {
+            let content = renderer.render_prepared_revealing_range(
+                &body.prepared,
+                body.range.clone(),
+                theme,
+                body.selector.clone(),
+                body.tone,
+                &self.prose_reveal,
+            );
+            if self.prose_reveal.is_animating() {
+                self.animating = true;
+                window.request_animation_frame();
+            }
+            content
+        } else {
+            renderer.render_prepared_range(
+                &body.prepared,
+                body.range.clone(),
+                theme,
+                body.selector.clone(),
+                body.tone,
+            )
+        };
+        if !body.wrapped {
+            return content;
+        }
+        div()
+            .w_full()
+            .child(content)
+            .when_some(body.notice.clone(), |root, notice| {
+                root.child(editor_ui::page::notice(&theme, notice))
+                    .children(test_mark("live-preview"))
+            })
+            .when_some(body.copy.clone(), |root, (key, source)| {
+                root.child(copy_action(key.to_string(), theme, source))
+            })
+            .into_any_element()
+    }
+
+    fn plain(&self, body: &Plain, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        register_selection_source(&body.source, window, cx);
+        let mut text = SelectableText::retained(
+            body.key.clone(),
+            body.text.clone(),
+            self.theme(),
+            Vec::new(),
+        );
+        if body.slice {
+            text = text.source_slice(0..body.text.len());
+        }
+        let text = text
+            .selection_scope(self.env.scope.clone())
+            .selection_order(body.order.clone(), body.separator);
+        let Some(native) = &body.native else {
+            return text.into_any_element();
+        };
+        let owner = self.env.conversation.clone();
+        let (notify_owner, layout_owner, paint_owner, failure_owner) =
+            (owner.clone(), owner.clone(), owner.clone(), owner);
+        let (layout_base, paint_base, failed_base) = (
+            native.base.clone(),
+            native.base.clone(),
+            native.base.clone(),
+        );
+        let (layout_leaf, paint_leaf, failed_leaf) = (
+            native.leaf.clone(),
+            native.leaf.clone(),
+            native.leaf.clone(),
+        );
+        let notify_base = native.base.clone();
+        text.native_window(
+            self.env.markdown.clone(),
+            native.key.clone(),
+            native.visual,
+            native.window.clone(),
+            editor_ui::selectable_text::NativeWindowEvents {
+                notify: Rc::new(move |cx| {
+                    let _ = notify_owner.update(cx, |this, cx| {
+                        if let Row::Text { id, slot, .. } = &notify_base {
+                            this.body_ready(id, *slot, cx);
+                        }
+                    });
+                }),
+                layout_ready: Rc::new(move |ready, cx| {
+                    let _ = layout_owner.update(cx, |this, cx| {
+                        this.native_body_ready(&layout_base, &layout_leaf, ready, false, cx);
+                    });
+                }),
+                ready: Rc::new(move |ready, cx| {
+                    let _ = paint_owner.update(cx, |this, cx| {
+                        this.native_body_ready(&paint_base, &paint_leaf, ready, true, cx);
+                    });
+                }),
+            },
+        )
+        .native_failure_handler(Rc::new(move |error, cx| {
+            let _ = failure_owner.update(cx, |this, cx| {
+                this.native_body_failed(&failed_base, &failed_leaf, error, cx);
+            });
+        }))
+        .into_any_element()
+    }
+
+    /// A text row: a reply's prose, a formatted section, or a literal
+    /// body in its bubble, error card or caption.
+    fn text_row(&mut self, slot: Slot, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some(text) = self.model.text.clone() else {
+            return div().into_any_element();
+        };
+        let Slot::Plain(section) = slot else {
+            if slot == Slot::Prose {
+                let running = self
+                    .model
+                    .row
+                    .anchor()
+                    .and_then(|id| self.item(id))
+                    .is_some_and(|item| item.status == Status::Running);
+                self.prose_reveal
+                    .begin_frame(running, self.prose_fresh, cx.reduce_motion());
+            }
+            return self.body(&text.body, slot == Slot::Prose, window, cx);
+        };
+        let content = self.body(&text.body, false, window, cx);
+        let theme = self.theme();
+        let (first, last) = (text.first, text.last);
+        match section {
+            PlainSection::Error => return self.error_body(content, first, last),
+            PlainSection::ImageCaption => {
+                return div()
+                    .w_full()
+                    .text_size(theme.typography.control_text)
+                    .text_color(theme.colors.muted_foreground.to_paint())
+                    .child(content)
                     .into_any_element();
             }
-            let count = self
-                .shared
-                .stored_sources
-                .borrow()
-                .get(&(id.clone(), section.slot()))
-                .filter(|source| source.source_ref() == reference)
-                .map_or(1, |source| source.block_count());
-            let first = block == 0 && visual.unwrap_or(0) == 0;
-            let visual_last = visual.is_none_or(|visual| {
-                self.shared
-                    .native_windows
-                    .borrow()
-                    .get(&native_key)
-                    .is_some_and(|state| visual + 1 == state.count)
-            });
-            let last = block + 1 == count && visual_last;
-            let content = StoredPreparedText {
-                shared: self.shared.clone(),
-                source: reference.clone(),
-                host: self.source_host.clone(),
-                owners: self.stored.clone(),
-                id: id.clone(),
-                slot: section.slot(),
-                block,
-                tone: MarkdownBodyTone::Foreground,
-                literal: Some(section),
-                visual,
-                reveal: None,
-                queue_key: None,
-                order: crate::fold::selection_order(
-                    self.shared.agent_scope.get(),
-                    item.position,
-                    section.slot(),
-                ),
-            }
-            .into_any_element();
-            return if section == PlainSection::Error {
-                self.error_body(content, first, last)
-            } else if section == PlainSection::ImageCaption {
-                div()
-                    .w_full()
-                    .text_size(self.theme().typography.control_text)
-                    .text_color(self.theme().colors.muted_foreground.to_paint())
-                    .child(content)
-                    .into_any_element()
-            } else {
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .gap(px(8.0))
-                    .children(
-                        (first && section == PlainSection::User)
-                            .then(|| self.media().user_attachments(item))
-                            .flatten(),
-                    )
-                    .child(ChatBubbleSegment::new(
-                        self.theme(),
-                        match (first, last) {
-                            (true, true) => SegmentPosition::Single,
-                            (true, false) => SegmentPosition::Head,
-                            (false, true) => SegmentPosition::Tail,
-                            (false, false) => SegmentPosition::Body,
-                        },
-                        content,
-                    ))
-                    .into_any_element()
-            };
+            _ => {}
         }
-        self.shared.prepare_plain(item, section);
-        let sources = self.shared.plain_sources.borrow();
-        let Some(body) = sources.get(&(id.clone(), section.slot())) else {
-            return div().into_any_element();
-        };
-        let Some(text) = body.chunks.get(block) else {
-            return div().into_any_element();
-        };
-        let last = block + 1 == body.chunks.len();
-        let content = PlainText {
-            source: body.source.clone(),
-            text: text.clone(),
-            key: format!("{}-{id}-{block}", section.slot()).into(),
-            scope: self.shared.selection_scope.borrow().clone(),
-            order: {
-                let mut order = crate::fold::selection_order(
-                    self.shared.agent_scope.get(),
-                    item.position,
-                    section.slot(),
-                );
-                order.extend([section.order(), block as u64]);
-                order
-            },
-            theme: self.theme(),
-        }
-        .into_any_element();
-        let theme = self.theme();
-        if section == PlainSection::Error {
-            return self.error_body(content, block == 0, last);
-        }
-        if section == PlainSection::ImageCaption {
-            return div()
-                .w_full()
-                .text_size(theme.typography.control_text)
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(content)
-                .into_any_element();
-        }
-        let mut root = div().w_full().flex().flex_col().items_end().gap(px(8.0));
-        if block == 0 && section == PlainSection::User {
-            root = root.children(self.media().user_attachments(item));
-        }
-        if section == PlainSection::User && text.is_empty() {
+        let attachments = (first && section == PlainSection::User)
+            .then(|| {
+                self.model
+                    .row
+                    .anchor()
+                    .and_then(|id| self.item(id))
+                    .and_then(|item| self.media().user_attachments(item))
+            })
+            .flatten();
+        let root = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(8.0))
+            .children(attachments);
+        let empty = matches!(&text.body, Body::Plain(plain) if plain.text.is_empty());
+        if !text.stored && section == PlainSection::User && empty {
             return root.into_any_element();
         }
         root.child(ChatBubbleSegment::new(
             theme,
-            SegmentPosition::for_index(block, body.chunks.len()),
+            match (first, last) {
+                (true, true) => SegmentPosition::Single,
+                (true, false) => SegmentPosition::Head,
+                (false, true) => SegmentPosition::Tail,
+                (false, false) => SegmentPosition::Body,
+            },
             content,
         ))
         .into_any_element()
-    }
-
-    /// One prepared block of a reply, or all of it while its blocks are
-    /// not known yet. The renderer owns parsing; the native list owns
-    /// visibility.
-    fn prose(&mut self, id: &ItemId, block: usize, cx: &mut Context<Self>) -> AnyElement {
-        let Some(item) = self.model.items.get(id).cloned() else {
-            return div().into_any_element();
-        };
-        let ItemKind::AssistantMessage { text, .. } = &item.kind else {
-            return div().into_any_element();
-        };
-        self.prose_reveal.begin_frame(
-            item.status == Status::Running,
-            self.prose_fresh,
-            cx.reduce_motion(),
-        );
-        let key: SharedString = id.to_string().into();
-        let owner = self.shared.conversation.clone();
-        let prepared_id = id.clone();
-        let live = self
-            .model
-            .live
-            .get(&LiveTarget::Text {
-                item_id: id.clone(),
-            })
-            .filter(|_| item.status == Status::Running)
-            .cloned();
-        let live_coverage = live.as_ref().and_then(|rope| {
-            let conversation = self.shared.conversation.upgrade()?;
-            let conversation = conversation.read(cx);
-            let host = conversation.host(cx)?;
-            let snapshot = host.read(cx).live_snapshot(
-                &item.thread_id,
-                &LiveTarget::Text {
-                    item_id: id.clone(),
-                },
-            )?;
-            (Arc::ptr_eq(&snapshot.text, rope) && !snapshot.coverage.is_complete(rope.len_bytes()))
-                .then_some((rope.len_bytes(), snapshot.coverage.total))
-        });
-        if live.is_none()
-            && let TextContent::Stored(_) = text
-        {
-            return self
-                .text()
-                .stored_reply(&item, block, self.prose_reveal.clone());
-        }
-        let source = if live.is_none() {
-            let TextContent::Inline(text) = text else {
-                unreachable!("stored source handled above")
-            };
-            let mut sources = self.shared.sources.borrow_mut();
-            let cached = sources
-                .entry((id.clone(), Slot::Prose))
-                .or_insert_with(|| (item.seq, Arc::from(text.as_str())));
-            if cached.0 != item.seq && cached.1.as_ref() != text.as_str() {
-                cached.1 = Arc::from(text.as_str());
-            }
-            cached.0 = item.seq;
-            Some(cached.1.clone())
-        } else {
-            None
-        };
-        let preparation = if let Some(live) = &live {
-            self.shared
-                .markdown
-                .prepare_rope_source(key.clone(), live.clone(), cx, move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.prose_ready(&prepared_id, cx));
-                })
-        } else {
-            self.shared.markdown.prepare_source(
-                key.clone(),
-                source.as_ref().expect("static prose source").clone(),
-                cx,
-                move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.prose_ready(&prepared_id, cx));
-                },
-            )
-        };
-        let prepared = match preparation {
-            editor_ui::markdown_renderer::MarkdownPreparation::Ready(prepared) => Some(prepared),
-            editor_ui::markdown_renderer::MarkdownPreparation::Pending => {
-                self.shared.markdown.prepared_source(&key)
-            }
-            editor_ui::markdown_renderer::MarkdownPreparation::Failed(error) => {
-                self.prose_reveal.mark_presented();
-                return div()
-                    .child(error)
-                    .child(copy_action(
-                        format!("copy-full-{id}"),
-                        self.theme(),
-                        CopySource::from_parts(live, source),
-                    ))
-                    .into_any_element();
-            }
-        };
-        let Some(prepared) = prepared else {
-            return div()
-                .debug_selector(|| "text-loading".to_owned())
-                .child("Loading reply…")
-                .into_any_element();
-        };
-        self.shared
-            .markdown
-            .set_selection_prefix(crate::fold::selection_order(
-                self.shared.agent_scope.get(),
-                item.position,
-                Slot::Prose,
-            ));
-        let split = self.shared.prose_shapes.borrow().contains_key(id);
-        let range = if split {
-            block..block + 1
-        } else {
-            0..prepared.block_count()
-        };
-        let last = range.end >= prepared.block_count();
-        let theme = self.theme();
-        let content = self.shared.markdown.render_prepared_revealing_range(
-            &prepared,
-            range,
-            theme,
-            format!("prose-{id}"),
-            MarkdownBodyTone::Foreground,
-            &self.prose_reveal,
-        );
-        self.animating |= self.prose_reveal.is_animating();
-        let mut root = div().w_full().child(content);
-        if last && let Some((shown, total)) = live_coverage {
-            root = root.child(editor_ui::page::notice(&theme, format!(
-                    "Live preview shows {shown} of {total} bytes. Complete content is available after the reply is saved."
-                ))).children(test_mark("live-preview"));
-        }
-        if last && prepared.is_preview() {
-            root = root.child(copy_action(
-                format!("copy-full-{id}"),
-                theme,
-                CopySource::from_parts(live, source),
-            ));
-        }
-        root.into_any_element()
     }
 
     /// Only the header lives here. Expanded descendants are independent native rows.
@@ -1200,7 +584,6 @@ impl RowView {
         run: Option<&RunId>,
         segment: usize,
         entries: &[ItemId],
-        compaction: Option<&ItemId>,
         _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if segment != 0 {
@@ -1216,22 +599,7 @@ impl RowView {
         let words = self.motion.phrase(&format!("{key}-label"), &label);
         let label = phrase_or_text(words, label, px(LINE));
         let local_fraction = self.motion.chevron(&key, open);
-        let fraction = self
-            .shared
-            .disclosure_fractions
-            .borrow()
-            .get(&self.model.row.key())
-            .copied()
-            .unwrap_or(local_fraction);
-        let checkpoint = compaction
-            .and_then(|id| self.compaction_status(id))
-            .map(|(_, status)| {
-                div().debug_selector(|| "work-compaction".to_owned()).child(
-                    div()
-                        .debug_selector(|| "compaction".to_owned())
-                        .child(status),
-                )
-            });
+        let fraction = self.disclosure.fraction.unwrap_or(local_fraction);
         let near = div()
             .flex()
             .flex_row()
@@ -1261,7 +629,6 @@ impl RowView {
             .pb(theme.spacing.steps(2.0))
             .debug_selector(|| "work-header".to_owned())
             .child(near)
-            .children(checkpoint)
             .child(
                 div()
                     .absolute()
@@ -1323,13 +690,7 @@ impl RowView {
         let words = self.motion.phrase(&format!("{key}-clause"), &clause);
         let clause = phrase_or_text(words, clause, px(LINE));
         let local_fraction = self.motion.chevron(&key, open);
-        let fraction = self
-            .shared
-            .disclosure_fractions
-            .borrow()
-            .get(&self.model.row.key())
-            .copied()
-            .unwrap_or(local_fraction);
+        let fraction = self.disclosure.fraction.unwrap_or(local_fraction);
         let activate = self.actions().handler(Action::ToggleChain {
             id: first,
             open: !open,
@@ -1370,9 +731,8 @@ impl RowView {
     }
 
     /// A non-activity row inside the work: plan, notice, nested messages.
-    fn entry(&self, item: &Item, _depth: usize) -> AnyElement {
+    fn entry(&mut self, item: &Item, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match &item.kind {
-            ItemKind::AssistantMessage { .. } => self.text().assistant(item, 0),
             ItemKind::Tool { .. } => {
                 let live = self.live_text(&LiveTarget::Shell {
                     item_id: item.id.clone(),
@@ -1381,16 +741,35 @@ impl RowView {
                     .ui(&item.id)
                     .and_then(|ui| ui.expanded)
                     .unwrap_or(false);
-                self.tools()
-                    .activity_row(item, expanded, live.as_deref(), &self.model.agents)
+                // An opened activity shows its preview once it has run.
+                let preview = self
+                    .model
+                    .text
+                    .clone()
+                    .filter(|_| {
+                        expanded
+                            && activity::agent_message(item).is_none()
+                            && (live.is_none() || item.status.is_terminal())
+                    })
+                    .map(|text| self.body(&text.body, false, window, cx));
+                self.tools().activity_row(
+                    item,
+                    expanded,
+                    live.as_deref(),
+                    &self.model.agents,
+                    preview,
+                )
             }
             ItemKind::Agent { .. } => self.agent().agent_row(item),
-            ItemKind::UserMessage { .. } => self.plain_block(&item.id, PlainSection::User, 0, None),
             ItemKind::Plan { .. } => self.tools().plan_entry(item),
             ItemKind::Notice { .. } => self.text().notice(item),
             ItemKind::Question { .. } => self.requests().question_card(item),
-            ItemKind::Error { .. } => self.error_alert(item),
-            ItemKind::Compaction { .. } | ItemKind::Image { .. } => div().into_any_element(),
+            ItemKind::Compaction { .. } => self.tools().compaction_entry(item),
+            // These have rows of their own.
+            ItemKind::AssistantMessage { .. }
+            | ItemKind::UserMessage { .. }
+            | ItemKind::Error { .. }
+            | ItemKind::Image { .. } => div().into_any_element(),
         }
     }
 
@@ -1533,9 +912,6 @@ impl RowView {
     }
 
     /// Error body styling is shared across its bounded native leaves.
-    fn error_alert(&self, item: &Item) -> AnyElement {
-        self.plain_block(&item.id, PlainSection::Error, 0, None)
-    }
     fn error_body(&self, content: AnyElement, first: bool, last: bool) -> AnyElement {
         let theme = self.theme();
         let mut root = div()
@@ -1630,12 +1006,6 @@ impl Render for RowView {
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.animating = false;
-        self.source_host = self
-            .shared
-            .conversation
-            .upgrade()
-            .and_then(|conversation| conversation.read(cx).host(cx))
-            .map(|host| host.downgrade());
         let policy = if cx.reduce_motion() {
             MotionPolicy::Reduced
         } else {
@@ -1648,8 +1018,8 @@ impl Render for RowView {
         let bypass = matches!(
             row.semantic(),
             Row::Work { .. }
-                | Row::PlainBlock {
-                    section: PlainSection::User,
+                | Row::Text {
+                    slot: Slot::Plain(PlainSection::User),
                     ..
                 }
         );
@@ -1659,46 +1029,42 @@ impl Render for RowView {
             .map_or(u64::MAX, |item| item.position);
         let (part, ordinal) = match row.semantic() {
             Row::Chain { .. } => (0, 0),
-            Row::ProseBlock { block, .. } | Row::TextBlock { block, .. } => (2, *block),
+            Row::Text {
+                slot: Slot::Prose | Slot::Text(_),
+                block,
+                ..
+            } => (2, *block),
             Row::PlanStep { step, .. } => (2, *step),
             _ => (1, 0),
         };
-        self.queue_held = self.shared.reveal_queue.borrow_mut().begin(
+        self.queue_held = self.env.reveal.borrow_mut().begin(
             key.clone(),
             (position, part, ordinal),
             !bypass && policy == MotionPolicy::Full,
         );
         self.prose_reveal.set_paused(self.queue_held);
-        let clip = self.shared.disclosure_clips.borrow().get(&key).copied();
-        let deferred_by_group = clip.is_none()
-            && !self.shared.disclosure_fractions.borrow().contains_key(&key)
-            && row
-                .anchor()
-                .is_some_and(|id| self.shared.disclosure_hidden.borrow().contains(id));
+        let clip = self.disclosure.clip;
+        let deferred_by_group =
+            clip.is_none() && self.disclosure.fraction.is_none() && self.disclosure.hidden;
         let content: Option<AnyElement> = if self.queue_held || deferred_by_group {
             Some(div().into_any_element())
         } else {
             match &row {
-                Row::ProseBlock { id, block } => Some(self.prose(id, *block, cx)),
+                Row::Text { slot, .. } => Some(self.text_row(*slot, window, cx)),
                 Row::Work {
                     run,
                     segment,
                     entries,
-                    compaction,
-                } => self.work_row(run.as_ref(), *segment, entries, compaction.as_ref(), cx),
-                Row::Projected { row, visual } => match row.as_ref() {
-                    Row::PlainBlock { id, section, block } => {
-                        Some(self.plain_block(id, *section, *block, Some(*visual)))
-                    }
+                } => self.work_row(run.as_ref(), *segment, entries, cx),
+                Row::Projected { row, .. } => match row.as_ref() {
+                    Row::Text { slot, .. } => Some(self.text_row(*slot, window, cx)),
                     _ => None,
                 },
-                Row::PlainBlock { id, section, block } => {
-                    Some(self.plain_block(id, *section, *block, None))
-                }
                 Row::WorkEntry { id, .. } => {
-                    let content = self
-                        .item(id)
-                        .map_or_else(|| div().into_any_element(), |item| self.entry(item, 0));
+                    let content = self.model.items.get(id).cloned().map_or_else(
+                        || div().into_any_element(),
+                        |item| self.entry(&item, window, cx),
+                    );
                     Some(self.entering(id, content))
                 }
                 Row::Chain { ids, .. } => {
@@ -1713,21 +1079,20 @@ impl Render for RowView {
                     || div().into_any_element(),
                     |item| self.tools().plan_step(item, *step),
                 )),
-                Row::TextBlock {
-                    id, section, block, ..
-                } => Some(self.item(id).map_or_else(
-                    || div().into_any_element(),
-                    |item| self.text().section(item, *section, *block),
-                )),
                 Row::Prompt(id) => {
-                    let card = match self.item(id) {
+                    let card = match self.model.items.get(id).cloned() {
                         Some(item) if matches!(item.kind, ItemKind::Question { .. }) => {
-                            self.requests().question_card(item)
+                            self.requests().question_card(&item)
                         }
-                        Some(item) => self
-                            .requests()
-                            .approval_card(item, self.answer_state(&item.id))
-                            .unwrap_or_else(|| self.entry(item, 0)),
+                        Some(item) => {
+                            match self
+                                .requests()
+                                .approval_card(&item, self.answer_state(&item.id))
+                            {
+                                Some(card) => card,
+                                None => self.entry(&item, window, cx),
+                            }
+                        }
                         None => div().into_any_element(),
                     };
                     Some(self.entering(id, card))
@@ -1756,10 +1121,8 @@ impl Render for RowView {
                         .into_any_element(),
                 ),
                 Row::Status(run) => self.status_row(run),
-                Row::AgentResult(id) => Some(self.item(id).map_or_else(
-                    || div().into_any_element(),
-                    |item| self.text().section(item, TextSection::AgentResult, 0),
-                )),
+                // Expanded into its text before it is published.
+                Row::AgentResult(_) => None,
                 Row::AgentStatus(_, working) => self.agent().agent_status_row(*working),
             }
         };
@@ -1783,7 +1146,7 @@ impl Render for RowView {
         if self.animating {
             window.request_animation_frame();
         }
-        self.shared.reveal_queue.borrow_mut().finish(
+        self.env.reveal.borrow_mut().finish(
             &key,
             !bypass
                 && (self.queue_held
@@ -1804,8 +1167,8 @@ impl Render for RowView {
                 Row::WorkEntry { id, .. } => self
                     .item(id)
                     .is_some_and(|item| activity::category(item).is_some()),
-                Row::TextBlock {
-                    section: TextSection::Message,
+                Row::Text {
+                    slot: Slot::Text(crate::fold::TextSection::Message),
                     ..
                 } => true,
                 _ => false,
@@ -1844,9 +1207,10 @@ impl Render for RowView {
             None => column,
         };
         let measured = self.reported_height.clone();
-        let shared = self.shared.clone();
-        let body_key = key.clone();
-        let owner = self.shared.conversation.clone();
+        let reported_body = self.reported_body.clone();
+        let clipped = clip.is_some();
+        let owner = self.env.conversation.clone();
+        let (body_owner, body_key) = (owner.clone(), key.clone());
         let end = px(self.model.end);
         let mut body = div()
             .w_full()
@@ -1857,16 +1221,21 @@ impl Render for RowView {
             .child(column.flex_shrink_0())
             .children(test_mark("animating").filter(|_| animating))
             .children(test_mark("disclosing").filter(|_| clip.is_some()))
-            .on_children_prepainted(move |bounds, window, _| {
-                if let Some(bounds) = bounds.first() {
-                    let changed = shared
-                        .row_heights
-                        .borrow_mut()
-                        .insert(body_key.clone(), bounds.size.height)
-                        .is_none_or(|old| old != bounds.size.height);
-                    if changed && shared.disclosure_clips.borrow().contains_key(&body_key) {
+            .on_children_prepainted(move |bounds, window, cx| {
+                // The row's whole height, which a disclosure clips to.
+                if let Some(bounds) = bounds.first()
+                    && reported_body.replace(Some(bounds.size.height)) != Some(bounds.size.height)
+                {
+                    if clipped {
                         window.request_animation_frame();
                     }
+                    let (owner, key, height) =
+                        (body_owner.clone(), body_key.clone(), bounds.size.height);
+                    cx.defer(move |cx| {
+                        let _ = owner.update(cx, |this, _| {
+                            this.row_heights.insert(key, height);
+                        });
+                    });
                 }
             });
         if let Some(clip) = clip {

@@ -6,7 +6,7 @@ pub(super) mod request;
 pub(super) mod text;
 pub(super) mod tool;
 
-use crate::{Conversation, row::Shared, viewport::Input};
+use crate::{Conversation, viewport::Input};
 use artisan_api::{Answer, BlobHash, ItemId, RunId};
 use editor_ui::{
     button::{Button, ButtonVariant},
@@ -32,22 +32,14 @@ pub(super) struct Actions {
     origin: SharedString,
 }
 impl Actions {
-    pub(super) fn new(shared: &Shared) -> Self {
-        // Read the already-established shared identity rather than borrowing the
-        // parent Conversation during RowView render.
-        Self {
-            target: shared.conversation.clone(),
-            origin: shared.selection_scope.borrow().clone(),
-        }
+    pub(super) fn new(target: WeakEntity<Conversation>, origin: SharedString) -> Self {
+        Self { target, origin }
     }
     fn dispatch(&self, action: &Action, cx: &mut App) {
         let _ = self.target.update(cx, |this, cx| {
             // A closed Conversation retains the last selection key. Check open
             // state as well, so old actions cannot run after the scope closes.
-            if this.open.is_none()
-                || self.origin.is_empty()
-                || *this.shared.selection_scope.borrow() != self.origin
-            {
+            if this.open.is_none() || self.origin.is_empty() || this.bodies.scope != self.origin {
                 return;
             }
             match action {
@@ -109,6 +101,7 @@ mod tests {
         });
         let (conversation, cx) =
             cx.add_window_view(|window, cx| Conversation::new(core, window, cx));
+        let weak = conversation.downgrade();
         let host = HostId("origin-host".to_owned());
         let thread = ThreadId::new();
         let reused_id = ItemId::new();
@@ -118,7 +111,7 @@ mod tests {
             this.update_selection_scope();
         });
         let old = conversation.read_with(cx, |this, _| {
-            Actions::new(&this.shared).handler(Action::ToggleItem {
+            Actions::new(weak.clone(), this.bodies.scope.clone()).handler(Action::ToggleItem {
                 id: reused_id.clone(),
                 expanded: true,
             })
@@ -146,7 +139,7 @@ mod tests {
                 assert!(!this.view.as_ref().unwrap().ui.contains_key(&reused_id))
             });
             let current = conversation.read_with(cx, |this, _| {
-                Actions::new(&this.shared).handler(Action::ToggleItem {
+                Actions::new(weak.clone(), this.bodies.scope.clone()).handler(Action::ToggleItem {
                     id: reused_id.clone(),
                     expanded: true,
                 })
@@ -160,7 +153,7 @@ mod tests {
             });
         }
         let before_close = conversation.read_with(cx, |this, _| {
-            Actions::new(&this.shared).handler(Action::ToggleItem {
+            Actions::new(weak.clone(), this.bodies.scope.clone()).handler(Action::ToggleItem {
                 id: reused_id.clone(),
                 expanded: true,
             })

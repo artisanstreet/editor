@@ -74,15 +74,16 @@ fn copying_a_long_message_keeps_every_character(cx: &mut TestAppContext) {
     );
 }
 
-/// Long stored messages open at their end, read from Forge a window at a
-/// time, and mark the thread read once that end shows.
+/// A long stored message opens at its end, read from Forge a window at a
+/// time. Its start shows the window it pages back from, never pages back
+/// and forth on its own, and does not mark the thread read; its end does.
 #[gpui::test]
 fn a_long_message_reads_only_once_its_end_paints(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
     let user = ItemId::new();
     let error = ItemId::new();
-    forge.put(
+    let user_item = forge.put(
         &thread,
         &user,
         Status::Done,
@@ -120,16 +121,43 @@ fn a_long_message_reads_only_once_its_end_paints(cx: &mut TestAppContext) {
             && shown(cx, format!("user:{user}:0")).is_none(),
         "the starts of both are not laid out"
     );
+    // At the start of the message's window, nothing is read.
+    conversation.update(cx, |c, cx| c.jump_to(&user_item, cx));
+    settle(cx, &conversation);
+    look(cx);
+    let prefix = format!("user:{user}");
+    let top = topmost(cx, &prefix, 7700..8001).expect("the message's start shows");
     assert!(
         !read(&forge, &thread),
-        "nothing is read while the window is behind"
+        "the start of a long message does not read it"
     );
-    look(cx);
+    for _ in 0..6 {
+        draw(cx);
+        cx.run_until_parked();
+        assert_eq!(
+            topmost(cx, &prefix, 7700..8001),
+            Some(top),
+            "repainting the same place never moves it"
+        );
+    }
+    // Scrolling up reads further back.
+    let center = cx.update(|window, _| window.viewport_size()) / 2.0;
+    wait(cx, "older lines", |cx| {
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: gpui::point(center.width, center.height),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(200.0))),
+            ..Default::default()
+        });
+        draw(cx);
+        topmost(cx, &prefix, top.0 - 400..top.0 + 64).is_some_and(|(line, _)| line + 64 < top.0)
+    });
+    settle(cx, &conversation);
+    // The end reads it all.
+    conversation.update(cx, |c, cx| c.jump_to_latest(cx));
     wait(cx, "the thread read at its end", |cx| {
         draw(cx);
         read(&forge, &thread)
     });
-    let _ = &conversation;
 }
 
 /// A message too long to lay out on one line in the transcript shows its

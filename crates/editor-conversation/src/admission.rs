@@ -6,7 +6,7 @@
 //! steers and work headers never wait.
 use crate::{
     Conversation,
-    fold::{PlainSection, Row, RowKey},
+    fold::{PlainSection, Row, RowKey, Slot},
 };
 use gpui::{App, Context};
 
@@ -14,8 +14,8 @@ fn immediate(row: &Row) -> bool {
     matches!(
         row.semantic(),
         Row::Work { .. }
-            | Row::PlainBlock {
-                section: PlainSection::User,
+            | Row::Text {
+                slot: Slot::Plain(PlainSection::User),
                 ..
             }
     )
@@ -82,14 +82,16 @@ impl Conversation {
                         .is_some_and(crate::thread::ItemUi::fresh)
                 };
                 match row.semantic() {
-                    Row::ProseBlock { id, block } => {
-                        let block = *block;
-                        self.shared
-                            .prose_arrivals
-                            .borrow()
-                            .get(id)
-                            .map_or_else(|| fresh(id), |arrival| arrival.is_fresh(block))
-                    }
+                    Row::Text {
+                        id,
+                        slot: Slot::Prose,
+                        block,
+                        ..
+                    } => self
+                        .bodies
+                        .arrivals
+                        .get(id)
+                        .map_or_else(|| fresh(id), |arrival| arrival.is_fresh(*block)),
                     Row::WorkEntry { .. } | Row::Chain { .. } | Row::Prompt(_) | Row::Image(_) => {
                         row.anchor().is_some_and(fresh)
                     }
@@ -101,7 +103,7 @@ impl Conversation {
 
     /// Follows the reveal queue's frontier, once per frame before layout.
     pub(crate) fn sync_reveal(&mut self, cx: &mut Context<Self>) {
-        let queued = self.shared.reveal_queue.borrow().frontier_key();
+        let queued = self.reveal.borrow().frontier_key();
         if queued == self.reveal_frontier {
             return;
         }
@@ -125,8 +127,7 @@ impl Conversation {
     /// fresh row.
     pub(crate) fn publish_reveal(&mut self, cx: &App) {
         let frontier = self
-            .shared
-            .reveal_queue
+            .reveal
             .borrow()
             .frontier_key()
             .or_else(|| self.speculative_frontier(cx));
@@ -154,7 +155,7 @@ impl Conversation {
         if immediate(row) {
             return false;
         }
-        let queued = self.shared.reveal_queue.borrow().frontier_key();
+        let queued = self.reveal.borrow().frontier_key();
         queued
             .as_ref()
             .or(self.reveal_frontier.as_ref())

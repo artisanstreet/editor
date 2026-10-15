@@ -5,7 +5,7 @@
 
 use crate::fold::Row;
 use crate::fold::Slot;
-use crate::row::{COLUMN, GUTTER, RowView};
+use crate::row::{COLUMN, GUTTER};
 use crate::viewport::Input;
 use crate::{Conversation, wants_older};
 use artisan_api::{ItemId, ItemKind};
@@ -21,8 +21,8 @@ use editor_ui::picker_motion::{HoverRect, sliding_hover_pill};
 use editor_ui::theme::{Oklch, RadiusStep, RadiusTokens};
 use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, AppContext as _, Context, FontWeight,
-    InteractiveElement as _, IntoElement, MouseMoveEvent, ParentElement as _, Render, SharedString,
+    Animation, AnimationExt as _, AnyElement, Context, FontWeight, InteractiveElement as _,
+    IntoElement, MouseMoveEvent, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, canvas, div, list,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
@@ -422,11 +422,7 @@ impl Conversation {
             .iter()
             .rev()
             .find_map(|(row, _)| {
-                matches!(
-                    row,
-                    Row::ProseBlock { .. } | Row::TextBlock { .. } | Row::PlainBlock { .. }
-                )
-                .then(|| self.read_evidence(row, cx).is_some())
+                matches!(row, Row::Text { .. }).then(|| self.read_evidence(row, cx).is_some())
             })
             .unwrap_or(false);
         let initial_leeway = following
@@ -483,19 +479,9 @@ impl Conversation {
             return div().into_any_element();
         };
         // A disclosure's members wait, empty, until its flight clips them.
-        let group_deferred = !self
-            .shared
-            .disclosure_fractions
-            .borrow()
-            .contains_key(&definition.key())
-            && definition
-                .anchor()
-                .is_some_and(|id| self.shared.disclosure_hidden.borrow().contains(id))
-            && !self
-                .shared
-                .disclosure_clips
-                .borrow()
-                .contains_key(&definition.key());
+        let disclosure = self.row_disclosure(&definition);
+        let group_deferred =
+            disclosure.fraction.is_none() && disclosure.hidden && disclosure.clip.is_none();
         if self.behind_reveal(index, &definition) {
             // Waits, hidden, for the content before it to reveal; the last
             // row still keeps the end space under the transcript.
@@ -510,27 +496,7 @@ impl Conversation {
             return div().into_any_element();
         }
         if self.row_views.get(index).is_some_and(Option::is_none) {
-            let images = self.row_images(&definition, cx);
-            let context = &self.row_context;
-            let model = self.model(
-                &definition,
-                definition
-                    .run()
-                    .and_then(|run| context.runs.get(run))
-                    .cloned(),
-                images,
-                context.now,
-                context.gaps.get(index).copied().unwrap_or_default(),
-                if index + 1 == self.rows.len() {
-                    context.end_space
-                } else {
-                    0.0
-                },
-                &context.agents,
-            );
-            let shared = self.shared.clone();
-            let version = context.versions.get(index).copied().unwrap_or_default();
-            self.row_views[index] = Some(cx.new(|_| RowView::new(model, version, shared)));
+            self.row_views[index] = Some(self.new_row_view(index, cx));
             self.touch_row_cache(index, true);
         } else {
             self.touch_row_cache(index, false);
@@ -550,11 +516,7 @@ impl Conversation {
         let observed = self
             .read_evidence(&definition, cx)
             .map(|seq| (self.open.clone(), definition.key(), seq));
-        let source_row = matches!(
-            definition.semantic(),
-            Row::ProseBlock { .. } | Row::TextBlock { .. } | Row::PlainBlock { .. }
-        )
-        .then_some(definition);
+        let source_row = matches!(definition.semantic(), Row::Text { .. }).then_some(definition);
         let this = cx.entity().downgrade();
         div()
             .relative()
@@ -581,44 +543,27 @@ impl Conversation {
                                     if let Some((key, start)) =
                                         this.native_window_prefetch(&source_row)
                                     {
-                                        let anchor = this
-                                            .rows
-                                            .get(this.list.logical_scroll_top().item_ix)
-                                            .map(|(row, _)| row.key());
-                                        if let Some(anchor) = anchor
-                                            && let Some(state) = this
-                                                .shared
-                                                .native_windows
-                                                .borrow_mut()
-                                                .get_mut(&key)
-                                        {
+                                        let place = this.reader_place();
+                                        if let Some(state) = this.bodies.native.get_mut(&key) {
                                             state.frontier =
-                                                Some((anchor, start > state.window.start));
+                                                Some((place, start > state.window.start));
                                         }
                                         this.native_window_edge(key, start, cx);
                                     } else if let Some((id, slot, revision, offset)) =
                                         this.source_window_prefetch(&source_row)
                                     {
-                                        if let Some(anchor) = this
-                                            .rows
-                                            .get(this.list.logical_scroll_top().item_ix)
-                                            .map(|(row, _)| row.key())
-                                        {
-                                            let (reference, newer) = {
-                                                let sources = this.shared.stored_sources.borrow();
-                                                let source =
-                                                    sources.get(&(id.clone(), slot)).unwrap();
-                                                (
-                                                    source.source_ref().clone(),
-                                                    offset > source.loaded_range().start,
-                                                )
-                                            };
-                                            this.shared.source_frontiers.borrow_mut().insert(
-                                                (id.clone(), slot),
-                                                (reference, anchor, newer),
-                                            );
-                                        }
-                                        this.source_window_edge(id, slot, revision, offset, cx);
+                                        let source = &this.bodies.stored[&(id.clone(), slot)];
+                                        let (reference, newer) = (
+                                            source.source_ref().clone(),
+                                            offset > source.loaded_range().start,
+                                        );
+                                        this.bodies.frontiers.insert(
+                                            (id.clone(), slot),
+                                            (reference, this.reader_place(), newer),
+                                        );
+                                        this.source_window_edge(
+                                            id, slot, revision, offset, true, cx,
+                                        );
                                     }
                                 });
                             });
@@ -665,12 +610,21 @@ impl Conversation {
             .into_any_element()
     }
 
+    /// How far the reader has scrolled, and the row on top.
+    pub(crate) fn reader_place(&self) -> crate::body::ReaderPlace {
+        (
+            self.reader_moves,
+            self.rows
+                .get(self.list.logical_scroll_top().item_ix)
+                .map(|(row, _)| row.key()),
+        )
+    }
+
     /// Read evidence belongs to complete current leaf content, independently of controls.
     fn native_window_prefetch(&self, row: &Row) -> Option<(crate::fold::RowKey, usize)> {
         let visual = row.visual()?;
         let key = row.semantic().key();
-        let states = self.shared.native_windows.borrow();
-        let state = states.get(&key)?;
+        let state = self.bodies.native.get(&key)?;
         if !state.painted.contains(&visual) {
             return None;
         }
@@ -692,17 +646,10 @@ impl Conversation {
         } else {
             return None;
         };
-        let top = self
-            .rows
-            .get(self.list.logical_scroll_top().item_ix)?
-            .0
-            .key();
-        if reverses_at_same_anchor(
-            state
-                .frontier
-                .as_ref()
-                .map(|(anchor, newer)| (anchor, *newer)),
-            &top,
+        if reverses_in_place(
+            state.frontier.as_ref(),
+            &self.reader_place(),
+            self.reader_toward_end,
             start > state.window.start,
         ) {
             return None;
@@ -712,37 +659,33 @@ impl Conversation {
 
     fn source_window_prefetch(&self, row: &Row) -> Option<(artisan_api::ItemId, Slot, u64, usize)> {
         if let Some(visual) = row.visual() {
-            let states = self.shared.native_windows.borrow();
-            let state = states.get(&row.semantic().key())?;
+            let state = self.bodies.native.get(&row.semantic().key())?;
             if !state.painted.contains(&visual) || (visual != 0 && visual + 1 != state.count) {
                 return None;
             }
         }
         let native_key = row.key();
         let row = row.semantic();
-        let (id, slot, block) = match row {
-            Row::ProseBlock { id, block } => (id, Slot::Prose, *block),
-            Row::TextBlock {
-                id, section, block, ..
-            } => (id, section.slot(), *block),
-            Row::PlainBlock { id, section, block } => (id, section.slot(), *block),
-            _ => return None,
+        let Row::Text {
+            id, slot, block, ..
+        } = row
+        else {
+            return None;
         };
-        let sources = self.shared.stored_sources.borrow();
-        let source = sources.get(&(id.clone(), slot))?;
+        let (slot, block) = (*slot, *block);
+        let source = self.bodies.stored.get(&(id.clone(), slot))?;
         let loaded = source.loaded_range();
         if !loaded.contains(&block) {
             return None;
         }
         let body_ready = if source.format() == artisan_api::SourceIndexFormat::Literal {
-            self.shared
-                .literal_sources
-                .borrow()
+            self.bodies
+                .literal
                 .get(&(id.clone(), slot, block))
                 .is_some_and(|entry| entry.leaf.source_ref == *source.source_ref())
         } else {
             let key = format!("{id}:{slot}:leaf:{block}").into();
-            self.shared
+            self.bodies
                 .markdown
                 .is_stored_leaf_prepared(&key, source, block)
         };
@@ -769,15 +712,14 @@ impl Conversation {
         } else {
             return None;
         };
-        let top = self
-            .rows
-            .get(self.list.logical_scroll_top().item_ix)?
-            .0
-            .key();
-        let frontiers = self.shared.source_frontiers.borrow();
-        if let Some((reference, anchor, newer)) = frontiers.get(&(id.clone(), slot))
+        if let Some((reference, place, newer)) = self.bodies.frontiers.get(&(id.clone(), slot))
             && reference == source.source_ref()
-            && reverses_at_same_anchor(Some((anchor, *newer)), &top, offset > loaded.start)
+            && reverses_in_place(
+                Some(&(place.clone(), *newer)),
+                &self.reader_place(),
+                self.reader_toward_end,
+                offset > loaded.start,
+            )
         {
             return None;
         }
@@ -786,185 +728,107 @@ impl Conversation {
 
     pub(crate) fn read_evidence(&self, row: &Row, cx: &gpui::App) -> Option<artisan_api::Seq> {
         let visual = row.visual();
-        let row = row.semantic();
-        let view = self.view.as_ref()?;
-        let id = row.anchor()?;
-        let item = view.item(id)?;
-        let stored = match row {
-            Row::ProseBlock { .. } => matches!(
-                &item.kind,
-                ItemKind::AssistantMessage {
-                    text: artisan_api::TextContent::Stored(_),
-                    ..
-                }
-            ),
-            Row::TextBlock { section, .. } => section
-                .text(item)
-                .is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(_))),
-            Row::PlainBlock { section, .. } => section
-                .text(item)
-                .is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(_))),
-            _ => false,
+        let Row::Text {
+            id, slot, block, ..
+        } = row.semantic()
+        else {
+            return None;
         };
-        let current_live = item.status == artisan_api::Status::Running
-            && view.live.contains_key(&artisan_api::LiveTarget::Text {
-                item_id: id.clone(),
-            })
-            && matches!(row, Row::ProseBlock { .. });
-        if stored && !current_live {
-            let (slot, block, reference) = match row {
-                Row::ProseBlock { block, .. } => {
-                    let ItemKind::AssistantMessage {
-                        text: artisan_api::TextContent::Stored(reference),
-                        ..
-                    } = &item.kind
-                    else {
-                        return None;
-                    };
-                    (Slot::Prose, *block, reference)
-                }
-                Row::TextBlock { section, block, .. } => {
-                    let artisan_api::TextContent::Stored(reference) = section.text(item)? else {
-                        return None;
-                    };
-                    (section.slot(), *block, reference)
-                }
-                Row::PlainBlock { section, block, .. } => {
-                    let artisan_api::TextContent::Stored(reference) = section.text(item)? else {
-                        return None;
-                    };
-                    (section.slot(), *block, reference)
-                }
-                _ => return None,
-            };
-            let sources = self.shared.stored_sources.borrow();
-            let index = sources.get(&(id.clone(), slot))?;
-            let key: gpui::SharedString = format!("{id}:{slot}:leaf:{block}").into();
-            let literal = matches!(row, Row::PlainBlock { .. });
-            let literal_sources = self.shared.literal_sources.borrow();
-            let literal_source = literal_sources.get(&(id.clone(), slot, block));
-            let projected = literal_source.is_some_and(|entry| entry.visible.len() > 16 * 1024);
-            let native = self.shared.native_windows.borrow();
-            let projection_complete = if projected {
-                native.get(&row.key()).is_some_and(|state| {
-                    let ordinal = visual.unwrap_or(0);
-                    state.reference == *reference
-                        && state.error.is_none()
-                        && ordinal + 1 == state.count
-                        && state.painted.contains(&ordinal)
-                })
-            } else {
-                visual.is_none()
-            };
-            let complete = reference == index.source_ref()
-                && projection_complete
-                && block + 1 == index.block_count()
-                && if literal {
-                    index.format() == artisan_api::SourceIndexFormat::Literal
-                        && literal_source.is_some_and(|entry| &entry.leaf.source_ref == reference)
-                        && self
-                            .shared
-                            .markdown
-                            .is_stored_literal_leaf_prepared(&key, index, block)
+        let (slot, block) = (*slot, *block);
+        let view = self.view.as_ref()?;
+        let item = view.item(id)?;
+        let text = match slot {
+            Slot::Prose => match &item.kind {
+                ItemKind::AssistantMessage { text, .. } => Some(text),
+                _ => None,
+            },
+            slot => slot.text(item),
+        };
+        let target = artisan_api::LiveTarget::Text {
+            item_id: id.clone(),
+        };
+        let live = slot == Slot::Prose
+            && item.status == artisan_api::Status::Running
+            && view.live.contains_key(&target);
+        let markdown = &self.bodies.markdown;
+        let complete = match text {
+            Some(artisan_api::TextContent::Stored(reference)) if !live => {
+                let index = self.bodies.stored.get(&(id.clone(), slot))?;
+                let key: gpui::SharedString = format!("{id}:{slot}:leaf:{block}").into();
+                let literal = self.bodies.literal.get(&(id.clone(), slot, block));
+                let projected = literal.is_some_and(|entry| entry.visible.len() > 16 * 1024);
+                let projection_complete = if projected {
+                    self.bodies
+                        .native
+                        .get(&row.semantic().key())
+                        .is_some_and(|state| {
+                            let ordinal = visual.unwrap_or(0);
+                            state.reference == *reference
+                                && state.error.is_none()
+                                && ordinal + 1 == state.count
+                                && state.painted.contains(&ordinal)
+                        })
                 } else {
-                    index.format() == artisan_api::SourceIndexFormat::Markdown
-                        && self
-                            .shared
-                            .markdown
-                            .is_stored_leaf_prepared(&key, index, block)
-                        && self
-                            .shared
-                            .markdown
-                            .prepared_source(&key)
-                            .is_some_and(|prepared| !prepared.is_preview())
+                    visual.is_none()
                 };
-            return complete.then(|| {
-                self.row_context
-                    .read_boundary
-                    .as_ref()
-                    .filter(|(boundary, _)| boundary == id)
-                    .map_or(item.seq, |(_, seq)| *seq)
-            });
-        }
-        let complete = match row {
-            Row::ProseBlock { block, .. } => {
+                reference == index.source_ref()
+                    && projection_complete
+                    && block + 1 == index.block_count()
+                    && if slot.literal() {
+                        index.format() == artisan_api::SourceIndexFormat::Literal
+                            && literal.is_some_and(|entry| {
+                                &entry.leaf.source_ref == reference
+                                    && crate::body::same_leaf(index, block, &entry.leaf)
+                            })
+                    } else {
+                        index.format() == artisan_api::SourceIndexFormat::Markdown
+                            && markdown.is_stored_leaf_prepared(&key, index, block)
+                            && markdown
+                                .prepared_source(&key)
+                                .is_some_and(|prepared| !prepared.is_preview())
+                    }
+            }
+            _ if slot == Slot::Prose => {
                 let key: gpui::SharedString = id.to_string().into();
-                let current = if item.status == artisan_api::Status::Running {
-                    view.live
-                        .get(&artisan_api::LiveTarget::Text {
-                            item_id: id.clone(),
-                        })
-                        .map(|source| {
-                            let covered = self.host(cx).is_some_and(|host| {
-                                host.read(cx)
-                                    .live_snapshot(
-                                        &view.thread,
-                                        &artisan_api::LiveTarget::Text {
-                                            item_id: id.clone(),
-                                        },
-                                    )
-                                    .is_some_and(|snapshot| {
-                                        std::sync::Arc::ptr_eq(&snapshot.text, source)
-                                            && snapshot.coverage.is_complete(source.len_bytes())
-                                    })
-                            });
-                            covered && self.shared.markdown.is_rope_source_prepared(&key, source)
-                        })
-                } else {
-                    None
-                };
-                let current = current.unwrap_or_else(|| {
-                    self.shared
-                        .sources
-                        .borrow()
-                        .get(&(id.clone(), Slot::Prose))
-                        .is_some_and(|(seq, source)| {
-                            *seq == item.seq
-                                && self.shared.markdown.is_source_prepared(&key, source)
-                        })
-                });
-                current
-                    && self
-                        .shared
-                        .markdown
-                        .prepared_source(&key)
-                        .is_some_and(|prepared| {
-                            !prepared.is_preview() && *block + 1 == prepared.block_count()
-                        })
-            }
-            Row::TextBlock { section, block, .. } => {
-                let key: gpui::SharedString = format!("{id}:{}", section.slot()).into();
-                self.shared
-                    .sources
-                    .borrow()
-                    .get(&(id.clone(), section.slot()))
-                    .is_some_and(|(seq, source)| {
-                        *seq == item.seq && self.shared.markdown.is_source_prepared(&key, source)
+                let current = if live {
+                    view.live.get(&target).is_some_and(|source| {
+                        let covered = self.host(cx).is_some_and(|host| {
+                            host.read(cx)
+                                .live_snapshot(&view.thread, &target)
+                                .is_some_and(|snapshot| {
+                                    std::sync::Arc::ptr_eq(&snapshot.text, source)
+                                        && snapshot.coverage.is_complete(source.len_bytes())
+                                })
+                        });
+                        covered && markdown.is_rope_source_prepared(&key, source)
                     })
-                    && self
-                        .shared
-                        .markdown
-                        .prepared_source(&key)
-                        .is_some_and(|prepared| {
-                            !prepared.is_preview() && *block + 1 == prepared.block_count()
-                        })
+                } else {
+                    self.bodies.inline_prepared(id, slot, item.seq)
+                };
+                current
+                    && markdown.prepared_source(&key).is_some_and(|prepared| {
+                        !prepared.is_preview() && block + 1 == prepared.block_count()
+                    })
             }
-            Row::PlainBlock { section, block, .. }
-                if *section != crate::fold::PlainSection::AgentTask =>
-            {
-                self.shared
-                    .plain_sources
-                    .borrow()
-                    .get(&(id.clone(), section.slot()))
-                    .is_some_and(|body| body.seq == item.seq && *block + 1 == body.chunks.len())
+            _ if slot == Slot::Plain(crate::fold::PlainSection::AgentTask) => false,
+            _ if slot.literal() => self
+                .bodies
+                .plain
+                .get(&(id.clone(), slot))
+                .is_some_and(|body| body.seq == item.seq && block + 1 == body.chunks.len()),
+            _ => {
+                let key: gpui::SharedString = format!("{id}:{slot}").into();
+                self.bodies.inline_prepared(id, slot, item.seq)
+                    && markdown.prepared_source(&key).is_some_and(|prepared| {
+                        !prepared.is_preview() && block + 1 == prepared.block_count()
+                    })
             }
-            _ => false,
         };
         complete.then(|| {
             self.row_context
                 .read_boundary
                 .as_ref()
-                .filter(|(id, _)| id == &item.id)
+                .filter(|(boundary, _)| boundary == id)
                 .map_or(item.seq, |(_, seq)| *seq)
         })
     }
@@ -1001,9 +865,9 @@ impl Conversation {
         let mut markers = Vec::new();
         for (index, (row, _)) in self.rows.iter().enumerate() {
             let id = match row.semantic() {
-                Row::PlainBlock {
+                Row::Text {
                     id,
-                    section: crate::fold::PlainSection::User,
+                    slot: Slot::Plain(crate::fold::PlainSection::User),
                     ..
                 } => id,
                 _ => continue,
@@ -1375,14 +1239,17 @@ fn navigator_tick_indices(count: usize, slots: usize, active: Option<usize>) -> 
     indices
 }
 
-/// A page splice is not a reader movement. Keep its opposite edge from undoing
-/// the fetch while the same canonical row remains at the top of the viewport.
-fn reverses_at_same_anchor(
-    previous: Option<(&crate::fold::RowKey, bool)>,
-    anchor: &crate::fold::RowKey,
+/// A page splice is not a reader movement. A page change is undone only
+/// once the reader has scrolled on to another row, the way it undoes.
+fn reverses_in_place(
+    previous: Option<&(crate::body::ReaderPlace, bool)>,
+    place: &crate::body::ReaderPlace,
+    toward_end: Option<bool>,
     newer: bool,
 ) -> bool {
-    previous.is_some_and(|(old_anchor, old_newer)| old_anchor == anchor && old_newer != newer)
+    previous.is_some_and(|((moves, row), old_newer)| {
+        *old_newer != newer && (*moves == place.0 || *row == place.1 || toward_end != Some(newer))
+    })
 }
 
 #[cfg(test)]

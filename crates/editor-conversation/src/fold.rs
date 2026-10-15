@@ -26,8 +26,6 @@ pub(crate) enum Row {
         run: Option<RunId>,
         segment: usize,
         entries: Vec<ItemId>,
-        /// A directly following checkpoint shares this work section's separator.
-        compaction: Option<ItemId>,
     },
     /// One independently mounted entry inside an expanded work section.
     WorkEntry {
@@ -44,26 +42,16 @@ pub(crate) enum Row {
         step: usize,
         run: Option<RunId>,
     },
-    TextBlock {
+    /// One block of an item's text body (see [`Slot`]): a reply's
+    /// prose, a literal body or a formatted section. The fold emits block 0
+    /// for the whole body; publishing splits it into the blocks prepared or
+    /// loaded so far, and until then that one row shows all of it.
+    Text {
         id: ItemId,
-        section: TextSection,
+        slot: Slot,
         block: usize,
+        /// The work the row sits in, for formatted sections.
         run: Option<RunId>,
-    },
-    /// One block of a literal body (a user message, an agent's task or a
-    /// message to it, an error, an image caption). The fold emits block 0
-    /// for the whole body; publishing splits it into bounded blocks.
-    PlainBlock {
-        id: ItemId,
-        section: PlainSection,
-        block: usize,
-    },
-    /// One prepared block of a reply. The fold emits block 0 for the whole
-    /// reply; publishing splits it once its blocks are known, and until
-    /// then that one row shows all of it.
-    ProseBlock {
-        id: ItemId,
-        block: usize,
     },
     /// An approval or a question.
     Prompt(ItemId),
@@ -74,7 +62,7 @@ pub(crate) enum Row {
     /// The live run's status line, reasoning and stop button.
     Status(RunId),
     /// A subagent's view: what it reported back, at the end (its task is
-    /// a `PlainBlock` at the top, a message it got one where it arrived).
+    /// a text row at the top, a message it got one where it arrived).
     AgentResult(ItemId),
     /// A live agent's status line: working (a tool runs) or thinking.
     AgentStatus(ItemId, bool),
@@ -94,6 +82,10 @@ pub(crate) enum Slot {
     Preview,
 }
 impl Slot {
+    /// Literal bodies keep their bytes; the rest are Markdown.
+    pub(crate) fn literal(self) -> bool {
+        matches!(self, Self::Plain(_))
+    }
     /// The body's text in `item`, if the item has it.
     pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
         match self {
@@ -241,9 +233,6 @@ pub(crate) enum TextSection {
     Message,
 }
 impl TextSection {
-    pub(crate) fn slot(self) -> Slot {
-        Slot::Text(self)
-    }
     pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
         match (self, &item.kind) {
             (Self::Proposal, ItemKind::Plan { proposal, .. }) => proposal.as_ref(),
@@ -266,11 +255,9 @@ impl TextSection {
 pub(crate) enum RowKey {
     Projected(Box<RowKey>, usize),
     Item(ItemId),
-    ProseBlock(ItemId, usize),
-    PlainBlock(ItemId, PlainSection, usize),
+    Text(ItemId, Slot, usize),
     Chain(ItemId),
     PlanStep(ItemId, usize),
-    TextBlock(ItemId, TextSection, usize),
     Work(RunId, usize),
     /// Work without a run, keyed by its first item.
     Loose(ItemId),
@@ -282,6 +269,15 @@ pub(crate) enum RowKey {
 }
 
 impl Row {
+    /// The whole of an item's text body, before it splits into blocks.
+    pub(crate) fn text(id: ItemId, slot: Slot) -> Self {
+        Self::Text {
+            id,
+            slot,
+            block: 0,
+            run: None,
+        }
+    }
     pub(crate) fn semantic(&self) -> &Self {
         match self {
             Self::Projected { row, .. } => row,
@@ -298,11 +294,9 @@ impl Row {
     pub(crate) fn anchor(&self) -> Option<&ItemId> {
         match self {
             Self::Projected { row, .. } => row.anchor(),
-            Self::PlainBlock { id, .. }
+            Self::Text { id, .. }
             | Self::WorkEntry { id, .. }
             | Self::PlanStep { id, .. }
-            | Self::TextBlock { id, .. }
-            | Self::ProseBlock { id, .. }
             | Self::Prompt(id)
             | Self::Compaction(id)
             | Self::Image(id)
@@ -316,30 +310,31 @@ impl Row {
     pub(crate) fn key(&self) -> RowKey {
         match self {
             Self::Projected { row, visual } => RowKey::Projected(Box::new(row.key()), *visual),
-            Self::PlainBlock {
+            Self::Text {
                 id,
-                section: PlainSection::AgentTask,
+                slot: Slot::Plain(PlainSection::AgentTask),
                 block: 0,
+                ..
             } => RowKey::AgentTask(id.clone()),
-            Self::PlainBlock {
+            Self::Text {
                 id,
-                section: PlainSection::User | PlainSection::AgentMessage | PlainSection::Error,
-                block: 0,
-            } => RowKey::Item(id.clone()),
-            Self::PlainBlock { id, section, block } => {
-                RowKey::PlainBlock(id.clone(), *section, *block)
-            }
-            Self::Chain { ids, .. } => RowKey::Chain(ids.first().cloned().unwrap_or_default()),
-            Self::PlanStep { id, step, .. } => RowKey::PlanStep(id.clone(), *step),
-            Self::TextBlock {
-                id,
-                section: TextSection::AgentResult,
+                slot: Slot::Text(TextSection::AgentResult),
                 block: 0,
                 ..
             } => RowKey::AgentResult(id.clone()),
-            Self::TextBlock {
-                id, section, block, ..
-            } => RowKey::TextBlock(id.clone(), *section, *block),
+            Self::Text {
+                id,
+                slot:
+                    Slot::Prose
+                    | Slot::Plain(PlainSection::User | PlainSection::AgentMessage | PlainSection::Error),
+                block: 0,
+                ..
+            } => RowKey::Item(id.clone()),
+            Self::Text {
+                id, slot, block, ..
+            } => RowKey::Text(id.clone(), *slot, *block),
+            Self::Chain { ids, .. } => RowKey::Chain(ids.first().cloned().unwrap_or_default()),
+            Self::PlanStep { id, step, .. } => RowKey::PlanStep(id.clone(), *step),
             Self::Work {
                 run: Some(run),
                 segment,
@@ -348,8 +343,6 @@ impl Row {
             Self::Work {
                 run: None, entries, ..
             } => RowKey::Loose(entries.first().cloned().unwrap_or_default()),
-            Self::ProseBlock { id, block: 0 } => RowKey::Item(id.clone()),
-            Self::ProseBlock { id, block } => RowKey::ProseBlock(id.clone(), *block),
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
             Self::AgentResult(id) => RowKey::AgentResult(id.clone()),
@@ -376,11 +369,9 @@ impl Row {
                 format!("chain:{}", ids.first().cloned().unwrap_or_default())
             }
             Self::PlanStep { id, step, .. } => format!("plan-step:{id}:{step}"),
-            Self::TextBlock {
-                id, section, block, ..
-            } => format!("{}:{id}:{block}", section.slot()),
-            Self::PlainBlock { id, section, block } => format!("{}:{id}:{block}", section.slot()),
-            Self::ProseBlock { id, block } => format!("prose:{id}:{block}"),
+            Self::Text {
+                id, slot, block, ..
+            } => format!("{slot}:{id}:{block}"),
             Self::Prompt(id) => format!("prompt:{id}"),
             Self::Compaction(id) => format!("compaction:{id}"),
             Self::Image(id) => format!("image:{id}"),
@@ -404,7 +395,7 @@ impl Row {
             | Self::WorkEntry { run, .. }
             | Self::Chain { run, .. }
             | Self::PlanStep { run, .. }
-            | Self::TextBlock { run, .. } => run.as_ref(),
+            | Self::Text { run, .. } => run.as_ref(),
             Self::Status(run) => Some(run),
             _ => None,
         }
@@ -478,7 +469,6 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
                 run,
                 segment: *next,
                 entries,
-                compaction: None,
             });
             *next += 1;
         }
@@ -506,60 +496,42 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
         }
         if scope.is_some() && to_scope(item) {
             flush(&mut work, &mut rows);
-            rows.push(Row::PlainBlock {
-                id: item.id.clone(),
-                section: PlainSection::AgentMessage,
-                block: 0,
-            });
+            rows.push(Row::text(
+                item.id.clone(),
+                Slot::Plain(PlainSection::AgentMessage),
+            ));
             continue;
         }
         let own_row = match &item.kind {
             // A steer belongs to the running turn: it sits in the work
             // where it was sent and folds with it.
             ItemKind::UserMessage { steer: true, .. } if item.run_id.is_some() => None,
-            ItemKind::UserMessage { .. } => Some(Row::PlainBlock {
-                id: item.id.clone(),
-                section: PlainSection::User,
-                block: 0,
-            }),
+            ItemKind::UserMessage { .. } => {
+                Some(Row::text(item.id.clone(), Slot::Plain(PlainSection::User)))
+            }
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
-            } if scope.is_none() => Some(Row::ProseBlock {
-                id: item.id.clone(),
-                block: 0,
-            }),
+            } if scope.is_none() => Some(Row::text(item.id.clone(), Slot::Prose)),
             ItemKind::Question { .. } => Some(Row::Prompt(item.id.clone())),
             ItemKind::Tool { .. } | ItemKind::Plan { .. }
                 if item.status == Status::AwaitingUser =>
             {
                 Some(Row::Prompt(item.id.clone()))
             }
-            ItemKind::Compaction { .. } => Some(Row::Compaction(item.id.clone())),
-            ItemKind::Error { .. } => Some(Row::PlainBlock {
-                id: item.id.clone(),
-                section: PlainSection::Error,
-                block: 0,
-            }),
+            // A compaction during a run is part of its work; one outside
+            // any run divides the transcript.
+            ItemKind::Compaction { .. } if item.run_id.is_none() => {
+                Some(Row::Compaction(item.id.clone()))
+            }
+            ItemKind::Error { .. } => {
+                Some(Row::text(item.id.clone(), Slot::Plain(PlainSection::Error)))
+            }
             ItemKind::Image { .. } => Some(Row::Image(item.id.clone())),
             _ => None,
         };
         if let Some(row) = own_row {
             flush(&mut work, &mut rows);
-            if let Row::Compaction(id) = &row
-                && let Some(Row::Work {
-                    run: Some(run),
-                    segment: 0,
-                    compaction,
-                    ..
-                }) = rows.last_mut()
-                && compaction.is_none()
-                && item.run_id.as_ref().is_none_or(|owner| owner == run)
-            {
-                *compaction = Some(id.clone());
-                context.clone_from(&item.run_id);
-                continue;
-            }
             rows.push(row);
             context.clone_from(&item.run_id);
             continue;
@@ -593,11 +565,7 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
     if let Some(agent) = scope {
         rows.insert(
             0,
-            Row::PlainBlock {
-                id: agent.clone(),
-                section: PlainSection::AgentTask,
-                block: 0,
-            },
+            Row::text(agent.clone(), Slot::Plain(PlainSection::AgentTask)),
         );
         if view
             .item(agent)
@@ -647,7 +615,6 @@ pub(crate) fn expanded(
                 run,
                 segment,
                 entries,
-                compaction,
             } => {
                 let open = run
                     .as_ref()
@@ -659,7 +626,6 @@ pub(crate) fn expanded(
                         run: run.clone(),
                         segment,
                         entries: entries.clone(),
-                        compaction,
                     });
                 }
                 if !open {
@@ -702,9 +668,9 @@ pub(crate) fn expanded(
                                         )
                                     })
                                 {
-                                    emit(Row::TextBlock {
+                                    emit(Row::Text {
                                         id,
-                                        section: TextSection::Message,
+                                        slot: Slot::Text(TextSection::Message),
                                         block: 0,
                                         run: run.clone(),
                                     });
@@ -717,7 +683,7 @@ pub(crate) fn expanded(
                         index += 1;
                         match view.item(&id).map(|item| &item.kind) {
                             Some(ItemKind::AssistantMessage { .. }) => {
-                                emit(Row::ProseBlock { id, block: 0 });
+                                emit(Row::text(id, Slot::Prose));
                             }
                             Some(ItemKind::Plan {
                                 steps, proposal, ..
@@ -732,9 +698,9 @@ pub(crate) fn expanded(
                                     }
                                 }
                                 if proposal.is_some() {
-                                    emit(Row::TextBlock {
+                                    emit(Row::Text {
                                         id: id.clone(),
-                                        section: TextSection::Proposal,
+                                        slot: Slot::Text(TextSection::Proposal),
                                         block: 0,
                                         run: run.clone(),
                                     });
@@ -744,6 +710,10 @@ pub(crate) fn expanded(
                                     run: run.clone(),
                                 });
                             }
+                            // A steer sits in the work as the message it is.
+                            Some(ItemKind::UserMessage { .. }) => {
+                                emit(Row::text(id, Slot::Plain(PlainSection::User)));
+                            }
                             _ => emit(Row::WorkEntry {
                                 id,
                                 run: run.clone(),
@@ -752,9 +722,9 @@ pub(crate) fn expanded(
                     }
                 }
             }
-            Row::AgentResult(id) => emit(Row::TextBlock {
+            Row::AgentResult(id) => emit(Row::Text {
                 id,
-                section: TextSection::AgentResult,
+                slot: Slot::Text(TextSection::AgentResult),
                 block: 0,
                 run: None,
             }),
@@ -769,13 +739,22 @@ pub(crate) fn expanded(
                     )
                 }) =>
             {
-                emit(Row::TextBlock {
+                emit(Row::Text {
                     id: id.clone(),
-                    section: TextSection::Proposal,
+                    slot: Slot::Text(TextSection::Proposal),
                     block: 0,
                     run: None,
                 });
                 emit(Row::Prompt(id));
+            }
+            Row::Image(id) => {
+                let caption = view
+                    .item(&id)
+                    .is_some_and(|item| PlainSection::ImageCaption.text(item).is_some());
+                emit(Row::Image(id.clone()));
+                if caption {
+                    emit(Row::text(id, Slot::Plain(PlainSection::ImageCaption)));
+                }
             }
             other => {
                 let _ = revision;
@@ -894,14 +873,18 @@ const STATUS_GAP: f32 = 32.0;
 
 /// The space above native rows preserves the rhythm of turns (each a
 /// user message and what the run did about it) and the blocks inside them.
-pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
+pub(crate) fn gap(view: &ThreadView, rows: &[(Row, u64)], index: usize) -> f32 {
     let run_of = |row: &Row| -> Option<RunId> {
         match row {
             Row::Work { run, .. }
             | Row::WorkEntry { run, .. }
             | Row::Chain { run, .. }
             | Row::PlanStep { run, .. }
-            | Row::TextBlock { run, .. } => run.clone(),
+            | Row::Text {
+                slot: Slot::Text(_),
+                run,
+                ..
+            } => run.clone(),
             Row::Status(run) => Some(run.clone()),
             other => other
                 .anchor()
@@ -909,100 +892,99 @@ pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
                 .and_then(|item| item.run_id.clone()),
         }
     };
-    rows.iter()
-        .enumerate()
-        .map(|(index, (row, _))| {
-            let Some((previous, _)) = index.checked_sub(1).and_then(|index| rows.get(index)) else {
-                return PAD_TOP;
-            };
-            if row.visual().is_some_and(|visual| visual > 0) {
-                return 0.0;
+    let row = &rows[index].0;
+    {
+        let Some((previous, _)) = index.checked_sub(1).and_then(|index| rows.get(index)) else {
+            return PAD_TOP;
+        };
+        if row.visual().is_some_and(|visual| visual > 0) {
+            return 0.0;
+        }
+        let (row, previous) = (row.semantic(), previous.semantic());
+        let (run, previous_run) = (run_of(row), run_of(previous));
+        match (previous, row) {
+            (Row::Chain { .. }, Row::WorkEntry { id, .. })
+                if view
+                    .item(id)
+                    .is_some_and(|item| activity::category(item).is_some()) =>
+            {
+                0.0
             }
-            let (row, previous) = (row.semantic(), previous.semantic());
-            let (run, previous_run) = (run_of(row), run_of(previous));
-            match (previous, row) {
-                (Row::Chain { .. }, Row::WorkEntry { id, .. })
-                    if view
+            (Row::WorkEntry { id: previous, .. }, Row::WorkEntry { id, .. })
+                if run == previous_run
+                    && view
+                        .item(previous)
+                        .is_some_and(|item| activity::category(item).is_some())
+                    && view
                         .item(id)
                         .is_some_and(|item| activity::category(item).is_some()) =>
-                {
-                    0.0
-                }
-                (Row::WorkEntry { id: previous, .. }, Row::WorkEntry { id, .. })
-                    if run == previous_run
-                        && view
-                            .item(previous)
-                            .is_some_and(|item| activity::category(item).is_some())
-                        && view
-                            .item(id)
-                            .is_some_and(|item| activity::category(item).is_some()) =>
-                {
-                    4.0
-                }
-                (Row::PlanStep { id: previous, .. }, Row::PlanStep { id, .. })
-                    if id == previous =>
-                {
-                    2.0
-                }
-                (
-                    Row::WorkEntry { id: previous, .. },
-                    Row::TextBlock {
-                        id,
-                        section: TextSection::Message,
-                        block: 0,
-                        ..
-                    },
-                ) if id == previous => 4.0,
-                // A prepared body or expanded work entry is already one list row.
-                (
-                    _,
-                    Row::ProseBlock { block: 1.., .. }
-                    | Row::TextBlock { block: 1.., .. }
-                    | Row::PlainBlock { block: 1.., .. },
-                ) => 0.0,
-                (
-                    Row::Work { .. }
-                    | Row::WorkEntry { .. }
-                    | Row::Chain { .. }
-                    | Row::PlanStep { .. }
-                    | Row::TextBlock { .. },
-                    Row::WorkEntry { .. }
-                    | Row::Chain { .. }
-                    | Row::PlanStep { .. }
-                    | Row::TextBlock { .. }
-                    | Row::ProseBlock { .. },
-                ) if run == previous_run => 8.0,
-                (Row::Work { .. }, Row::ProseBlock { .. }) => REPLY_SEAM,
-                (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
-                (_, Row::Status(_)) => STATUS_GAP,
-                // A user message starts a turn; a steer stays inside its
-                // run's turn.
-                (
-                    _,
-                    Row::PlainBlock {
-                        section: PlainSection::User,
-                        ..
-                    },
-                ) if run.is_some() && run == previous_run => BLOCK_GAP,
-                (
-                    _,
-                    Row::PlainBlock {
-                        section: PlainSection::User,
-                        ..
-                    },
-                ) => TURN_GAP,
-                (
-                    Row::PlainBlock {
-                        section: PlainSection::User,
-                        ..
-                    },
-                    _,
-                ) => BLOCK_GAP,
-                _ if run.is_some() && previous_run.is_some() && run != previous_run => TURN_GAP,
-                _ => BLOCK_GAP,
+            {
+                4.0
             }
-        })
-        .collect()
+            (Row::PlanStep { id: previous, .. }, Row::PlanStep { id, .. }) if id == previous => 2.0,
+            (
+                Row::WorkEntry { id: previous, .. },
+                Row::Text {
+                    id,
+                    slot: Slot::Text(TextSection::Message),
+                    block: 0,
+                    ..
+                },
+            ) if id == previous => 4.0,
+            // A prepared body or expanded work entry is already one list row.
+            (_, Row::Text { block: 1.., .. }) => 0.0,
+            (
+                Row::Work { .. }
+                | Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::PlanStep { .. }
+                | Row::Text {
+                    slot: Slot::Text(_),
+                    ..
+                },
+                Row::WorkEntry { .. }
+                | Row::Chain { .. }
+                | Row::PlanStep { .. }
+                | Row::Text {
+                    slot: Slot::Text(_) | Slot::Prose,
+                    ..
+                },
+            ) if run == previous_run => 8.0,
+            (
+                Row::Work { .. },
+                Row::Text {
+                    slot: Slot::Prose, ..
+                },
+            ) => REPLY_SEAM,
+            (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
+            (_, Row::Status(_)) => STATUS_GAP,
+            // A user message starts a turn; a steer stays inside its
+            // run's turn.
+            (
+                _,
+                Row::Text {
+                    slot: Slot::Plain(PlainSection::User),
+                    ..
+                },
+            ) if run.is_some() && run == previous_run => BLOCK_GAP,
+            (
+                _,
+                Row::Text {
+                    slot: Slot::Plain(PlainSection::User),
+                    ..
+                },
+            ) => TURN_GAP,
+            (
+                Row::Text {
+                    slot: Slot::Plain(PlainSection::User),
+                    ..
+                },
+                _,
+            ) => BLOCK_GAP,
+            _ if run.is_some() && previous_run.is_some() && run != previous_run => TURN_GAP,
+            _ => BLOCK_GAP,
+        }
+    }
 }
 
 fn version(
@@ -1015,7 +997,7 @@ fn version(
     row.hash(&mut hasher);
     row.run().and_then(|run| runs.get(run)).hash(&mut hasher);
     let mut stack: Vec<&ItemId> = match row {
-        Row::Work { compaction, .. } => compaction.iter().collect(),
+        Row::Work { .. } => Vec::new(),
         Row::Chain { ids, .. } => ids.iter().collect(),
         Row::Status(run) => {
             view.live
@@ -1064,7 +1046,10 @@ fn version(
             Row::Chain { .. }
                 | Row::WorkEntry { .. }
                 | Row::PlanStep { .. }
-                | Row::TextBlock { .. }
+                | Row::Text {
+                    slot: Slot::Text(_),
+                    ..
+                }
         ) && let Some(nested) = children.get(id)
         {
             stack.extend(nested.iter().map(|item| &item.id));

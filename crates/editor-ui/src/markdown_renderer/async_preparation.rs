@@ -260,7 +260,7 @@ pub(super) struct IndexedStyle {
     pub table_continues: bool,
 }
 type DocumentResult = Result<(MarkdownDocument, PreparedParts, Option<IndexedStyle>), String>;
-struct DocumentJob {
+pub(super) struct DocumentJob {
     // Capacity belongs to the actual queued/running snapshot, not its view task.
     // Canceling a view cannot release this until the worker drops the job.
     _source_capacity: tokio::sync::OwnedSemaphorePermit,
@@ -268,38 +268,105 @@ struct DocumentJob {
     renderer: gpui::SvgRenderer,
     result: oneshot::Sender<DocumentResult>,
 }
-enum Job {
-    Document(DocumentJob),
+/// Shaping a visible paragraph's glyph window: the job and where its result
+/// goes.
+pub(super) struct ShapeJob {
+    pub work: Box<dyn FnOnce() -> super::projection_worker::ShapeResult + Send>,
+    pub result: oneshot::Sender<super::projection_worker::ShapeResult>,
 }
+pub(super) enum Job {
+    Document(DocumentJob),
+    Shape(ShapeJob),
+}
+/// The renderer's one preparation thread. Shaping what a row shows goes
+/// ahead of every queued parse, so visible text never waits behind
+/// preparation of what may never show.
 pub(super) struct Worker {
-    queue: mpsc::Sender<Job>,
+    pub queue: mpsc::Sender<Job>,
     source_capacity: Arc<tokio::sync::Semaphore>,
 }
 impl Worker {
     fn new() -> Result<Self, String> {
         let (queue, mut receiver) = mpsc::channel::<Job>(QUEUE_DEPTH);
-        std::thread::Builder::new().name("artisan-markdown".into()).spawn(move || {
-            let engine = MarkdownEngine::new();
-            let mut diagrams = super::diagram::DiagramCache::default();
-            let mut fences = FenceTokenCache::default();
-            while let Some(job) = receiver.blocking_recv() {
-                match job {
-                    Job::Document(job)=> {
-                        if job.result.is_canceled() { continue; }
-                        let document=engine.as_ref().map_err(ToString::to_string)
-                            .and_then(|engine|job.source.parse(engine,&mut fences))
-                            .map(|(mut document,style)| { if !job.result.is_canceled() { diagrams.prepare(&mut document); } (document,style) })
-                            .and_then(|(document,style)| if document.resident_bytes()>MAX_CACHE_BYTES/8 { Err("Markdown leaf exceeds its syntax-memory budget; open the full source".to_owned()) } else { let parts=PreparedParts::new(&document,Some(&job.renderer)); if parts.resident_bytes()>MAX_CACHE_BYTES/2 { Err("Markdown leaf exceeds its normalized-memory budget; open the full source".to_owned()) } else { Ok((document,parts,style)) } });
-                        let _=job.result.send(document);
+        std::thread::Builder::new()
+            .name("artisan-markdown".into())
+            .spawn(move || {
+                let engine = MarkdownEngine::new();
+                let mut diagrams = super::diagram::DiagramCache::default();
+                let mut fences = FenceTokenCache::default();
+                let mut documents = VecDeque::new();
+                let mut shapes = VecDeque::new();
+                loop {
+                    if documents.is_empty() && shapes.is_empty() {
+                        match receiver.blocking_recv() {
+                            Some(job) => queue_job(job, &mut documents, &mut shapes),
+                            None => return,
+                        }
+                    }
+                    while let Ok(job) = receiver.try_recv() {
+                        queue_job(job, &mut documents, &mut shapes);
+                    }
+                    if let Some(job) = shapes.pop_front() {
+                        let ShapeJob { work, result } = job;
+                        if !result.is_canceled() {
+                            let _ = result.send(work());
+                        }
+                    } else if let Some(job) = documents.pop_front() {
+                        parse(job, engine.as_ref(), &mut diagrams, &mut fences);
                     }
                 }
-            }
-        }).map_err(|error| format!("Couldn't start Markdown preparation: {error}"))?;
+            })
+            .map_err(|error| format!("Couldn't start Markdown preparation: {error}"))?;
         Ok(Self {
             queue,
             source_capacity: super::budget::pool(MAX_CACHE_BYTES),
         })
     }
+}
+
+fn queue_job(job: Job, documents: &mut VecDeque<DocumentJob>, shapes: &mut VecDeque<ShapeJob>) {
+    match job {
+        Job::Document(job) => documents.push_back(job),
+        Job::Shape(job) => shapes.push_back(job),
+    }
+}
+
+/// Parses and highlights one document within its memory budgets.
+fn parse(
+    job: DocumentJob,
+    engine: Result<&MarkdownEngine, &crate::markdown::MarkdownError>,
+    diagrams: &mut super::diagram::DiagramCache,
+    fences: &mut FenceTokenCache,
+) {
+    if job.result.is_canceled() {
+        return;
+    }
+    let document = engine
+        .map_err(ToString::to_string)
+        .and_then(|engine| job.source.parse(engine, fences))
+        .map(|(mut document, style)| {
+            if !job.result.is_canceled() {
+                diagrams.prepare(&mut document);
+            }
+            (document, style)
+        })
+        .and_then(|(document, style)| {
+            if document.resident_bytes() > MAX_CACHE_BYTES / 8 {
+                return Err(
+                    "Markdown leaf exceeds its syntax-memory budget; open the full source"
+                        .to_owned(),
+                );
+            }
+            let parts = PreparedParts::new(&document, Some(&job.renderer));
+            if parts.resident_bytes() > MAX_CACHE_BYTES / 2 {
+                return Err(
+                    "Markdown leaf exceeds its normalized-memory budget; open the full source"
+                        .to_owned(),
+                );
+            }
+            Ok((document, parts, style))
+        });
+    let _ = job.result.send(document);
 }
 
 struct Entry {
@@ -311,12 +378,25 @@ struct Entry {
     task: Option<Task<()>>,
     pending_bytes: Option<usize>,
 }
+/// Tells a turned-away request to ask again.
+type Waiter = Box<dyn Fn(&mut App)>;
+
 #[derive(Default)]
 struct Cache {
     entries: VecDeque<Entry>,
     generation: u64,
+    /// Requests the budget turned away, told when any job finishes so they
+    /// can ask again.
+    waiters: Vec<(SharedString, Waiter)>,
 }
 impl Cache {
+    fn wait(&mut self, key: SharedString, notify: impl Fn(&mut App) + 'static) {
+        self.waiters.retain(|(waiting, _)| *waiting != key);
+        if self.waiters.len() >= MAX_PENDING_JOBS * 8 {
+            drop(self.waiters.remove(0));
+        }
+        self.waiters.push((key, Box::new(notify)));
+    }
     fn can_admit(&self, bytes: usize) -> bool {
         let pending = self.entries.iter().filter_map(|entry| entry.pending_bytes);
         let count = pending.clone().count();
@@ -403,6 +483,7 @@ impl PreparationOwner {
         self.identity_prepared(key, &SourceIdentity::Remote(reference.clone(), leaf))
     }
     pub(super) fn clear(&self, cx: &mut App) {
+        self.cache.borrow_mut().waiters.clear();
         for entry in self.cache.borrow_mut().entries.drain(..) {
             if let Some(source) = entry.prepared {
                 source.presentation.release_images(cx);
@@ -490,11 +571,12 @@ impl PreparationOwner {
             );
         }
         if !cache.can_admit(pending_bytes) {
-            // A publication notifies the requesting view, which retries blocked
-            // sources. Active requests are never evicted to admit more work.
+            // Active requests are never evicted to admit more work; this one
+            // asks again when one of them finishes.
             if let Some(entry) = old {
                 cache.entries.push_back(entry);
             }
+            cache.wait(key, notify);
             return MarkdownPreparation::Pending;
         }
         cache.generation = cache.generation.wrapping_add(1);
@@ -523,11 +605,17 @@ impl PreparationOwner {
                     return;
                 };
                 let mut cache = owner.borrow_mut();
+                // Whatever became of this job, its budget is free now.
+                let waiters = std::mem::take(&mut cache.waiters);
                 let Some(entry) = cache
                     .entries
                     .iter_mut()
                     .find(|entry| entry.key == task_key && entry.generation == generation)
                 else {
+                    drop(cache);
+                    for (_, waiter) in waiters {
+                        waiter(cx);
+                    }
                     return;
                 };
                 match document {
@@ -552,6 +640,9 @@ impl PreparationOwner {
                 cache.trim(cx);
                 drop(cache);
                 notify(cx);
+                for (_, waiter) in waiters {
+                    waiter(cx);
+                }
             });
         });
         cache.entries.push_back(Entry {

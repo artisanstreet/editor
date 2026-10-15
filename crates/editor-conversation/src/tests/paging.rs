@@ -577,8 +577,8 @@ fn the_newest_turn_shows_before_its_start_loads(cx: &mut TestAppContext) {
     );
 }
 
-/// Finishing preparation above the reader keeps the row the reader is on
-/// where it is.
+/// Text above the reader growing as it finishes preparing keeps the row
+/// the reader is on where it is.
 #[gpui::test]
 fn background_work_preparation_preserves_the_reading_anchor(cx: &mut TestAppContext) {
     let forge = Forge::start();
@@ -646,6 +646,7 @@ fn background_work_preparation_preserves_the_reading_anchor(cx: &mut TestAppCont
             .unwrap()
     };
     let before = anchor(cx);
+    let height = max(cx);
     let expanded = (0..300)
         .map(|n| format!("Earlier background paragraph {n}."))
         .collect::<Vec<_>>()
@@ -660,12 +661,10 @@ fn background_work_preparation_preserves_the_reading_anchor(cx: &mut TestAppCont
             phase: Phase::Commentary,
         },
     );
-    wait(cx, "the earlier commentary's new text", |cx| {
-        loaded(&conversation, cx).iter().any(|item| {
-            item.id == earlier
-                && matches!(&item.kind, ItemKind::AssistantMessage { text, .. }
-                    if text.inline() == Some(expanded.as_str()))
-        })
+    // Prepared just above the view, it grows there.
+    wait(cx, "the earlier commentary grows above the reader", |cx| {
+        draw(cx);
+        max(cx) > height + 1000.0
     });
     settle(cx, &conversation);
     let after = anchor(cx);

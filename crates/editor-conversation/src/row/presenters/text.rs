@@ -1,73 +1,50 @@
-//! Canonical text sections construct existing prepared and selection leaves.
-//! Preparation, source windows and selection storage keep their current owners.
-use super::super::{
-    PlainBody, PlainText, PreparedText, Shared, StoredPreparedText, body_line, body_text,
-};
+//! Text inside cards and activities: tool output, answers, notices and
+//! stored fields. Text rows draw the body the conversation prepared.
+use super::super::{body_line, body_text};
 use crate::content::{SourceField, SourceOwners, StoredText};
 use crate::fold::Slot;
-use crate::fold::TextSection;
-use artisan_api::{Item, ItemKind, NoticeKind, TextContent};
-use editor_ui::{AssetId, markdown_renderer::MarkdownBodyTone, selectable_text::SelectionSource};
+use artisan_api::{Item, ItemId, ItemKind, NoticeKind, TextContent};
+use editor_ui::selectable_text::{SelectableText, register_selection_source};
+use editor_ui::{AssetId, selectable_text::SelectionSource, theme::ArtisanTheme};
 use gpui::{
-    AnyElement, IntoElement, ParentElement as _, SharedString, Styled as _, WeakEntity, div, px,
-    svg,
+    AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
+    WeakEntity, Window, div, px, svg,
 };
-use std::{rc::Rc, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+/// A row's own tool output and answers, each one selectable source, kept
+/// while their text stays the same.
+pub(in crate::row) type PlainSources =
+    RefCell<HashMap<(ItemId, Slot), (SharedString, Rc<SelectionSource>)>>;
+
+/// Literal text registered with the window's selection as it draws.
+#[derive(IntoElement)]
+struct PlainText {
+    source: Rc<SelectionSource>,
+    text: SharedString,
+    key: SharedString,
+    scope: SharedString,
+    order: Vec<u64>,
+    theme: ArtisanTheme,
+}
+impl RenderOnce for PlainText {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        register_selection_source(&self.source, window, cx);
+        SelectableText::retained(self.key, self.text, self.theme, Vec::new())
+            .selection_scope(self.scope)
+            .selection_order(self.order, "\n\n")
+    }
+}
+
 pub(in crate::row) struct TextPresenter<'a> {
-    pub shared: &'a Rc<Shared>,
+    pub theme: ArtisanTheme,
     pub owners: &'a SourceOwners,
-    pub source_host: Option<WeakEntity<editor_core::HostData>>,
+    pub host: Option<WeakEntity<editor_core::HostData>>,
+    pub plain: &'a PlainSources,
+    pub scope: &'a SharedString,
+    pub agent_scope: bool,
 }
 impl TextPresenter<'_> {
-    pub(in crate::row) fn assistant(&self, item: &Item, block: usize) -> AnyElement {
-        let ItemKind::AssistantMessage { text, .. } = &item.kind else {
-            return div().into_any_element();
-        };
-        self.prepared_text(item, Slot::Prose, text, MarkdownBodyTone::Foreground, block)
-    }
-    pub(in crate::row) fn section(
-        &self,
-        item: &Item,
-        section: TextSection,
-        block: usize,
-    ) -> AnyElement {
-        let Some(text) = section.text(item) else {
-            return div().into_any_element();
-        };
-        self.prepared_text(
-            item,
-            section.slot(),
-            text,
-            if section == TextSection::Message {
-                MarkdownBodyTone::Muted
-            } else {
-                MarkdownBodyTone::Foreground
-            },
-            block,
-        )
-    }
-    pub(in crate::row) fn stored_reply(
-        &self,
-        item: &Item,
-        block: usize,
-        reveal: Rc<editor_ui::markdown_renderer::PreparedReveal>,
-    ) -> AnyElement {
-        let ItemKind::AssistantMessage {
-            text: TextContent::Stored(source),
-            ..
-        } = &item.kind
-        else {
-            return div().into_any_element();
-        };
-        self.stored_formatted(
-            item,
-            Slot::Prose,
-            source,
-            block,
-            MarkdownBodyTone::Foreground,
-            Some(reveal),
-        )
-    }
     pub(super) fn output(&self, item: &Item, text: &str) -> AnyElement {
         self.plain_text(item, Slot::Output, text)
     }
@@ -93,11 +70,11 @@ impl TextPresenter<'_> {
             return div().into_any_element();
         };
         match text {
-            TextContent::Inline(text) => body_text(text, &self.shared.theme).into_any_element(),
+            TextContent::Inline(text) => body_text(text, &self.theme).into_any_element(),
             TextContent::Stored(source) => StoredText {
-                host: self.source_host.clone(),
+                host: self.host.clone(),
                 source: source.clone(),
-                theme: self.shared.theme,
+                theme: self.theme,
                 key: (item.id.clone(), field),
                 owners: self.owners.clone(),
             }
@@ -105,151 +82,43 @@ impl TextPresenter<'_> {
         }
     }
 
-    fn prepared_text(
-        &self,
-        item: &Item,
-        section: Slot,
-        text: &TextContent,
-        tone: MarkdownBodyTone,
-        block: usize,
-    ) -> AnyElement {
-        let TextContent::Inline(text) = text else {
-            let TextContent::Stored(source) = text else {
-                unreachable!()
-            };
-            return self.stored_formatted(item, section, source, block, tone, None);
-        };
-        let source = {
-            let mut sources = self.shared.sources.borrow_mut();
-            let cached = sources
-                .entry((item.id.clone(), section))
-                .or_insert_with(|| (item.seq, Arc::from(text.as_str())));
-            if cached.0 != item.seq && cached.1.as_ref() != text {
-                cached.1 = Arc::from(text.as_str());
-            }
-            cached.0 = item.seq;
-            cached.1.clone()
-        };
-        PreparedText {
-            shared: self.shared.clone(),
-            source,
-            key: format!("{}:{section}", item.id).into(),
-            order: crate::fold::selection_order(
-                self.shared.agent_scope.get(),
-                item.position,
-                section,
-            ),
-            blocks: block..block + 1,
-            tone,
-        }
-        .into_any_element()
-    }
-
-    /// The opened activity's preview, built once per change of the item.
-    pub(super) fn preview(&self, item: &Item) -> Option<AnyElement> {
-        let key = (item.id.clone(), Slot::Preview);
-        let source = {
-            let mut sources = self.shared.sources.borrow_mut();
-            match sources.get(&key) {
-                Some((seq, source)) if *seq == item.seq => source.clone(),
-                _ => {
-                    let source: Arc<str> = crate::preview::markdown(item)?.into();
-                    sources.insert(key, (item.seq, source.clone()));
-                    source
-                }
-            }
-        };
-        Some(
-            PreparedText {
-                shared: self.shared.clone(),
-                source,
-                key: format!("{}:{}", item.id, Slot::Preview).into(),
-                order: crate::fold::selection_order(
-                    self.shared.agent_scope.get(),
-                    item.position,
-                    Slot::Preview,
-                ),
-                blocks: 0..usize::MAX,
-                tone: MarkdownBodyTone::Foreground,
-            }
-            .into_any_element(),
-        )
-    }
-
-    fn stored_formatted(
-        &self,
-        item: &Item,
-        slot: Slot,
-        source: &artisan_api::ContentRef,
-        block: usize,
-        tone: MarkdownBodyTone,
-        reveal: Option<Rc<editor_ui::markdown_renderer::PreparedReveal>>,
-    ) -> AnyElement {
-        StoredPreparedText {
-            shared: self.shared.clone(),
-            source: source.clone(),
-            host: self.source_host.clone(),
-            owners: self.owners.clone(),
-            id: item.id.clone(),
-            slot,
-            block,
-            tone,
-            literal: None,
-            visual: None,
-            queue_key: (slot == Slot::Prose).then(|| {
-                crate::fold::Row::ProseBlock {
-                    id: item.id.clone(),
-                    block,
-                }
-                .key()
-            }),
-            reveal,
-            order: crate::fold::selection_order(self.shared.agent_scope.get(), item.position, slot),
-        }
-        .into_any_element()
-    }
-
+    /// Tool output or an answer: literal, selectable as authored.
     fn plain_text(&self, item: &Item, slot: Slot, text: &str) -> AnyElement {
-        let id = &item.id;
-        let scope = self.shared.selection_scope.borrow().clone();
-        let mut order =
-            crate::fold::selection_order(self.shared.agent_scope.get(), item.position, slot);
+        let mut order = crate::fold::selection_order(self.agent_scope, item.position, slot);
         order.push(if slot == Slot::Output { 1 } else { 0 });
         let (text, source) = {
-            let mut sources = self.shared.plain_sources.borrow_mut();
-            let cached = sources.entry((id.clone(), slot)).or_insert_with(|| {
+            let mut plain = self.plain.borrow_mut();
+            let cached = plain.entry((item.id.clone(), slot)).or_insert_with(|| {
                 let text: SharedString = text.to_owned().into();
-                let source =
-                    SelectionSource::single(scope.clone(), order.clone(), text.clone(), "\n\n");
-                PlainBody {
-                    seq: item.seq,
-                    chunks: vec![text.clone()],
-                    source,
-                }
+                let source = SelectionSource::single(
+                    self.scope.clone(),
+                    order.clone(),
+                    text.clone(),
+                    "\n\n",
+                );
+                (text, source)
             });
-            if cached.chunks.len() != 1 || cached.chunks[0].as_ref() != text {
+            if cached.0.as_ref() != text {
                 let text: SharedString = text.to_owned().into();
-                *cached = PlainBody {
-                    seq: item.seq,
-                    chunks: vec![text.clone()],
-                    source: SelectionSource::single(
-                        scope.clone(),
-                        order.clone(),
-                        text.clone(),
-                        "\n\n",
-                    ),
-                };
+                *cached = (
+                    text.clone(),
+                    SelectionSource::single(self.scope.clone(), order.clone(), text, "\n\n"),
+                );
             }
-            cached.seq = item.seq;
-            (cached.chunks[0].clone(), cached.source.clone())
+            cached.clone()
         };
+        let (scope, key, theme) = (
+            self.scope.clone(),
+            SharedString::from(format!("{slot}-{}", item.id)),
+            self.theme,
+        );
         PlainText {
             source,
             text,
-            key: format!("{slot}-{id}").into(),
+            key,
             scope,
             order,
-            theme: self.shared.theme,
+            theme,
         }
         .into_any_element()
     }
@@ -258,7 +127,7 @@ impl TextPresenter<'_> {
         let ItemKind::Notice { kind, text } = &item.kind else {
             return div().into_any_element();
         };
-        let theme = self.shared.theme;
+        let theme = self.theme;
         let muted = theme.colors.muted_foreground.to_paint();
         let (asset, prefix) = match kind {
             NoticeKind::Goal { state } => (AssetId::TABLER_TARGET_ARROW, format!("Goal {state}: ")),

@@ -1,4 +1,5 @@
-//! Cold native shaping runs on a background worker, never in a visible row.
+//! Cold native shaping runs on the renderer's preparation thread, ahead of
+//! queued parsing, never in a visible row.
 //! A per-job WindowTextSystem drops its full shaped-line cache after projecting
 //! the requested hot range. Platform-internal allocation peaks are not a hard
 //! bound implied by the conservative admission estimate below.
@@ -13,6 +14,9 @@ const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_RUN_BYTES: usize = 128 * 1024;
 const ADMITTED_ESTIMATE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_NATIVE_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
+
+/// A shaped glyph window, or why it couldn't be.
+pub(super) type ShapeResult = Result<NativeWindow, String>;
 
 /// Whether two paragraph sources are the same immutable text.
 pub(super) fn same_source(a: &SharedString, b: &SharedString) -> bool {
@@ -80,6 +84,7 @@ impl NativeWindow {
 /// generation key. Publish only if that key still matches after awaiting.
 pub(super) fn start(
     cx: &App,
+    worker: &Arc<super::async_preparation::Worker>,
     source: SharedString,
     font_size: Pixels,
     runs: Arc<[TextRun]>,
@@ -112,7 +117,37 @@ pub(super) fn start(
         .try_acquire_owned()
         .map_err(|_| StartError::Busy)?;
     let system: Arc<TextSystem> = cx.text_system().clone();
+    let (result, shaped) = futures::channel::oneshot::channel();
+    let job = super::async_preparation::ShapeJob {
+        work: Box::new(move || shape(owner, system, source, font_size, runs, width, window)),
+        result,
+    };
+    let queue = worker.queue.clone();
     Ok(cx.background_executor().spawn(async move {
+        if queue
+            .send(super::async_preparation::Job::Shape(job))
+            .await
+            .is_err()
+        {
+            return Err("Markdown worker closed".to_owned());
+        }
+        shaped
+            .await
+            .unwrap_or_else(|_| Err("Markdown worker stopped before shaping".to_owned()))
+    }))
+}
+
+/// Shapes the paragraph and projects the visual rows of `window`.
+fn shape(
+    owner: tokio::sync::OwnedSemaphorePermit,
+    system: Arc<TextSystem>,
+    source: SharedString,
+    font_size: Pixels,
+    runs: Arc<[TextRun]>,
+    width: Pixels,
+    window: Range<usize>,
+) -> ShapeResult {
+    {
         let _owner = owner;
         let text = source;
         let worker = WindowTextSystem::new(system);
@@ -190,5 +225,5 @@ pub(super) fn start(
         }
         ready._resident = Some(capacity);
         Ok(ready)
-    }))
+    }
 }

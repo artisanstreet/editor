@@ -163,8 +163,13 @@ impl MarkdownRenderer {
         cx: &mut gpui::App,
         notify: impl Fn(&mut gpui::App) + 'static,
     ) -> NativePreparation {
-        self.projection
-            .prepare(key, source, font_size, width, runs, range, cx, notify)
+        let worker = match self.preparation.worker() {
+            Ok(worker) => worker,
+            Err(error) => return NativePreparation::Failed(error),
+        };
+        self.projection.prepare(
+            key, source, font_size, width, runs, range, &worker, cx, notify,
+        )
     }
     pub fn native_row_count(
         &self,

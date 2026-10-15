@@ -273,6 +273,15 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
         ),
     ],
+    // Claude repeats its `compacting` status as progress, and each repeat
+    // used to start another compaction item. Keep one per compaction: the
+    // one that has token counts, otherwise the first.
+    &[Step::Sql(
+        r"DELETE FROM items WHERE kind_type='compaction'
+         AND json_extract(body,'$.kind.tokens_before') IS NULL
+         AND EXISTS(SELECT 1 FROM items c WHERE c.run_id=items.run_id AND c.kind_type='compaction'
+           AND (json_extract(c.body,'$.kind.tokens_before') IS NOT NULL OR c.position<items.position));",
+    )],
 ];
 
 /// An approval stored as its own item (`{"type":"approval", target,
@@ -870,6 +879,38 @@ mod item_column_migration_tests {
                 .collect::<Vec<_>>(),
             ["input"]
         );
+    }
+
+    /// A Claude compaction stored once per progress frame shows once: the
+    /// thread keeps the item with token counts and its other compactions.
+    #[test]
+    fn repeated_compaction_items_collapse_to_one_per_compaction() {
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, 17).unwrap();
+        let compaction = |id: &str, run: &str, position: i64, before: Option<u64>| {
+            let body = json!({"id":id,"thread_id":"t","position":position,"seq":position,
+                "run_id":run,"parent_id":null,"status":"done","created_at":1,"updated_at":1,
+                "kind":{"type":"compaction","tokens_before":before,
+                    "tokens_after":before.map(|_| 15_000)}});
+            conn.execute(
+                "INSERT INTO items(id,thread_id,position,seq,run_id,status,body,kind_type)
+                 VALUES(?1,'t',?2,?2,?3,'done',?4,'compaction')",
+                rusqlite::params![id, position, run, body.to_string()],
+            )
+            .unwrap();
+        };
+        compaction("progress-1", "r1", 1, None);
+        compaction("progress-2", "r1", 2, None);
+        compaction("boundary", "r1", 3, Some(966_000));
+        compaction("interrupted-1", "r2", 4, None);
+        compaction("interrupted-2", "r2", 5, None);
+        compaction("other-run", "r3", 6, Some(500_000));
+        migrate(&mut conn).unwrap();
+        let page =
+            crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
+        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["boundary", "interrupted-1", "other-run"]);
     }
 
     /// Threads Codex and ACP ran before approvals moved onto the item they

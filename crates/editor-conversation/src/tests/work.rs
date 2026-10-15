@@ -429,11 +429,13 @@ fn opening_long_work_prepares_only_what_shows(cx: &mut TestAppContext) {
     });
 }
 
+/// A compaction during a run is a line of its work, never a divider that
+/// splits the run into two sections.
 #[gpui::test]
-fn adjacent_work_and_compaction_share_one_separator_and_keep_disclosure(cx: &mut TestAppContext) {
+fn a_compaction_during_a_run_is_a_line_of_its_work(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
-    forge.put(
+    let ask = forge.put(
         &thread,
         &ItemId::new(),
         Status::Done,
@@ -443,65 +445,67 @@ fn adjacent_work_and_compaction_share_one_separator_and_keep_disclosure(cx: &mut
             steer: false,
         },
     );
-    forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo build"));
+    let build = forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo build"));
     let checkpoint = ItemId::new();
     let compact = || ItemKind::Compaction {
-        tokens_before: Some(120_000),
-        tokens_after: Some(40_000),
+        tokens_before: Some(966_000),
+        tokens_after: Some(15_000),
     };
     forge.put(&thread, &checkpoint, Status::Done, compact());
-    forge.put(&thread, &ItemId::new(), Status::Done, reply("It builds."));
+    let test = forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
+    let answer = forge.put(&thread, &ItemId::new(), Status::Done, reply("It builds."));
     forge.finish_run(&thread);
     let dir = tempfile::tempdir().unwrap();
     let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
     open(&core, &host, &thread, cx);
-    wait(cx, "the compacted turn", |cx| {
-        loaded(&conversation, cx).len() == 4
+    let folded = [
+        format!("user:{}:0", ask.id),
+        "work:run:0".to_owned(),
+        format!("prose:{}:0", answer.id),
+    ];
+    wait(cx, "the turn", |cx| {
+        draw(cx);
+        painted_order(cx, &folded).len() == folded.len()
     });
-    draw(cx);
+    assert_eq!(painted_order(cx, &folded), folded, "one work section");
     assert!(
         shown(cx, format!("compaction:{checkpoint}")).is_none(),
-        "the merged checkpoint has no second native separator"
-    );
-    let header = cx
-        .debug_bounds("work-header")
-        .expect("worked duration and disclosure remain");
-    let indicator = cx
-        .debug_bounds("work-compaction")
-        .expect("compacted indicator remains");
-    assert!(
-        indicator.top() >= header.top() && indicator.bottom() <= header.bottom(),
-        "the compacted indicator shares the work header"
-    );
-    assert!(
-        cx.debug_bounds("work-chain").is_none(),
-        "completed work starts collapsed"
+        "no divider"
     );
     click(cx, "work-header");
     settle(cx, &conversation);
-    assert!(
-        cx.debug_bounds("work-chain").is_some(),
-        "the merged separator still expands its native work descendants"
+    let open = [
+        "work:run:0".to_owned(),
+        format!("chain:{}", build.id),
+        format!("entry:{checkpoint}"),
+        format!("chain:{}", test.id),
+        format!("prose:{}:0", answer.id),
+    ];
+    assert_eq!(
+        painted_order(cx, &open),
+        open,
+        "the compaction is a line of the work between its calls"
     );
-    assert!(cx.debug_bounds("work-compaction").is_some());
-    let updated = forge.put(&thread, &checkpoint, Status::Cancelled, compact());
-    wait(cx, "the checkpoint's new status", |cx| {
-        loaded(&conversation, cx)
-            .iter()
-            .any(|item| item.id == checkpoint && item.seq == updated.seq)
-    });
-    draw(cx);
     assert!(
-        cx.debug_bounds("work-compaction").is_some(),
-        "status updates retain the combined separator"
+        painted(
+            cx,
+            "work-compaction-text:Compacted the conversation \u{b7} 966k \u{2192} 15k tokens"
+                .to_owned()
+        )
+        .is_some()
     );
-    let separate = ItemId::new();
-    forge.put(&thread, &separate, Status::Done, compact());
-    wait(cx, "a checkpoint separated by the reply", |cx| {
-        loaded(&conversation, cx).len() == 5
-    });
-    wait(cx, "the separate checkpoint", |cx| {
+    // While it runs, and when it fails.
+    let running = forge.put(&thread, &ItemId::new(), Status::Running, compact());
+    let failed = forge.put(&thread, &ItemId::new(), Status::Failed, compact());
+    wait(cx, "the other compactions", |cx| {
         draw(cx);
-        shown(cx, format!("compaction:{separate}")).is_some()
+        shown(cx, format!("entry:{}", running.id)).is_some()
+            && shown(cx, format!("entry:{}", failed.id)).is_some()
     });
+    for words in ["Compacting the conversation", "Compaction failed"] {
+        assert!(
+            painted(cx, format!("work-compaction-text:{words}")).is_some(),
+            "{words}"
+        );
+    }
 }

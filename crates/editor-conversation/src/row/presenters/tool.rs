@@ -24,8 +24,9 @@ impl ToolPresenter<'_> {
         expanded: bool,
         live: Option<&str>,
         agents: &HashMap<artisan_api::ItemId, String>,
+        preview: Option<AnyElement>,
     ) -> AnyElement {
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         if activity::category(item).is_none() {
             return div().into_any_element();
         }
@@ -96,7 +97,7 @@ impl ToolPresenter<'_> {
                     let streamed = live.filter(|_| !item.status.is_terminal());
                     div()
                         .mt(theme.spacing.steps(1.0))
-                        .child(self.tool_details(item, tool, output.as_ref(), streamed))
+                        .child(self.tool_details(item, tool, output.as_ref(), streamed, preview))
                         .into_any_element()
                 }
                 _ => div().into_any_element(),
@@ -113,13 +114,14 @@ impl ToolPresenter<'_> {
         tool: &ToolKind,
         output: Option<&Output>,
         live: Option<&str>,
+        preview: Option<AnyElement>,
     ) -> AnyElement {
         if live.is_none()
-            && let Some(preview) = self.text.preview(item)
+            && let Some(preview) = preview
         {
             return preview;
         }
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         let mut panel = div()
             .p(px(12.0))
             .rounded(RadiusTokens::value(RadiusStep::Lg))
@@ -148,7 +150,7 @@ impl ToolPresenter<'_> {
                 panel = panel.child(self.collections.edit(
                     item.id.clone(),
                     source.clone(),
-                    self.text.source_host.clone(),
+                    self.text.host.clone(),
                     theme,
                 ));
             }
@@ -185,6 +187,70 @@ impl ToolPresenter<'_> {
         panel.into_any_element()
     }
 
+    /// A compaction during the run, a line of its work: what it did and how
+    /// far it shrank the context, or that it failed.
+    pub(in crate::row) fn compaction_entry(&self, item: &Item) -> AnyElement {
+        let theme = self.text.theme;
+        let ItemKind::Compaction {
+            tokens_before,
+            tokens_after,
+        } = &item.kind
+        else {
+            return div().into_any_element();
+        };
+        let (verb, object) = match item.status {
+            artisan_api::Status::Running => ("Compacting", "the conversation".to_owned()),
+            artisan_api::Status::Done => (
+                "Compacted",
+                match (tokens_before, tokens_after) {
+                    (Some(before), Some(after)) => format!(
+                        "the conversation \u{b7} {} \u{2192} {} tokens",
+                        compact_count(*before),
+                        compact_count(*after)
+                    ),
+                    _ => "the conversation".to_owned(),
+                },
+            ),
+            artisan_api::Status::Cancelled | artisan_api::Status::Declined => {
+                ("Stopped compacting", "the conversation".to_owned())
+            }
+            _ => ("Compaction failed", String::new()),
+        };
+        let failed = object.is_empty();
+        div()
+            .debug_selector(|| "work-compaction".to_owned())
+            .w_full()
+            .min_w_0()
+            .py(theme.spacing.steps(0.5))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(theme.spacing.steps(2.0))
+            .text_size(px(ProseTypography::BODY_SIZE_PX))
+            .line_height(px(LINE))
+            .font_weight(ProseTypography::BODY_WEIGHT)
+            .tracking(ProseTypography::TRACKING_EM)
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(if failed {
+                        theme.colors.destructive.to_paint()
+                    } else {
+                        theme.colors.foreground.to_paint()
+                    })
+                    .child(verb),
+            )
+            .when(!failed, |line| {
+                line.child(div().min_w_0().flex_1().truncate().child(object.clone()))
+            })
+            .children(crate::row::test_mark(format!(
+                "work-compaction-text:{}",
+                [verb, object.as_str()].join(" ").trim_end()
+            )))
+            .into_any_element()
+    }
+
     pub(in crate::row) fn plan_entry(&self, item: &Item) -> AnyElement {
         let ItemKind::Plan {
             steps, approval, ..
@@ -197,12 +263,12 @@ impl ToolPresenter<'_> {
             body = body.child(self.collections.plan(
                 item.id.clone(),
                 source.clone(),
-                self.text.source_host.clone(),
-                self.text.shared.theme,
+                self.text.host.clone(),
+                self.text.theme,
             ));
         }
         if let Some(decision) = approval.as_ref().and_then(|approval| approval.decision) {
-            body = body.child(body_text(decision_note(decision), &self.text.shared.theme));
+            body = body.child(body_text(decision_note(decision), &self.text.theme));
         }
         body.into_any_element()
     }
@@ -214,7 +280,7 @@ impl ToolPresenter<'_> {
         let Some(step) = steps.inline().and_then(|steps| steps.get(index)) else {
             return div().into_any_element();
         };
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         let muted = theme.colors.muted_foreground.to_paint();
         let (asset, color) = match step.status {
             StepStatus::Done => (AssetId::TABLER_CIRCLE_CHECK, muted),
@@ -285,6 +351,22 @@ fn details_available(
                 || live.is_some()
         }
         _ => false,
+    }
+}
+
+/// A token count as the work line says it: 966k, 1.2M, 512.
+fn compact_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        let tenths = (count + 50_000) / 100_000;
+        if tenths.is_multiple_of(10) {
+            format!("{}M", tenths / 10)
+        } else {
+            format!("{}.{}M", tenths / 10, tenths % 10)
+        }
+    } else if count >= 1_000 {
+        format!("{}k", (count + 500) / 1_000)
+    } else {
+        count.to_string()
     }
 }
 

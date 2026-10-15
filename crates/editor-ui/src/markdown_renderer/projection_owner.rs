@@ -111,6 +111,7 @@ impl ProjectionOwner {
         width: Pixels,
         runs: Arc<[TextRun]>,
         range: Range<usize>,
+        worker: &Arc<super::async_preparation::Worker>,
         cx: &mut App,
         notify: impl Fn(&mut App) + 'static,
     ) -> NativePreparation {
@@ -170,15 +171,16 @@ impl ProjectionOwner {
             .back()
             .map(|page| page.text.clone())
             .unwrap_or(source);
-        let task = match projection_worker::start(cx, shape_source, font_size, runs, width, range) {
-            Ok(task) => task,
-            Err(error) => {
-                // Busy is explicit control state, never inferred from text.
-                if error == projection_worker::StartError::Busy {
-                    let owner = Rc::downgrade(&self.cache);
-                    let generation = entry.generation;
-                    entry.task =
-                        Some(cx.spawn(async move |cx| {
+        let task =
+            match projection_worker::start(cx, worker, shape_source, font_size, runs, width, range)
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    // Busy is explicit control state, never inferred from text.
+                    if error == projection_worker::StartError::Busy {
+                        let owner = Rc::downgrade(&self.cache);
+                        let generation = entry.generation;
+                        entry.task = Some(cx.spawn(async move |cx| {
                             projection_worker::wait_for_owner().await;
                             cx.update(|cx| {
                                 let Some(owner) = owner.upgrade() else { return };
@@ -193,15 +195,15 @@ impl ProjectionOwner {
                                 notify(cx);
                             });
                         }));
+                        cache.push(entry);
+                        return NativePreparation::Pending;
+                    }
+                    let error = error.to_string();
+                    entry.error = Some(error.clone());
                     cache.push(entry);
-                    return NativePreparation::Pending;
+                    return NativePreparation::Failed(error);
                 }
-                let error = error.to_string();
-                entry.error = Some(error.clone());
-                cache.push(entry);
-                return NativePreparation::Failed(error);
-            }
-        };
+            };
         let owner = Rc::downgrade(&self.cache);
         let generation = entry.generation;
         entry.task = Some(cx.spawn(async move |cx| {

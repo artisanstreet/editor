@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::motion::MotionCurve;
 use gpui::{
     AnyElement, HighlightStyle, IntoElement as _, ParentElement as _, Pixels, SharedString,
-    Styled as _, Window, div, px,
+    Styled as _, div, px,
 };
 
 const FADE: Duration = Duration::from_millis(400);

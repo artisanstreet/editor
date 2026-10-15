@@ -393,10 +393,23 @@ impl ClaudeDecoder {
                     .filter_map(|task| str_at(task, "parent_task_id").map(str::to_owned))
                     .collect();
             }
+            // Claude repeats `compacting` as progress (with a growing
+            // `compact_output_chars`) and ends it with a null status that
+            // carries `compact_result` (2.1.296): one compaction, one item.
             "status" if str_at(frame, "status") == Some("compacting") => {
-                let key = self.next_key("compaction");
-                out.push(compaction(&key, Status::Running, None, None));
-                self.compacting = Some(key);
+                if self.compacting.is_none() {
+                    let key = self.next_key("compaction");
+                    out.push(compaction(&key, Status::Running, None, None));
+                    self.compacting = Some(key);
+                }
+            }
+            "status" => {
+                let result = str_at(frame, "compact_result");
+                if result.is_some_and(|result| result != "success")
+                    && let Some(key) = self.compacting.take()
+                {
+                    out.push(compaction(&key, Status::Failed, None, None));
+                }
             }
             "compact_boundary" => {
                 let metadata = &frame["compact_metadata"];

@@ -26,7 +26,7 @@ pub(in crate::row) struct RequestPresenter<'a> {
 }
 impl RequestPresenter<'_> {
     fn card(&self, heading: &str, details: impl IntoElement) -> Div {
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         let style = CardStyle::resolve(theme);
         compact_card(style)
             .w_full()
@@ -39,7 +39,7 @@ impl RequestPresenter<'_> {
             .w_full()
             .flex()
             .flex_col()
-            .gap(self.text.shared.theme.spacing.steps(2.0))
+            .gap(self.text.theme.spacing.steps(2.0))
     }
 
     pub(in crate::row) fn approval_card(
@@ -47,7 +47,7 @@ impl RequestPresenter<'_> {
         item: &Item,
         state: AnswerState,
     ) -> Option<AnyElement> {
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         let muted = theme.colors.muted_foreground.to_paint();
         let (approval, files) = match &item.kind {
             ItemKind::Tool { approval, tool, .. } => {
@@ -125,7 +125,7 @@ impl RequestPresenter<'_> {
             };
             let id = item.id.clone();
             actions = actions.child(self.actions.button(
-                self.text.shared.theme,
+                self.text.theme,
                 format!("approve-{}-{index}", item.id),
                 decision_label(decision),
                 variant,
@@ -169,7 +169,7 @@ impl RequestPresenter<'_> {
     }
 
     pub(in crate::row) fn question_card(&self, item: &Item) -> AnyElement {
-        let theme = self.text.shared.theme;
+        let theme = self.text.theme;
         let ItemKind::Question {
             questions,
             answers,
@@ -191,7 +191,7 @@ impl RequestPresenter<'_> {
                 details = details.child(self.collections.question(
                     item.id.clone(),
                     source.clone(),
-                    self.text.source_host.clone(),
+                    self.text.host.clone(),
                     theme,
                 ))
             }

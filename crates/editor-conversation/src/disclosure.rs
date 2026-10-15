@@ -16,10 +16,21 @@ const CLOCK: Duration = Duration::from_millis(250);
 const MAX_FLIGHTS: usize = 8;
 const MAX_ROWS: usize = 128;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RowClip {
     pub height: Pixels,
     pub opacity: f32,
+}
+
+/// What the disclosures in flight do to one row this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct RowDisclosure {
+    /// The clip a flight draws it at.
+    pub clip: Option<RowClip>,
+    /// A flight header's open fraction (its chevron turns with it).
+    pub fraction: Option<f32>,
+    /// The row belongs to a group in flight.
+    pub hidden: bool,
 }
 pub(crate) struct Flight {
     members: HashSet<ItemId>,
@@ -51,9 +62,7 @@ impl Conversation {
         let now = Instant::now();
         if let Some(flight) = self.disclosures.get_mut(&header) {
             flight.from = self
-                .shared
                 .disclosure_fractions
-                .borrow()
                 .get(&header)
                 .copied()
                 .unwrap_or_else(|| flight.fraction(now));
@@ -72,7 +81,7 @@ impl Conversation {
             Row::Chain { ids, .. } => ids.iter().cloned().collect(),
             _ => return,
         };
-        let heights = self.shared.row_heights.borrow();
+        let heights = &self.row_heights;
         let mut retained = Vec::new();
         let mut captured = HashMap::new();
         let mut seen = HashSet::new();
@@ -149,7 +158,7 @@ impl Conversation {
     }
     /// Every changed row uses ListState's anchor-preserving, bounded invalidation.
     pub(crate) fn advance_disclosures(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.disclosures.is_empty() && self.shared.disclosure_clips.borrow().is_empty() {
+        if self.disclosures.is_empty() && self.disclosure_clips.is_empty() {
             return false;
         }
         let now = Instant::now();
@@ -180,7 +189,7 @@ impl Conversation {
         let mut hidden = HashSet::new();
         let mut fractions = HashMap::new();
         {
-            let heights = self.shared.row_heights.borrow();
+            let heights = &self.row_heights;
             for (header, flight) in &mut self.disclosures {
                 if flight.open {
                     for key in &flight.keys {
@@ -217,25 +226,31 @@ impl Conversation {
             }
         }
         let changed: HashSet<_> = {
-            let old = self.shared.disclosure_clips.borrow();
+            let old = &self.disclosure_clips;
             old.keys()
                 .chain(clips.keys())
                 .filter(|key| old.get(*key) != clips.get(*key))
                 .cloned()
                 .collect()
         };
-        *self.shared.disclosure_clips.borrow_mut() = clips;
-        *self.shared.disclosure_hidden.borrow_mut() = hidden;
-        *self.shared.disclosure_fractions.borrow_mut() = fractions;
+        self.disclosure_clips = clips;
+        self.disclosure_hidden = hidden;
+        self.disclosure_fractions = fractions;
         // Old clip keys can vanish during native-window paging. Their dropped
         // owners pinned metrics while the old clip existed; release that bounded
         // old/new union as soon as the replacement clip no longer owns it.
         released.extend(changed.iter().cloned());
+        // Every mounted row learns where it is clipped; those whose clip
+        // changed measure again.
+        for index in 0..self.row_views.len() {
+            let Some(view) = self.row_views[index].clone() else {
+                continue;
+            };
+            let disclosure = self.row_disclosure(&self.rows[index].0);
+            view.update(cx, |view, cx| view.set_disclosure(disclosure, cx));
+        }
         for key in changed {
             if let Some(index) = self.row_context.key_rows.get(&key).copied() {
-                if let Some(row) = self.row_views.get(index).and_then(Option::as_ref) {
-                    row.update(cx, |row, cx| row.disclosure_finished(cx));
-                }
                 self.list.remeasure_items(index..index + 1);
             }
         }
@@ -250,12 +265,24 @@ impl Conversation {
                 .key_rows
                 .get(&key)
                 .is_some_and(|index| self.row_views.get(*index).is_some_and(Option::is_some));
-            if !owned && !self.shared.disclosure_clips.borrow().contains_key(&key) {
-                self.shared.row_heights.borrow_mut().remove(&key);
+            if !owned && !self.disclosure_clips.contains_key(&key) {
+                self.row_heights.remove(&key);
             }
         }
         !self.disclosures.is_empty()
     }
+    /// What the disclosures in flight do to `row` now.
+    pub(crate) fn row_disclosure(&self, row: &Row) -> RowDisclosure {
+        let key = row.key();
+        RowDisclosure {
+            clip: self.disclosure_clips.get(&key).copied(),
+            fraction: self.disclosure_fractions.get(&key).copied(),
+            hidden: row
+                .anchor()
+                .is_some_and(|id| self.disclosure_hidden.contains(id)),
+        }
+    }
+
     pub(crate) fn row_height_changed(&mut self, key: &RowKey, cx: &mut Context<Self>) {
         if let Some(index) = self.row_context.key_rows.get(key).copied() {
             self.list.remeasure_items(index..index + 1);
