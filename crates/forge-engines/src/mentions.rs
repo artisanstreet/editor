@@ -9,44 +9,6 @@
 
 use artisan_api::EngineId;
 
-/// Characters that end a mention name besides whitespace; the composer's
-/// list.
-const NAME_TERMINATORS: &[char] = &[',', '.', ';', ':', '!', '?', ')', ']', '}', '"', '\''];
-
-/// The skills `text` mentions, in order and without repeats.
-fn skill_mentions<'a>(text: &str, skills: &'a [artisan_api::Skill]) -> Vec<&'a str> {
-    let mut mentioned = Vec::new();
-    for (index, character) in text.char_indices() {
-        if character != '$'
-            || !text[..index]
-                .chars()
-                .next_back()
-                .is_none_or(char::is_whitespace)
-        {
-            continue;
-        }
-        let rest = &text[index + 1..];
-        let longest = skills
-            .iter()
-            .map(|skill| skill.name.as_str())
-            .filter(|name| {
-                rest.strip_prefix(name).is_some_and(|after| {
-                    after
-                        .chars()
-                        .next()
-                        .is_none_or(|next| next.is_whitespace() || NAME_TERMINATORS.contains(&next))
-                })
-            })
-            .max_by_key(|name| name.len());
-        if let Some(name) = longest
-            && !mentioned.contains(&name)
-        {
-            mentioned.push(name);
-        }
-    }
-    mentioned
-}
-
 /// The text `engine` should receive for a user message: unchanged for
 /// Codex or when it mentions no installed skill, else with a closing line
 /// naming the mentioned skills.
@@ -55,7 +17,16 @@ pub fn with_skill_mentions(engine: EngineId, text: &str, skills: &[artisan_api::
     if engine == EngineId::Codex {
         return text.to_owned();
     }
-    let mentioned = skill_mentions(text, skills);
+    let names = skills
+        .iter()
+        .map(|skill| skill.name.as_str())
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    let mentioned = artisan_api::skill_mentions(text, &names)
+        .into_iter()
+        .filter(|mention| seen.insert(mention.name.clone()))
+        .map(|mention| mention.name)
+        .collect::<Vec<_>>();
     if mentioned.is_empty() {
         return text.to_owned();
     }

@@ -1,10 +1,5 @@
-//! Settings, ported from the previous Editor's `native_settings`: a
-//! centred row of the nav rail (the `ARTISAN` pages, then each engine)
-//! and the open page.
-//!
-//! Everything shown comes from [`Core`] (device preferences, paired hosts)
-//! and the active host's [`HostData`] (what its Forge sent). The only state
-//! kept here is form fields and the outcome of the last action.
+//! Settings reads device preferences from Core and application data from the selected HostData.
+//! It retains form drafts and pending-action state only.
 
 mod about;
 mod appearance;
@@ -28,14 +23,14 @@ use chrome::{
     nav_link,
 };
 use editor_core::{Core, CoreEvent, HostData, HostEvent, Screen, SettingsPage};
-use editor_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant};
-use editor_ui::motion::MotionPolicy;
+use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::switch::{Switch, SwitchSize};
-use editor_ui::theme::{ArtisanTheme, ThemeMode};
+use editor_ui::theme::ArtisanTheme;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, px,
 };
 
 pub use about::BuildInfo;
@@ -45,6 +40,8 @@ type SwitchChange = Box<dyn Fn(bool, &mut Window, &mut App)>;
 pub use notifications::NOTIFICATIONS_KEY;
 
 pub struct Settings {
+    #[cfg(test)]
+    completion_gate: Option<tests::CompletionGate>,
     core: Entity<Core>,
     build: BuildInfo,
     /// The engine the Engines page shows; the host's first engine until
@@ -54,11 +51,8 @@ pub struct Settings {
     extensions: extensions::ExtensionsForm,
     prompt: prompt::PromptForm,
     hosts: hosts::HostsForm,
-    performance: appearance::PerformanceControl,
     archive: threads::ArchiveForm,
-    /// Shared by every static control; they need a handle but never focus.
-    control_focus: FocusHandle,
-    host_subscriptions: Vec<Subscription>,
+    host_subscription: Option<Subscription>,
     _core_subscription: Subscription,
 }
 
@@ -70,13 +64,20 @@ impl Settings {
         cx: &mut Context<Self>,
     ) -> Self {
         let core_subscription = cx.subscribe(&core, |this, _, event: &CoreEvent, cx| {
-            if matches!(event, CoreEvent::HostsChanged) {
+            if !matches!(this.core.read(cx).screen(), Screen::Settings(_)) {
+                this.host_subscription = None;
+                return;
+            }
+            if matches!(event, CoreEvent::HostsChanged | CoreEvent::ScreenChanged) {
+                this.archive.invalidate();
                 this.watch_hosts(cx);
                 this.sync_host(cx);
             }
             cx.notify();
         });
         let mut settings = Self {
+            #[cfg(test)]
+            completion_gate: None,
             core,
             build,
             engine: None,
@@ -84,10 +85,8 @@ impl Settings {
             extensions: extensions::ExtensionsForm::new(cx),
             prompt: prompt::PromptForm::new(cx),
             hosts: hosts::HostsForm::new(cx),
-            performance: appearance::PerformanceControl::default(),
             archive: threads::ArchiveForm::default(),
-            control_focus: cx.focus_handle(),
-            host_subscriptions: Vec::new(),
+            host_subscription: None,
             _core_subscription: core_subscription,
         };
         settings.watch_hosts(cx);
@@ -103,32 +102,51 @@ impl Settings {
     /// Re-renders when any host's projects, settings, engines or status
     /// change; items and live text don't concern settings.
     fn watch_hosts(&mut self, cx: &mut Context<Self>) {
-        let hosts: Vec<Entity<HostData>> = self
-            .core
-            .read(cx)
-            .hosts()
-            .map(|(_, host)| host.clone())
-            .collect();
-        self.host_subscriptions = hosts
-            .iter()
-            .map(|host| {
-                cx.subscribe(host, |this, host, event: &HostEvent, cx| {
-                    if matches!(event, HostEvent::Changed | HostEvent::Reset) {
-                        if this.selected_host(cx).as_ref() == Some(&host) {
-                            this.sync_host(cx);
-                        }
-                        cx.notify();
-                    }
-                })
+        self.host_subscription = self.selected_host(cx).map(|host| {
+            cx.subscribe(&host, |this, _, event: &HostEvent, cx| {
+                if matches!(
+                    event,
+                    HostEvent::ThreadChanged { .. } | HostEvent::Reset | HostEvent::Changed
+                ) {
+                    this.archive.invalidate();
+                }
+                if matches!(event,HostEvent::EngineInstall {engine} if this.page(cx)==SettingsPage::Engines && *engine==this.shown_engine(cx)) {
+                    cx.notify();
+                }
+                let archive_changed = matches!(event, HostEvent::ThreadChanged { .. })
+                    && this.page(cx) == SettingsPage::Threads;
+                if archive_changed || matches!(event, HostEvent::Changed | HostEvent::Reset) {
+                    this.sync_host(cx);
+                    cx.notify();
+                }
             })
-            .collect();
+        });
     }
 
     /// Loads what the forms show from the active host.
     fn sync_host(&mut self, cx: &mut Context<Self>) {
+        if self.page(cx) == SettingsPage::Hosts {
+            self.discover_hosts(cx);
+        }
         let host = self.selected_host(cx);
+        self.engines
+            .sync(host.as_ref().map(|host| host.read(cx).id.clone()));
+        if self.page(cx) == SettingsPage::Threads {
+            if let Some(host) = &host {
+                if !host.read(cx).thread_page(true).loaded
+                    && !host.read(cx).thread_page(true).loading
+                {
+                    host.update(cx, |host, cx| {
+                        host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx)
+                    });
+                }
+            }
+            self.archive.sync(host.as_ref(), cx);
+        }
         self.extensions.sync(host.as_ref(), cx);
-        self.prompt.sync(host.as_ref(), cx);
+        if self.page(cx) == SettingsPage::GlobalPrompt {
+            self.prompt.sync(host.as_ref(), cx);
+        }
     }
 
     /// The host the per-host pages show: the one the Editor works on.
@@ -170,8 +188,7 @@ impl Settings {
             .unwrap_or(EngineId::Claude)
     }
 
-    /// The rail (`nav.svelte`): the heading, the `ARTISAN` pages with the
-    /// open one's anchors, then the `ENGINES` group.
+    /// Page navigation followed by the engines reported by Forge.
     fn render_nav(&self, theme: &ArtisanTheme, page: SettingsPage, cx: &mut Context<Self>) -> Div {
         let mut rail = div()
             .flex()
@@ -189,6 +206,11 @@ impl Settings {
                 nav_link(theme, label, page == target)
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
+                    .focusable()
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .aria_selected(page == target)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.navigate(target, cx);
                     })),
@@ -206,6 +228,11 @@ impl Settings {
                 nav_link(theme, page::engine_label(engine), active)
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
+                    .focusable()
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label(page::engine_label(engine))
+                    .aria_selected(active)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.engine = Some(engine);
                         this.engines.clear_errors();
@@ -247,7 +274,11 @@ impl Settings {
                     page::label(page),
                     page::description(page),
                 ))
-                .child(chrome::note(theme, "Pair a host on the Hosts page first.").mt(px(32.0)))
+                .child(
+                    div()
+                        .mt(px(32.0))
+                        .child(chrome::note(theme, "Pair a host on the Hosts page first.")),
+                )
                 .into_any_element(),
             (SettingsPage::GlobalPrompt, Some(_)) => {
                 prompt::render(self, theme, cx).into_any_element()
@@ -257,6 +288,7 @@ impl Settings {
             }
             (SettingsPage::Engines, Some(host)) => {
                 let engine = self.shown_engine(cx);
+                self.engines.prepare(engine, cx);
                 engines::render(self, &host, engine, theme, cx).into_any_element()
             }
             (SettingsPage::Extensions, Some(host)) => {
@@ -274,28 +306,13 @@ impl Settings {
         disabled: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
-        let label = label.into();
-        match Button::new(
-            id,
-            self.control_focus.clone(),
-            theme(),
-            MotionPolicy::Full,
-            variant,
-            ButtonSize::Small,
-            ButtonContent::text(label.clone()),
-        ) {
-            Ok(button) => button
-                .disabled(disabled)
-                .on_activate(on_click)
-                .into_any_element(),
-            Err(error) => {
-                tracing::error!("button {label:?}: {error}");
-                div().into_any_element()
-            }
-        }
+        Button::text(id, theme(), label)
+            .variant(variant)
+            .disabled(disabled)
+            .on_activate(on_click)
+            .into_any_element()
     }
 
-    /// A control the previous Editor painted without an action yet.
     fn static_button(
         &self,
         id: impl Into<ElementId>,
@@ -314,10 +331,10 @@ impl Settings {
     ) -> AnyElement {
         let switch = Switch::new(
             id,
-            self.control_focus.clone(),
             theme(),
             SwitchSize::Default,
             checked,
+            id.trim_start_matches("settings-").replace('-', " "),
         )
         .debug_selector(id);
         match on_change {
@@ -330,12 +347,17 @@ impl Settings {
 }
 
 impl Render for Settings {
-    /// The frame (`+layout.svelte`): a centred `max-w-4xl` row of the
-    /// 176 px rail and the growing page, 56 px apart.
+    /// Navigation wraps above the page in narrow windows.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = theme();
         let page = self.page(cx);
+        let narrow = window.viewport_size().width < px(760.0);
         let nav = self.render_nav(&theme, page, cx);
+        let nav = if narrow {
+            nav.w_full().flex_row().flex_wrap()
+        } else {
+            nav
+        };
         let main = self.render_main(&theme, page, window, cx);
         let selector = format!("route-settings-{}", page::label(page).to_lowercase());
         div()
@@ -350,7 +372,8 @@ impl Render for Settings {
                     div()
                         .w_full()
                         .flex()
-                        .flex_row()
+                        .when(!narrow, |el| el.flex_row())
+                        .when(narrow, |el| el.flex_col())
                         .max_w(px(CONTENT_MAX_WIDTH))
                         .px(px(24.0))
                         .py(px(48.0))
@@ -362,7 +385,7 @@ impl Render for Settings {
     }
 }
 
-/// The Editor is dark throughout, like the old one.
+/// The application theme is resolved once by editor-ui.
 fn theme() -> ArtisanTheme {
-    ArtisanTheme::for_mode(ThemeMode::Dark)
+    ArtisanTheme::default()
 }

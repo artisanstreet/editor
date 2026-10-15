@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -16,31 +17,44 @@ expression: "(events, outcome)"
             status: Running,
             kind: Question {
                 blocking: true,
-                questions: [
-                    Question {
-                        id: "0",
-                        header: Some(
-                            "Colour",
-                        ),
-                        text: "Which colour do you prefer?",
-                        multi_select: false,
-                        options: [
-                            QuestionOption {
-                                label: "Red",
-                                description: Some(
-                                    "Red",
-                                ),
-                            },
-                            QuestionOption {
-                                label: "Blue",
-                                description: Some(
-                                    "Blue",
-                                ),
-                            },
-                        ],
-                    },
-                ],
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
                 answers: None,
+                answer_text: None,
             },
         },
         Item {
@@ -49,31 +63,44 @@ expression: "(events, outcome)"
             status: AwaitingUser,
             kind: Question {
                 blocking: true,
-                questions: [
-                    Question {
-                        id: "0",
-                        header: Some(
-                            "Colour",
-                        ),
-                        text: "Which colour do you prefer?",
-                        multi_select: false,
-                        options: [
-                            QuestionOption {
-                                label: "Red",
-                                description: Some(
-                                    "Red",
-                                ),
-                            },
-                            QuestionOption {
-                                label: "Blue",
-                                description: Some(
-                                    "Blue",
-                                ),
-                            },
-                        ],
-                    },
-                ],
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
                 answers: None,
+                answer_text: None,
             },
         },
         Usage(
@@ -96,31 +123,44 @@ expression: "(events, outcome)"
             status: Done,
             kind: Question {
                 blocking: true,
-                questions: [
-                    Question {
-                        id: "0",
-                        header: Some(
-                            "Colour",
-                        ),
-                        text: "Which colour do you prefer?",
-                        multi_select: false,
-                        options: [
-                            QuestionOption {
-                                label: "Red",
-                                description: Some(
-                                    "Red",
-                                ),
-                            },
-                            QuestionOption {
-                                label: "Blue",
-                                description: Some(
-                                    "Blue",
-                                ),
-                            },
-                        ],
-                    },
-                ],
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Which colour do you prefer?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: Some(
+                                            Inline(
+                                                "Red",
+                                            ),
+                                        ),
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Blue",
+                                        description: Some(
+                                            Inline(
+                                                "Blue",
+                                            ),
+                                        ),
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
                 answers: None,
+                answer_text: None,
             },
         },
         Item {
@@ -128,7 +168,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -139,21 +181,21 @@ expression: "(events, outcome)"
             text: "Red.",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "Red.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
             },
+            text: "Red.",
+            append: false,
         },
         Item {
             key: "msg_011Cfv2uS6kmxEMFi1FAChSS:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Red.",
+                text: Inline(
+                    "Red.",
+                ),
                 phase: Final,
             },
         },

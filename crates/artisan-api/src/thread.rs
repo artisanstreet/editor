@@ -20,9 +20,18 @@ pub struct Thread {
     /// From the engine; until then the first line of the first message.
     pub title: Option<String>,
     pub config: EngineConfig,
-    /// Seq of the last item change; unread while greater than `read_seq`.
+    /// Forge-local order of accepted input and run boundaries; unread after `read_seq`.
     pub activity_seq: Seq,
+    /// Event time of that activity, for approximate recency across independent Forges.
+    /// Metadata edits and read acknowledgments leave this unchanged.
+    #[serde(default)]
+    pub activity_at: Timestamp,
     pub read_seq: Seq,
+    #[serde(default)]
+    pub marked_unread: bool,
+    /// Activity acknowledged as settled by the client; monotonic.
+    #[serde(default)]
+    pub settled_seq: Seq,
     pub seq: Seq,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -36,7 +45,7 @@ pub struct Thread {
 impl Thread {
     #[must_use]
     pub fn is_unread(&self) -> bool {
-        self.activity_seq > self.read_seq
+        self.marked_unread || self.activity_seq > self.read_seq
     }
 }
 
@@ -46,6 +55,8 @@ pub struct Run {
     pub thread_id: ThreadId,
     pub engine: EngineId,
     pub model: Option<String>,
+    /// Highest pending-input revision observed when this run started.
+    pub input_cutoff: Seq,
     pub status: RunStatus,
     pub usage: Usage,
     /// The engine's session or thread id, used to resume.

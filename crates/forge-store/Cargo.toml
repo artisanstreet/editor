@@ -5,7 +5,12 @@ license-file.workspace = true
 version.workspace = true
 description = "Forge's durable state: one SQLite file with a global change seq, plus content-addressed blobs."
 
+[features]
+legacy-import = []
+
 [dependencies]
+artisan-markdown-index = { path = "../artisan-markdown-index" }
+tempfile.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
@@ -13,13 +18,13 @@ rusqlite = { workspace = true, features = ["fallible_uint"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+hex.workspace = true
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing.workspace = true
-uuid.workspace = true
+thiserror.workspace = true
 webp.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

@@ -10,6 +10,9 @@ name = "artisan-editor"
 path = "src/main.rs"
 
 [features]
+# Optional Windows renderer fallback; the default uses native D3D11 with the
+# same Cosmic text system. Linux keeps its existing WGPU renderer.
+windows-wgpu = ["gpui_platform/wgpu"]
 # `ARTISAN_EDITOR_CAPTURE=<png>` saves the window after a few seconds and
 # quits; for checking a build by eye without a screen.
 capture = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
@@ -27,11 +30,16 @@ editor-marketplace = { path = "../editor-marketplace" }
 editor-settings = { path = "../editor-settings" }
 editor-sidebar = { path = "../editor-sidebar" }
 gpui.workspace = true
+futures.workspace = true
 gpui_platform.workspace = true
 mimalloc.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+file-rotate = "0.8.0"
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

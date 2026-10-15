@@ -2,8 +2,7 @@
 //! dedicated thread that follows the shared state.
 //!
 //! The thread opens the stream, then reconciles it with the state whenever the
-//! player sends a command (and every [`POLL`], so a track that ran out is
-//! paused): running while playing, paused (corked) otherwise, flushed after a
+//! player sends a command, including end-of-track and failure: running while playing, paused (corked) otherwise, flushed after a
 //! seek. Dropping the [`Output`] closes the command channel, which ends the
 //! thread and releases the stream.
 
@@ -18,14 +17,10 @@ use self::cpal as platform;
 use self::pulse as platform;
 
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
 
 use crate::state::Shared;
-
-/// How often the output thread re-checks the state without a command.
-const POLL: Duration = Duration::from_millis(100);
 
 /// The layout of the decoded track the output streams.
 #[derive(Clone, Debug)]
@@ -118,10 +113,10 @@ fn control(
             set_running(wanted)?;
             running = wanted;
         }
-        match commands.recv_timeout(POLL) {
+        match commands.recv() {
             Ok(Command::Flush) => flush()?,
-            Ok(Command::Sync) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Ok(Command::Sync) => {}
+            Err(_) => return Ok(()),
         }
     }
 }

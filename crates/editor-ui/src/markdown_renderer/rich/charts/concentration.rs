@@ -4,7 +4,8 @@
 //! draw. A highlighted cutoff reads the headline ("the top 10% of installs
 //! send 65% of turns"), and hovering reads any point on the curve.
 
-use std::fmt::Write as _;
+use crate::markdown_renderer::rich::budget;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ElementId, IntoElement, MouseMoveEvent, ParentElement as _, RenderOnce,
@@ -21,11 +22,8 @@ use crate::theme::ArtisanTheme;
 /// Most points drawn; larger inputs are sampled evenly along the curve.
 const MAX_POINTS: usize = 400;
 
-/// Shares of items listed in the copied table.
-const TABLE_SHARES: [f64; 5] = [0.01, 0.05, 0.1, 0.2, 0.5];
-
-#[derive(Clone, Debug, Deserialize)]
-pub(super) struct Concentration {
+#[derive(Debug, Deserialize)]
+struct ConcentrationSpec {
     /// One value per item: turns per install, bytes per file, and so on.
     values: Vec<f64>,
     /// What the items are, plural ("installs").
@@ -37,6 +35,53 @@ pub(super) struct Concentration {
     /// The share of items to call out, `0..1`; default `0.1`.
     #[serde(default)]
     highlight: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(from = "ConcentrationSpec")]
+pub(super) struct Concentration(Arc<ConcentrationData>);
+#[derive(Debug)]
+pub(super) struct ConcentrationData {
+    items: Option<String>,
+    total: Option<String>,
+    highlight: Option<f64>,
+    curve: Option<Arc<Vec<(f64, f64)>>>,
+}
+impl std::ops::Deref for Concentration {
+    type Target = ConcentrationData;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl From<ConcentrationSpec> for Concentration {
+    fn from(spec: ConcentrationSpec) -> Self {
+        let mut values: Vec<f64> = spec
+            .values
+            .into_iter()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .collect();
+        values.sort_by(|a, b| b.total_cmp(a));
+        let scale = values.first().copied().unwrap_or(0.0);
+        let curve = if scale > 0.0 {
+            let total: f64 = values.iter().map(|value| value / scale).sum();
+            let mut running = 0.0;
+            let mut points = Vec::with_capacity(values.len() + 1);
+            points.push((0.0, 0.0));
+            for (index, value) in values.iter().enumerate() {
+                running += value / scale;
+                points.push((f64_of(index + 1) / f64_of(values.len()), running / total));
+            }
+            Some(Arc::new(points))
+        } else {
+            None
+        };
+        Self(Arc::new(ConcentrationData {
+            items: spec.items,
+            total: spec.total,
+            highlight: spec.highlight,
+            curve,
+        }))
+    }
 }
 
 impl Concentration {
@@ -56,27 +101,8 @@ impl Concentration {
 
     /// The curve: `(share of items, share of total)` from `(0, 0)` to
     /// `(1, 1)`, items ranked largest first. `None` without a positive total.
-    pub(super) fn curve(&self) -> Option<Vec<(f64, f64)>> {
-        let mut values: Vec<f64> = self
-            .values
-            .iter()
-            .copied()
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .collect();
-        let total: f64 = values.iter().sum();
-        if values.is_empty() || total <= 0.0 {
-            return None;
-        }
-        values.sort_by(|a, b| b.total_cmp(a));
-        let count = f64_of(values.len());
-        let mut running = 0.0;
-        let mut curve = Vec::with_capacity(values.len() + 1);
-        curve.push((0.0, 0.0));
-        for (index, value) in values.iter().enumerate() {
-            running += value;
-            curve.push((f64_of(index + 1) / count, running / total));
-        }
-        Some(curve)
+    pub(super) fn curve(&self) -> Option<Arc<Vec<(f64, f64)>>> {
+        self.0.curve.clone()
     }
 
     /// The share of the total held by the top `share` of items, read off the
@@ -84,9 +110,8 @@ impl Concentration {
     pub(super) fn share_of_total(curve: &[(f64, f64)], share: f64) -> f64 {
         let share = share.clamp(0.0, 1.0);
         let after = curve
-            .iter()
-            .position(|(x, _)| *x >= share)
-            .unwrap_or(curve.len() - 1);
+            .partition_point(|(x, _)| *x < share)
+            .min(curve.len() - 1);
         if after == 0 {
             return curve[0].1;
         }
@@ -101,6 +126,14 @@ impl Concentration {
 }
 
 impl RichBlock for Concentration {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<ConcentrationData>()
+            + budget::optional(&self.items)
+            + budget::optional(&self.total)
+            + self.curve.as_ref().map_or(0, |curve| budget::vector(curve))
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         ConcentrationView {
             id: cx.key("concentration"),
@@ -108,28 +141,6 @@ impl RichBlock for Concentration {
             spec: self.clone(),
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        let Some(curve) = self.curve() else {
-            return "_No values._".to_owned();
-        };
-        let header = vec![
-            format!("Top share of {}", self.items()),
-            format!("Share of {}", self.total()),
-        ];
-        let rows: Vec<Vec<String>> = TABLE_SHARES
-            .iter()
-            .map(|share| {
-                vec![
-                    percent(*share),
-                    percent(Self::share_of_total(&curve, *share)),
-                ]
-            })
-            .collect();
-        let mut out = kit::markdown_table(&header, &rows);
-        let _ = write!(out, "\n_{} {}._\n", self.values.len(), self.items());
-        out
     }
 }
 
@@ -179,8 +190,16 @@ impl RenderOnce for ConcentrationView {
             })
             .collect();
         let (shapes, labels) = self.shapes(&curve, &y_ticks, hover);
+        let mut selection_label = None;
         let readout = hover.map(|share| {
             let held = Concentration::share_of_total(&curve, share);
+            selection_label = Some(format!(
+                "Top {} of {}: {} of {}",
+                percent(share),
+                self.spec.items(),
+                percent(held),
+                self.spec.total()
+            ));
             frame::readout(
                 &theme,
                 f32_of(share),
@@ -193,6 +212,30 @@ impl RenderOnce for ConcentrationView {
             )
         });
         let plot = self.plot(&state, shapes, labels, readout, plot_probe);
+        let keyboard = state.clone();
+        let mut navigation = crate::chart_navigation::ChartNavigation::new(
+            ElementId::Name(format!("{}-navigation", self.id).into()),
+            theme,
+            "Concentration chart. Arrows explore percentage shares; Escape clears the reading.",
+            0..101,
+            plot,
+            move |command, _, cx| {
+                keyboard.update(cx, |state, cx| {
+                    use crate::chart_navigation::ChartCommand;
+                    state.hover = match command {
+                        ChartCommand::Select(index) | ChartCommand::Activate(index) => {
+                            Some(index as f64 / 100.0)
+                        }
+                        ChartCommand::Parent | ChartCommand::Reset => None,
+                    };
+                    cx.notify();
+                })
+            },
+        )
+        .selected(hover.map(|share| (share * 100.0).round() as usize));
+        if let Some(label) = selection_label {
+            navigation = navigation.selection_label(label);
+        }
         Frame {
             end_labels: Vec::new(),
             y_ticks,
@@ -202,7 +245,7 @@ impl RenderOnce for ConcentrationView {
             y_axis_width: frame::NUMBER_AXIS_WIDTH,
             height: frame::PLOT_HEIGHT,
         }
-        .wrap(&theme, plot)
+        .wrap(&theme, navigation)
         .into_any_element()
     }
 }
@@ -295,7 +338,7 @@ impl ConcentrationView {
         let leaving = state.clone();
         let move_probe = plot_probe.clone();
         div()
-            .id(ElementId::Name(format!("{}-plot", self.id).into()))
+            .id(kit::part(&self.id, "plot"))
             .absolute()
             .top_0()
             .left_0()

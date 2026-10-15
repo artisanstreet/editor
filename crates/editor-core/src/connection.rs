@@ -1,22 +1,22 @@
-//! The connection to one Forge: fetch `/state`, follow `/events?since=N`,
-//! back off and resume after a failure. The only sync state is `since`.
+//! One owned connection: fetch state, follow bounded SSE, resume after failures.
 
 use crate::client::ForgeClient;
 use crate::runtime::runtime;
 use anyhow::{Context, Result, bail};
-use artisan_api::{Envelope, Event, Seq};
-use futures::channel::mpsc::UnboundedSender;
-use statig::blocking::{self, IntoStateMachineExt as _, Outcome};
+use artisan_api::{Envelope, Event, Seq, ThreadId};
+use futures::channel::mpsc::Sender;
+use futures::{SinkExt as _, StreamExt as _};
+use sse_core::{SseDecoder, SseEvent, SseStream, SseStreamError};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
+use tokio_util::task::AbortOnDropHandle;
 
-/// What the connection tells the host's store.
 #[derive(Debug)]
 pub enum Update {
-    /// A full state: replace everything.
     State(Box<artisan_api::State>),
-    Event(Box<Envelope>),
+    Event(Box<Envelope>, tokio::sync::OwnedSemaphorePermit),
     Status(ConnectionStatus),
 }
 
@@ -24,285 +24,248 @@ pub enum Update {
 pub enum ConnectionStatus {
     Connecting,
     Live,
-    /// Waiting before retry `attempt`, with the reason.
     Offline {
         attempt: u32,
         reason: String,
+        code: Option<artisan_api::ErrorCode>,
     },
 }
 
-/// Starts following a Forge. Ends when the receiver is dropped.
-/// `retry` cuts a wait between attempts short (the reader asked to retry).
-pub fn follow(client: ForgeClient, updates: UnboundedSender<Update>, retry: Arc<Notify>) {
-    runtime().spawn(async move {
-        let mut machine = Machine::default().state_machine();
-        let mut effect = Effect::None;
-        machine.handle_with_context(&Input::Start, &mut effect);
+enum End {
+    Closed,
+    Reset,
+    Observation,
+}
+
+/// Dropping the returned owner aborts even a stalled network read.
+pub fn follow(
+    client: ForgeClient,
+    mut updates: Sender<Update>,
+    retry: Arc<Notify>,
+    mut observed: watch::Receiver<Option<ThreadId>>,
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(runtime().spawn(async move {
+        let budget = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024));
+        let mut since = None;
+        let mut attempt = 0_u32;
         loop {
-            match std::mem::take(&mut effect) {
-                Effect::None => return,
-                Effect::Connect { since } => {
-                    let _ = updates.unbounded_send(Update::Status(ConnectionStatus::Connecting));
-                    match session(&client, since, &updates, &mut machine, &mut effect).await {
-                        Ok(()) => machine.handle_with_context(&Input::Ended, &mut effect),
-                        Err(error) if updates.is_closed() => {
-                            tracing::debug!("stopped following Forge: {error:#}");
-                            return;
-                        }
-                        Err(error) => {
-                            tracing::warn!("Forge connection failed: {error:#}");
-                            machine.handle_with_context(
-                                &Input::Failed(format!("{error:#}")),
-                                &mut effect,
-                            );
-                        }
-                    }
-                }
-                Effect::Wait { attempt, reason } => {
-                    let _ = updates.unbounded_send(Update::Status(ConnectionStatus::Offline {
-                        attempt,
-                        reason,
-                    }));
-                    tokio::select! {
-                        () = tokio::time::sleep(backoff(attempt)) => {}
-                        () = retry.notified() => {}
-                    }
-                    machine.handle_with_context(&Input::RetryDue, &mut effect);
-                }
+            // Changing the observed thread replaces the stream filter, not the
+            // host connection. Only bootstrap and failure recovery are connecting.
+            if (since.is_none() || attempt > 0)
+                && updates
+                    .send(Update::Status(ConnectionStatus::Connecting))
+                    .await
+                    .is_err()
+            {
+                return;
             }
+            let result = session(
+                &client,
+                &mut since,
+                &mut updates,
+                &retry,
+                &mut observed,
+                &mut attempt,
+                &budget,
+            )
+            .await;
             if updates.is_closed() {
                 return;
             }
+            let (reason, code) = match result {
+                Ok(End::Reset) => {
+                    since = None;
+                    attempt = 0;
+                    continue;
+                }
+                Ok(End::Observation) => continue,
+                Ok(End::Closed) => ("Forge's event stream closed".to_owned(), None),
+                Err(error) => (
+                    format!("{error:#}"),
+                    error
+                        .downcast_ref::<artisan_api::ApiError>()
+                        .map(|error| error.code),
+                ),
+            };
+            attempt = attempt.saturating_add(1);
+            if updates
+                .send(Update::Status(ConnectionStatus::Offline {
+                    attempt,
+                    reason,
+                    code,
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(backoff(attempt)) => {},
+                () = retry.notified() => {},
+                _ = observed.changed() => {},
+            }
         }
-    });
+    }))
 }
 
 fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(250 * 2_u64.saturating_pow(attempt.min(6))).min(Duration::from_secs(15))
 }
 
-/// One connected session: state when needed, then events until the stream
-/// ends or Forge asks for a reset.
 async fn session(
     client: &ForgeClient,
-    since: Option<Seq>,
-    updates: &UnboundedSender<Update>,
-    machine: &mut blocking::StateMachine<Machine>,
-    effect: &mut Effect,
-) -> Result<()> {
-    let since = if let Some(since) = since {
-        since
+    since: &mut Option<Seq>,
+    updates: &mut Sender<Update>,
+    retry: &Notify,
+    observed: &mut watch::Receiver<Option<ThreadId>>,
+    attempt: &mut u32,
+    budget: &Arc<tokio::sync::Semaphore>,
+) -> Result<End> {
+    let head = if let Some(head) = *since {
+        head
     } else {
         let state = client.state().await?;
-        if state.protocol != artisan_api::PROTOCOL_VERSION {
-            bail!(
-                "Forge {} speaks protocol {}; update Forge or the Editor",
-                state.forge_version,
-                state.protocol
-            );
-        }
         let head = state.head;
         updates
-            .unbounded_send(Update::State(Box::new(state)))
+            .send(Update::State(Box::new(state)))
+            .await
             .ok()
             .context("store closed")?;
-        machine.handle_with_context(&Input::Seen(head), effect);
+        *since = Some(head);
         head
     };
-    let mut response = client
-        .raw()
-        .get(client.events_url(since))
-        .header("accept", "text/event-stream")
-        .send()
-        .await
-        .context("open the event stream")?;
-    if !response.status().is_success() {
-        bail!("event stream refused: {}", response.status());
+    let observation = observed.borrow_and_update().clone();
+    let mut query = vec![("summary", "true".to_owned())];
+    if let Some(thread) = observation {
+        query.push(("thread", thread.to_string()));
     }
-    machine.handle_with_context(&Input::Connected, effect);
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        client
+            .raw()
+            .get(client.events_url(head))
+            .query(&query)
+            .header("accept", "text/event-stream")
+            .send(),
+    )
+    .await
+    .context("Forge did not open its event stream")?
+    .context("open the event stream")?;
+    let response = crate::client::check(response).await?;
     updates
-        .unbounded_send(Update::Status(ConnectionStatus::Live))
+        .send(Update::Status(ConnectionStatus::Live))
+        .await
         .ok()
         .context("store closed")?;
-    let mut buffer = String::new();
-    while let Some(chunk) = response.chunk().await.context("read the event stream")? {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(end) = buffer.find("\n\n") {
-            let block: String = buffer.drain(..end + 2).collect();
-            let data: String = block
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .map(|line| line.strip_prefix(' ').unwrap_or(line))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if data.is_empty() {
-                continue;
+    *attempt = 0;
+    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(
+        NonZeroUsize::new(4 * 1024 * 1024).unwrap(),
+    ));
+    stream.attach(response.bytes_stream());
+    loop {
+        let event = tokio::select! {
+            event = stream.next() => event,
+            () = retry.notified() => return Ok(End::Observation),
+            _ = observed.changed() => return Ok(End::Observation),
+        };
+        let Some(event) = event else {
+            return Ok(End::Closed);
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(SseStreamError::Inner(error)) => {
+                return Err(error).context("read Forge event stream");
             }
-            let envelope: Envelope = match serde_json::from_str(&data) {
-                Ok(envelope) => envelope,
-                Err(error) => {
-                    tracing::warn!("skipped an event Forge sent: {error}");
-                    continue;
+            Err(SseStreamError::PayloadTooLarge(error)) => {
+                *since = None;
+                return Err(error)
+                    .context("Forge event exceeded the frame limit; resnapshot required");
+            }
+        };
+        let SseEvent::Message(message) = event else {
+            continue;
+        };
+        let envelope = decode_envelope(&message.data, since)?;
+        if matches!(envelope.event, Event::Reset) {
+            return Ok(End::Reset);
+        }
+        if let Event::Hello { protocol, .. } = &envelope.event
+            && *protocol != artisan_api::PROTOCOL_VERSION
+        {
+            *since = None;
+            bail!(artisan_api::ApiError {
+                code: artisan_api::ErrorCode::VersionMismatch,
+                message: "Forge's event protocol changed; update Forge or the Editor".into()
+            });
+        }
+        let seq = envelope.seq;
+        let permit = budget
+            .clone()
+            .acquire_many_owned(message.data.len().max(1) as u32)
+            .await
+            .context("event queue closed")?;
+        updates
+            .send(Update::Event(Box::new(envelope), permit))
+            .await
+            .ok()
+            .context("store closed")?;
+        if let Some(seq) = seq {
+            *since = Some(seq);
+        }
+    }
+}
+
+fn decode_envelope(data: &str, since: &mut Option<Seq>) -> Result<Envelope> {
+    serde_json::from_str(data).map_err(|error| {
+        *since = None;
+        anyhow::Error::from(error).context("Forge sent an invalid event; resnapshot required")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn utf8_and_crlf_survive_every_network_boundary() {
+        let event = Envelope {
+            seq: Some(19),
+            live_revision: 0,
+            event: Event::Setting {
+                key: "label".into(),
+                value: "blå 🦀".into(),
+            },
+        };
+        let data = serde_json::to_string(&event).unwrap();
+        let wire = format!("id: 19\r\ndata: {data}\r\n\r\n").into_bytes();
+        for split in 1..wire.len() {
+            let mut decoder = SseDecoder::new();
+            let mut events = Vec::new();
+            for bytes in [&wire[..split], &wire[split..]] {
+                let mut cursor = std::io::Cursor::new(bytes);
+                while let Some(event) = decoder.next(&mut cursor) {
+                    events.push(event.unwrap());
                 }
+            }
+            let [SseEvent::Message(message)] = events.as_slice() else {
+                panic!("one complete message at split {split}");
             };
-            if matches!(envelope.event, Event::Reset) {
-                machine.handle_with_context(&Input::Reset, effect);
-                return Ok(());
-            }
-            if let Some(seq) = envelope.seq {
-                machine.handle_with_context(&Input::Seen(seq), effect);
-            }
-            updates
-                .unbounded_send(Update::Event(Box::new(envelope)))
-                .ok()
-                .context("store closed")?;
+            assert_eq!(decode_envelope(&message.data, &mut None).unwrap(), event);
         }
     }
-    Ok(())
-}
-
-#[derive(Debug, Default)]
-enum Effect {
-    #[default]
-    None,
-    /// Open a session; `None` means fetch the state first.
-    Connect {
-        since: Option<Seq>,
-    },
-    Wait {
-        attempt: u32,
-        reason: String,
-    },
-}
-
-#[derive(Debug)]
-enum Input {
-    Start,
-    Connected,
-    Seen(Seq),
-    /// The stream ended cleanly (Forge restarted, network dropped).
-    Ended,
-    Failed(String),
-    /// Forge says the client fell too far behind.
-    Reset,
-    RetryDue,
-}
-
-/// Lifecycle data only: the last seq seen. Handlers put the next effect in
-/// the context; the driver performs it.
-#[derive(Default)]
-struct Machine {
-    since: Option<Seq>,
-}
-
-#[blocking::state_machine(initial = "State::disconnected()", state(derive(Debug)))]
-impl Machine {
-    #[state]
-    fn disconnected(&mut self, context: &mut Effect, event: &Input) -> Outcome<State> {
-        match event {
-            Input::Start => {
-                *context = Effect::Connect { since: self.since };
-                Outcome::Transition(State::connecting())
-            }
-            _ => Outcome::Handled,
-        }
+    #[test]
+    fn invalid_json_invalidates_the_resume_cursor() {
+        let mut since = Some(19);
+        assert!(decode_envelope("{broken", &mut since).is_err());
+        assert_eq!(since, None);
     }
-
-    #[state]
-    fn connecting(&mut self, context: &mut Effect, event: &Input) -> Outcome<State> {
-        match event {
-            Input::Seen(seq) => {
-                self.since = Some(*seq);
-                Outcome::Handled
-            }
-            Input::Connected => Outcome::Transition(State::live()),
-            Input::Failed(reason) => {
-                *context = Effect::Wait {
-                    attempt: 1,
-                    reason: reason.clone(),
-                };
-                Outcome::Transition(State::backoff(1))
-            }
-            Input::Reset => {
-                self.since = None;
-                *context = Effect::Connect { since: None };
-                Outcome::Handled
-            }
-            _ => Outcome::Handled,
+    #[test]
+    fn oversized_stream_reports_an_error() {
+        let mut decoder = SseDecoder::with_limit(NonZeroUsize::new(64).unwrap());
+        let mut input = std::io::Cursor::new(format!("data: {}\n\n", "x".repeat(128)).into_bytes());
+        let mut rejected = false;
+        while let Some(event) = decoder.next(&mut input) {
+            rejected |= event.is_err();
         }
-    }
-
-    #[state]
-    fn live(&mut self, context: &mut Effect, event: &Input) -> Outcome<State> {
-        match event {
-            Input::Seen(seq) => {
-                self.since = Some(*seq);
-                Outcome::Handled
-            }
-            Input::Reset => {
-                self.since = None;
-                *context = Effect::Connect { since: None };
-                Outcome::Transition(State::connecting())
-            }
-            Input::Ended => {
-                *context = Effect::Connect { since: self.since };
-                Outcome::Transition(State::connecting())
-            }
-            Input::Failed(reason) => {
-                *context = Effect::Wait {
-                    attempt: 1,
-                    reason: reason.clone(),
-                };
-                Outcome::Transition(State::backoff(1))
-            }
-            _ => Outcome::Handled,
-        }
-    }
-
-    #[state]
-    fn backoff(
-        &mut self,
-        attempt: &mut u32,
-        context: &mut Effect,
-        event: &Input,
-    ) -> Outcome<State> {
-        match event {
-            Input::RetryDue => {
-                *context = Effect::Connect { since: self.since };
-                Outcome::Transition(State::retrying(*attempt))
-            }
-            _ => Outcome::Handled,
-        }
-    }
-
-    /// Connecting again after `attempt` failures.
-    #[state]
-    fn retrying(
-        &mut self,
-        attempt: &mut u32,
-        context: &mut Effect,
-        event: &Input,
-    ) -> Outcome<State> {
-        match event {
-            Input::Seen(seq) => {
-                self.since = Some(*seq);
-                Outcome::Handled
-            }
-            Input::Connected => Outcome::Transition(State::live()),
-            Input::Failed(reason) => {
-                let next = attempt.saturating_add(1);
-                *context = Effect::Wait {
-                    attempt: next,
-                    reason: reason.clone(),
-                };
-                Outcome::Transition(State::backoff(next))
-            }
-            Input::Reset => {
-                self.since = None;
-                *context = Effect::Connect { since: None };
-                Outcome::Handled
-            }
-            _ => Outcome::Handled,
-        }
+        assert!(rejected);
     }
 }

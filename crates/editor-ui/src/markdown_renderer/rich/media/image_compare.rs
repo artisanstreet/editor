@@ -15,6 +15,7 @@
 //! it to the middle. The labels are glass pills that step aside while the
 //! divider is dragged.
 
+use crate::markdown_renderer::rich::budget;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -28,7 +29,9 @@ use serde::Deserialize;
 use super::super::kit;
 use super::super::{BlockContext, RichBlock};
 use super::picture::{self, Loaded, SizeHint};
-use crate::hover_card::glass_surface;
+use super::source::MediaSource;
+use crate::hover_card::{glass_handle, glass_pill};
+use crate::segmented_control::{Segment, SegmentedControl};
 use crate::theme::ArtisanTheme;
 use editor_assets::AssetId;
 
@@ -77,7 +80,7 @@ pub(super) struct ImageCompare {
 
 #[derive(Clone, Debug, Deserialize)]
 struct Side {
-    src: String,
+    src: MediaSource,
     #[serde(default)]
     label: Option<String>,
 }
@@ -96,12 +99,21 @@ impl Side {
 }
 
 impl RichBlock for ImageCompare {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.before.src.resident_bytes()
+            + self.after.src.resident_bytes()
+            + budget::optional(&self.before.label)
+            + budget::optional(&self.after.label)
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         CompareView {
             id: cx.key("image-compare"),
+            media: cx.media.cloned(),
             theme: *cx.theme,
-            before: SharedString::from(self.before.src.clone()),
-            after: SharedString::from(self.after.src.clone()),
+            before: self.before.src.clone(),
+            after: self.after.src.clone(),
             before_label: self.before.label_or("Before"),
             after_label: self.after.label_or("After"),
             mode: self.mode,
@@ -109,24 +121,15 @@ impl RichBlock for ImageCompare {
         }
         .into_any_element()
     }
-
-    fn markdown(&self) -> String {
-        let before = self.before.label_or("Before");
-        let after = self.after.label_or("After");
-        format!(
-            "**{before}**\n\n{}\n\n**{after}**\n\n{}\n",
-            picture::markdown(&before, &self.before.src),
-            picture::markdown(&after, &self.after.src),
-        )
-    }
 }
 
 #[derive(IntoElement)]
 struct CompareView {
+    media: Option<super::source::MediaFetcher>,
     id: SharedString,
     theme: ArtisanTheme,
-    before: SharedString,
-    after: SharedString,
+    before: MediaSource,
+    after: MediaSource,
     before_label: SharedString,
     after_label: SharedString,
     mode: Mode,
@@ -214,17 +217,16 @@ impl CompareView {
 
     /// The string form of [`Self::part`].
     fn key(&self, part: impl std::fmt::Display) -> SharedString {
-        SharedString::from(format!("{}-{part}", self.id))
+        kit::part_key(&self.id, part)
     }
 }
 
 /// A small glass pill over the image.
-fn pill(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
-    glass_surface(
+fn pill(theme: &ArtisanTheme, text: impl Into<SharedString>) -> crate::hover_card::GlassCard {
+    glass_pill(
         theme,
-        px(11.0),
         div()
-            .h(px(22.0))
+            .h_full()
             .px(px(9.0))
             .flex()
             .items_center()
@@ -268,11 +270,10 @@ fn divider(theme: &ArtisanTheme, split: f32) -> [Div; 2] {
             .left(relative(split))
             .mt(px(-HANDLE / 2.0))
             .ml(px(-HANDLE / 2.0))
-            .child(glass_surface(
+            .child(glass_handle(
                 theme,
-                px(HANDLE / 2.0),
                 div()
-                    .size(px(HANDLE))
+                    .size_full()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -325,24 +326,20 @@ impl RenderOnce for CompareView {
         let state = window.use_keyed_state(self.part("state"), cx, |_, cx| {
             CompareState::new(mode, cx.focus_handle())
         });
-        let before = picture::load(window, cx, &self.key("before"), &self.before);
-        let after = picture::load(window, cx, &self.key("after"), &self.after);
-        // A comparison with a side missing compares nothing: say which
-        // images could not load instead of drawing an empty frame.
-        let missing: Vec<_> = [(&before, &self.before), (&after, &self.after)]
-            .into_iter()
-            .filter(|(image, _)| matches!(image, Loaded::Failed))
-            .map(|(_, src)| picture::unavailable(&self.theme, src))
-            .collect();
-        if !missing.is_empty() {
-            return div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .children(missing)
-                .into_any_element();
-        }
+        let before = picture::load(
+            window,
+            cx,
+            &self.key("before"),
+            &self.before,
+            self.media.as_ref(),
+        );
+        let after = picture::load(
+            window,
+            cx,
+            &self.key("after"),
+            &self.after,
+            self.media.as_ref(),
+        );
         let (aspect, max_width) =
             Loaded::frame(&[&before, &after], self.hint, picture::MAX_FRAME_HEIGHT);
         let mode = state.read(cx).mode;
@@ -423,15 +420,10 @@ impl CompareView {
         };
 
         let frame = div()
+            .relative()
+            .size_full()
             .id(self.part("frame"))
             .track_focus(&focus)
-            .relative()
-            .w_full()
-            .aspect_ratio(aspect)
-            .rounded(kit::inner_radius())
-            .overflow_hidden()
-            .border_1()
-            .border_color(kit::hairline(&theme))
             .map(|frame| match mode {
                 Mode::Toggle => frame.cursor_pointer(),
                 _ => frame.cursor_col_resize(),
@@ -456,7 +448,8 @@ impl CompareView {
             showing_after,
             dragging,
         };
-        self.layers(frame, shown, before, after)
+        crate::media_frame::MediaFrame::new(theme, aspect, self.layers(frame, shown, before, after))
+            .into_any_element()
     }
 
     /// The images, labels, and divider of a single frame in `mode`.
@@ -547,16 +540,17 @@ impl CompareView {
         let theme = self.theme;
         let half = |image: &Loaded, src: &str, label: &SharedString, left: bool| {
             div()
-                .relative()
                 .flex_1()
                 .min_w_0()
-                .aspect_ratio(aspect)
-                .rounded(kit::inner_radius())
-                .overflow_hidden()
-                .border_1()
-                .border_color(kit::hairline(&theme))
-                .child(layer(image, &theme, src))
-                .child(corner(&theme, label.clone(), left, false))
+                .child(crate::media_frame::MediaFrame::new(
+                    theme,
+                    aspect,
+                    div()
+                        .relative()
+                        .size_full()
+                        .child(layer(image, &theme, src))
+                        .child(corner(&theme, label.clone(), left, false)),
+                ))
         };
         div()
             .w_full()
@@ -568,30 +562,30 @@ impl CompareView {
             .into_any_element()
     }
 
-    /// The mode row: the open mode in the foreground, the rest muted, every
-    /// entry with the app's hover fill.
-    fn switcher(&self, state: &Entity<CompareState>, chosen: Mode) -> Div {
-        let theme = self.theme;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .children(Mode::ALL.iter().map(|mode| {
-                let mode = *mode;
-                let state = state.clone();
-                let id = self.part(format_args!("mode-{}", mode.label()));
-                kit::mode_entry(&theme, id, mode.label(), mode == chosen).on_click(
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| {
-                            if state.mode != mode {
-                                state.mode = mode;
-                                state.dragging = false;
-                                cx.notify();
-                            }
-                        });
-                    },
-                )
-            }))
+    /// The feature chooses the mode; shared controls own focus and selection.
+    fn switcher(&self, state: &Entity<CompareState>, chosen: Mode) -> SegmentedControl<Mode> {
+        let state = state.clone();
+        SegmentedControl::new(
+            self.part("modes"),
+            self.theme,
+            "Comparison mode",
+            chosen,
+            Segment::new(Mode::ALL[0], Mode::ALL[0].label()),
+        )
+        .options(
+            Mode::ALL[1..]
+                .iter()
+                .map(|mode| Segment::new(*mode, mode.label())),
+        )
+        .on_change(move |mode, _, cx| {
+            state.update(cx, |state, cx| {
+                if state.mode != mode {
+                    state.mode = mode;
+                    state.dragging = false;
+                    cx.notify();
+                }
+            });
+        })
     }
 }
 

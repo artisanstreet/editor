@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 119
 expression: "replay(Profile::Grok, \"plain-reply\")"
 ---
 [
@@ -30,8 +31,8 @@ expression: "replay(Profile::Grok, \"plain-reply\")"
     Event(
         Live {
             target: Reasoning,
-            text: "The user wants a one-word reply.",
-            append: true,
+            text: "The user wants a one-word reply",
+            append: false,
         },
     ),
     Event(
@@ -40,7 +41,9 @@ expression: "replay(Profile::Grok, \"plain-reply\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -92,7 +95,9 @@ expression: "replay(Profile::Grok, \"plain-reply\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "ok",
+                text: Inline(
+                    "ok",
+                ),
                 phase: Final,
             },
         },

@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -16,7 +17,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch created.txt",
+                    command: Inline(
+                        "touch created.txt",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -34,7 +37,9 @@ expression: "(events, outcome)"
             status: AwaitingUser,
             kind: Tool {
                 tool: Shell {
-                    command: "touch created.txt",
+                    command: Inline(
+                        "touch created.txt",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -46,11 +51,15 @@ expression: "(events, outcome)"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch created.txt",
+                            command: Inline(
+                                "touch created.txt",
+                            ),
                             cwd: None,
                         },
                         reason: Some(
-                            "Create empty file created.txt",
+                            Inline(
+                                "Create empty file created.txt",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -82,7 +91,9 @@ expression: "(events, outcome)"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "touch created.txt",
+                    command: Inline(
+                        "touch created.txt",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -91,20 +102,25 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "(Bash completed with no output)",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "(Bash completed with no output)",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch created.txt",
+                            command: Inline(
+                                "touch created.txt",
+                            ),
                             cwd: None,
                         },
                         reason: Some(
-                            "Create empty file created.txt",
+                            Inline(
+                                "Create empty file created.txt",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -126,7 +142,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -137,21 +155,21 @@ expression: "(events, outcome)"
             text: "done",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "done",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
             },
+            text: "done",
+            append: false,
         },
         Item {
             key: "msg_011Cfv2sySr47v2PJDiXNqwD:1",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "done",
+                text: Inline(
+                    "done",
+                ),
                 phase: Final,
             },
         },

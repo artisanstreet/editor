@@ -1,13 +1,5 @@
-//! Native table rendering for the Markdown renderer.
-//!
-//! A table is one grid whose cells arrive in row order, so every column
-//! shares one track and rows stay aligned without measuring text here. The
-//! tracks are content-sized (`minmax(0, max-content)`): short columns hug
-//! their content, and when the row outgrows the message width the tracks
-//! shrink and cells wrap instead of overflowing. The reference table fills
-//! its container (`width: 100%` under automatic table layout); GPUI grids
-//! only offer uniform track templates, so the native table hugs its content
-//! at the leading edge instead of stretching every column equally.
+//! Virtualized Markdown table rows use equal shared native column tracks.
+//! Every cell remains ordinary selectable inline text.
 //!
 //! Type follows the plugin `table`: 14 px / 24 px, header cells at 600 in
 //! the foreground token above a hairline, body rows separated by hairlines,
@@ -17,7 +9,7 @@
 
 use gpui::{AnyElement, Div, IntoElement, ParentElement, Styled, div, prelude::*, px};
 
-use crate::markdown::{Table, TableAlignment};
+use crate::markdown::TableAlignment;
 use crate::theme::{ArtisanTheme, ProseTypography};
 
 use super::prepared::PreparedTable;
@@ -30,78 +22,51 @@ enum RowKind {
     Body,
 }
 
-/// Renders one prepared table. `table` is the parsed table, read only for
-/// the cell spans a title change re-flattens.
-pub(super) fn render_table(
-    table: Option<&Table>,
+/// Equal native tracks keep independently virtualized rows aligned.
+pub(super) fn render_row(
     prepared: &PreparedTable,
+    row_index: usize,
     render: &RenderContext<'_>,
 ) -> AnyElement {
     let theme = render.theme;
-    let selector = render.id(prepared.table);
     let columns = prepared.alignments.len();
     let mut grid = div()
+        .w_full()
         .grid()
-        .grid_cols_max_content(u16::try_from(columns).unwrap_or(u16::MAX))
+        .grid_cols(u16::try_from(columns).unwrap_or(u16::MAX))
         .min_w_0()
         .text_size(px(ProseTypography::TABLE_SIZE_PX))
         .line_height(px(ProseTypography::TABLE_LINE_PX))
         .tracking(ProseTypography::TRACKING_EM);
-
-    let last_row = prepared.rows.len().saturating_sub(1);
-    for (row_index, cells) in prepared.rows.iter().enumerate() {
-        let kind = if row_index == 0 {
-            RowKind::Header
-        } else {
-            RowKind::Body
-        };
-        let authored = table.and_then(|table| {
-            if row_index == 0 {
-                Some(&table.header)
-            } else {
-                table.rows.get(row_index - 1)
-            }
-        });
-        for (column, (alignment, prepared_cell)) in
-            prepared.alignments.iter().zip(cells.iter()).enumerate()
-        {
-            let cell_selector = render.id(prepared_cell.selector);
-            let mut cell = cell_frame(kind, *alignment, column, columns, theme);
-            if row_index < last_row {
-                cell = cell
-                    .border_b_1()
-                    .border_color(theme.colors.border.to_paint());
-            }
-            // The grammar pads short rows and drops excess cells; a missing
-            // cell still takes its slot so later rows never shift columns.
-            if let Some(leaf) = &prepared_cell.leaf {
-                let spans = authored
-                    .and_then(|cells| cells.get(column))
-                    .map_or(&[][..], |cell| cell.spans.as_slice());
-                let content_selector = render.id(prepared_cell.content);
-                // The content keeps its automatic minimum width: it feeds
-                // the track's max-content size, and a zero minimum here
-                // collapses every column to its padding. Shrinking belongs
-                // to the cell.
-                cell = cell.child(
-                    div()
-                        .debug_selector(move || content_selector.to_string())
-                        .child(render_leaf(spans, leaf, cell_selector.clone(), render)),
-                );
-            }
-            grid = grid.child(cell.debug_selector(move || cell_selector.to_string()));
+    let kind = if row_index < prepared.header_rows {
+        RowKind::Header
+    } else {
+        RowKind::Body
+    };
+    let Some(cells) = prepared.rows.get(row_index) else {
+        return grid.into_any_element();
+    };
+    for (column, (alignment, prepared_cell)) in
+        prepared.alignments.iter().zip(cells.iter()).enumerate()
+    {
+        let selector = render.id(prepared_cell.selector);
+        let mut cell = cell_frame(kind, *alignment, column, columns, theme);
+        if row_index + 1 < prepared.rows.len() || prepared.trailing_border {
+            cell = cell
+                .border_b_1()
+                .border_color(theme.colors.border.to_paint());
         }
+        if let Some(leaf) = &prepared_cell.leaf {
+            cell = cell.child(render_leaf(
+                leaf,
+                prepared_cell.selector,
+                if column == 0 { "\n" } else { "\t" },
+                render,
+            ));
+        }
+        grid = grid.child(cell.debug_selector(move || selector.to_string()));
     }
-
-    // A flex row sizes the grid to its content and lets it shrink to the
-    // message width; as a column child the grid would stretch instead.
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .child(grid.debug_selector(move || selector.to_string()))
-        .into_any_element()
+    grid.into_any_element()
 }
 
 /// One cell's box: padding, alignment, and the header type treatment. The

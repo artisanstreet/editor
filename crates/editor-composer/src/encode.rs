@@ -5,46 +5,84 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use image::{
-    AnimationDecoder as _, DynamicImage, GenericImageView as _, ImageFormat, imageops::FilterType,
+    AnimationDecoder as _, DynamicImage, GenericImageView as _, ImageDecoder as _, ImageFormat,
+    imageops::FilterType,
 };
 
 const QUALITY: f32 = 85.0;
 /// Engines downscale past this anyway, so extra pixels are never seen.
 const LONG_EDGE: u32 = 2576;
+pub(crate) const MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PIXELS: u64 = 16_000_000;
+const MAX_FRAMES: usize = 120;
+const MAX_ANIMATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Converts JPEG, PNG, GIF, BMP or WebP bytes to the WebP Forge stores.
 pub fn to_webp(bytes: &[u8]) -> Result<Vec<u8>> {
+    anyhow::ensure!(
+        bytes.len() <= MAX_INPUT_BYTES,
+        "Images must be at most 32 MiB"
+    );
     let format = image::guess_format(bytes).context("recognise the image format")?;
     match format {
-        ImageFormat::WebP => {
-            let image =
-                image::load_from_memory_with_format(bytes, format).context("decode the WebP")?;
-            if fits(&image) {
-                // Re-encoding only adds loss.
+        ImageFormat::Gif => {
+            let mut decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
+                .context("decode the GIF")?;
+            check_dimensions(decoder.dimensions())?;
+            decoder.set_limits(decode_limits())?;
+            // Decode and resize each frame before reading the next. The encoder
+            // borrows these resized buffers, so their aggregate stays bounded.
+            let mut frames = Vec::new();
+            let mut retained = 0usize;
+            for frame in decoder.into_frames() {
+                anyhow::ensure!(
+                    frames.len() < MAX_FRAMES,
+                    "Animations must have at most {MAX_FRAMES} frames"
+                );
+                let frame = frame.context("decode a GIF frame")?;
+                let delay = frame.delay();
+                let image = resize(DynamicImage::ImageRgba8(frame.into_buffer())).to_rgba8();
+                retained = retained.saturating_add(image.len());
+                anyhow::ensure!(
+                    retained <= MAX_ANIMATION_BYTES,
+                    "Animation pixels exceed 64 MiB"
+                );
+                frames.push(image::Frame::from_parts(image, 0, 0, delay));
+            }
+            if frames.len() == 1 {
+                return encode(&DynamicImage::ImageRgba8(frames.remove(0).into_buffer()));
+            }
+            encode_animation(frames)
+        }
+        ImageFormat::WebP | ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Bmp => {
+            let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+            reader.limits(decode_limits());
+            let decoder = reader.into_decoder().context("read image dimensions")?;
+            check_dimensions(decoder.dimensions())?;
+            let image = DynamicImage::from_decoder(decoder).context("decode the image")?;
+            if format == ImageFormat::WebP && fits(&image) {
                 return Ok(bytes.to_vec());
             }
             encode(&resize(image))
         }
-        ImageFormat::Gif => {
-            let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-                .context("decode the GIF")?
-                .into_frames()
-                .collect_frames()
-                .context("decode the GIF frames")?;
-            if frames.len() > 1 {
-                return encode_animation(frames);
-            }
-            let image =
-                image::load_from_memory_with_format(bytes, format).context("decode the GIF")?;
-            encode(&resize(image))
-        }
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Bmp => {
-            let image = image::load_from_memory_with_format(bytes, format)
-                .with_context(|| format!("decode the {format:?}"))?;
-            encode(&resize(image))
-        }
         other => bail!("{other:?} images aren't supported; use PNG, JPEG, GIF, BMP or WebP"),
     }
+}
+
+fn decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_PIXELS * 4);
+    limits
+}
+
+fn check_dimensions((width, height): (u32, u32)) -> Result<()> {
+    anyhow::ensure!(
+        width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_PIXELS,
+        "Images must have at most 16 million pixels"
+    );
+    Ok(())
 }
 
 fn fits(image: &DynamicImage) -> bool {
@@ -100,13 +138,12 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>> {
         .map(|frame| {
             let at = timestamp;
             let (numerator, denominator) = frame.delay().numer_denom_ms();
-            timestamp += i32::try_from(numerator / denominator.max(1))
-                .unwrap_or(100)
-                .max(20);
-            let image = match resize(DynamicImage::ImageRgba8(frame.into_buffer())) {
-                DynamicImage::ImageRgba8(buffer) => buffer,
-                other => other.to_rgba8(),
-            };
+            timestamp = timestamp.saturating_add(
+                i32::try_from(numerator / denominator.max(1))
+                    .unwrap_or(100)
+                    .clamp(20, 60_000),
+            );
+            let image = frame.into_buffer();
             (image, at)
         })
         .collect();
@@ -129,4 +166,21 @@ fn encode_animation(frames: Vec<image::Frame>) -> Result<Vec<u8>> {
         .try_encode()
         .map_err(|error| anyhow!("encode an animated {width}×{height} WebP: {error:?}"))?;
     Ok(animation.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn intake_rejects_oversized_bytes_and_pixels_before_decode() {
+        assert!(
+            to_webp(&vec![0; MAX_INPUT_BYTES + 1])
+                .unwrap_err()
+                .to_string()
+                .contains("32 MiB")
+        );
+        assert!(check_dimensions((100_000, 100_000)).is_err());
+        assert!(check_dimensions((0, 10)).is_err());
+        assert!(check_dimensions((4000, 4000)).is_ok());
+    }
 }

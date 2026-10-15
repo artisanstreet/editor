@@ -7,11 +7,10 @@
 //! recording did. Consecutive live appends to one target are merged.
 
 use super::decoder::Decoder;
-use crate::{EngineEvent, LiveKind, Outcome};
+use crate::{EngineEvent, Outcome};
 use artisan_api::{Answer, Decision};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -29,10 +28,7 @@ enum Step {
 }
 
 fn replay(case: &str) -> Vec<Step> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/codex/{case}.jsonl"));
-    let transcript = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let transcript = crate::transcript_tests::read("codex", case);
     let mut decoder = Decoder::default();
     // The recorder's `initialize` (id 1) isn't in the transcript.
     decoder.request("initialize", json!({}));
@@ -71,11 +67,20 @@ fn replay(case: &str) -> Vec<Step> {
             && let Some(id) = message.get("id")
             && let Some(item) = message["params"]["itemId"].as_str()
         {
-            asked.insert(id.to_string(), item.to_owned());
+            let key = if message["method"]
+                .as_str()
+                .is_some_and(|method| method.ends_with("/requestApproval"))
+            {
+                format!("approval-request:{id}")
+            } else {
+                item.to_owned()
+            };
+            asked.insert(id.to_string(), key);
         }
         steps.extend(
             decoder
                 .feed(line)
+                .unwrap()
                 .into_iter()
                 .map(|event| Step::Event(Box::new(event))),
         );
@@ -103,21 +108,9 @@ fn merge_live(steps: Vec<Step>) -> Vec<Step> {
     let mut merged: Vec<Step> = Vec::new();
     for step in steps {
         if let Step::Event(event) = &step
-            && let EngineEvent::Live {
-                target,
-                text,
-                append: true,
-            } = event.as_ref()
             && let Some(Step::Event(last)) = merged.last_mut()
-            && let EngineEvent::Live {
-                target: last_target,
-                text: last_text,
-                append: true,
-            } = last.as_mut()
-            && last_target == target
-            && *target != LiveKind::Status
+            && crate::transcript_tests::merge_live(last.as_mut(), event.as_ref())
         {
-            last_text.push_str(text);
             continue;
         }
         merged.push(step);
@@ -157,7 +150,11 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
     config.model = Some("gpt-6.1-sol".into());
     config.speed = Some("priority".into());
+    config
+        .options
+        .insert("context_window".to_owned(), json!(1_000_000));
     let mut turn = crate::Turn {
+        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -170,6 +167,14 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     };
     let (_, params) = super::thread_params(&turn);
     assert_eq!(params["serviceTier"], "priority");
+    assert_eq!(params["config"]["model_context_window"], 1_000_000);
+    turn.session_id = Some("saved-session".into());
+    let (method, resumed) = super::thread_params(&turn);
+    assert_eq!(method, "thread/resume");
+    assert_eq!(resumed["config"]["model_context_window"], 1_000_000);
+    turn.config.options.remove("context_window");
+    let (_, standard) = super::thread_params(&turn);
+    assert!(standard["config"].get("model_context_window").is_none());
     let mut overrides = json!({});
     super::turn_overrides(&turn.config, &mut overrides);
     assert_eq!(overrides["serviceTier"], "priority");
@@ -183,6 +188,7 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
 #[test]
 fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     let mut turn = crate::Turn {
+        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -219,19 +225,19 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
 /// set, then cleared.
 #[test]
 fn a_goal_is_shown_only_when_one_was_set() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("transcripts/codex/command.jsonl");
-    let transcript = std::fs::read_to_string(path).unwrap();
+    let transcript = crate::transcript_tests::read("codex", "command");
     let mut decoder = Decoder::default();
     decoder.request("initialize", json!({}));
     let mut lines = transcript.lines();
     let start: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     decoder.request("thread/start", start["client"]["params"].clone());
-    decoder.feed(lines.next().unwrap());
+    decoder.feed(lines.next().unwrap()).unwrap();
     decoder.take_outbox();
     let thread = "01a12bc9-9151-7921-a2d6-1e7b08366259";
     let mut goals = |frame: Value| -> Vec<String> {
         decoder
             .feed(&frame.to_string())
+            .unwrap()
             .into_iter()
             .filter_map(|event| match event {
                 EngineEvent::Item {
@@ -241,7 +247,12 @@ fn a_goal_is_shown_only_when_one_was_set() {
                             text,
                         },
                     ..
-                } => Some(format!("{state}: {text}")),
+                } => {
+                    let artisan_api::TextContent::Inline(text) = text else {
+                        panic!("native goal fixture must be inline before persistence")
+                    };
+                    Some(format!("{state}: {text}"))
+                }
                 _ => None,
             })
             .collect()
@@ -255,4 +266,50 @@ fn a_goal_is_shown_only_when_one_was_set() {
     let set = json!({"method": "thread/goal/updated", "params": {"threadId": thread, "goal": {"objective": "Ship the parser", "status": "active"}}});
     assert_eq!(goals(set), ["active: Ship the parser"]);
     assert_eq!(goals(cleared), ["cleared: Ship the parser"]);
+}
+
+#[test]
+fn reversed_child_arrival_keeps_explicit_spawn_ownership() {
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    for spawn in ["spawn-a", "spawn-b"] {
+        decoder.feed(&json!({ "method": "item/started", "params": { "threadId": "root", "item": { "id": spawn, "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "inProgress", "agentsStates": {}, "prompt": spawn, "receiverThreadIds": [] } } }).to_string()).unwrap();
+    }
+    decoder.feed(&json!({ "method": "thread/started", "params": { "thread": { "id": "child-b", "parentThreadId": "root" } } }).to_string()).unwrap();
+    let before = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "child-b", "item": { "id": "reply-b", "type": "agentMessage", "text": "B reply", "phase": "final_answer" } } }).to_string()).unwrap();
+    assert!(
+        before.is_empty(),
+        "unbound child content waits for explicit relation"
+    );
+    let after = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "spawn-b", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "inProgress", "agentsStates": {}, "receiverThreadIds": ["child-b"] } } }).to_string()).unwrap();
+    assert!(after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-b")));
+    assert!(!after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-a")));
+}
+
+/// Sanitized native trace: optional web metadata can remain absent at completion.
+#[test]
+fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
+    let steps = replay("web-search-optional-metadata");
+    assert!(!steps.iter().any(|step| matches!(step,
+        Step::Event(event) if matches!(event.as_ref(), EngineEvent::Item {
+            kind: artisan_api::ItemKind::Error { .. }, ..
+        })
+    )));
+    assert!(steps.iter().any(|step| matches!(step,
+        Step::Event(event) if matches!(event.as_ref(), EngineEvent::Item {
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Tool {
+                tool: artisan_api::ToolKind::WebSearch { query }, ..
+            }, ..
+        } if query == "example query")
+    )));
+    assert!(
+        steps
+            .iter()
+            .any(|step| matches!(step, Step::TurnEnd(outcome) if outcome.status == artisan_api::RunStatus::Done && outcome.error.is_none()))
+    );
 }

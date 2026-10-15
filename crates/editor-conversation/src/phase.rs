@@ -7,6 +7,8 @@ use std::hash::BuildHasher;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Phase {
+    /// The page has no canonical Run metadata. Never infer its outcome from Items.
+    Unknown,
     Thinking,
     Working,
     /// The reply is streaming.
@@ -24,7 +26,7 @@ pub enum Phase {
 pub fn turn_phase<S: BuildHasher>(
     run: &Run,
     items: &[&Item],
-    live: &HashMap<LiveTarget, String, S>,
+    live: &HashMap<LiveTarget, std::sync::Arc<ropey::Rope>, S>,
 ) -> Phase {
     if !run.status.is_live() {
         return Phase::Settled(run.status);
@@ -69,7 +71,7 @@ pub fn turn_phase<S: BuildHasher>(
         .get(&LiveTarget::Reasoning {
             run_id: run.id.clone(),
         })
-        .is_some_and(|text| !text.trim().is_empty());
+        .is_some_and(|text| text.chars().any(|character| !character.is_whitespace()));
     if reasoning {
         return Phase::Thinking;
     }
@@ -103,7 +105,7 @@ pub(crate) fn status_copy(phase: Phase) -> Option<&'static str> {
         Phase::Compacting => Some("Compacting the conversation…"),
         Phase::WaitingOnYou => Some("Waiting for you"),
         Phase::Background => Some("Waiting for background work…"),
-        Phase::Replying | Phase::Settled(_) => None,
+        Phase::Unknown | Phase::Replying | Phase::Settled(_) => None,
     }
 }
 
@@ -111,11 +113,13 @@ pub(crate) fn status_copy(phase: Phase) -> Option<&'static str> {
 /// a generic title. The verb comes from what the run did, not from this
 /// moment: a run that used a tool or an agent is "Working"/"Worked" all
 /// through, so the header doesn't flip each time it goes back to thinking;
-/// one that only thought is "Thinking"/"Thought" (master's `ThoughtFor`).
+/// one that only thought is "Thinking"/"Thought".
 #[must_use]
 pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> String {
     let elapsed = format_elapsed(elapsed_ms);
     match phase {
+        Phase::Unknown if worked => "Work".to_owned(),
+        Phase::Unknown => "Thought".to_owned(),
         Phase::WaitingOnYou => "Waiting for you".to_owned(),
         Phase::Settled(RunStatus::Done) if worked => format!("Worked for {elapsed}"),
         Phase::Settled(RunStatus::Done) => format!("Thought for {elapsed}"),
@@ -139,22 +143,6 @@ pub(crate) fn section_title(phase: Phase, worked: bool, elapsed_ms: u64) -> Stri
         Phase::Settled(RunStatus::Cancelled) => "Cancelled".to_owned(),
         Phase::Settled(RunStatus::Interrupted) => "Interrupted".to_owned(),
         Phase::Settled(RunStatus::Refused) => "Refused".to_owned(),
-    }
-}
-
-/// How a run ended, judged from its items when its `Run` is not at hand
-/// (only each thread's latest run is).
-#[must_use]
-pub(crate) fn settled_from_items(items: &[&Item]) -> RunStatus {
-    if items
-        .iter()
-        .any(|item| matches!(item.kind, ItemKind::Error { .. }))
-    {
-        RunStatus::Failed
-    } else if items.iter().any(|item| item.status == Status::Cancelled) {
-        RunStatus::Cancelled
-    } else {
-        RunStatus::Done
     }
 }
 

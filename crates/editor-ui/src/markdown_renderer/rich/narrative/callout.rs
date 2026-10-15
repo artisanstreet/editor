@@ -1,11 +1,11 @@
 //! `callout`: a note set apart, in the tone of its kind.
 
+use crate::markdown_renderer::rich::budget;
 use gpui::{
     AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
     Window, div, prelude::*, px,
 };
 use serde::Deserialize;
-use std::fmt::Write as _;
 
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, Chrome, RichBlock};
@@ -72,6 +72,10 @@ pub(super) struct Callout {
 }
 
 impl RichBlock for Callout {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + budget::optional(&self.title) + self.body.capacity()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         CalloutView {
             id: cx.key("callout"),
@@ -82,18 +86,6 @@ impl RichBlock for Callout {
             collapsed: self.collapsed,
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        let heading = self
-            .title
-            .as_deref()
-            .map_or_else(String::new, |title| format!(" {title}"));
-        let mut out = format!("> **{}:**{heading}\n>\n", self.kind.label());
-        for line in self.body.lines() {
-            let _ = writeln!(out, "> {line}");
-        }
-        out
     }
 
     fn chrome(&self) -> Chrome {

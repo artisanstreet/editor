@@ -11,6 +11,7 @@ expression: seen
         LoggingIn {
             url: None,
             code: None,
+            accepts_code: false,
         },
         [
             StartLogin,
@@ -22,6 +23,7 @@ expression: seen
                 "https://auth.example/device",
             ),
             code: None,
+            accepts_code: false,
         },
         [],
     ),
@@ -33,6 +35,7 @@ expression: seen
             code: Some(
                 "ABCD-1234",
             ),
+            accepts_code: false,
         },
         [],
     ),
@@ -44,6 +47,7 @@ expression: seen
             code: Some(
                 "ABCD-1234",
             ),
+            accepts_code: false,
         },
         [],
     ),
@@ -75,6 +79,7 @@ expression: seen
         LoggingIn {
             url: None,
             code: None,
+            accepts_code: false,
         },
         [
             StartLogin,

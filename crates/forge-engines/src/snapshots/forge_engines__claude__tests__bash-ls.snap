@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -16,7 +17,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -48,7 +51,9 @@ expression: "(events, outcome)"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -57,9 +62,10 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "notes.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "notes.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -76,7 +82,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -108,21 +116,21 @@ expression: "(events, outcome)"
             text: "`.",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "The current directory contains one file, `notes.txt`.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
             },
+            text: "The current directory contains one file, `notes.txt`.",
+            append: false,
         },
         Item {
             key: "msg_011Cfv2riasBhBKoC4hgM67c:1",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The current directory contains one file, `notes.txt`.",
+                text: Inline(
+                    "The current directory contains one file, `notes.txt`.",
+                ),
                 phase: Final,
             },
         },

@@ -30,10 +30,6 @@ use gpui::{
 
 use crate::workspace::Workspace;
 
-/// How long input settles before the next step, so the frame it causes is
-/// painted before a `capture`.
-const SETTLE: Duration = Duration::from_millis(80);
-
 #[derive(Debug)]
 enum Step {
     Wait(Duration),
@@ -60,8 +56,8 @@ pub fn window_options(options: &mut WindowOptions) {
         .and_then(|value| {
             let (x, y) = value.split_once(',')?;
             Some(point(
-                px(x.trim().parse().ok()?),
-                px(y.trim().parse().ok()?),
+                px(finite_number(x.trim()).ok()?),
+                px(finite_number(y.trim()).ok()?),
             ))
         });
     if let (Some(origin), Some(WindowBounds::Windowed(bounds))) =
@@ -79,8 +75,7 @@ pub fn run(path: PathBuf, handle: WindowHandle<Workspace>, cx: &mut App) {
         Ok(steps) => steps,
         Err(error) => {
             tracing::error!("couldn't read the script: {error:#}");
-            cx.quit();
-            return;
+            std::process::exit(1);
         }
     };
     tracing::info!(steps = steps.len(), script = %path.display(), "running the script");
@@ -90,8 +85,13 @@ pub fn run(path: PathBuf, handle: WindowHandle<Workspace>, cx: &mut App) {
     cx.spawn(async move |cx| {
         for (index, step) in steps.into_iter().enumerate() {
             tracing::info!(step = index + 1, ?step, "script step");
+            let quit = matches!(step, Step::Quit);
             if let Err(error) = perform(step, target, cx).await {
                 tracing::error!(step = index + 1, "script step failed: {error:#}");
+                std::process::exit(1);
+            }
+            if quit {
+                return;
             }
         }
         tracing::info!("script finished");
@@ -180,7 +180,21 @@ async fn perform(step: Step, target: AnyWindowHandle, cx: &mut AsyncApp) -> Resu
             return Ok(());
         }
     }
-    cx.background_executor().timer(SETTLE).await;
+    // Await a frame boundary instead of assuming a fixed machine speed.
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    cx.update_window(target, |_, window, _| {
+        window.on_next_frame(move |_, _| {
+            let _ = send.send(());
+        });
+        window.request_animation_frame();
+    })?;
+    cx.background_executor()
+        .spawn(async move {
+            receive
+                .recv_timeout(Duration::from_secs(5))
+                .context("window did not produce a frame")
+        })
+        .await?;
     Ok(())
 }
 
@@ -207,14 +221,7 @@ fn parse(text: &str) -> Result<Vec<Step>> {
 
 fn parse_step(line: &str) -> Result<Step> {
     let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let numbers = || -> Result<Vec<f32>> {
-        rest.split_whitespace()
-            .map(|word| {
-                word.parse::<f32>()
-                    .with_context(|| format!("not a number: {word}"))
-            })
-            .collect()
-    };
+    let numbers = || -> Result<Vec<f32>> { rest.split_whitespace().map(finite_number).collect() };
     let position = || -> Result<Point<Pixels>> {
         match numbers()?.as_slice() {
             [x, y] => Ok(point(px(*x), px(*y))),
@@ -223,7 +230,9 @@ fn parse_step(line: &str) -> Result<Step> {
     };
     Ok(match command {
         "wait" => match numbers()?.as_slice() {
-            [ms] if *ms >= 0.0 => Step::Wait(Duration::from_millis(*ms as u64)),
+            [ms] if *ms >= 0.0 && *ms <= 3_600_000.0 => {
+                Step::Wait(Duration::from_millis(*ms as u64))
+            }
             _ => bail!("expected <milliseconds>"),
         },
         "move" => Step::Move(position()?),
@@ -241,4 +250,113 @@ fn parse_step(line: &str) -> Result<Step> {
         "quit" => Step::Quit,
         _ => bail!("unknown step"),
     })
+}
+
+fn finite_number(word: &str) -> Result<f32> {
+    let value = word
+        .parse::<f32>()
+        .with_context(|| format!("not a number: {word}"))?;
+    if !value.is_finite() {
+        bail!("expected a finite number: {word}");
+    }
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_step;
+    #[gpui::test]
+    fn capture_failure_exit_child(cx: &mut gpui::TestAppContext) {
+        if std::env::var_os("ARTISAN_REFORM_CAPTURE_FAILURE_CHILD").is_none() {
+            return;
+        }
+        use gpui::AppContext as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("script.txt");
+        let script = format!(
+            "capture {}\nquit\n",
+            dir.path().join("missing/capture.png").display()
+        );
+        assert!(super::parse(&script).is_ok());
+        std::fs::write(&path, script).unwrap();
+        let core = cx.new(|cx| {
+            editor_core::Core::new(
+                editor_core::EditorFiles {
+                    dir: dir.path().join("preferences"),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        core.update(cx, |core, cx| {
+            core.navigate(
+                editor_core::Screen::Settings(editor_core::SettingsPage::Appearance),
+                cx,
+            )
+        });
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            crate::workspace::Workspace::new(core.clone(), None, window, cx)
+        });
+        println!("executing real capture step in isolated test window");
+        cx.update(|window, cx| {
+            super::run(
+                path,
+                window
+                    .window_handle()
+                    .downcast::<crate::workspace::Workspace>()
+                    .unwrap(),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        panic!("a failed real capture step must exit before a later quit step");
+    }
+
+    #[test]
+    fn failed_capture_step_exits_nonzero_instead_of_reporting_success() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "script::tests::capture_failure_exit_child",
+                "--nocapture",
+            ])
+            .env("ARTISAN_REFORM_CAPTURE_FAILURE_CHILD", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("owned capture test child did not exit on failure");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "actual script failure must exit1, not test panic or successful quit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("executing real capture step in isolated test window")
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_script_input() {
+        for line in [
+            "move NaN 1",
+            "click 1 inf",
+            "scroll 1 2 -inf",
+            "wait inf",
+            "wait 3600001",
+        ] {
+            assert!(parse_step(line).is_err(), "{line}");
+        }
+    }
 }

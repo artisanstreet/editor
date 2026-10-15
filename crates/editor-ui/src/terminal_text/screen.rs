@@ -4,6 +4,7 @@
 use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use unicode_width::UnicodeWidthChar;
 
 use super::parser::{Params, Parser, Perform};
 use super::style::{TerminalLine, TerminalRun, TerminalStyle};
@@ -14,6 +15,8 @@ pub const DEFAULT_MAX_LINES: usize = 5_000;
 pub const MAX_LINE_CHARS: usize = 4_096;
 /// Highest row an absolute cursor move (`CSI H`, `CSI d`) may address, so a
 /// TUI's "jump to row 999" cannot grow hundreds of blank lines.
+const MAX_RETAINED_CELLS: usize = 128 * 1024;
+const MAX_COMBINING_PER_CELL: usize = 8;
 const MAX_CURSOR_ROW: usize = 500;
 /// Style-table size before unused styles are first collected.
 const STYLE_TABLE_FLOOR: usize = 4_096;
@@ -23,10 +26,11 @@ const MAX_LINK_BYTES: usize = 2_048;
 const DEFAULT_STYLE: u32 = 0;
 
 /// One character cell: the character and its interned style id.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Cell {
     /// The character drawn in this cell.
     ch: char,
+    combining: Vec<char>,
     /// Index into the style table.
     style: u32,
 }
@@ -34,6 +38,7 @@ struct Cell {
 /// What erasing leaves behind.
 const BLANK: Cell = Cell {
     ch: ' ',
+    combining: Vec::new(),
     style: DEFAULT_STYLE,
 };
 
@@ -44,12 +49,14 @@ struct Line {
     cells: Vec<Cell>,
     /// Materialized text and runs, rebuilt after any change.
     rendered: OnceCell<TerminalLine>,
+    dirty: bool,
 }
 
 impl Line {
     /// Mutable cells; drops the cached materialization.
     fn cells_mut(&mut self) -> &mut Vec<Cell> {
         self.rendered.take();
+        self.dirty = true;
         &mut self.cells
     }
 
@@ -72,7 +79,10 @@ fn materialize(cells: &[Cell], styles: &[TerminalStyle]) -> TerminalLine {
             }
             open = Some((text.len(), cell.style));
         }
-        text.push(cell.ch);
+        if cell.ch != '\0' {
+            text.push(cell.ch);
+            text.extend(&cell.combining);
+        }
     }
     if let Some((start, style)) = open {
         push_run(&mut runs, start..text.len(), style, styles);
@@ -126,6 +136,7 @@ struct Grid {
     pen_id: u32,
     /// Retention bound for `lines`, at least 1.
     max_lines: usize,
+    retained_cells: usize,
     /// Lines dropped from the front by the retention bound.
     truncated_lines: u64,
     /// Content lines dropped by clear-screen sequences.
@@ -150,6 +161,7 @@ impl Grid {
             pen: TerminalStyle::default(),
             pen_id: DEFAULT_STYLE,
             max_lines: max_lines.max(1),
+            retained_cells: 0,
             truncated_lines: 0,
             cleared_lines: 0,
         }
@@ -178,10 +190,13 @@ impl Grid {
             self.row += 1;
             return;
         }
+        self.enforce_cell_budget();
         self.lines.push_back(Line::default());
         self.row += 1;
         if self.lines.len() > self.max_lines {
-            self.lines.pop_front();
+            if let Some(line) = self.lines.pop_front() {
+                self.retained_cells -= line.cells.len();
+            }
             self.row -= 1;
             self.truncated_lines += 1;
             if let Some((row, _)) = &mut self.saved {
@@ -208,6 +223,7 @@ impl Grid {
     /// `CSI K`: 0 erases to the end, 1 to the start (inclusive), 2 the line.
     fn erase_in_line(&mut self, mode: u32) {
         let col = self.col;
+        let before = self.current_line().cells.len();
         let cells = self.current_line().cells_mut();
         match mode {
             0 => cells.truncate(col),
@@ -218,6 +234,8 @@ impl Grid {
             2 => cells.clear(),
             _ => {}
         }
+        let after = cells.len();
+        self.retained_cells -= before - after;
     }
 
     /// `CSI J`: 0 erases below, 1 above, 2 and 3 clear the screen.
@@ -225,10 +243,17 @@ impl Grid {
         match mode {
             0 => {
                 self.erase_in_line(0);
+                self.retained_cells -= self
+                    .lines
+                    .iter()
+                    .skip(self.row + 1)
+                    .map(|line| line.cells.len())
+                    .sum::<usize>();
                 self.lines.truncate(self.row + 1);
             }
             1 => {
                 for line in self.lines.iter_mut().take(self.row) {
+                    self.retained_cells -= line.cells.len();
                     line.cells_mut().clear();
                 }
                 self.erase_in_line(1);
@@ -243,6 +268,7 @@ impl Grid {
     fn clear_screen(&mut self) {
         self.cleared_lines += count(self.content_len());
         self.lines.clear();
+        self.retained_cells = 0;
         self.lines.push_back(Line::default());
         self.row = 0;
         self.saved = None;
@@ -319,26 +345,64 @@ impl Grid {
         self.compact_at = (kept.len() * 2).max(STYLE_TABLE_FLOOR);
         self.styles = kept;
     }
+    fn enforce_cell_budget(&mut self) {
+        while self.retained_cells > MAX_RETAINED_CELLS && self.lines.len() > 1 {
+            if let Some(line) = self.lines.pop_front() {
+                self.retained_cells -= line.cells.len();
+                self.row = self.row.saturating_sub(1);
+                self.truncated_lines += 1;
+                if let Some((row, _)) = &mut self.saved {
+                    *row = row.saturating_sub(1);
+                }
+            }
+        }
+    }
 }
 
 impl Perform for Grid {
     fn print(&mut self, ch: char) {
-        if self.col >= MAX_LINE_CHARS {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width == 0 {
+            let col = self.col;
+            let cells = self.current_line().cells_mut();
+            let end = col.min(cells.len());
+            if let Some(cell) = cells[..end].iter_mut().rev().find(|cell| cell.ch != '\0') {
+                if cell.combining.len() < MAX_COMBINING_PER_CELL {
+                    cell.combining.push(ch);
+                }
+            }
+            return;
+        }
+        if self.col.saturating_add(width) > MAX_LINE_CHARS {
             return;
         }
         let col = self.col;
         let cell = Cell {
             ch,
+            combining: Vec::new(),
             style: self.pen_id,
         };
         let cells = self.current_line().cells_mut();
-        if col < cells.len() {
-            cells[col] = cell;
-        } else {
-            cells.resize(col, BLANK);
-            cells.push(cell);
+        if cells.get(col).is_some_and(|cell| cell.ch == '\0') && col > 0 {
+            cells[col - 1] = BLANK;
         }
-        self.col += 1;
+        if cells.get(col + 1).is_some_and(|cell| cell.ch == '\0') {
+            cells[col + 1] = BLANK;
+        }
+        let added = (col + width).saturating_sub(cells.len());
+        if added > 0 {
+            cells.resize(col + width, BLANK);
+        }
+        cells[col] = cell;
+        if width == 2 {
+            cells[col + 1] = Cell {
+                ch: '\0',
+                combining: Vec::new(),
+                style: DEFAULT_STYLE,
+            };
+        }
+        self.retained_cells += added;
+        self.col += width;
     }
 
     fn execute(&mut self, byte: u8) {
@@ -474,12 +538,27 @@ impl TerminalScreen {
         for &byte in bytes {
             self.parser.advance(byte, &mut self.grid);
         }
+        self.grid.enforce_cell_budget();
     }
 
     /// Number of content lines.
     #[must_use]
     pub fn line_count(&self) -> usize {
         self.grid.content_len()
+    }
+
+    /// Consume rows changed since the owning display last synchronized.
+    /// Materializing text does not consume this change record. Consumers must
+    /// also reconcile clear/truncation counters and line count for row shifts.
+    pub fn take_dirty_line_indices(&mut self) -> Vec<usize> {
+        let count = self.grid.content_len();
+        self.grid
+            .lines
+            .iter_mut()
+            .take(count)
+            .enumerate()
+            .filter_map(|(index, line)| std::mem::take(&mut line.dirty).then_some(index))
+            .collect()
     }
 
     /// The content lines, oldest first. Each line materializes once per

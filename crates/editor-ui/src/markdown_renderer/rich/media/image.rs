@@ -5,9 +5,10 @@
 //! Several images wrap in a row at a smaller cap. An image that cannot load
 //! is one quiet line naming it. Right-clicking an image offers its path.
 //!
-//! [`ImageShowcase`] is the same view outside a fence: the transcript draws
+//! [`ImageShowcase`] is the internal prepared image view: the transcript draws
 //! images an engine generated or looked at with it.
 
+use crate::markdown_renderer::rich::budget;
 use gpui::{
     AnyElement, App, ElementId, IntoElement, MouseButton, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, prelude::*, px,
@@ -18,6 +19,7 @@ use super::super::actions::{CopyEntry, show_copy_menu};
 use super::super::kit;
 use super::super::{BlockContext, RichBlock};
 use super::picture::{self, Loaded, MAX_FRAME_HEIGHT, SizeHint};
+use super::source::MediaSource;
 use crate::theme::ArtisanTheme;
 
 /// The height cap of each image when several share a row.
@@ -34,7 +36,7 @@ pub(super) struct ImageBlock {
 #[derive(Debug, Deserialize)]
 struct Spec {
     #[serde(default)]
-    src: Option<String>,
+    src: Option<MediaSource>,
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
@@ -45,7 +47,7 @@ struct Spec {
 
 #[derive(Clone, Debug, Deserialize)]
 struct Picture {
-    src: String,
+    src: MediaSource,
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
@@ -68,6 +70,9 @@ impl TryFrom<Spec> for ImageBlock {
             );
         }
         images.retain(|image| !image.src.trim().is_empty());
+        if images.len() > 16 {
+            return Err("image gallery preview supports at most 16 images".into());
+        }
         if images.is_empty() {
             return Err("an image needs a `src` or `images`".to_owned());
         }
@@ -79,6 +84,20 @@ impl TryFrom<Spec> for ImageBlock {
 }
 
 impl RichBlock for ImageBlock {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + budget::vector(&self.images)
+            + self
+                .images
+                .iter()
+                .map(|image| {
+                    image.src.resident_bytes()
+                        + budget::optional(&image.alt)
+                        + budget::optional(&image.caption)
+                })
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         let gallery = self.images.len() > 1;
         let views = self
@@ -87,7 +106,14 @@ impl RichBlock for ImageBlock {
             .enumerate()
             .map(|(index, image)| ImageShowcase {
                 id: cx.key(format_args!("image-{index}")),
-                src: SharedString::from(image.src.trim().to_owned()),
+                media: cx.media.cloned(),
+                src: image.src.clone(),
+                alt: image
+                    .alt
+                    .as_deref()
+                    .filter(|alt| !alt.trim().is_empty())
+                    .map(SharedString::from)
+                    .unwrap_or_else(|| image.src.raw()),
                 caption: image
                     .caption
                     .as_deref()
@@ -116,67 +142,57 @@ impl RichBlock for ImageBlock {
             .children(views)
             .into_any_element()
     }
-
-    fn markdown(&self) -> String {
-        self.images
-            .iter()
-            .map(|image| {
-                let alt = image.alt.as_deref().or(image.caption.as_deref());
-                picture::markdown(alt.unwrap_or_default(), &image.src)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    }
 }
 
 /// One image shown as it is: an engine's generated or viewed image, or an
 /// `image` block's.
 #[derive(IntoElement)]
-pub struct ImageShowcase {
+pub(super) struct ImageShowcase {
+    media: Option<super::source::MediaFetcher>,
     id: SharedString,
-    src: SharedString,
+    src: MediaSource,
+    alt: SharedString,
     caption: Option<SharedString>,
     theme: ArtisanTheme,
     hint: SizeHint,
     max_height: f32,
 }
 
-impl ImageShowcase {
-    /// The image at `src`: an absolute path, a `file://` URI, an `http(s)`
-    /// URL, or a path relative to the media root. `id` must be unique and
-    /// stable across frames.
-    pub fn new(
-        id: impl Into<SharedString>,
-        src: impl Into<SharedString>,
-        theme: ArtisanTheme,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            src: src.into(),
-            caption: None,
-            theme,
-            hint: SizeHint::default(),
-            max_height: MAX_FRAME_HEIGHT,
-        }
-    }
-
-    /// A muted line under the image.
-    #[must_use]
-    pub fn caption(mut self, caption: impl Into<SharedString>) -> Self {
-        self.caption = Some(caption.into());
-        self
-    }
-}
-
 impl RenderOnce for ImageShowcase {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
-        let loaded = picture::load(window, cx, &self.id, &self.src);
-        if matches!(loaded, Loaded::Failed) {
-            return picture::unavailable(&theme, &self.src).into_any_element();
-        }
+        let loaded = picture::load(window, cx, &self.id, &self.src, self.media.as_ref());
         let (aspect, width) = Loaded::frame(&[&loaded], self.hint, self.max_height);
-        let path = self.src.clone();
+        let path = self.src.raw();
+        let preview = match &loaded {
+            Loaded::Ready(image) => Some(image.clone()),
+            _ => None,
+        };
+        let content = div()
+            .relative()
+            .size_full()
+            .id(kit::part(&self.id, "content"))
+            .role(gpui::Role::Image)
+            .aria_label(self.alt.clone())
+            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                cx.stop_propagation();
+                show_copy_menu(
+                    event.position,
+                    vec![CopyEntry::primary("Copy Image Path", path.clone())],
+                    window,
+                    cx,
+                );
+            })
+            .child(loaded.element(&theme, &self.src));
+        let mut frame = crate::media_frame::MediaFrame::new(theme, aspect, content)
+            .debug_selector(self.id.clone());
+        if let Some(image) = preview {
+            frame = frame.on_activate(
+                ElementId::Name(self.id.clone()),
+                format!("{}. Open image preview", self.alt),
+                crate::image_preview::open_on_click(image),
+            );
+        }
         div()
             .min_w_0()
             .max_w(width)
@@ -184,22 +200,7 @@ impl RenderOnce for ImageShowcase {
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .child(
-                div()
-                    .id(ElementId::Name(self.id.clone()))
-                    .w_full()
-                    .aspect_ratio(aspect)
-                    .rounded(kit::inner_radius())
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(kit::hairline(&theme))
-                    .on_mouse_down(MouseButton::Right, move |event, window, cx| {
-                        cx.stop_propagation();
-                        let entries = vec![CopyEntry::primary("Copy Image Path", path.clone())];
-                        show_copy_menu(event.position, entries, window, cx);
-                    })
-                    .child(loaded.element(&theme, &self.src)),
-            )
+            .child(frame)
             .children(self.caption.map(|caption| kit::muted(&theme, caption)))
             .into_any_element()
     }

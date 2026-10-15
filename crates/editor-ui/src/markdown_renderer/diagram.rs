@@ -2,25 +2,18 @@
 //!
 //! A closed `mermaid` fence lays out through `mermaid-rs-renderer` into an
 //! SVG painted in the transcript's own tokens, and GPUI rasterizes that SVG
-//! as an ordinary image. Layout runs synchronously so the card claims its
-//! final size in the frame the fence first renders: rasterization then
-//! fills a box that never moves, and the transcript below never shifts.
-//!
-//! Layout measures labels against system fonts, and the first measurement
-//! loads them all. [`warm_up`] spends that once on a background thread, so
-//! the first diagram does not stall a frame on the font scan.
+//! as an ordinary image. Layout runs on the owning Markdown worker before
+//! the prepared block is published. No font scan or layout runs during paint.
 //!
 //! Source the renderer rejects — or panics on — yields no diagram, and the
 //! caller keeps drawing the fence as code.
 
-use std::cell::RefCell;
+use crate::markdown::{Block, DiagramSvg, MarkdownDocument};
 use std::collections::VecDeque;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 
-use gpui::{Image, ImageFormat};
+use gpui::{RenderImage, SvgRenderer};
 use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
@@ -50,74 +43,101 @@ const FONT_SIZE_PX: f32 = 14.0;
 /// One diagram ready to paint: the SVG as an image, and the size it claims.
 #[derive(Debug)]
 pub(super) struct MermaidDiagram {
-    pub(super) image: Arc<Image>,
+    pub(super) image: Arc<RenderImage>,
     pub(super) width: f32,
     pub(super) height: f32,
 }
 
-type Memo = VecDeque<(u64, Option<Rc<MermaidDiagram>>)>;
-
-thread_local! {
-    static MEMO: RefCell<Memo> = const { RefCell::new(VecDeque::new()) };
+/// Owned by the Markdown worker; exact keys and byte limits avoid collisions
+/// and release all diagram resources when that worker closes.
+#[derive(Default)]
+pub(super) struct DiagramCache {
+    entries: VecDeque<(String, Option<Arc<[DiagramSvg; 2]>>)>,
 }
-
-/// Loads the system fonts layout measures against, once, off the UI thread.
-pub(super) fn warm_up() {
-    static WARM: Once = Once::new();
-    WARM.call_once(|| {
-        let spawned = std::thread::Builder::new()
-            .name("mermaid-font-warmup".into())
-            .spawn(|| {
-                let _ = layout_svg("flowchart LR\n  A --> B", &Theme::modern());
-            });
-        // Without the thread the first diagram loads the fonts itself.
-        drop(spawned);
-    });
-}
-
-/// The diagram for `source` in `theme`, or `None` when it does not render.
-pub(super) fn mermaid_diagram(source: &str, theme: &ArtisanTheme) -> Option<Rc<MermaidDiagram>> {
-    let key = memo_key(source, theme.mode);
-    if let Some(hit) = MEMO.with_borrow(|memo| {
-        memo.iter()
-            .find(|(entry, _)| *entry == key)
-            .map(|(_, diagram)| diagram.clone())
-    }) {
-        return hit;
+impl DiagramCache {
+    pub(super) fn prepare(&mut self, document: &mut MarkdownDocument) {
+        self.blocks(&mut document.blocks);
     }
-    let diagram = render(source, theme).map(Rc::new);
-    MEMO.with_borrow_mut(|memo| {
-        if memo.len() == MEMO_CAPACITY {
-            memo.pop_front();
+    fn blocks(&mut self, blocks: &mut [Block]) {
+        for block in blocks {
+            match block {
+                Block::Code(fence)
+                    if fence.closed && fence.language.as_deref() == Some("mermaid") =>
+                {
+                    fence.diagrams = self.get(&fence.source);
+                }
+                Block::List { items, .. } => {
+                    for item in items {
+                        self.blocks(&mut item.blocks);
+                    }
+                }
+                _ => {}
+            }
         }
-        memo.push_back((key, diagram.clone()));
-    });
-    diagram
+    }
+    fn get(&mut self, source: &str) -> Option<Arc<[DiagramSvg; 2]>> {
+        if let Some((_, diagrams)) = self.entries.iter().find(|(key, _)| key == source) {
+            return diagrams.clone();
+        }
+        let diagrams = [ThemeMode::Light, ThemeMode::Dark]
+            .map(|mode| render(source, &ArtisanTheme::for_mode(mode)));
+        let diagrams = match diagrams {
+            [Some(light), Some(dark)] => Some(Arc::new([light, dark])),
+            _ => None,
+        };
+        self.entries
+            .push_back((source.to_owned(), diagrams.clone()));
+        while self.entries.len() > MEMO_CAPACITY
+            || self
+                .entries
+                .iter()
+                .map(|(key, svgs)| {
+                    key.len()
+                        + svgs.as_ref().map_or(0, |svgs| {
+                            svgs.iter().map(|svg| svg.source.len()).sum::<usize>()
+                        })
+                })
+                .sum::<usize>()
+                > 8 * 1024 * 1024
+        {
+            self.entries.pop_front();
+        }
+        diagrams
+    }
+}
+pub(super) fn image(svg: &DiagramSvg, renderer: SvgRenderer) -> Option<MermaidDiagram> {
+    let image = super::rich::decode_image_bytes(svg.source.as_bytes(), renderer).ok()?;
+    Some(MermaidDiagram {
+        image,
+        width: f32::from_bits(svg.width_bits),
+        height: f32::from_bits(svg.height_bits),
+    })
 }
 
-fn memo_key(source: &str, mode: ThemeMode) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source.hash(&mut hasher);
-    matches!(mode, ThemeMode::Dark).hash(&mut hasher);
-    hasher.finish()
-}
-
-fn render(source: &str, theme: &ArtisanTheme) -> Option<MermaidDiagram> {
-    if source.trim().is_empty() || source.len() > MAX_SOURCE_BYTES {
+fn render(source: &str, theme: &ArtisanTheme) -> Option<DiagramSvg> {
+    if source.trim().is_empty()
+        || source.len() > MAX_SOURCE_BYTES
+        || source
+            .bytes()
+            .filter(|byte| matches!(byte, b'\n' | b';' | b','))
+            .count()
+            > 512
+    {
         return None;
     }
     let (svg, width, height) = layout_svg(source, &diagram_theme(theme))?;
-    let sized = width.is_finite()
+    (svg.len() <= 2 * 1024 * 1024
+        && width.is_finite()
         && height.is_finite()
         && width >= 1.0
         && height >= 1.0
         && width <= MAX_EDGE_PX
-        && height <= MAX_EDGE_PX;
-    sized.then(|| MermaidDiagram {
-        image: Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes())),
-        width,
-        height,
-    })
+        && height <= MAX_EDGE_PX)
+        .then(|| DiagramSvg {
+            source: svg,
+            width_bits: width.to_bits(),
+            height_bits: height.to_bits(),
+        })
 }
 
 /// Parses, lays out, and serializes `source`. The renderer is third-party
@@ -126,6 +146,18 @@ fn render(source: &str, theme: &ArtisanTheme) -> Option<MermaidDiagram> {
 fn layout_svg(source: &str, theme: &Theme) -> Option<(String, f32, f32)> {
     catch_unwind(AssertUnwindSafe(|| {
         let parsed = parse_mermaid_strict(source).ok()?;
+        if parsed.graph.nodes.len()
+            + parsed.graph.edges.len()
+            + parsed.graph.subgraphs.len()
+            + parsed.graph.gantt_tasks.len()
+            + parsed.graph.pie_slices.len()
+            + parsed.graph.sequence_participants.len()
+            + parsed.graph.sequence_frames.len()
+            + parsed.graph.sequence_notes.len()
+            > 512
+        {
+            return None;
+        }
         let config = LayoutConfig::default();
         let layout = compute_layout(&parsed.graph, theme, &config);
         let size = measure_svg_dimensions(&layout, &config, None);
@@ -216,17 +248,19 @@ mod tests {
     #[test]
     fn flowchart_renders_into_a_sized_svg() {
         let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let diagram = mermaid_diagram("flowchart TD\n  A[Browser] --> B[Web]\n", &theme)
+        let diagram = render("flowchart TD\n  A[Browser] --> B[Web]\n", &theme)
             .expect("a valid flowchart renders");
-        assert!(diagram.width >= 1.0 && diagram.height >= 1.0);
-        let svg = std::str::from_utf8(&diagram.image.bytes).expect("svg is utf-8");
+        assert!(
+            f32::from_bits(diagram.width_bits) >= 1.0 && f32::from_bits(diagram.height_bits) >= 1.0
+        );
+        let svg = diagram.source;
         assert!(svg.contains("<svg") && svg.contains("Browser"));
     }
 
     #[test]
     fn invalid_source_renders_nothing() {
         let theme = ArtisanTheme::for_mode(ThemeMode::Light);
-        assert!(mermaid_diagram("this is not a diagram {{{", &theme).is_none());
-        assert!(mermaid_diagram("   \n", &theme).is_none());
+        assert!(render("this is not a diagram {{{", &theme).is_none());
+        assert!(render("   \n", &theme).is_none());
     }
 }

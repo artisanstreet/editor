@@ -11,6 +11,7 @@
 
 use crate::EngineId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Where a skill comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -147,4 +148,101 @@ pub enum ResolvePrompt {
     UseEngine { engine: EngineId },
     /// Write Artisan's prompt over the engine's edited file.
     RestoreEngine { engine: EngineId },
+}
+
+/// A stdio server (`command`, `args`, `env`) or, with `url`, an HTTP one.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Edits one server against its original value; concurrent unrelated edits survive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpMutation {
+    Upsert {
+        previous: Option<McpServer>,
+        server: McpServer,
+    },
+    Remove {
+        previous: McpServer,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum EngineCommand {
+    Install {},
+    Update {},
+    Rollback {},
+    Use { version: String },
+    Login {},
+    LoginCode { code: String },
+    CancelLogin {},
+    Logout {},
+    Refresh {},
+    Versions {},
+}
+impl EngineCommand {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Install {} => "install",
+            Self::Update {} => "update",
+            Self::Rollback {} => "rollback",
+            Self::Use { .. } => "use",
+            Self::Login {} => "login",
+            Self::LoginCode { .. } => "login-code",
+            Self::CancelLogin {} => "cancel-login",
+            Self::Logout {} => "logout",
+            Self::Refresh {} => "refresh",
+            Self::Versions {} => "versions",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillAction {
+    Enable,
+    Disable,
+    Adopt,
+}
+impl SkillAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Enable => "enable",
+            Self::Disable => "disable",
+            Self::Adopt => "adopt",
+        }
+    }
+}
+
+#[cfg(test)]
+mod engine_command_tests {
+    use super::EngineCommand;
+    #[test]
+    fn command_arguments_are_required_and_unrelated_arguments_are_rejected() {
+        assert!(serde_json::from_str::<EngineCommand>(r#"{"command":"use"}"#).is_err());
+        assert!(serde_json::from_str::<EngineCommand>(r#"{"command":"login-code"}"#).is_err());
+        assert!(
+            serde_json::from_str::<EngineCommand>(r#"{"command":"install","version":"1"}"#)
+                .is_err()
+        );
+        let command = EngineCommand::Use {
+            version: "1.2.3".into(),
+        };
+        assert_eq!(
+            serde_json::from_str::<EngineCommand>(&serde_json::to_string(&command).unwrap())
+                .unwrap(),
+            command
+        );
+    }
 }

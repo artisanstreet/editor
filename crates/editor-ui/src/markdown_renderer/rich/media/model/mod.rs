@@ -8,12 +8,14 @@
 //! material, or the file's own colors, under a studio light rig; the view
 //! ([`view`]) orbits, pans, and zooms it and re-renders off the main thread.
 
-use gpui::{AnyElement, IntoElement as _, SharedString};
+use crate::markdown_renderer::rich::budget;
+use gpui::{AnyElement, IntoElement as _};
 use serde::Deserialize;
 
 use super::super::{BlockContext, RichBlock};
 use super::color;
 use super::picture::SizeHint;
+use super::source::MediaSource;
 
 mod formats;
 mod load;
@@ -29,7 +31,7 @@ use view::{ModelView, Shading};
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "Spec")]
 pub(super) struct ModelBlock {
-    src: String,
+    src: MediaSource,
     name: Option<String>,
     format: Option<Format>,
     up: Option<Up>,
@@ -43,7 +45,7 @@ pub(super) struct ModelBlock {
 
 #[derive(Debug, Deserialize)]
 struct Spec {
-    src: String,
+    src: MediaSource,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -66,7 +68,7 @@ impl TryFrom<Spec> for ModelBlock {
     type Error = String;
 
     fn try_from(spec: Spec) -> Result<Self, String> {
-        let src = spec.src.trim().to_owned();
+        let src = spec.src;
         if src.is_empty() {
             return Err("a model needs a `src`".to_owned());
         }
@@ -118,11 +120,17 @@ impl ModelBlock {
 }
 
 impl RichBlock for ModelBlock {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>() + self.src.resident_bytes() + budget::optional(&self.name)
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         ModelView {
             id: cx.key("model"),
+            media: cx.media.cloned(),
             theme: *cx.theme,
-            src: SharedString::from(self.src.clone()),
+            src: self.src.clone(),
+            name: self.display_name().into(),
             format: self.format,
             up: self.up,
             color: self.color,
@@ -132,13 +140,5 @@ impl RichBlock for ModelBlock {
             hint: self.hint,
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        format!(
-            "[{}]({})",
-            self.display_name().replace(['[', ']'], ""),
-            self.src.replace(' ', "%20")
-        )
     }
 }

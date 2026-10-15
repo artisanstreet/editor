@@ -4,6 +4,17 @@
 
 fn main() {
     println!("cargo:rerun-if-env-changed=EDITOR_COMMIT");
+    for metadata in ["HEAD", "packed-refs"] {
+        watch_git_path(metadata);
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+    {
+        if output.status.success() {
+            watch_git_path(String::from_utf8_lossy(&output.stdout).trim());
+        }
+    }
     let commit = std::env::var("EDITOR_COMMIT")
         .ok()
         .filter(|commit| !commit.is_empty())
@@ -25,4 +36,18 @@ fn main() {
         "cargo:rustc-env=EDITOR_TARGET={}",
         std::env::var("TARGET").unwrap_or_default()
     );
+}
+
+fn watch_git_path(name: &str) {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", name])
+        .output()
+    {
+        if output.status.success() {
+            println!(
+                "cargo:rerun-if-changed={}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+        }
+    }
 }

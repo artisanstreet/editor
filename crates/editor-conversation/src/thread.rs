@@ -2,52 +2,60 @@
 //! position, the live text, the viewport and per-item UI state.
 
 use crate::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
-use artisan_api::{
-    Item, ItemId, ItemKind, ItemsPage, ItemsQuery, LiveTarget, RunId, Seq, ThreadId,
-};
-use statig::blocking::{IntoStateMachineExt as _, StateMachine};
+use artisan_api::{Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// Items per page.
 pub(crate) const PAGE: u32 = 100;
-/// Items per page while reading back to the start of a turn: Forge's
-/// largest. A turn with subagents runs to thousands of items.
-pub(crate) const SEARCH_PAGE: u32 = 500;
-/// The window grows to this many items before far ones are dropped…
-/// An agentic turn runs to hundreds of items, so this is generous: dropping
-/// the newest while the reader is up in history shows a gap below.
-const WINDOW_MAX: usize = 4000;
-/// …down to this many.
-const WINDOW_KEEP: usize = 3000;
+const WINDOW_MAX: usize = 800;
+const WINDOW_KEEP: usize = 600;
+const WINDOW_MAX_BYTES: usize = 8 * 1024 * 1024;
+const WINDOW_KEEP_BYTES: usize = 6 * 1024 * 1024;
 
-/// UI state of one item: user toggles, an answer draft. (Reveal progress
-/// lives in the reply's row view.)
+/// How long after arriving an item still animates in.
+const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// UI state of one Item: disclosures and pending answers.
 #[derive(Clone, Debug, Default, Hash)]
 pub(crate) struct ItemUi {
     /// The user opened or closed the item's details.
     pub expanded: Option<bool>,
-    /// Arrived while the thread was open: prose reveals from its first
-    /// word rather than appearing whole, and rows enter.
-    pub fresh: bool,
+    /// When it arrived while the reader was watching the open thread:
+    /// compact rows may fade in. Only for a moment: shown any later (an agent's view
+    /// opened, a chain unfolded) it is history and appears at once.
+    pub arrived: Option<std::time::Instant>,
     /// The user opened or closed the activity chain this item starts.
     pub chain_open: Option<bool>,
     /// An answer is on its way to Forge.
     pub sending: bool,
+
     /// Why the last answer failed.
     pub error: Option<String>,
 }
 
+impl ItemUi {
+    /// It arrived while the reader watched, a moment ago: it animates in.
+    pub(crate) fn fresh(&self) -> bool {
+        self.arrived
+            .is_some_and(|arrived| arrived.elapsed() < FRESH_FOR)
+    }
+}
+
 pub(crate) struct ThreadView {
     pub thread: ThreadId,
+    pub context: HashMap<ItemId, Arc<Item>>,
     /// The loaded window, by position.
-    pub items: BTreeMap<Seq, Item>,
+    pub items: BTreeMap<Seq, Arc<Item>>,
     positions: HashMap<ItemId, Seq>,
+    resident_bytes: usize,
     /// Memory-only text of the live run.
-    pub live: HashMap<LiveTarget, String>,
-    pub viewport: StateMachine<Viewport>,
+    pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
+    pub viewport: Viewport,
     pub ui: HashMap<ItemId, ItemUi>,
     /// The user's fold choice per run; `None` follows the derived default.
     pub work_open: HashMap<RunId, bool>,
+    pub runs: HashMap<RunId, Run>,
 }
 
 impl ThreadView {
@@ -55,12 +63,15 @@ impl ThreadView {
     pub(crate) fn open(thread: ThreadId) -> (Self, Vec<Effect>) {
         let mut view = Self {
             thread,
+            context: HashMap::new(),
             items: BTreeMap::new(),
             positions: HashMap::new(),
+            resident_bytes: 0,
             live: HashMap::new(),
-            viewport: Viewport::default().state_machine(),
+            viewport: Viewport::default(),
             ui: HashMap::new(),
             work_open: HashMap::new(),
+            runs: HashMap::new(),
         };
         let effects = view.handle(&Input::Open);
         (view, effects)
@@ -76,56 +87,38 @@ impl ThreadView {
     pub(crate) fn reset(&mut self) -> Vec<Effect> {
         self.items.clear();
         self.positions.clear();
+        self.resident_bytes = 0;
+        self.live.clear();
+        self.ui.clear();
+        self.work_open.clear();
+        self.runs.clear();
         self.handle(&Input::Open)
     }
 
     pub(crate) fn window(&self) -> &Viewport {
-        self.viewport.inner()
+        &self.viewport
     }
 
-    /// Items on screen: whole turns, from the first loaded turn start up to
-    /// a gap, if one is open below.
-    ///
-    /// A page often ends partway through a long turn. Showing that fragment
-    /// above whole turns means every older page lands inside a row already
-    /// on screen: it grows upward and the list loses the reader's place (a
-    /// jump per page). Held back until its start loads, older pages only
-    /// ever add whole turns above what shows. A fragment that is all there
-    /// is (the newest turn, longer than what loaded) shows at once while
-    /// its start loads: hiding it left only the status line on screen.
+    /// Every loaded item through the lower gap, including partial turns.
     pub(crate) fn shown(&self) -> impl DoubleEndedIterator<Item = &Item> {
         let end = self.window().gap.unwrap_or(Seq::MAX);
-        let start = self.turn_start().unwrap_or(0);
-        self.items
-            .range(..=end)
-            .filter(move |(position, _)| **position >= start)
-            .map(|(_, item)| item)
-    }
-
-    /// Where the shown items begin: the oldest loaded turn start (a user
-    /// message, not a steer), or the very first item once nothing older
-    /// exists. `None` while the loaded window holds no turn start yet.
-    fn turn_start(&self) -> Option<Seq> {
-        if self.window().exhausted {
-            return Some(0);
-        }
-        self.items
-            .values()
-            .find(|item| {
-                item.parent_id.is_none()
-                    && matches!(item.kind, ItemKind::UserMessage { steer: false, .. })
-            })
-            .map(|item| item.position)
-    }
-
-    /// The loaded window holds part of a turn but not its start: older
-    /// pages must load before anything shows.
-    pub(crate) fn needs_turn_start(&self) -> bool {
-        !self.items.is_empty() && self.turn_start().is_none()
+        self.items.range(..=end).map(|(_, item)| item.as_ref())
     }
 
     pub(crate) fn item(&self, id: &ItemId) -> Option<&Item> {
-        self.items.get(self.positions.get(id)?)
+        self.positions
+            .get(id)
+            .and_then(|position| self.items.get(position))
+            .or_else(|| self.context.get(id))
+            .map(Arc::as_ref)
+    }
+
+    pub(crate) fn shared_item(&self, id: &ItemId) -> Option<Arc<Item>> {
+        self.positions
+            .get(id)
+            .and_then(|position| self.items.get(position))
+            .or_else(|| self.context.get(id))
+            .cloned()
     }
 
     pub(crate) fn position_of(&self, id: &ItemId) -> Option<Seq> {
@@ -133,23 +126,40 @@ impl ThreadView {
     }
 
     /// Inserts or replaces by id; an older copy never replaces a newer one.
-    fn upsert(&mut self, item: Item) -> bool {
+    fn upsert(&mut self, item: Arc<Item>) -> bool {
         if let Some(&position) = self.positions.get(&item.id) {
             match self.items.get(&position) {
                 Some(known) if known.seq > item.seq || *known == item => return false,
                 _ => {}
             }
-            self.items.remove(&position);
+            if let Some(old) = self.items.remove(&position) {
+                self.resident_bytes -= old.resident_bytes();
+            }
         }
+        self.resident_bytes += item.resident_bytes();
         self.positions.insert(item.id.clone(), item.position);
         self.items.insert(item.position, item);
         true
     }
 
     /// An item from the event stream. Returns whether the view changed.
-    pub(crate) fn apply_item(&mut self, item: Item) -> bool {
+    /// An item from the live stream. `watched`: the reader sees the thread
+    /// (its window active, its transcript landed), so a new item animates.
+    pub(crate) fn apply_item(&mut self, item: impl Into<Arc<Item>>, watched: bool) -> bool {
+        let item = item.into();
         if item.thread_id != self.thread {
             return false;
+        }
+        if self.context.contains_key(&item.id) {
+            if self
+                .context
+                .get(&item.id)
+                .is_some_and(|known| known.seq >= item.seq)
+            {
+                return false;
+            }
+            self.context.insert(item.id.clone(), item);
+            return true;
         }
         let known = self.positions.contains_key(&item.id);
         let window = self.window();
@@ -158,25 +168,30 @@ impl ThreadView {
             // Above the window: it arrives with its page.
             return false;
         }
-        // New while the thread is open: prose streams in like the reply,
+        // New while the reader watches: prose streams in like the reply,
         // and rows enter rather than appear.
-        let arrived = !known;
+        let arrived = !known && watched;
         let id = item.id.clone();
         if !self.upsert(item) {
             return false;
         }
         if arrived {
-            self.ui.entry(id).or_default().fresh = true;
+            self.ui.entry(id).or_default().arrived = Some(std::time::Instant::now());
         }
-        if self.viewport.state().is_following() {
-            self.evict_older();
-        }
+        self.trim_window();
         true
     }
 
     /// A page arrived. Returns follow-up effects (another page while
     /// jumping, scrolling).
     pub(crate) fn apply_page(&mut self, fetch: Fetch, page: ItemsPage) -> Vec<Effect> {
+        for run in page.runs {
+            if run.thread_id == self.thread
+                && self.runs.get(&run.id).is_none_or(|old| old.seq <= run.seq)
+            {
+                self.runs.insert(run.id.clone(), run);
+            }
+        }
         let first = page.items.first().map(|item| item.position);
         let last = page.items.last().map(|item| item.position);
         if fetch == Fetch::Tail {
@@ -184,10 +199,12 @@ impl ThreadView {
             let keep_from = first.unwrap_or(Seq::MAX);
             self.items.retain(|position, _| *position >= keep_from);
             self.positions.retain(|_, position| *position >= keep_from);
+            self.resident_bytes = self.items.values().map(|item| item.resident_bytes()).sum();
+            self.ui.retain(|id, _| self.positions.contains_key(id));
         }
         for item in page.items {
             if item.thread_id == self.thread {
-                self.upsert(item);
+                self.upsert(Arc::new(item));
             }
         }
         let mut effects = self.handle(&Input::Loaded {
@@ -196,10 +213,7 @@ impl ThreadView {
             last,
             more: page.more,
         });
-        match fetch {
-            Fetch::Older { .. } if !self.viewport.state().is_following() => self.evict_newer(),
-            _ => self.evict_older(),
-        }
+        self.trim_window();
         if let State::Jumping {
             target: Jump::To(position),
             ..
@@ -225,45 +239,92 @@ impl ThreadView {
         effects
     }
 
-    fn evict_older(&mut self) {
-        if self.items.len() <= WINDOW_MAX {
+    fn trim_window(&mut self) {
+        if self.items.len() <= WINDOW_MAX && self.resident_bytes <= WINDOW_MAX_BYTES {
             return;
         }
-        while self.items.len() > WINDOW_KEEP {
-            if let Some((_, item)) = self.items.pop_first() {
-                self.positions.remove(&item.id);
-                self.ui.remove(&item.id);
+        let anchor = match self.viewport.state() {
+            State::Reading { anchor } => Some(*anchor),
+            State::Jumping {
+                target: Jump::To(position),
+                ..
+            } => Some(*position),
+            _ => None,
+        };
+        let mut before = anchor.map_or(self.items.len(), |position| {
+            self.items.range(..position).count()
+        });
+        let (mut older, mut newer) = (false, false);
+        // Keep a single oversized Item accessible; its body has its own rendering budget.
+        while self.items.len() > 1
+            && (self.items.len() > WINDOW_KEEP || self.resident_bytes > WINDOW_KEEP_BYTES)
+        {
+            let take_older = anchor.is_none() || before > self.items.len() / 2;
+            let removed = if take_older {
+                self.items.pop_first()
+            } else {
+                self.items.pop_last()
+            };
+            let Some((_, item)) = removed else { break };
+            self.resident_bytes -= item.resident_bytes();
+            self.positions.remove(&item.id);
+            self.ui.remove(&item.id);
+            if take_older {
+                older = true;
+                before = before.saturating_sub(1);
+            } else {
+                newer = true;
             }
         }
-        if let Some(&oldest) = self.items.keys().next() {
+        if older && let Some(&oldest) = self.items.keys().next() {
             self.handle(&Input::EvictedOlder { oldest });
         }
-    }
-
-    fn evict_newer(&mut self) {
-        if self.items.len() <= WINDOW_MAX {
-            return;
-        }
-        while self.items.len() > WINDOW_KEEP {
-            if let Some((_, item)) = self.items.pop_last() {
-                self.positions.remove(&item.id);
-                self.ui.remove(&item.id);
-            }
-        }
-        if let Some(&last) = self.items.keys().next_back() {
+        if newer && let Some(&last) = self.items.keys().next_back() {
             self.handle(&Input::EvictedNewer { last });
         }
+        let runs: std::collections::HashSet<_> = self
+            .items
+            .values()
+            .filter_map(|item| item.run_id.as_ref())
+            .collect();
+        self.work_open.retain(|run, _| runs.contains(run));
+        self.runs.retain(|run, _| runs.contains(run));
+    }
+
+    /// A live frame replaces only its named target; other snapshots keep their identity.
+    pub(crate) fn update_live(
+        &mut self,
+        target: &LiveTarget,
+        text: Option<Arc<ropey::Rope>>,
+    ) -> bool {
+        match (self.live.get(target), &text) {
+            (Some(old), Some(next)) if Arc::ptr_eq(old, next) => return false,
+            (None, None) => return false,
+            _ => {}
+        }
+        if let Some(text) = text {
+            self.live.insert(target.clone(), text);
+        } else {
+            self.live.remove(target);
+        }
+        true
     }
 
     /// Replaces the live text with the host's current copy.
     pub(crate) fn set_live<'a>(
         &mut self,
-        targets: impl Iterator<Item = (&'a LiveTarget, &'a str)>,
+        targets: impl Iterator<Item = (&'a LiveTarget, &'a Arc<ropey::Rope>)>,
     ) -> bool {
-        let live: HashMap<LiveTarget, String> = targets
-            .map(|(target, text)| (target.clone(), text.to_owned()))
+        let live: HashMap<LiveTarget, Arc<ropey::Rope>> = targets
+            .map(|(target, text)| (target.clone(), text.clone()))
             .collect();
-        if live == self.live {
+        if live.len() == self.live.len()
+            && live.iter().all(|(target, text)| {
+                self.live
+                    .get(target)
+                    .is_some_and(|old| Arc::ptr_eq(old, text))
+            })
+        {
             return false;
         }
         self.live = live;

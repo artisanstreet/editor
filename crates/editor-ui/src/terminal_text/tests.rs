@@ -363,3 +363,28 @@ fn palette_resolves_cube_and_ramp() {
         TerminalPalette::for_mode(ThemeMode::Light).base[4]
     );
 }
+
+#[test]
+fn wide_character_overwrites_use_display_columns() {
+    let mut screen = TerminalScreen::new();
+    screen.feed("界a\r\x1b[2Cb".as_bytes());
+    assert_eq!(screen.plain_text(), "界b");
+}
+
+#[test]
+fn combining_marks_do_not_advance_the_terminal_cursor() {
+    let mut screen = TerminalScreen::new();
+    screen.feed("e\u{301}x\r\x1b[1Cy".as_bytes());
+    assert_eq!(screen.plain_text(), "e\u{301}y");
+}
+
+#[test]
+fn dirty_rows_include_cursor_writes_above_the_tail_and_survive_materialization() {
+    let mut screen = TerminalScreen::new();
+    screen.feed(b"first\nsecond\nthird");
+    assert_eq!(screen.take_dirty_line_indices(), [0, 1, 2]);
+    screen.feed(b"\x1b[1;1Hnew");
+    let _ = screen.last_nonempty_line();
+    assert_eq!(screen.take_dirty_line_indices(), [0]);
+    assert!(screen.take_dirty_line_indices().is_empty());
+}

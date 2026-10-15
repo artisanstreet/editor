@@ -1,25 +1,17 @@
-//! Threads (`threads.svelte` with `archived_threads`, `thread-titles`,
-//! `usage-recovery` and `agent-names`), as the previous Editor painted it.
-//!
-//! The archive is live: the host's archived threads, most recently touched
-//! first, each with a button that brings it back to the sidebar. Forge
-//! never erases an archived thread, so the table has no deletion column.
-//! Retention, titles, usage recovery and the agent name set are painted
-//! disabled with the previous Editor's values.
+//! Archived thread index, refreshed from host metadata and rendered as visible rows.
 
 use crate::Settings;
 use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use artisan_api::{ThreadId, Timestamp, UpdateThread};
-use editor_core::{HostData, SettingsPage};
-use editor_ui::button::ButtonVariant;
-use editor_ui::native_select::{NativeSelect, NativeSelectOption};
+use editor_core::{HostData, HostId, SettingsPage};
+use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, Styled as _, div, px,
+    AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Styled as _, div, px, uniform_list,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 
 /// Widths of the table's fixed columns.
 const ARCHIVED_COLUMN_PX: f32 = 112.0;
@@ -33,23 +25,75 @@ const AGENT_NAME_DATASETS: [(&str, &str, &str); 2] = [
 
 #[derive(Default)]
 pub(crate) struct ArchiveForm {
+    host: Option<HostId>,
+    generation: u64,
     restoring: HashSet<ThreadId>,
     error: Option<String>,
+    ids: Rc<Vec<ThreadId>>,
+    dirty: bool,
+}
+
+impl ArchiveForm {
+    pub(crate) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+    pub(crate) fn sync(&mut self, host: Option<&Entity<HostData>>, cx: &App) {
+        let host_id = host.map(|host| host.read(cx).id.clone());
+        if self.host != host_id {
+            self.host = host_id;
+            self.dirty = true;
+            self.generation += 1;
+            self.restoring.clear();
+            self.error = None;
+        }
+        if !self.dirty {
+            return;
+        }
+        self.dirty = false;
+        self.ids = Rc::new(
+            host.map(|host| {
+                let data = host.read(cx);
+                data.thread_page(true)
+                    .ids
+                    .iter()
+                    .filter(|id| data.threads.get(*id).is_some_and(|thread| thread.archived))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        );
+    }
 }
 
 impl Settings {
     fn unarchive(&mut self, host: &Entity<HostData>, thread: ThreadId, cx: &mut Context<Self>) {
+        if self.archive.restoring.contains(&thread) {
+            return;
+        }
         let client = host.read(cx).client.clone();
+        let host_id = host.read(cx).id.clone();
+        let generation = self.archive.generation;
         self.archive.restoring.insert(thread.clone());
         self.archive.error = None;
         cx.notify();
+        #[cfg(test)]
+        let completion_gate = self.completion_gate.clone();
         cx.spawn(async move |this, cx| {
             let update = UpdateThread {
                 archived: Some(false),
                 ..UpdateThread::default()
             };
             let result = client.update_thread(&thread, &update).await;
+            #[cfg(test)]
+            if let Some(gate) = completion_gate {
+                gate.wait().await;
+            }
             let _ = this.update(cx, |this, cx| {
+                if this.archive.host.as_ref() != Some(&host_id)
+                    || this.archive.generation != generation
+                {
+                    return;
+                }
                 this.archive.restoring.remove(&thread);
                 if let Err(error) = result {
                     this.archive.error = Some(format!("Couldn't unarchive the thread: {error:#}"));
@@ -98,56 +142,111 @@ fn render_archived(
             .child(text.to_owned())
             .into_any_element()
     };
-    let data = host.read(cx);
-    let mut archived: Vec<(ThreadId, String, String, Timestamp)> = data
-        .threads
-        .values()
-        .filter(|thread| thread.archived)
-        .map(|thread| {
-            let title = thread
-                .title
-                .clone()
-                .unwrap_or_else(|| "New thread".to_owned());
-            let project = data
-                .projects
-                .get(&thread.project_id)
-                .map(|project| project.name.clone())
-                .unwrap_or_default();
-            (thread.id.clone(), title, project, thread.updated_at)
-        })
-        .collect();
-    archived.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
-    let body = if archived.is_empty() {
-        card(theme, vec![muted("No archived threads.")])
+    let ids = settings.archive.ids.clone();
+    let body = if ids.is_empty() {
+        card(
+            theme,
+            vec![muted(if host.read(cx).thread_page(true).loading {
+                "Loading archived threads…"
+            } else {
+                "No archived threads."
+            })],
+        )
     } else {
-        let now = artisan_api::now();
-        let mut blocks = vec![archive_header(theme).into_any_element()];
-        for (id, title, project, archived_at) in archived {
-            blocks.push(archived_row(
-                settings,
-                host,
-                theme,
-                id,
-                title,
-                project,
-                now - archived_at,
-                cx,
-            ));
-        }
-        card(theme, blocks)
+        let this = cx.entity().downgrade();
+        let host = host.clone();
+        let theme = *theme;
+        let count = ids.len();
+        let list = uniform_list("archived-threads", count, move |range, _, cx| {
+            this.update(cx, |settings, cx| {
+                let now = artisan_api::now();
+                range
+                    .filter_map(|index| {
+                        let data = host.read(cx);
+                        let thread = data.threads.get(&ids[index])?;
+                        let id = thread.id.clone();
+                        let title = thread
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| "New thread".to_owned());
+                        let project = data
+                            .projects
+                            .get(&thread.project_id)
+                            .map(|project| project.name.clone())
+                            .unwrap_or_default();
+                        let age = now - thread.updated_at;
+                        Some(archived_row(
+                            settings, &host, &theme, id, title, project, age, cx,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+        })
+        .h(px((count.min(8) * 68) as f32))
+        .w_full();
+        card(
+            &theme,
+            vec![
+                archive_header(&theme).into_any_element(),
+                list.into_any_element(),
+            ],
+        )
     };
-    let mut section = section_shell(
+    let mut body = div().flex().flex_col().child(body);
+    let page = host.read(cx).thread_page(true);
+    let loading = page.loading;
+    let next = page.next.is_some();
+    let older = !page.at_latest;
+    let error = page.error.clone();
+    if let Some(error) = error {
+        body = body.child(error_text(theme, error));
+    }
+    if older || host.read(cx).thread_page(true).error.is_some() {
+        let host = host.clone();
+        body = body.child(
+            Button::text("archived-latest", *theme, "Latest archived threads")
+                .disabled(loading)
+                .variant(ButtonVariant::Ghost)
+                .on_activate(move |_, _, cx| {
+                    host.update(cx, |host, cx| {
+                        host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx)
+                    })
+                }),
+        );
+    }
+    if next {
+        let host = host.clone();
+        body = body.child(
+            Button::text(
+                "archived-older",
+                *theme,
+                if loading {
+                    "Loading…"
+                } else {
+                    "Older archived threads"
+                },
+            )
+            .disabled(loading)
+            .variant(ButtonVariant::Ghost)
+            .on_activate(move |_, _, cx| {
+                host.update(cx, |host, cx| {
+                    host.load_threads(true, editor_core::ThreadPageDirection::Older, cx)
+                })
+            }),
+        );
+    }
+    if let Some(error) = &settings.archive.error {
+        body = body.child(error_text(theme, error.clone()));
+    }
+    section_shell(
         theme,
         "archived",
         "Archived",
         Some("Archived threads leave the sidebar. They stay here until you restore them."),
         None,
         body,
-    );
-    if let Some(error) = &settings.archive.error {
-        section = section.child(error_text(theme, error.clone()));
-    }
-    section
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -348,28 +447,24 @@ fn render_usage_recovery(settings: &Settings, theme: &ArtisanTheme) -> Div {
     )
 }
 
-fn render_agent_names(settings: &Settings, theme: &ArtisanTheme) -> Div {
-    let options = AGENT_NAME_DATASETS
-        .into_iter()
-        .filter_map(|(id, label, description)| {
-            NativeSelectOption::new(id, format!("{label} \u{2014} {description}")).ok()
-        })
-        .collect::<Vec<_>>();
-    let select = NativeSelect::new(
-        "settings-select-agent-names",
-        settings.control_focus.clone(),
-        *theme,
-        AGENT_NAME_DATASETS[0].0,
-        options,
-    )
-    .ok()
-    .map(|select| {
-        select
-            .disabled(true)
-            .semantic_label("Agent name set")
-            .debug_selector("settings-select-agent-names")
-            .into_any_element()
-    });
+fn render_agent_names(_settings: &Settings, theme: &ArtisanTheme) -> Div {
+    let select = Some(
+        editor_ui::select::Select::new(
+            "settings-select-agent-names",
+            *theme,
+            Some(AGENT_NAME_DATASETS[0].0),
+            AGENT_NAME_DATASETS
+                .iter()
+                .map(|(id, label, description)| {
+                    editor_ui::select::SelectEntry::item(*id, format!("{label} — {description}"))
+                })
+                .collect(),
+        )
+        .disabled(true)
+        .label("Agent name set")
+        .debug_selector("settings-select-agent-names")
+        .into_any_element(),
+    );
     section_shell(
         theme,
         "agents",
@@ -392,21 +487,32 @@ fn render_agent_names(settings: &Settings, theme: &ArtisanTheme) -> Div {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::span;
-
-    #[test]
-    fn spans_read_in_their_largest_whole_unit() {
-        let minute = 60 * 1_000;
-        let hour = 60 * minute;
-        let day = 24 * hour;
-        for (left, expected) in [
-            (0, "1 minute"),
-            (5 * minute, "5 minutes"),
-            (hour, "1 hour"),
-            (3 * day + hour, "3 days"),
-        ] {
-            assert_eq!(span(left), expected);
-        }
+mod delayed_restore_tests {
+    use super::*;
+    use crate::tests::{CompletionGate, SettingsFixture, finish_gate, wait_gate};
+    use gpui::TestAppContext;
+    #[gpui::test]
+    fn old_archive_failure_cannot_clear_new_hosts_restoring_state(cx: &mut TestAppContext) {
+        let fixture = SettingsFixture::new(cx);
+        let (settings, cx) = fixture.open(cx, SettingsPage::Threads);
+        let gate = CompletionGate::new();
+        let thread = ThreadId::new();
+        settings.update(cx, |settings, cx| {
+            settings.completion_gate = Some(gate.clone());
+            let host = settings.selected_host(cx).unwrap();
+            settings.unarchive(&host, thread.clone(), cx);
+        });
+        wait_gate(cx, &gate);
+        fixture.select(1, SettingsPage::Threads, cx);
+        settings.update(cx, |settings, _| {
+            settings.archive.restoring.insert(thread.clone());
+            settings.archive.error = Some("B owns this error".into());
+        });
+        finish_gate(cx, &gate);
+        settings.read_with(cx, |settings, _| {
+            assert_eq!(settings.archive.host.as_ref(), Some(&fixture.hosts[1]));
+            assert!(settings.archive.restoring.contains(&thread));
+            assert_eq!(settings.archive.error.as_deref(), Some("B owns this error"));
+        });
     }
 }

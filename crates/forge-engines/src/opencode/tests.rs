@@ -8,10 +8,9 @@
 //! target are merged to keep snapshots readable.
 
 use super::decoder::{Decoder, Reply};
-use crate::{EngineEvent, LiveKind};
+use crate::EngineEvent;
 use artisan_api::{Answer, Decision, ItemId};
 use serde_json::Value;
-use std::path::Path;
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -24,10 +23,7 @@ enum Step {
 }
 
 fn replay(case: &str) -> Vec<Step> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/opencode/{case}.jsonl"));
-    let transcript = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let transcript = crate::transcript_tests::read("opencode", case);
     let mut decoder: Option<Decoder> = None;
     let mut prompts = 0;
     let mut steps = Vec::new();
@@ -42,7 +38,7 @@ fn replay(case: &str) -> Vec<Step> {
         {
             decoder.follow_root(session.to_owned());
         }
-        let mut events = decoder.feed(line);
+        let mut events = decoder.feed(line).unwrap();
         match event["type"].as_str() {
             Some("session.next.prompt.admitted") => {
                 let message = data["messageID"].as_str().expect("message id");
@@ -63,7 +59,9 @@ fn replay(case: &str) -> Vec<Step> {
             Some("question.v2.asked") => {
                 let key = data["tool"]["callID"].as_str().expect("call id");
                 let answer = Answer::Question {
-                    answers: vec![Some(vec!["blue".to_owned()])],
+                    answers: vec![Some(artisan_api::QuestionAnswer::Choices {
+                        ids: (vec!["option-1".to_owned()]).into(),
+                    })],
                 };
                 let (reply, answered) = decoder.answer(key, &answer).expect("pending question");
                 events.extend(answered);
@@ -82,21 +80,9 @@ fn merge_live(steps: Vec<Step>) -> Vec<Step> {
     let mut merged: Vec<Step> = Vec::new();
     for step in steps {
         if let Step::Event(event) = &step
-            && let EngineEvent::Live {
-                target,
-                text,
-                append: true,
-            } = event.as_ref()
             && let Some(Step::Event(last)) = merged.last_mut()
-            && let EngineEvent::Live {
-                target: last_target,
-                text: last_text,
-                append: true,
-            } = last.as_mut()
-            && last_target == target
-            && *target != LiveKind::Status
+            && crate::transcript_tests::merge_live(last.as_mut(), event.as_ref())
         {
-            last_text.push_str(text);
             continue;
         }
         merged.push(step);

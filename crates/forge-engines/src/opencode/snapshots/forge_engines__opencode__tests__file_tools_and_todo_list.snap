@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 122
 expression: "replay(\"tools\")"
 ---
 [
@@ -11,8 +12,15 @@ expression: "replay(\"tools\")"
     Event(
         Live {
             target: Reasoning,
-            text: "The user wants me to do steps one tool call at a time, no commentary. But there are dependencies - step 2 depends on step 1? Not really. But they said one tool call at a time. Let me follow exactly.\n\nLet me do step 1.",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Let me do step 1",
+            append: false,
         },
     ),
     Event(
@@ -22,7 +30,9 @@ expression: "replay(\"tools\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -40,16 +50,19 @@ expression: "replay(\"tools\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
                 title: None,
                 output: Some(
                     Output {
-                        head: "(no output)\nCommand exited with code 0.",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "(no output)\nCommand exited with code 0.",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -82,8 +95,15 @@ expression: "replay(\"tools\")"
     Event(
         Live {
             target: Reasoning,
-            text: "Step 2: write notes.txt.",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Step 2: write notes.txt",
+            append: false,
         },
     ),
     Event(
@@ -93,13 +113,15 @@ expression: "replay(\"tools\")"
             status: Running,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "notes.txt",
-                            op: Add,
-                            diff: None,
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "notes.txt",
+                                op: Add,
+                                diff: None,
+                            },
+                        ],
+                    ),
                 },
                 title: None,
                 output: None,
@@ -115,20 +137,23 @@ expression: "replay(\"tools\")"
             status: Done,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "notes.txt",
-                            op: Add,
-                            diff: None,
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "notes.txt",
+                                op: Add,
+                                diff: None,
+                            },
+                        ],
+                    ),
                 },
                 title: None,
                 output: Some(
                     Output {
-                        head: "Created file successfully: notes.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "Created file successfully: notes.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -186,9 +211,10 @@ expression: "replay(\"tools\")"
                 title: None,
                 output: Some(
                     Output {
-                        head: "hello\n",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "hello\n",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -248,9 +274,10 @@ expression: "replay(\"tools\")"
                 title: None,
                 output: Some(
                     Output {
-                        head: "Found 1 matches\n/work/notes.txt:\n  Line 1: hello\n",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "Found 1 matches\n/work/notes.txt:\n  Line 1: hello\n",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -310,9 +337,10 @@ expression: "replay(\"tools\")"
                 title: None,
                 output: Some(
                     Output {
-                        head: "/work/notes.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "/work/notes.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -347,13 +375,15 @@ expression: "replay(\"tools\")"
             status: Running,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "notes.txt",
-                            op: Modify,
-                            diff: None,
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "notes.txt",
+                                op: Modify,
+                                diff: None,
+                            },
+                        ],
+                    ),
                 },
                 title: None,
                 output: None,
@@ -369,22 +399,27 @@ expression: "replay(\"tools\")"
             status: Done,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "notes.txt",
-                            op: Modify,
-                            diff: Some(
-                                "Index: notes.txt\n===================================================================\n--- notes.txt\n+++ notes.txt\n@@ -1,1 +1,1 @@\n-hello\n+bye\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "notes.txt",
+                                op: Modify,
+                                diff: Some(
+                                    Inline(
+                                        "Index: notes.txt\n===================================================================\n--- notes.txt\n+++ notes.txt\n@@ -1,1 +1,1 @@\n-hello\n+bye\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: None,
                 output: Some(
                     Output {
-                        head: "Edited file successfully: notes.txt\nReplacements: 1\n```diff\n-hello\n+bye\n```",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "Edited file successfully: notes.txt\nReplacements: 1\n```diff\n-hello\n+bye\n```",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -418,12 +453,16 @@ expression: "replay(\"tools\")"
             parent: None,
             status: Done,
             kind: Plan {
-                steps: [
-                    PlanStep {
-                        text: "check notes",
-                        status: Done,
-                    },
-                ],
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "check notes",
+                            ),
+                            status: Done,
+                        },
+                    ],
+                ),
                 proposal: None,
                 approval: None,
             },
@@ -455,7 +494,9 @@ expression: "replay(\"tools\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -470,14 +511,12 @@ expression: "replay(\"tools\")"
         },
     ),
     Event(
-        Item {
-            key: "msg_129dec36b001fIPZeojzlDfekI/text-0",
-            parent: None,
-            status: Done,
-            kind: AssistantMessage {
-                text: "done",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_129dec36b001fIPZeojzlDfekI/text-0",
             },
+            text: "done",
+            append: false,
         },
     ),
     Event(
@@ -506,7 +545,9 @@ expression: "replay(\"tools\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "done",
+                text: Inline(
+                    "done",
+                ),
                 phase: Final,
             },
         },

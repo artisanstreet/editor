@@ -6,22 +6,23 @@
 //! and the tree flattens into rows in reading order. Collapsing a
 //! directory hides the rows nested under it.
 
+use crate::markdown_renderer::rich::budget;
 use std::collections::HashSet;
-use std::fmt::Write as _;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use editor_assets::AssetId;
 use gpui::{
-    AnyElement, App, Div, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Stateful, Styled as _, Window, div, prelude::*, px,
+    AnyElement, App, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
+    Styled as _, Window, div, prelude::*, px, uniform_list,
 };
 use serde::Deserialize;
 
 use super::super::actions::open_reference;
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
-use super::{chevron, counted};
+use super::counted;
 use crate::theme::ArtisanTheme;
+use crate::tree_row::{TreeFocus, TreeNavigation, TreeRow};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -127,7 +128,7 @@ struct Model {
 /// The `file-tree` spec, derived once.
 #[derive(Debug, Deserialize)]
 #[serde(try_from = "Spec")]
-pub(super) struct FileTree(Rc<Model>);
+pub(super) struct FileTree(Arc<Model>);
 
 impl FileTree {
     #[cfg(test)]
@@ -150,32 +151,32 @@ fn segments(path: &str) -> Vec<String> {
 struct Dir {
     name: String,
     dirs: Vec<Dir>,
+    indices: std::collections::HashMap<String, usize>,
+    count: usize,
     files: Vec<(String, usize)>,
 }
 
 impl Dir {
     fn insert(&mut self, parts: &[String], entry: usize) {
+        self.count += 1;
         match parts {
             [] => {}
             [file] => self.files.push((file.clone(), entry)),
             [dir, rest @ ..] => {
-                let index =
-                    if let Some(index) = self.dirs.iter().position(|child| child.name == *dir) {
-                        index
-                    } else {
-                        self.dirs.push(Self {
-                            name: dir.clone(),
-                            ..Self::default()
-                        });
-                        self.dirs.len() - 1
-                    };
+                let index = *self.indices.entry(dir.clone()).or_insert_with(|| {
+                    self.dirs.push(Self {
+                        name: dir.clone(),
+                        ..Self::default()
+                    });
+                    self.dirs.len() - 1
+                });
                 self.dirs[index].insert(rest, entry);
             }
         }
     }
 
     fn file_count(&self) -> usize {
-        self.files.len() + self.dirs.iter().map(Self::file_count).sum::<usize>()
+        self.count
     }
 
     /// Folds chains of directories that hold one directory and no files.
@@ -226,16 +227,22 @@ impl TryFrom<Spec> for FileTree {
     type Error = String;
 
     fn try_from(spec: Spec) -> Result<Self, String> {
+        if spec.entries.len() > 4096 {
+            return Err("file-tree preview supports at most 4096 entries".to_owned());
+        }
         let mut root = Dir::default();
         let mut entries = Vec::new();
         for entry in spec.entries {
             let parts = segments(&entry.path);
+            if parts.len() > 32 {
+                return Err("file-tree paths exceed the 32-level preview budget".to_owned());
+            }
             if parts.is_empty() {
                 continue;
             }
             root.insert(&parts, entries.len());
             entries.push(Entry {
-                path: SharedString::from(parts.join("/")),
+                path: SharedString::from(entry.path.trim().to_owned()),
                 change: entry.change,
                 note: entry
                     .note
@@ -253,201 +260,199 @@ impl TryFrom<Spec> for FileTree {
         root.sort();
         let mut rows = Vec::new();
         root.flatten(0, "", &mut rows);
-        Ok(Self(Rc::new(Model { entries, rows })))
+        Ok(Self(Arc::new(Model { entries, rows })))
     }
 }
 
 impl RichBlock for FileTree {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Model>()
+            + budget::vector(&self.0.entries)
+            + self
+                .0
+                .entries
+                .iter()
+                .map(|entry| entry.path.len() + entry.note.as_ref().map_or(0, |note| note.len()))
+                .sum::<usize>()
+            + budget::vector(&self.0.rows)
+            + self
+                .0
+                .rows
+                .iter()
+                .map(|row| {
+                    row.name.len()
+                        + match &row.kind {
+                            RowKind::Dir { key, .. } => key.len(),
+                            RowKind::File { .. } => 0,
+                        }
+                })
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         FileTreeView {
             key: cx.key("tree"),
+            scope: cx.media.and_then(|provider| provider.resource_scope()),
             theme: *cx.theme,
-            model: Rc::clone(&self.0),
+            model: Arc::clone(&self.0),
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        let model = &self.0;
-        let mut out = String::new();
-        for row in &model.rows {
-            let indent = "  ".repeat(row.depth);
-            match row.kind {
-                RowKind::Dir { .. } => {
-                    let _ = writeln!(out, "{indent}- **{}**", row.name);
-                }
-                RowKind::File { entry } => {
-                    let entry = &model.entries[entry];
-                    let _ = write!(out, "{indent}- `{}`", row.name);
-                    if let Some(change) = entry.change {
-                        let _ = write!(out, " ({})", change.word());
-                    }
-                    if let Some(note) = &entry.note {
-                        let _ = write!(out, " — {note}");
-                    }
-                    out.push('\n');
-                }
-            }
-        }
-        out
     }
 }
 
 #[derive(Default)]
 struct TreeState {
     collapsed: HashSet<SharedString>,
+    model: Option<Arc<Model>>,
+    focus: TreeFocus,
+    scroll: gpui::UniformListScrollHandle,
 }
 
 #[derive(IntoElement)]
 struct FileTreeView {
+    scope: Option<super::super::actions::ResourceScope>,
     key: SharedString,
     theme: ArtisanTheme,
-    model: Rc<Model>,
+    model: Arc<Model>,
 }
 
 impl FileTreeView {
     fn id(&self, part: impl std::fmt::Display) -> gpui::ElementId {
-        gpui::ElementId::Name(SharedString::from(format!("{}-{part}", self.key)))
+        kit::part(&self.key, part)
     }
 }
 
 impl FileTreeView {
-    /// A row's clickable frame, indented to its depth.
-    fn frame(&self, index: usize, depth: usize) -> Stateful<Div> {
-        let theme = self.theme;
-        #[expect(clippy::cast_precision_loss, reason = "tree depth stays small")]
-        let indent = px(4.0 + depth as f32 * 16.0);
-        div()
-            .id(self.id(format!("row-{index}")))
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
-            .pl(indent)
-            .pr(px(8.0))
-            .rounded(px(6.0))
-            .cursor_pointer()
-            .hover(move |style| crate::hover_card::hover_fill_style(style, &theme, px(6.0)))
+    fn node_id(&self, index: usize, row: &Row) -> SharedString {
+        node_id(&self.key, index, row, &self.model)
     }
-
-    /// A directory row; clicking collapses or expands it.
     fn dir(
         &self,
-        frame: Stateful<Div>,
+        index: usize,
         row: &Row,
         key: &SharedString,
         files: usize,
         open: bool,
         state: &Entity<TreeState>,
-    ) -> Stateful<Div> {
-        let theme = &self.theme;
+        focus: &TreeFocus,
+    ) -> TreeRow {
+        let theme = self.theme;
         let key = key.clone();
         let state = state.clone();
-        frame
-            .child(chevron(theme, open, 12.0))
-            .child(kit::glyph(
-                if open {
-                    AssetId::TABLER_FOLDER_OPEN
-                } else {
-                    AssetId::TABLER_FOLDER
-                },
-                14.0,
-                theme.colors.muted_foreground.to_paint(),
-            ))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.0))
-                    .text_color(theme.colors.foreground.to_paint())
-                    .child(row.name.clone()),
-            )
-            .when(!open, |row| {
-                row.child(kit::label(theme, counted(files, "file")))
-            })
-            .on_click(move |_, _, cx| {
+        let frame = TreeRow::branch(
+            focus.node(self.node_id(index, row)),
+            theme,
+            row.depth,
+            row.name.clone(),
+            open,
+            move |expanded, _, cx| {
                 state.update(cx, |state, cx| {
-                    if !state.collapsed.remove(&key) {
+                    if expanded {
+                        state.collapsed.remove(&key);
+                    } else {
                         state.collapsed.insert(key.clone());
                     }
                     cx.notify();
                 });
-            })
+            },
+        );
+        if open {
+            frame
+        } else {
+            frame.trailing(kit::label(&theme, counted(files, "file")))
+        }
     }
-
-    /// A file row: change-tinted glyph, name, badge, and note; clicking
-    /// opens the file.
-    fn file(&self, frame: Stateful<Div>, row: &Row, entry: &Entry) -> Stateful<Div> {
-        let theme = &self.theme;
-        let muted = theme.colors.muted_foreground.to_paint();
+    fn file(&self, index: usize, row: &Row, entry: &Entry, focus: &TreeFocus) -> TreeRow {
+        let theme = self.theme;
         let path = entry.path.clone();
+        let scope = self.scope.clone();
         let tone = entry.change.map_or(Tone::Neutral, Change::tone);
         let deleted = entry.change == Some(Change::Deleted);
-        frame
-            .child(div().w(px(12.0)).flex_shrink_0())
-            .child(kit::glyph(
-                if deleted {
-                    AssetId::TABLER_FILE_X
-                } else {
-                    AssetId::TABLER_FILE_TEXT
-                },
-                14.0,
-                if tone == Tone::Neutral {
-                    muted
-                } else {
-                    tone.color(theme).to_paint()
-                },
-            ))
-            .child(
+        let mut frame = TreeRow::leaf(
+            focus.node(self.node_id(index, row)),
+            theme,
+            row.depth,
+            row.name.clone(),
+            path.clone(),
+            move |window, cx| open_reference(&path, None, scope.clone(), window, cx),
+        )
+        .deleted(deleted)
+        .leading(kit::glyph(
+            if deleted {
+                AssetId::TABLER_FILE_X
+            } else {
+                AssetId::TABLER_FILE_TEXT
+            },
+            14.0,
+            if tone == Tone::Neutral {
+                theme.colors.muted_foreground.to_paint()
+            } else {
+                tone.color(&theme).to_paint()
+            },
+        ));
+        if let Some(change) = entry.change {
+            frame = frame.trailing(
                 div()
-                    .min_w_0()
-                    .flex_shrink_0()
-                    .max_w(gpui::relative(0.6))
-                    .truncate()
-                    .font_family(theme.typography.mono.family)
-                    .tracking(0.0)
-                    .text_size(px(13.0))
-                    .text_color(if deleted {
-                        muted
-                    } else {
-                        theme.colors.foreground.to_paint()
-                    })
-                    .when(deleted, gpui::Styled::line_through)
-                    .child(row.name.clone()),
-            )
-            .children(entry.change.map(|change| {
-                div()
-                    .flex_shrink_0()
                     .font_family(theme.typography.mono.family)
                     .tracking(0.0)
                     .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(change.tone().color(theme).to_paint())
-                    .child(change.letter())
-            }))
-            .children(entry.note.clone().map(|note| {
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.0))
-                    .text_color(muted)
-                    .child(note)
-            }))
-            .on_click(move |_, window, cx| open_reference(&path, None, window, cx))
+                    .text_color(change.tone().color(&theme).to_paint())
+                    .child(change.letter()),
+            );
+        }
+        if let Some(note) = &entry.note {
+            frame = frame.description(note.clone());
+        }
+        frame
+    }
+}
+fn node_id(key: &str, index: usize, row: &Row, model: &Model) -> SharedString {
+    match &row.kind {
+        RowKind::Dir { key: path, .. } => format!("{key}-dir-{path}").into(),
+        RowKind::File { entry } => {
+            format!("{key}-file-{}-{index}", model.entries[*entry].path).into()
+        }
+    }
+}
+fn navigation_target(
+    model: &Model,
+    visible: &[usize],
+    index: usize,
+    command: TreeNavigation,
+) -> usize {
+    match command {
+        TreeNavigation::Previous => index.saturating_sub(1),
+        TreeNavigation::Next => (index + 1).min(visible.len().saturating_sub(1)),
+        TreeNavigation::First => 0,
+        TreeNavigation::Last => visible.len().saturating_sub(1),
+        TreeNavigation::Parent => (0..index)
+            .rev()
+            .find(|prior| model.rows[visible[*prior]].depth < model.rows[visible[index]].depth)
+            .unwrap_or(index),
     }
 }
 
 impl RenderOnce for FileTreeView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
-        let model = Rc::clone(&self.model);
+        let model = Arc::clone(&self.model);
         let state = kit::keyed(window, cx, self.id("state"), TreeState::default);
+        state.update(cx, |state, cx| {
+            if !state.model.as_ref().is_some_and(|old| Arc::ptr_eq(old, &model)) {
+                state.focus.reset(window, cx);
+                state.model = Some(model.clone());
+                state.collapsed.retain(|key| model.rows.iter().any(|row| matches!(&row.kind, RowKind::Dir { key: current, .. } if current == key)));
+                state.scroll = gpui::UniformListScrollHandle::new();
+            }
+        });
         let collapsed = state.read(cx).collapsed.clone();
+        let focus = state.read(cx).focus.clone();
+        let scroll = state.read(cx).scroll.clone();
+        let navigation_scroll = scroll.clone();
 
-        let mut rows = Vec::new();
+        let mut visible = Vec::new();
         let mut hidden_below: Option<usize> = None;
         for (index, row) in model.rows.iter().enumerate() {
             if let Some(depth) = hidden_below {
@@ -456,18 +461,62 @@ impl RenderOnce for FileTreeView {
                 }
                 hidden_below = None;
             }
-            let frame = self.frame(index, row.depth);
-            rows.push(match &row.kind {
-                RowKind::Dir { key, files } => {
-                    let open = !collapsed.contains(key);
-                    if !open {
-                        hidden_below = Some(row.depth);
-                    }
-                    self.dir(frame, row, key, *files, open, &state)
+            visible.push(index);
+            if let RowKind::Dir { key, .. } = &row.kind {
+                if collapsed.contains(key) {
+                    hidden_below = Some(row.depth);
                 }
-                RowKind::File { entry } => self.file(frame, row, &model.entries[*entry]),
-            });
+            }
         }
+        let visible: Arc<[usize]> = visible.into();
+        let row_count = visible.len();
+        let list_id = self.id("rows");
+        let tree_id = self.id("tree");
+        let row_model = model.clone();
+        let list = uniform_list(list_id, row_count, move |range, window, _| {
+            focus.retain_visible(
+                range
+                    .clone()
+                    .filter_map(|position| visible.get(position))
+                    .map(|index| node_id(&self.key, *index, &row_model.rows[*index], &row_model)),
+                window,
+            );
+            range
+                .filter_map(|visible_index| {
+                    let index = *visible.get(visible_index)?;
+                    let row = &row_model.rows[index];
+                    let frame = match &row.kind {
+                        RowKind::Dir { key, files } => self.dir(
+                            index,
+                            row,
+                            key,
+                            *files,
+                            !collapsed.contains(key),
+                            &state,
+                            &focus,
+                        ),
+                        RowKind::File { entry } => {
+                            self.file(index, row, &row_model.entries[*entry], &focus)
+                        }
+                    };
+                    let visible = visible.clone();
+                    let model = row_model.clone();
+                    let key = self.key.clone();
+                    let focus = focus.clone();
+                    let scroll = navigation_scroll.clone();
+                    Some(frame.on_navigate(move |command, window, cx| {
+                        let target = navigation_target(&model, &visible, visible_index, command);
+                        let index = visible[target];
+                        scroll.scroll_to_item(target, gpui::ScrollStrategy::Nearest);
+                        focus.focus(node_id(&key, index, &model.rows[index], &model), window, cx);
+                        window.refresh();
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&scroll)
+        .w_full()
+        .h(TreeRow::row_height() * row_count.min(14) as f32);
 
         let summary = Change::ALL.into_iter().filter_map(|change| {
             let count = model
@@ -482,6 +531,9 @@ impl RenderOnce for FileTreeView {
         });
 
         div()
+            .id(tree_id)
+            .role(gpui::Role::Tree)
+            .aria_label("Changed files")
             .w_full()
             .min_w_0()
             .flex()
@@ -496,6 +548,51 @@ impl RenderOnce for FileTreeView {
                     .child(kit::label(&theme, counted(model.entries.len(), "file")))
                     .children(summary),
             )
-            .child(div().w_full().min_w_0().flex().flex_col().children(rows))
+            .child(list)
+    }
+}
+
+#[cfg(test)]
+mod resource_target_tests {
+    use super::*;
+    #[test]
+    fn keyboard_navigation_uses_visible_order_across_viewport_edges() {
+        let entries: Vec<_> = (0..24)
+            .map(|index| serde_json::json!({"path": format!("directory/file-{index:02}.rs")}))
+            .collect();
+        let tree: FileTree =
+            serde_json::from_value(serde_json::json!({"entries": entries})).unwrap();
+        let model = &tree.0;
+        let visible: Vec<_> = (0..model.rows.len()).collect();
+        assert_eq!(
+            navigation_target(model, &visible, 13, TreeNavigation::Next),
+            14
+        );
+        assert_eq!(
+            navigation_target(model, &visible, 0, TreeNavigation::Last),
+            24
+        );
+        assert_eq!(
+            navigation_target(model, &visible, 24, TreeNavigation::Parent),
+            0
+        );
+        assert_eq!(navigation_target(model, &[0], 0, TreeNavigation::Next), 0);
+        assert_eq!(
+            navigation_target(model, &visible, 0, TreeNavigation::Previous),
+            0
+        );
+    }
+    #[test]
+    fn display_normalization_preserves_absolute_and_unc_resource_targets() {
+        for path in [
+            "/home/user/project/main.rs",
+            "C:\\project\\main.rs",
+            "\\\\server\\share\\main.rs",
+        ] {
+            let tree: FileTree =
+                serde_json::from_value(serde_json::json!({"entries":[{"path":path}]})).unwrap();
+            assert_eq!(tree.0.entries[0].path.as_ref(), path);
+            assert!(!tree.0.rows.is_empty());
+        }
     }
 }

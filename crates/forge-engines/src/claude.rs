@@ -46,7 +46,11 @@ impl Harness for ClaudeHarness {
     }
 }
 
-async fn run(turn: Turn, mut io: RunIo) -> Outcome {
+async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
+    if let Some((key, value)) = context_window_env(&turn.config) {
+        turn.launch.env.retain(|(existing, _)| existing != key);
+        turn.launch.env.push((key.to_owned(), value));
+    }
     let mut decoder = ClaudeDecoder::default();
     let mut session = turn.session_id.clone();
     let fresh = session.is_none();
@@ -85,6 +89,14 @@ async fn run(turn: Turn, mut io: RunIo) -> Outcome {
             &mut inbox_open,
         )
         .await;
+        if let Err(error) = finished {
+            engine.kill().await;
+            for event in decoder.finish() {
+                io.emit(event).await;
+            }
+            return Outcome::failed(format!("Claude protocol exchange failed: {error:#}"));
+        }
+        let finished = finished.expect("error handled above");
         let code = engine.wait().await;
         for event in decoder.finish() {
             io.emit(event).await;
@@ -143,7 +155,7 @@ async fn drive(
     io: &mut RunIo,
     next: &mut VecDeque<(UserInput, bool)>,
     inbox_open: &mut bool,
-) -> Finished {
+) -> Result<Finished> {
     let mut cancelling = false;
     let grace = tokio::time::sleep(Duration::from_secs(u64::from(u32::MAX)));
     tokio::pin!(grace);
@@ -159,11 +171,10 @@ async fn drive(
                     Ok(Some(line)) => line,
                     Ok(None) => break,
                     Err(error) => {
-                        tracing::warn!("reading Claude output: {error:#}");
-                        break;
+                        return Err(error.context("reading Claude output"));
                     }
                 };
-                for event in decoder.feed(&line) {
+                for event in decoder.feed(&line)? {
                     io.emit(event).await;
                 }
                 for reply in decoder.take_replies() {
@@ -178,25 +189,31 @@ async fn drive(
                 // a `result` only once no steer, title request or
                 // background agent is still on its way.
                 if decoder.take_result_seen() && engine.stdin_open() {
-                    if cancelling || (!decoder.awaiting_input() && !decoder.background_running()) {
-                        engine.close_stdin();
-                    } else if decoder.background_running() {
-                        waiting_on_background = true;
-                    }
+                    waiting_on_background |= after_result(engine, decoder, cancelling);
                 }
                 // The last agent ended: its report starts a follow-up turn
                 // whose `result` closes input; failing that, the grace does.
                 if waiting_on_background && !decoder.background_running() && !settling {
+                    engine.note(&format!(
+                        "background work ended; input closes in {}s unless more starts ({})",
+                        SETTLED_INPUT_GRACE.as_secs(),
+                        decoder.background_summary()
+                    ));
                     settling = true;
                     settle.as_mut().reset(tokio::time::Instant::now() + SETTLED_INPUT_GRACE);
-                } else if decoder.background_running() {
+                } else if decoder.background_running() && settling {
+                    engine.note("background work started again; input stays open");
                     settling = false;
                 }
             }
             () = &mut settle, if settling => {
                 settling = false;
                 if engine.stdin_open() && !decoder.awaiting_input() && !decoder.background_running() {
-                    engine.close_stdin();
+                    engine.close_stdin(&format!(
+                        "no background work for {}s ({})",
+                        SETTLED_INPUT_GRACE.as_secs(),
+                        decoder.background_summary()
+                    ));
                 }
             }
             input = io.inbox.recv(), if *inbox_open && !cancelling => match input {
@@ -220,6 +237,7 @@ async fn drive(
                 None => *inbox_open = false,
             },
             () = io.cancel.cancelled(), if !cancelling => {
+                engine.note("the run was cancelled: interrupting");
                 cancelling = true;
                 let interrupt = json!({
                     "type": "control_request",
@@ -238,8 +256,30 @@ async fn drive(
             }
         }
     }
-    Finished {
+    Ok(Finished {
         cancelled: cancelling,
+    })
+}
+
+/// A `result` arrived: closes input unless a steer, a title request or
+/// background work still needs it. Returns whether it stays open for
+/// background work.
+fn after_result(engine: &mut EngineProcess, decoder: &ClaudeDecoder, cancelling: bool) -> bool {
+    if cancelling || (!decoder.awaiting_input() && !decoder.background_running()) {
+        engine.close_stdin(&format!(
+            "result (cancelling: {cancelling}; {})",
+            decoder.background_summary()
+        ));
+        false
+    } else if decoder.background_running() {
+        engine.note(&format!(
+            "result; input stays open for background work ({})",
+            decoder.background_summary()
+        ));
+        true
+    } else {
+        engine.note("result; input stays open: a steer or title request is on its way");
+        false
     }
 }
 
@@ -247,11 +287,11 @@ async fn deliver(
     engine: &mut EngineProcess,
     decoder: &mut ClaudeDecoder,
     input: &UserInput,
-    steer: bool,
+    _steer: bool,
 ) -> Result<()> {
     let line = user_line(input).await?;
     engine.send(&line).await?;
-    decoder.expect_replay(steer.then(|| input.id.clone()));
+    decoder.expect_replay(Some(input.id.clone()));
     Ok(())
 }
 
@@ -269,8 +309,15 @@ async fn request_title(engine: &mut EngineProcess, decoder: &mut ClaudeDecoder, 
 /// A stream-json user message: the text, then each image as a base64 block.
 async fn user_line(input: &UserInput) -> Result<Value> {
     let mut content = Vec::new();
-    if !input.text.is_empty() {
-        content.push(json!({ "type": "text", "text": input.text }));
+    let native_text = match crate::normalize_command(artisan_api::EngineId::Claude, &input.text)? {
+        Some(crate::PromptCommand::Prompt { text }) => text,
+        Some(crate::PromptCommand::Configure { .. }) => {
+            anyhow::bail!("configuration commands must be accepted by Forge before model delivery")
+        }
+        None => input.text.clone(),
+    };
+    if !native_text.is_empty() {
+        content.push(json!({ "type": "text", "text": native_text }));
     }
     for path in &input.images {
         let bytes = tokio::fs::read(path)
@@ -324,8 +371,19 @@ fn launch_args(config: &EngineConfig, session: Option<&str>) -> Vec<String> {
     }
     // Fast mode is a setting (`fastMode`), not a flag; this run's settings
     // layer over the engine home's.
+    let mut settings = serde_json::Map::new();
     if config.speed.as_deref() == Some(crate::catalog::CLAUDE_FAST) {
-        args.extend(["--settings".to_owned(), r#"{"fastMode":true}"#.to_owned()]);
+        settings.insert("fastMode".to_owned(), json!(true));
+    }
+    if let Some(enabled) = config
+        .session_options
+        .get("ultracode")
+        .and_then(Value::as_bool)
+    {
+        settings.insert("ultracode".to_owned(), json!(enabled));
+    }
+    if !settings.is_empty() {
+        args.extend(["--settings".to_owned(), Value::Object(settings).to_string()]);
     }
     if let Some(session) = session {
         args.extend(["--resume".to_owned(), session.to_owned()]);
@@ -370,6 +428,152 @@ mod tests {
     use super::ClaudeDecoder;
     use artisan_api::ItemId;
 
+    #[test]
+    fn native_agent_messages_are_canonical_tools() {
+        use artisan_api::{ItemKind, ToolKind};
+        let mut decoder = ClaudeDecoder::default();
+        for (index, recipient, expected_label) in [
+            (0, "a1234567890123456", "an agent"),
+            (1, "uds:/tmp/another-session", "another session"),
+            (2, "reviewer", "reviewer"),
+        ] {
+            let frame = serde_json::json!({
+                "type": "assistant",
+                "message": {"id": format!("message-{index}"), "content": [{
+                    "type": "tool_use", "id": format!("send-{index}"), "name": "SendMessage",
+                    "input": {"to": recipient, "summary": "Review update", "message": "Check the cancellation path."}
+                }]}
+            });
+            let events = decoder.feed(&frame.to_string()).unwrap();
+            assert!(events.iter().any(|event| matches!(event,
+                crate::EngineEvent::Item { kind: ItemKind::Tool { tool: ToolKind::AgentMessage {
+                    recipient: target, recipient_label, summary, text}, .. }, .. }
+                if target == recipient && recipient_label == expected_label
+                    && summary.as_deref() == Some("Review update") && text.inline() == Some("Check the cancellation path.")
+            )));
+        }
+        let malformed = serde_json::json!({"type":"assistant","message":{"id":"missing-target","content":[{
+            "type":"tool_use","id":"bad-send","name":"SendMessage","input":{"to":" ","message":"hello"}
+        }]}});
+        assert!(
+            decoder
+                .feed(&malformed.to_string())
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event,
+                    crate::EngineEvent::Item { kind: ItemKind::Error {message,..}, .. }
+                    if message.inline().expect("adapter error is inline").contains("SendMessage")
+                ))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protocol_output_errors_fail_even_after_a_successful_result() {
+        use crate::{Harness as _, Launch, RunIo, Turn, UserInput};
+        use artisan_api::{EngineConfig, EngineId, RunStatus, ThreadId};
+        use std::os::unix::fs::PermissionsExt as _;
+        for (after_result, malformed) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let binary = directory.path().join("fake-claude");
+            let earlier = if after_result {
+                "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\",\"usage\":{}}'\n"
+            } else {
+                ""
+            };
+            let output = if malformed {
+                "printf '%s\\n' '{broken-json'\n".to_owned()
+            } else {
+                format!(
+                    "head -c {} /dev/zero\nprintf '\\n'\n",
+                    crate::process::MAX_LINE_BYTES + 1
+                )
+            };
+            let parent_pid = directory.path().join("parent-pid");
+            let child_pid = directory.path().join("child-pid");
+            std::fs::write(
+                &binary,
+                format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$ARTISAN_TEST_PARENT_PID\"\nsleep 30 & child=$!\nprintf '%s\\n' \"$child\" > \"$ARTISAN_TEST_CHILD_PID\"\nread -r input\n{earlier}{output}wait\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let turn = Turn {
+                trace_dir: None,
+                thread_id: ThreadId::from("protocol-error"),
+                engine: EngineId::Claude,
+                binary,
+                home: directory.path().join("home"),
+                cwd: directory.path().into(),
+                config: EngineConfig::new(EngineId::Claude),
+                session_id: Some("existing".into()),
+                input: UserInput {
+                    text: "go".into(),
+                    ..Default::default()
+                },
+                launch: Launch {
+                    env: vec![
+                        (
+                            "ARTISAN_TEST_PARENT_PID".into(),
+                            parent_pid.to_string_lossy().into_owned(),
+                        ),
+                        (
+                            "ARTISAN_TEST_CHILD_PID".into(),
+                            child_pid.to_string_lossy().into_owned(),
+                        ),
+                    ],
+                    ..Launch::default()
+                },
+            };
+            let (_sender, inbox) = tokio::sync::mpsc::channel(8);
+            let (events, mut received) = tokio::sync::mpsc::channel(256);
+            let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                super::ClaudeHarness.run(
+                    turn,
+                    RunIo {
+                        inbox,
+                        events,
+                        cancel: tokio_util::sync::CancellationToken::new(),
+                    },
+                ),
+            )
+            .await
+            .expect("protocol failure must not await a blocked process");
+            assert_eq!(outcome.status, RunStatus::Failed);
+            assert!(outcome.error.unwrap().contains(if malformed {
+                "protocol JSON"
+            } else {
+                "exceeds"
+            }));
+            for (path, parent) in [(parent_pid, true), (child_pid, false)] {
+                let pid = std::fs::read_to_string(path).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let mut command = tokio::process::Command::new("ps");
+                        command.args(["-o", "stat=", "-p", pid.trim()]);
+                        let state =
+                            crate::process::probe(command, std::time::Duration::from_secs(3), 1024)
+                                .await
+                                .unwrap();
+                        let state = String::from_utf8_lossy(&state.stdout);
+                        if state.trim().is_empty() || (!parent && state.trim().starts_with('Z')) {
+                            break;
+                        }
+                        // A delivered SIGKILL still needs the scheduler to stop
+                        // descendants; prove they stop rather than accepting R.
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("owned process is reaped and its descendant stops");
+            }
+            drain.await.unwrap();
+        }
+    }
+
     /// A background agent outlives the turn's `result`: input stays open
     /// until it reports back, or the CLI would kill it mid-work. The fake
     /// CLI fails the run if its input closes while the agent works.
@@ -401,11 +605,15 @@ cat > /dev/null
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Tracing is explicitly enabled for this diagnostic fixture.
+        let home = dir.path().join("data/engines/claude/home");
+        std::fs::create_dir_all(&home).unwrap();
         let turn = Turn {
+            trace_dir: Some(dir.path().join("data/traces")),
             thread_id: artisan_api::ThreadId::from("thread"),
             engine: artisan_api::EngineId::Claude,
             binary: fake,
-            home: dir.path().to_owned(),
+            home,
             cwd: dir.path().to_owned(),
             config: artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
             session_id: Some("s1".into()),
@@ -431,6 +639,34 @@ cat > /dev/null
         .expect("the run ends once the agent reported");
         drain.abort();
         assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
+
+        // The trace says what Claude wrote and why input stayed open, then
+        // closed: what an agent killed mid-work is read back from.
+        let traces = dir.path().join("data/traces");
+        let mut trace = String::new();
+        for _ in 0..200 {
+            trace = std::fs::read_dir(&traces)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+                .collect();
+            if trace.contains("exited") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        for expected in [
+            "background_tasks_changed",
+            "input stays open for background work (1 background task(s)",
+            "closing stdin: result (cancelling: false; 0 background task(s)",
+            "exited",
+        ] {
+            assert!(
+                trace.contains(expected),
+                "the trace lacks {expected:?}:\n{trace}"
+            );
+        }
     }
 
     /// Fast mode is Claude's `fastMode` setting, given for this run only.
@@ -449,6 +685,52 @@ cat > /dev/null
         assert_eq!(settings(&config), None);
         config.speed = Some("fast".into());
         assert_eq!(settings(&config).as_deref(), Some(r#"{"fastMode":true}"#));
+    }
+
+    #[test]
+    fn capped_context_uses_compaction_environment_and_keeps_model_identity() {
+        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
+        config.model = Some("claude-opus-test".to_owned());
+        assert_eq!(super::context_window_env(&config), None);
+        config
+            .options
+            .insert("context_window".to_owned(), serde_json::json!(400_000));
+        assert_eq!(
+            super::context_window_env(&config),
+            Some(("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "400000".to_owned()))
+        );
+        let args = super::launch_args(&config, None);
+        let model = args.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(args[model + 1], "claude-opus-test");
+    }
+
+    #[tokio::test]
+    async fn ultrathink_is_native_prompt_text_and_ultracode_is_an_independent_setting() {
+        let input = crate::UserInput {
+            text: "/ultrathink audit this".to_owned(),
+            ..crate::UserInput::default()
+        };
+        let line = super::user_line(&input).await.unwrap();
+        assert_eq!(
+            line["message"]["content"][0]["text"],
+            "ultrathink\naudit this"
+        );
+        assert_eq!(input.text, "/ultrathink audit this");
+        let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Claude);
+        config.effort = Some("high".to_owned());
+        config.speed = Some("fast".to_owned());
+        for enabled in [true, false] {
+            config
+                .session_options
+                .insert("ultracode".to_owned(), serde_json::json!(enabled));
+            let args = super::launch_args(&config, None);
+            let effort = args.iter().position(|arg| arg == "--effort").unwrap();
+            assert_eq!(args[effort + 1], "high");
+            let settings = args.iter().position(|arg| arg == "--settings").unwrap();
+            let settings: serde_json::Value = serde_json::from_str(&args[settings + 1]).unwrap();
+            assert_eq!(settings["ultracode"], enabled);
+            assert_eq!(settings["fastMode"], true);
+        }
     }
 
     /// Auto is Claude's own auto mode; Full skips every permission prompt.
@@ -495,7 +777,7 @@ cat > /dev/null
                 .expect("name")
                 .to_string_lossy()
                 .into_owned();
-            let text = std::fs::read_to_string(&path).expect("transcript");
+            let text = crate::transcript_tests::read_path(&path);
             // Write what the driver writes: the message, the title request
             // on a fresh session, and every later user line as a steer.
             let mut decoder = ClaudeDecoder::default();
@@ -511,7 +793,7 @@ cat > /dev/null
                         (user_lines > 1).then(|| ItemId::from(format!("steer-{user_lines}"))),
                     );
                 }
-                events.extend(decoder.feed(line));
+                events.extend(decoder.feed(line).unwrap());
             }
             events.extend(decoder.finish());
             let outcome = decoder.take_outcome();
@@ -525,16 +807,12 @@ cat > /dev/null
     /// progress line is not its report.
     #[test]
     fn an_agent_waiting_on_its_own_shell_keeps_the_session_open_and_reports_at_the_end() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/transcripts/claude/agent-waits-on-its-shell.jsonl"
-        );
-        let text = std::fs::read_to_string(path).expect("transcript");
+        let text = crate::transcript_tests::read("claude", "agent-waits-on-its-shell");
         let mut decoder = ClaudeDecoder::default();
         let mut results = Vec::new();
         let mut open_while_waiting = true;
         for line in text.lines() {
-            for event in decoder.feed(line) {
+            for event in decoder.feed(line).unwrap() {
                 if let crate::EngineEvent::Item {
                     status,
                     kind: artisan_api::ItemKind::Agent { result, .. },
@@ -555,7 +833,7 @@ cat > /dev/null
         );
         assert_eq!(
             results.last(),
-            Some(&(artisan_api::Status::Done, Some("FINISHED".to_owned()))),
+            Some(&(artisan_api::Status::Done, Some("FINISHED".into()))),
             "the agent's report is what it said once resumed: {results:?}"
         );
         assert!(
@@ -578,7 +856,7 @@ cat > /dev/null
             serde_json::json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a4c1", "task_type": "local_agent"}]}),
             serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "a4c1", "tool_use_id": "toolu_linnea", "status": "completed", "summary": "Attachments now show on the gun."}),
         ] {
-            events.extend(decoder.feed(&line.to_string()));
+            events.extend(decoder.feed(&line.to_string()).unwrap());
         }
         let last = events.iter().rev().find_map(|event| match event {
             crate::EngineEvent::Item {
@@ -593,7 +871,7 @@ cat > /dev/null
             last,
             Some((
                 artisan_api::Status::Done,
-                Some("Attachments now show on the gun.".to_owned())
+                Some("Attachments now show on the gun.".into())
             ))
         );
     }
@@ -628,7 +906,7 @@ cat > /dev/null
                 "Temporal mode is in on `render-taa`.",
             ),
         ] {
-            events.extend(decoder.feed(&line));
+            events.extend(decoder.feed(&line).unwrap());
         }
         let last = |key: &str| {
             events.iter().rev().find_map(|event| match event {
@@ -645,15 +923,25 @@ cat > /dev/null
             last("toolu_a"),
             Some((
                 artisan_api::Status::Cancelled,
-                Some("Do Faithful CMAA2 port in full.".to_owned()),
+                Some("Do Faithful CMAA2 port in full.".into()),
                 None
             )),
             "a stopped agent reports nothing, and its task is the prompt"
         );
         assert_eq!(
-            last("toolu_b").and_then(|(_, _, result)| result).as_deref(),
+            last("toolu_b")
+                .and_then(|(_, _, result)| result)
+                .as_ref()
+                .and_then(artisan_api::TextContent::inline),
             Some("Temporal mode is in on `render-taa`."),
             "the later report replaces the progress line"
         );
     }
+}
+
+/// The CLI caps auto-compaction without changing the model's identity.
+fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
+    config
+        .context_window_override()
+        .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }

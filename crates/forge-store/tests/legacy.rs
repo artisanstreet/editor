@@ -1,3 +1,5 @@
+#![cfg(feature = "legacy-import")]
+
 use artisan_api::{ItemKind, ItemsQuery, Permissions, Phase, RunStatus, ThreadId};
 use forge_store::{Store, legacy};
 use rusqlite::{Connection, params};
@@ -158,7 +160,7 @@ async fn old_thread_reads_the_same_after_importing_twice() {
     let dir = tempfile::tempdir().unwrap();
     let old_db = dir.path().join("old.sqlite3");
     old_database(&old_db);
-    let store = Store::open_in_memory(&dir.path().join("blobs")).unwrap();
+    let store = Store::open(&dir.path().join("blobs")).unwrap();
 
     let first = legacy::import(&old_db, dir.path(), &store).await.unwrap();
     assert_eq!(
@@ -203,6 +205,10 @@ async fn old_thread_reads_the_same_after_importing_twice() {
         "a thread that never asked keeps running without asking"
     );
     assert!(!thread.is_unread(), "the thread was read in the old Editor");
+    assert_eq!(
+        thread.activity_at, 40,
+        "recency comes from the imported run boundary, not import time or metadata time"
+    );
     assert_eq!(
         (thread.created_at, thread.updated_at),
         (10, 50),
@@ -260,8 +266,8 @@ async fn old_thread_reads_the_same_after_importing_twice() {
         .map(|item| (item.created_at, item.updated_at))
         .collect();
     assert_eq!(times, [(21, 21), (22, 22), (23, 23)], "message times kept");
-    assert_eq!(text, "Why is the header blurry?");
-    assert_eq!(reply, "It was scaled by 1.01; fixed.");
+    assert_eq!(text.inline(), Some("Why is the header blurry?"));
+    assert_eq!(reply.inline(), Some("It was scaled by 1.01; fixed."));
     let [image] = images.as_slice() else {
         panic!("one image expected")
     };
@@ -277,4 +283,146 @@ async fn old_thread_reads_the_same_after_importing_twice() {
     assert_eq!(run.session_id.as_deref(), Some(SESSION));
     assert_eq!(run.status, RunStatus::Done);
     assert_eq!(run.usage.cache_read, 1000);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn imported_unread_state_and_old_timestamps_are_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_db = dir.path().join("old.sqlite3");
+    old_database(&old_db);
+    Connection::open(&old_db)
+        .unwrap()
+        .execute("DELETE FROM thread_reads", [])
+        .unwrap();
+    let store = Store::open(&dir.path().join("new")).unwrap();
+    legacy::import(&old_db, dir.path(), &store).await.unwrap();
+    let thread = store
+        .thread(&ThreadId::from(THREAD))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(thread.is_unread());
+    assert_eq!((thread.created_at, thread.updated_at), (10, 50));
+    store
+        .update_thread(
+            &thread.id,
+            artisan_api::UpdateThread {
+                read_seq: Some(thread.activity_seq),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    legacy::import(&old_db, dir.path(), &store).await.unwrap();
+    assert!(
+        !store.thread(&thread.id).await.unwrap().unwrap().is_unread(),
+        "repeat import preserves the user's new read state"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_thread_imports_across_bounded_chunks_without_repeat_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_db = dir.path().join("old.sqlite3");
+    old_database(&old_db);
+    let mut old = Connection::open(&old_db).unwrap();
+    let tx = old.transaction().unwrap();
+    for ordinal in 4..604 {
+        tx.execute("INSERT INTO conversation_items VALUES (?1, ?2, 't1', ?3, 'item', 0, 'completed', 'assistant_message', NULL, 'r1', NULL, NULL, ?4, ?3, ?3, NULL)", params![format!("long-{ordinal}"), THREAD, ordinal, "body ".repeat(4000)]).unwrap();
+    }
+    tx.commit().unwrap();
+    let store = Store::open(&dir.path().join("new")).unwrap();
+    let first = legacy::import(&old_db, dir.path(), &store).await.unwrap();
+    assert_eq!(first.items, 603);
+    let head = store.head();
+    let second = legacy::import(&old_db, dir.path(), &store).await.unwrap();
+    assert_eq!(second.items, 0);
+    assert_eq!(
+        store.head(),
+        head,
+        "repeating imports allocates no new change sequences"
+    );
+    let latest = store
+        .items_page(
+            &ThreadId::from(THREAD),
+            ItemsQuery {
+                before: None,
+                after: None,
+                limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+    let last = latest.items.last().unwrap();
+    assert_eq!(last.id.as_str(), "long-603");
+    assert!(matches!(
+        last.kind,
+        ItemKind::AssistantMessage {
+            phase: Phase::Final,
+            ..
+        }
+    ));
+    assert_eq!((last.created_at, last.updated_at), (603, 603));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_agent_message_repair_preserves_identity_and_is_idempotent() {
+    use artisan_api::{
+        CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, Status, ToolKind,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/repo".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Claude),
+            title: None,
+            parent_thread_id: None,
+        })
+        .await
+        .unwrap();
+    let original = store.upsert_item(forge_store::NewItem {
+        id: ItemId::new(), thread_id: thread.id, run_id: None, parent_id: None, native_id: Some("native-send".into()), status: Status::Done,
+        kind: ItemKind::Tool { tool: ToolKind::Other { name: "SendMessage".into(), input: (Some(serde_json::json!({"to":"uds:/tmp/session","summary":"Update","message":"Hello"}).to_string())).map(Into::into) }, title: Some("message".into()), output: None, exit_code: Some(0), approval: None }
+    }).await.unwrap();
+    let inspected_head = store.head();
+    assert_eq!(legacy::inspect_agent_messages(dir.path()).unwrap(), 1);
+    assert_eq!(
+        store.head(),
+        inspected_head,
+        "inspection allocates no sequence"
+    );
+    assert_eq!(legacy::normalize_agent_messages(&store).await.unwrap(), 1);
+    let repaired = store.item(&original.id).await.unwrap().unwrap();
+    assert_eq!(
+        (
+            &repaired.id,
+            repaired.position,
+            repaired.created_at,
+            repaired.updated_at,
+            &repaired.native_id
+        ),
+        (
+            &original.id,
+            original.position,
+            original.created_at,
+            original.updated_at,
+            &original.native_id
+        )
+    );
+    assert!(
+        matches!(repaired.kind, ItemKind::Tool { tool: ToolKind::AgentMessage { recipient, recipient_label, summary, text}, exit_code: Some(0), .. } if recipient == "uds:/tmp/session" && recipient_label == "another session" && summary.as_deref() == Some("Update") && text.inline() == Some("Hello"))
+    );
+    let head = store.head();
+    assert_eq!(legacy::normalize_agent_messages(&store).await.unwrap(), 0);
+    assert_eq!(store.head(), head);
 }

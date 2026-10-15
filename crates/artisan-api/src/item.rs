@@ -1,4 +1,4 @@
-use crate::{BlobHash, ItemId, RunId, Seq, ThreadId, Timestamp};
+use crate::{BlobHash, Collection, ItemId, RunId, Seq, TextContent, ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Anything in a thread. Adapters map each engine's wiring onto these kinds.
@@ -15,6 +15,7 @@ pub struct Item {
     pub parent_id: Option<ItemId>,
     /// The engine's own id (tool_use_id, Codex item id, ACP toolCallId…),
     /// used only to update the item in place.
+    #[serde(skip)]
     pub native_id: Option<String>,
     pub status: Status,
     pub created_at: Timestamp,
@@ -54,7 +55,7 @@ impl Status {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemKind {
     UserMessage {
-        text: String,
+        text: TextContent,
         #[serde(default)]
         images: Vec<BlobHash>,
         /// Sent while a run was active.
@@ -62,7 +63,7 @@ pub enum ItemKind {
         steer: bool,
     },
     AssistantMessage {
-        text: String,
+        text: TextContent,
         phase: Phase,
     },
     Tool {
@@ -72,22 +73,33 @@ pub enum ItemKind {
         exit_code: Option<i32>,
         approval: Option<Approval>,
     },
+    /// A user approval request, distinct from the execution it may gate.
+    Approval {
+        target: Option<ItemId>,
+        approval: Approval,
+    },
     Agent {
         /// The engine's name for it: a type ("general-purpose"), a nickname
         /// or nothing.
         name: Option<String>,
-        description: String,
+        description: TextContent,
         /// The full task it was given, when the engine reports one apart
         /// from the description (Claude's `prompt`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt: Option<String>,
+        prompt: Option<TextContent>,
         /// The engine's own id for the running agent (Claude's `agentId`,
         /// the address its `SendMessage` uses).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        /// Tokens in the agent's context after its latest message, and the
+        /// model it runs on: what the context meter shows in its view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_used: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default)]
         background: bool,
-        result: Option<String>,
+        result: Option<TextContent>,
         /// Artisan's name for it, unique in its thread ([`AGENT_NAMES`]):
         /// Forge assigns it when the agent is first stored. `None` on agents
         /// stored before; read [`Item::agent_label`].
@@ -97,19 +109,23 @@ pub enum ItemKind {
     Question {
         /// The engine waits for the answer.
         blocking: bool,
-        questions: Vec<Question>,
+        questions: Collection<Question>,
         /// One entry per question; `None` means skipped.
-        answers: Option<Vec<Option<Vec<String>>>>,
+        answers: Option<Collection<Option<QuestionAnswer>>>,
+        /// Forge-computed literal history. Clients never resolve opaque IDs or
+        /// duplicate labels to construct display text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer_text: Option<TextContent>,
     },
     Plan {
-        steps: Vec<PlanStep>,
+        steps: Collection<PlanStep>,
         /// A markdown plan awaiting approval.
-        proposal: Option<String>,
+        proposal: Option<TextContent>,
         approval: Option<Approval>,
     },
     Image {
         blob: BlobHash,
-        caption: Option<String>,
+        caption: Option<TextContent>,
     },
     Compaction {
         tokens_before: Option<u64>,
@@ -117,11 +133,11 @@ pub enum ItemKind {
     },
     Notice {
         kind: NoticeKind,
-        text: String,
+        text: TextContent,
     },
     Error {
         kind: ErrorKind,
-        message: String,
+        message: TextContent,
         #[serde(default)]
         retryable: bool,
     },
@@ -139,8 +155,16 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolKind {
+    /// A normalized message to an agent or session. Adapters own recipient
+    /// interpretation; Clients render this label without provider heuristics.
+    AgentMessage {
+        recipient: String,
+        recipient_label: String,
+        summary: Option<String>,
+        text: TextContent,
+    },
     Shell {
-        command: String,
+        command: TextContent,
         cwd: Option<String>,
         #[serde(default)]
         background: bool,
@@ -150,7 +174,7 @@ pub enum ToolKind {
         range: Option<(u64, u64)>,
     },
     Edit {
-        changes: Vec<FileChange>,
+        changes: Collection<FileChange>,
     },
     Search {
         pattern: String,
@@ -167,7 +191,7 @@ pub enum ToolKind {
         server: String,
         tool: String,
         #[serde(default)]
-        input: Option<String>,
+        input: Option<TextContent>,
     },
     ViewImage {
         path: String,
@@ -175,7 +199,7 @@ pub enum ToolKind {
     Other {
         name: String,
         #[serde(default)]
-        input: Option<String>,
+        input: Option<TextContent>,
     },
 }
 
@@ -192,7 +216,7 @@ pub struct FileChange {
     pub path: String,
     pub op: FileOp,
     /// Unified diff, when the engine provides one.
-    pub diff: Option<String>,
+    pub diff: Option<TextContent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,54 +228,31 @@ pub enum FileOp {
     Move { from: String },
 }
 
-/// Tool output kept for display: the head and tail of what the tool printed.
+/// Complete tool output. Historical imports can explicitly report bytes already lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
-    pub head: String,
-    pub tail: String,
-    /// Bytes dropped between head and tail.
-    pub truncated_bytes: u64,
+    pub text: TextContent,
+    #[serde(default)]
+    pub omitted_bytes: u64,
 }
-
 impl Output {
-    /// Bytes kept from each end.
-    pub const KEEP: usize = 8 * 1024;
-
-    /// Keeps the first and last [`Self::KEEP`] bytes on char boundaries.
     #[must_use]
     pub fn from_text(text: &str) -> Self {
-        if text.len() <= Self::KEEP * 2 {
-            return Self {
-                head: text.to_owned(),
-                tail: String::new(),
-                truncated_bytes: 0,
-            };
-        }
-        let mut head_end = Self::KEEP;
-        while !text.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        let mut tail_start = text.len() - Self::KEEP;
-        while !text.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
         Self {
-            head: text[..head_end].to_owned(),
-            tail: text[tail_start..].to_owned(),
-            truncated_bytes: (tail_start - head_end) as u64,
+            text: text.into(),
+            omitted_bytes: 0,
         }
     }
-
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.head.is_empty() && self.tail.is_empty()
+        self.text.byte_len() == 0 && self.omitted_bytes == 0
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub request: ApprovalRequest,
-    pub reason: Option<String>,
+    pub reason: Option<TextContent>,
     /// What the engine offers; the client shows only these.
     pub options: Vec<Decision>,
     pub decision: Option<Decision>,
@@ -261,12 +262,12 @@ pub struct Approval {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalRequest {
     Command {
-        command: String,
+        command: TextContent,
         cwd: Option<String>,
     },
     FileChange,
     Action {
-        description: String,
+        description: TextContent,
     },
 }
 
@@ -291,21 +292,123 @@ impl Decision {
 pub struct Question {
     pub id: String,
     pub header: Option<String>,
-    pub text: String,
+    pub text: TextContent,
     #[serde(default)]
     pub multi_select: bool,
-    pub options: Vec<QuestionOption>,
+    pub options: Collection<QuestionOption>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
+    pub id: String,
     pub label: String,
-    pub description: Option<String>,
+    pub description: Option<TextContent>,
+}
+
+/// Choice identity stays separate from presentation and free-form answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionAnswer {
+    Choices { ids: Collection<String> },
+    Text { text: String },
+}
+impl Question {
+    pub fn validate_answer_structure(
+        &self,
+        answer: &Option<QuestionAnswer>,
+    ) -> Result<(), &'static str> {
+        match answer {
+            None => Ok(()),
+            Some(QuestionAnswer::Text { text }) if text.trim().is_empty() => {
+                Err("answer text is empty")
+            }
+            Some(QuestionAnswer::Text { text }) if text.len() > crate::INLINE_TEXT_BYTES => {
+                Err("answer text exceeds 16 KiB")
+            }
+            Some(QuestionAnswer::Text { .. }) => Ok(()),
+            Some(QuestionAnswer::Choices { ids }) => {
+                let ids = ids.inline().ok_or("submitted choices must be inline")?;
+                if ids.is_empty() {
+                    return Err("no choice was selected");
+                }
+                if !self.multi_select && ids.len() > 1 {
+                    return Err("question does not allow multiple choices");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for id in ids {
+                    if !seen.insert(id) {
+                        return Err("choice was selected twice");
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    pub fn validate_answer(&self, answer: &Option<QuestionAnswer>) -> Result<(), &'static str> {
+        self.validate_answer_structure(answer)?;
+        if let Some(QuestionAnswer::Choices { ids }) = answer {
+            let choices = self
+                .options
+                .inline()
+                .ok_or("question choices must be loaded before validation")?;
+            let known = choices
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            for id in ids.inline().ok_or("submitted choices must be inline")? {
+                if !known.contains(id.as_str()) {
+                    return Err("unknown question choice");
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Readable history/next-turn copy; transport answers retain opaque IDs.
+    pub fn answer_text(&self, answer: &QuestionAnswer) -> Result<String, &'static str> {
+        match answer {
+            QuestionAnswer::Text { text } => Ok(text.clone()),
+            QuestionAnswer::Choices { ids } => {
+                let ids = ids
+                    .inline()
+                    .ok_or("saved choice identities must be loaded before formatting")?;
+                let mut labels = std::collections::HashMap::new();
+                let choices = self
+                    .options
+                    .inline()
+                    .ok_or("question choices must be loaded before formatting")?;
+                let options = choices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, option)| {
+                        *labels.entry(option.label.as_str()).or_insert(0usize) += 1;
+                        (option.id.as_str(), (index, option))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                ids.iter()
+                    .map(|id| {
+                        let (index, option) =
+                            options.get(id.as_str()).ok_or("unknown question choice")?;
+                        Ok(if labels[option.label.as_str()] > 1 {
+                            format!(
+                                "{} (option {} of {})",
+                                option.label,
+                                index + 1,
+                                self.options.len()
+                            )
+                        } else {
+                            option.label.clone()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, &'static str>>()
+                    .map(|labels| labels.join(", "))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
-    pub text: String,
+    pub text: TextContent,
     pub status: StepStatus,
 }
 
@@ -337,12 +440,145 @@ pub enum ErrorKind {
 }
 
 impl Item {
+    /// Stateful plans, agents and questions can be explicitly reused by an adapter.
+    /// Completed output and accepted input remain terminal.
+    #[must_use]
+    pub fn next_status(&self, next: Status) -> Status {
+        if matches!(
+            self.kind,
+            ItemKind::Plan { .. } | ItemKind::Agent { .. } | ItemKind::Question { .. }
+        ) {
+            next
+        } else {
+            self.status.advance(next)
+        }
+    }
+
+    /// Allocated content bytes for resident-window budgets, excluding allocator overhead.
+    #[must_use]
+    pub fn resident_bytes(&self) -> usize {
+        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
+        let payload =
+            |value: &Option<TextContent>| value.as_ref().map_or(0, TextContent::resident_bytes);
+        let approval = |value: Option<&Approval>| {
+            value.map_or(0, |approval| {
+                payload(&approval.reason)
+                    + approval.options.capacity() * size_of::<Decision>()
+                    + match &approval.request {
+                        ApprovalRequest::Command { command, cwd } => {
+                            command.resident_bytes() + optional(cwd)
+                        }
+                        ApprovalRequest::Action { description } => description.resident_bytes(),
+                        ApprovalRequest::FileChange => 0,
+                    }
+            })
+        };
+        let content = match &self.kind {
+            ItemKind::UserMessage { text, images, .. } => {
+                text.resident_bytes()
+                    + images.capacity() * size_of::<BlobHash>()
+                    + images.iter().map(|hash| hash.0.capacity()).sum::<usize>()
+            }
+            ItemKind::AssistantMessage { text, .. } => text.resident_bytes(),
+            ItemKind::Approval {
+                target,
+                approval: request,
+            } => approval(Some(request)) + target.as_ref().map_or(0, |target| target.0.capacity()),
+            ItemKind::Tool {
+                tool,
+                title,
+                output,
+                approval: request,
+                ..
+            } => {
+                tool.resident_bytes()
+                    + optional(title)
+                    + approval(request.as_ref())
+                    + output
+                        .as_ref()
+                        .map_or(0, |output| output.text.resident_bytes())
+            }
+            ItemKind::Agent {
+                name,
+                description,
+                prompt,
+                agent_id,
+                model,
+                result,
+                label,
+                ..
+            } => {
+                description.resident_bytes()
+                    + payload(prompt)
+                    + payload(result)
+                    + [name, agent_id, model, label]
+                        .into_iter()
+                        .map(optional)
+                        .sum::<usize>()
+            }
+            ItemKind::Question {
+                questions,
+                answers,
+                answer_text,
+                ..
+            } => {
+                questions.resident_bytes(|question| {
+                    question.id.capacity()
+                        + optional(&question.header)
+                        + question.text.resident_bytes()
+                        + question.options.resident_bytes(|option| {
+                            option.id.capacity()
+                                + option.label.capacity()
+                                + payload(&option.description)
+                        })
+                }) + payload(answer_text)
+                    + answers.as_ref().map_or(0, |answers| {
+                        answers.resident_bytes(|answer| {
+                            answer.as_ref().map_or(0, |answer| match answer {
+                                QuestionAnswer::Choices { ids } => {
+                                    ids.resident_bytes(String::capacity)
+                                }
+                                QuestionAnswer::Text { text } => text.capacity(),
+                            })
+                        })
+                    })
+            }
+            ItemKind::Plan {
+                steps,
+                proposal,
+                approval: request,
+            } => {
+                steps.resident_bytes(|step| step.text.resident_bytes())
+                    + payload(proposal)
+                    + approval(request.as_ref())
+            }
+            ItemKind::Image { blob, caption } => blob.0.capacity() + payload(caption),
+            ItemKind::Compaction { .. } => 0,
+            ItemKind::Notice { kind, text } => {
+                text.resident_bytes()
+                    + match kind {
+                        NoticeKind::Goal { state } => state.capacity(),
+                        NoticeKind::Reroute { model } => model.capacity(),
+                        NoticeKind::Safety | NoticeKind::Info => 0,
+                    }
+            }
+            ItemKind::Error { message, .. } => message.resident_bytes(),
+        };
+        size_of::<Self>()
+            + self.id.0.capacity()
+            + self.thread_id.0.capacity()
+            + self.run_id.as_ref().map_or(0, |id| id.0.capacity())
+            + self.parent_id.as_ref().map_or(0, |id| id.0.capacity())
+            + optional(&self.native_id)
+            + content
+    }
+
     /// The text a reader sees first, for previews and titles.
     #[must_use]
     pub fn preview(&self) -> Option<&str> {
         match &self.kind {
             ItemKind::UserMessage { text, .. } | ItemKind::AssistantMessage { text, .. } => {
-                Some(text)
+                text.inline()
             }
             _ => None,
         }
@@ -360,5 +596,159 @@ impl Item {
                 .clone()
                 .unwrap_or_else(|| crate::fallback_agent_name(self.id.as_str()).to_owned()),
         )
+    }
+}
+
+impl ToolKind {
+    /// Totals of unified edit operations, computed once by Forge on save.
+    #[must_use]
+    pub fn edit_totals(&self) -> Option<crate::EditTotals> {
+        let Self::Edit { changes } = self else {
+            return None;
+        };
+        let mut totals = crate::EditTotals::default();
+        for change in changes.inline()? {
+            let Some(diff) = &change.diff else {
+                continue;
+            };
+            let diff = diff.inline()?;
+            let count = crate::EditTotals::from_diff(diff);
+            totals.added = totals.added.saturating_add(count.added);
+            totals.removed = totals.removed.saturating_add(count.removed);
+        }
+        Some(totals)
+    }
+
+    fn resident_bytes(&self) -> usize {
+        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
+        let payload =
+            |value: &Option<TextContent>| value.as_ref().map_or(0, TextContent::resident_bytes);
+        match self {
+            Self::Shell { command, cwd, .. } => command.resident_bytes() + optional(cwd),
+            Self::Read { path, .. } => path.capacity(),
+            Self::Edit { changes } => changes.resident_bytes(|change| {
+                change.path.capacity()
+                    + payload(&change.diff)
+                    + match &change.op {
+                        FileOp::Move { from } => from.capacity(),
+                        _ => 0,
+                    }
+            }),
+            Self::Search { pattern, path, .. } => pattern.capacity() + optional(path),
+            Self::WebFetch { url } => url.capacity(),
+            Self::WebSearch { query } => query.capacity(),
+            Self::Mcp {
+                server,
+                tool,
+                input,
+            } => server.capacity() + tool.capacity() + payload(input),
+            Self::ViewImage { path } => path.capacity(),
+            Self::AgentMessage {
+                recipient,
+                recipient_label,
+                summary,
+                text,
+            } => {
+                recipient.capacity()
+                    + recipient_label.capacity()
+                    + optional(summary)
+                    + text.resident_bytes()
+            }
+            Self::Other { name, input } => name.capacity() + payload(input),
+        }
+    }
+}
+
+impl crate::EditTotals {
+    /// Counts authored unified-diff operations. Forge stores this derivation
+    /// beside immutable source bytes, so status-only updates do not reload diffs.
+    pub fn from_diff(diff: &str) -> Self {
+        let mut totals = Self::default();
+        let mut in_hunk = false;
+        for line in diff.lines() {
+            if line.starts_with("diff --git ") {
+                in_hunk = false;
+                continue;
+            }
+            if line.starts_with("@@") {
+                in_hunk = true;
+                continue;
+            }
+            if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
+                continue;
+            }
+            if line.starts_with('+') {
+                totals.added = totals.added.saturating_add(1);
+            } else if line.starts_with('-') {
+                totals.removed = totals.removed.saturating_add(1);
+            }
+        }
+        totals
+    }
+}
+
+#[cfg(test)]
+mod question_identity_tests {
+    use super::{Question, QuestionAnswer, QuestionOption};
+    #[test]
+    fn duplicate_labels_keep_distinct_choice_identity_and_text_is_not_a_choice() {
+        let question = Question {
+            id: "q".into(),
+            header: None,
+            text: "Pick".into(),
+            multi_select: false,
+            options: vec![
+                QuestionOption {
+                    id: "a".into(),
+                    label: "Same".into(),
+                    description: None,
+                },
+                QuestionOption {
+                    id: "b".into(),
+                    label: "Same".into(),
+                    description: None,
+                },
+            ]
+            .into(),
+        };
+        let answer = QuestionAnswer::Choices {
+            ids: vec!["b".into()].into(),
+        };
+        assert!(question.validate_answer(&Some(answer.clone())).is_ok());
+        let encoded = serde_json::to_string(&answer).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuestionAnswer>(&encoded).unwrap(),
+            answer
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["Same".into()].into()
+                }))
+                .is_err()
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Text {
+                    text: "Same".into()
+                }))
+                .is_ok()
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["a".into(), "b".into()].into()
+                }))
+                .is_err()
+        );
+        let mut multi = question;
+        multi.multi_select = true;
+        assert!(
+            multi
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["a".into(), "a".into()].into()
+                }))
+                .is_err()
+        );
     }
 }

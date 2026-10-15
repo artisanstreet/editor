@@ -14,7 +14,6 @@ use anyhow::{Context, Result, bail, ensure};
 use base64::Engine as _;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_FEED: &str =
@@ -68,6 +67,16 @@ impl Source {
     }
 
     async fn fetch(&self, http: &reqwest::Client, name: &str) -> Result<Vec<u8>> {
+        // Bootstrap already downloaded this signed release. Missing platform
+        // archives fall through to the original feed for cross-host installs.
+        if usable_name(name)
+            && let Some(cache) = std::env::var_os("ARTISAN_RELEASE_CACHE")
+        {
+            let path = PathBuf::from(cache).join(name);
+            if path.is_file() {
+                return std::fs::read(&path).with_context(|| format!("read {}", path.display()));
+            }
+        }
         match self {
             Self::Dir(dir) => {
                 let path = dir.join(name);
@@ -143,7 +152,8 @@ fn verify_signature(raw: &[u8], signature: &[u8]) -> Result<()> {
     } else {
         PUBLIC_KEY_HEX.to_owned()
     };
-    let key: [u8; 32] = hex(&key_hex)?
+    let key: [u8; 32] = hex::decode(key_hex.trim())
+        .context("invalid release public key hex")?
         .try_into()
         .map_err(|_| anyhow::anyhow!("the release key is not 32 bytes"))?;
     let key = ed25519_dalek::VerifyingKey::from_bytes(&key).context("read the release key")?;
@@ -184,12 +194,7 @@ impl Release {
         );
         eprintln!("Downloading {}…", artifact.file);
         let bytes = self.source.fetch(&self.http, &artifact.file).await?;
-        let actual = Sha256::digest(&bytes)
-            .iter()
-            .fold(String::new(), |mut hex, byte| {
-                let _ = write!(hex, "{byte:02x}");
-                hex
-            });
+        let actual = hex::encode(Sha256::digest(&bytes));
         if !actual.eq_ignore_ascii_case(&artifact.sha256) {
             bail!(
                 "{} is corrupt or was tampered with (SHA-256 {actual}, expected {})",
@@ -240,32 +245,18 @@ pub fn usable_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b".-_+".contains(&byte))
 }
 
-fn hex(text: &str) -> Result<Vec<u8>> {
-    let text = text.trim();
-    ensure!(text.len().is_multiple_of(2), "odd-length hex");
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-                .context("invalid hex")
-        })
-        .collect()
-}
-
 /// `std::env::consts` names, as release.json uses them.
 pub fn this_platform() -> (&'static str, &'static str) {
     (std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// Orders dotted versions numerically (`0.10.0` > `0.9.1`).
+/// SemVer precedence ignores build metadata and ranks prereleases below releases.
 pub fn newer(candidate: &str, current: &str) -> bool {
-    let parts = |version: &str| -> Vec<u64> {
-        version
-            .split(|c: char| !c.is_ascii_digit())
-            .filter_map(|part| part.parse().ok())
-            .collect()
-    };
-    parts(candidate) > parts(current)
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(current),
+    ) {
+        (Ok(candidate), Ok(current)) => candidate.cmp_precedence(&current).is_gt(),
+        _ => false,
+    }
 }

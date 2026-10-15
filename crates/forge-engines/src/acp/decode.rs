@@ -4,6 +4,7 @@
 
 use super::Profile;
 use crate::{EngineEvent, LiveKind};
+use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, ErrorKind, FileChange, FileOp, ItemKind,
     NoticeKind, Output, Phase, PlanStep, Question, QuestionOption, SearchMode, Status, StepStatus,
@@ -12,28 +13,238 @@ use artisan_api::{
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
+#[derive(serde::Deserialize)]
+struct CursorQuestion {
+    id: String,
+    prompt: String,
+    #[serde(default)]
+    options: Vec<CursorChoice>,
+    #[serde(default, rename = "allowMultiple")]
+    allow_multiple: bool,
+}
+#[derive(serde::Deserialize)]
+struct CursorChoice {
+    id: String,
+    label: String,
+}
+
+fn permission_options(value: &Value) -> Result<Vec<(String, Decision)>, String> {
+    #[derive(serde::Deserialize)]
+    struct OptionEntry {
+        #[serde(rename = "optionId")]
+        id: String,
+        kind: OptionKind,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OptionKind {
+        AllowOnce,
+        AllowAlways,
+        RejectOnce,
+        RejectAlways,
+    }
+    let entries: Vec<OptionEntry> = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid permission options: {error}"))?;
+    if entries.is_empty() {
+        return Err("permission request requires offered options".into());
+    }
+    let mut ids = HashSet::new();
+    let mut options = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if entry.id.trim().is_empty() || !ids.insert(entry.id.clone()) {
+            return Err("permission options require nonempty unique native IDs".into());
+        }
+        let decision = match entry.kind {
+            OptionKind::AllowOnce => Decision::AllowOnce,
+            OptionKind::AllowAlways => Decision::AllowAlways,
+            OptionKind::RejectOnce => Decision::DenyOnce,
+            OptionKind::RejectAlways => Decision::DenyAlways,
+        };
+        options.push((entry.id, decision));
+    }
+    Ok(options)
+}
+
 const PLAN_KEY: &str = "plan";
 const GOAL_KEY: &str = "goal";
 
-/// A response to one of our requests.
-#[derive(Debug)]
-pub(crate) struct Response {
-    pub id: u64,
-    pub method: String,
-    pub result: Result<Value, String>,
+pub(crate) use crate::rpc::Response;
+
+#[derive(Debug, serde::Serialize)]
+struct ElicitationField {
+    name: String,
+    schema: Value,
+    required: bool,
+}
+
+impl ElicitationField {
+    fn value(&self, answer: &Option<artisan_api::QuestionAnswer>) -> Result<Option<Value>, String> {
+        let Some(answer) = answer else {
+            return if self.required {
+                Err(format!("{} is required", self.name))
+            } else {
+                Ok(None)
+            };
+        };
+        let kind = self.schema["type"].as_str().unwrap_or("string");
+        let source = if kind == "array" {
+            &self.schema["items"]
+        } else {
+            &self.schema
+        };
+        let choices = source["oneOf"]
+            .as_array()
+            .or_else(|| source["anyOf"].as_array())
+            .or_else(|| source["enum"].as_array());
+        let values = match answer {
+            artisan_api::QuestionAnswer::Choices { ids } if choices.is_some() => ids
+                .inline()
+                .ok_or_else(|| format!("{} submitted choices must be inline", self.name))?
+                .to_vec(),
+            artisan_api::QuestionAnswer::Text { text } if choices.is_none() => {
+                if kind == "array" {
+                    let values: Vec<Value> = serde_json::from_str(text)
+                        .map_err(|_| format!("{} requires a JSON array", self.name))?;
+                    values
+                        .into_iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| value.to_string())
+                        })
+                        .collect()
+                } else {
+                    vec![text.clone()]
+                }
+            }
+            _ => return Err(format!("{} has an answer of the wrong kind", self.name)),
+        };
+        for unsupported in [
+            "pattern",
+            "format",
+            "allOf",
+            "not",
+            "$ref",
+            "multipleOf",
+            "uniqueItems",
+        ] {
+            if source.get(unsupported).is_some() || self.schema.get(unsupported).is_some() {
+                return Err(format!(
+                    "{} uses unsupported schema constraint {unsupported}",
+                    self.name
+                ));
+            }
+        }
+        let scalar_kind = source["type"].as_str().unwrap_or("string");
+        let scalar = |text: &str| -> Result<Value, String> {
+            if let Some(choices) = choices {
+                return choices
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, choice)| {
+                        (text == format!("option-{index}")).then(|| {
+                            choice
+                                .get("const")
+                                .cloned()
+                                .unwrap_or_else(|| choice.clone())
+                        })
+                    })
+                    .ok_or_else(|| format!("{} has an invalid choice", self.name));
+            }
+            let value = match scalar_kind {
+                "boolean" => match text.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" => Value::Bool(true),
+                    "false" | "no" => Value::Bool(false),
+                    _ => return Err(format!("{} must be true or false", self.name)),
+                },
+                "integer" => text
+                    .trim()
+                    .parse::<i64>()
+                    .map(Value::from)
+                    .map_err(|_| format!("{} must be an integer", self.name))?,
+                "number" => {
+                    let number = text
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("{} must be a number", self.name))?;
+                    serde_json::Number::from_f64(number)
+                        .map(Value::Number)
+                        .ok_or_else(|| format!("{} must be finite", self.name))?
+                }
+                "string" => Value::String(text.to_owned()),
+                other => return Err(format!("{} has unsupported schema type {other}", self.name)),
+            };
+            if let Some(number) = value.as_f64() {
+                if source["minimum"]
+                    .as_f64()
+                    .is_some_and(|minimum| number < minimum)
+                    || source["maximum"]
+                        .as_f64()
+                        .is_some_and(|maximum| number > maximum)
+                    || source["exclusiveMinimum"]
+                        .as_f64()
+                        .is_some_and(|minimum| number <= minimum)
+                    || source["exclusiveMaximum"]
+                        .as_f64()
+                        .is_some_and(|maximum| number >= maximum)
+                {
+                    return Err(format!("{} is outside its allowed range", self.name));
+                }
+            }
+            if let Some(text) = value.as_str() {
+                let count = text.chars().count() as u64;
+                if source["minLength"]
+                    .as_u64()
+                    .is_some_and(|minimum| count < minimum)
+                    || source["maxLength"]
+                        .as_u64()
+                        .is_some_and(|maximum| count > maximum)
+                {
+                    return Err(format!("{} has an invalid length", self.name));
+                }
+            }
+            Ok(value)
+        };
+        if kind == "array" {
+            let count = values.len() as u64;
+            if self.schema["minItems"]
+                .as_u64()
+                .is_some_and(|minimum| count < minimum)
+                || self.schema["maxItems"]
+                    .as_u64()
+                    .is_some_and(|maximum| count > maximum)
+            {
+                return Err(format!("{} has an invalid number of selections", self.name));
+            }
+            Ok(Some(Value::Array(
+                values
+                    .iter()
+                    .map(|value| scalar(value))
+                    .collect::<Result<_, _>>()?,
+            )))
+        } else {
+            if values.len() != 1 {
+                return Err(format!("{} needs one value", self.name));
+            }
+            scalar(&values[0]).map(Some)
+        }
+    }
 }
 
 /// An engine request waiting on the user, by item key.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 enum Pending {
     Permission {
         rpc: Value,
         options: Vec<(String, Decision)>,
+        target: String,
+        approval: Approval,
     },
     /// `elicitation/create`: one schema property per question.
     Elicitation {
         rpc: Value,
-        fields: Vec<(String, String)>,
+        fields: Vec<ElicitationField>,
         asked: Vec<Question>,
     },
     /// `cursor/ask_question`: question ids and their `(option id, label)`s.
@@ -59,28 +270,30 @@ struct Tool {
     kind: Option<String>,
     title: Option<String>,
     raw_input: Value,
-    raw_output: Value,
+    exit_code: Option<i32>,
     text: String,
+    output: Option<Output>,
+    retained_kind: Option<ToolKind>,
+    retained_agent: Option<ItemKind>,
     changes: Vec<FileChange>,
     locations: Vec<String>,
     status: Option<Status>,
-    approval: Option<Approval>,
 }
 
 #[derive(Debug, Default)]
 struct Plan {
+    todo_index: HashMap<String, usize>,
     steps: Vec<PlanStep>,
-    proposal: Option<String>,
+    proposal: Option<artisan_api::TextContent>,
     approval: Option<Approval>,
     status: Option<Status>,
 }
 
 pub(crate) struct AcpDecoder {
+    ownership: crate::retained::Ownership,
+    reasoning_summary: crate::reasoning::Summary,
     profile: Profile,
-    next_id: u64,
-    requests: HashMap<u64, String>,
-    outbox: Vec<Value>,
-    responses: Vec<Response>,
+    rpc: crate::rpc::State,
     /// Session updates outside a prompt are `session/load` history.
     prompting: bool,
     message: Option<Message>,
@@ -103,11 +316,10 @@ pub(crate) struct AcpDecoder {
 impl AcpDecoder {
     pub(crate) fn new(profile: Profile) -> Self {
         Self {
+            ownership: crate::retained::Ownership::default(),
             profile,
-            next_id: 0,
-            requests: HashMap::new(),
-            outbox: Vec::new(),
-            responses: Vec::new(),
+            reasoning_summary: crate::reasoning::Summary::default(),
+            rpc: crate::rpc::State::acp(),
             prompting: false,
             message: None,
             messages: 0,
@@ -127,51 +339,139 @@ impl AcpDecoder {
 
     /// Queues a request and returns its id.
     pub(crate) fn request(&mut self, method: &str, params: Value) -> u64 {
-        self.next_id += 1;
-        let message =
-            json!({ "jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params });
-        self.sent(&message);
-        self.outbox.push(message);
-        self.next_id
+        self.on_sent(method, &params);
+        self.rpc.request(method, params)
     }
 
     pub(crate) fn notify(&mut self, method: &str, params: Value) {
-        self.outbox
-            .push(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
+        self.rpc.notify(method, Some(params));
     }
 
-    /// Records a request we sent, so its response can be told apart.
+    /// Records the exact requests from a transcript fixture.
+    #[cfg(test)]
     pub(crate) fn sent(&mut self, message: &Value) {
-        let (Some(id), Some(method)) = (message["id"].as_u64(), message["method"].as_str()) else {
+        let (Some(_), Some(method)) = (message["id"].as_u64(), message["method"].as_str()) else {
             return;
         };
-        self.next_id = self.next_id.max(id);
-        self.requests.insert(id, method.to_owned());
+        self.rpc.sent(message);
+        self.on_sent(method, &message["params"]);
+    }
+
+    fn on_sent(&mut self, method: &str, params: &Value) {
         match method {
             "session/prompt" => {
                 self.prompting = true;
                 self.stop_reason = None;
             }
-            "session/load" => {
-                self.session_id = message["params"]["sessionId"].as_str().map(str::to_owned)
-            }
+            "session/load" => self.session_id = params["sessionId"].as_str().map(str::to_owned),
             _ => {}
         }
     }
 
     pub(crate) fn take_outbox(&mut self) -> Vec<Value> {
-        std::mem::take(&mut self.outbox)
+        std::mem::take(&mut self.rpc.outbox)
     }
 
     pub(crate) fn take_responses(&mut self) -> Vec<Response> {
-        std::mem::take(&mut self.responses)
+        std::mem::take(&mut self.rpc.responses)
     }
 
-    pub(crate) fn feed(&mut self, line: &str) -> Vec<EngineEvent> {
-        let Ok(message) = serde_json::from_str::<Value>(line) else {
-            tracing::debug!(engine = ?self.profile, "skipping a non-JSON line from the engine");
-            return Vec::new();
-        };
+    pub(crate) fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
+        let message: Value = serde_json::from_str(line).context("decoding ACP protocol JSON")?;
+        anyhow::ensure!(message.is_object(), "ACP protocol frame must be an object");
+        anyhow::ensure!(
+            message["method"].is_string() || message.get("id").is_some(),
+            "native protocol frame is missing its required envelope identity"
+        );
+        let pending_frame = matches!(
+            message["method"].as_str(),
+            Some(
+                "session/request_permission"
+                    | "elicitation/create"
+                    | "cursor/ask_question"
+                    | "cursor/create_plan"
+            )
+        );
+        if pending_frame {
+            crate::retained::admit_pending(self.pending.len(), self.ownership.bytes(), &message)?;
+        }
+        let pending_before = self.pending.len();
+        let events = self.feed_raw(&message);
+        let events = self.reasoning_summary.normalize(events, false);
+        self.refresh_ownership(
+            &events,
+            pending_frame || self.pending.len() != pending_before,
+        )?;
+        // Hidden provider tool cards can mutate without a canonical event.
+        for id in [
+            message["params"]["update"]["toolCallId"].as_str(),
+            message["params"]["toolCall"]["toolCallId"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.charge_tool(id)?;
+        }
+        self.ownership.check()?;
+        Ok(events)
+    }
+
+    fn charge_tool(&mut self, key: &str) -> anyhow::Result<()> {
+        if let Some(tool) = self.tools.get(key) {
+            let charge = crate::retained::owned_charge(&(
+                &tool.kind,
+                &tool.title,
+                &tool.raw_input,
+                &tool.text,
+                &tool.output,
+                &tool.retained_kind,
+                &tool.retained_agent,
+                &tool.changes,
+                &tool.locations,
+            ))?
+            .saturating_add(crate::retained::owned_charge(&self.emitted.get(key))?);
+            self.ownership.replace(key, charge);
+        }
+        Ok(())
+    }
+
+    fn refresh_ownership(
+        &mut self,
+        events: &[EngineEvent],
+        pending_changed: bool,
+    ) -> anyhow::Result<()> {
+        for key in crate::retained::changed_keys(events) {
+            self.charge_tool(key)?;
+        }
+        if events.iter().any(|event| matches!(event, EngineEvent::Item { key, .. } | EngineEvent::Status { key, .. } if key == PLAN_KEY)) {
+            if let Some(plan) = &self.plan {
+                let charge = crate::retained::owned_charge(&(&plan.todo_index, &plan.steps, &plan.proposal, &plan.approval))?
+                    .saturating_add(crate::retained::owned_charge(&self.emitted.get(PLAN_KEY))?);
+                self.ownership.replace_buffer(PLAN_KEY, charge);
+            } else {
+                self.ownership.remove_buffer(PLAN_KEY);
+            }
+        }
+        if let Some(message) = &self.message {
+            let charge = message
+                .text
+                .capacity()
+                .saturating_add(message.key.capacity())
+                .saturating_add(message.native.as_ref().map_or(0, String::capacity))
+                .saturating_add(128)
+                .saturating_mul(4);
+            self.ownership.replace_buffer("open-message", charge);
+        } else {
+            self.ownership.remove_buffer("open-message");
+        }
+        if pending_changed {
+            self.ownership
+                .set_pending(crate::retained::owned_charge(&self.pending)?);
+        }
+        self.ownership.check()
+    }
+
+    fn feed_raw(&mut self, message: &Value) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         match (
             message.get("method").and_then(Value::as_str),
@@ -181,20 +481,15 @@ impl AcpDecoder {
                 self.engine_request(method, id.clone(), &message["params"], &mut events)
             }
             (Some(method), None) => self.notification(method, &message["params"], &mut events),
-            (None, Some(id)) => self.response(id, &message, &mut events),
+            (None, Some(_)) => self.response(message, &mut events),
             (None, None) => {}
         }
         events
     }
 
-    fn response(&mut self, id: &Value, message: &Value, events: &mut Vec<EngineEvent>) {
-        let Some(id) = id.as_u64() else { return };
-        let Some(method) = self.requests.remove(&id) else {
+    fn response(&mut self, message: &Value, events: &mut Vec<EngineEvent>) {
+        let Some(Response { id, method, result }) = self.rpc.response(message) else {
             return;
-        };
-        let result = match message.get("error") {
-            Some(error) => Err(rpc_error(error)),
-            None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
         };
         if let Ok(value) = &result {
             match method.as_str() {
@@ -244,7 +539,7 @@ impl AcpDecoder {
                 self.close_message(Phase::Commentary, events);
             }
         }
-        self.responses.push(Response { id, method, result });
+        self.rpc.responses.push(Response { id, method, result });
     }
 
     fn prompt_ended(&mut self, result: &Value, events: &mut Vec<EngineEvent>) {
@@ -277,12 +572,12 @@ impl AcpDecoder {
         };
         if let Some((kind, message)) = error {
             events.push(EngineEvent::Item {
-                key: format!("stop:{}", self.next_id),
+                key: format!("stop:{}", self.rpc.next_id),
                 parent: None,
                 status: Status::Done,
                 kind: ItemKind::Error {
                     kind,
-                    message: message.to_owned(),
+                    message: (message.to_owned()).into(),
                     retryable: false,
                 },
             });
@@ -297,7 +592,7 @@ impl AcpDecoder {
             "_x.ai/session/update" if update["sessionUpdate"] == "goal_updated" => {
                 self.goal(update, events)
             }
-            _ => {}
+            _ => tracing::debug!(method, "ignored unsupported ACP notification"),
         }
     }
 
@@ -329,7 +624,7 @@ impl AcpDecoder {
                         parent: None,
                         status: Status::Running,
                         kind: ItemKind::AssistantMessage {
-                            text: String::new(),
+                            text: (String::new()).into(),
                             phase: Phase::Commentary,
                         },
                     });
@@ -367,11 +662,19 @@ impl AcpDecoder {
                 self.emit_tool(id, events);
             }
             "plan" => {
-                let steps = update["entries"]
-                    .as_array()
-                    .map(|entries| plan_steps(entries, "content"))
-                    .unwrap_or_default();
-                self.plan.get_or_insert_default().steps = steps;
+                let parsed = match plan_steps(&update["entries"], false) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        self.plan_error(message, events);
+                        return;
+                    }
+                };
+                let plan = self.plan.get_or_insert_default();
+                plan.steps = parsed.steps;
+                plan.todo_index = parsed.index;
+                if plan.status != Some(Status::AwaitingUser) {
+                    plan.status = None;
+                }
                 self.emit_plan(events);
             }
             "session_info_update" => {
@@ -431,7 +734,7 @@ impl AcpDecoder {
                 kind: NoticeKind::Goal {
                     state: state.to_owned(),
                 },
-                text,
+                text: text.into(),
             },
         });
     }
@@ -449,28 +752,41 @@ impl AcpDecoder {
             "cursor/ask_question" => self.cursor_question(rpc, params, events),
             "cursor/create_plan" => self.cursor_plan(rpc, params, events),
             "cursor/update_todos" => {
-                if let Some(todos) = params["todos"].as_array() {
-                    let steps = plan_steps(todos, "content");
-                    let plan = self.plan.get_or_insert_default();
-                    if params["merge"].as_bool().unwrap_or(false) {
-                        for step in steps {
-                            match plan.steps.iter_mut().find(|known| known.text == step.text) {
-                                Some(known) => known.status = step.status,
-                                None => plan.steps.push(step),
-                            }
-                        }
-                    } else {
-                        plan.steps = steps;
+                let parsed = match plan_steps(&params["todos"], true) {
+                    Ok(parsed) => parsed,
+                    Err(message) => {
+                        self.invalid_plan_request(rpc, message, events);
+                        return;
                     }
-                    self.emit_plan(events);
+                };
+                let plan = self.plan.get_or_insert_default();
+                if params["merge"].as_bool().unwrap_or(false) {
+                    let mut incoming = parsed.index.into_iter().collect::<Vec<_>>();
+                    incoming.sort_by_key(|(_, index)| *index);
+                    for (id, index) in incoming {
+                        let step = parsed.steps[index].clone();
+                        if let Some(index) = plan.todo_index.get(&id) {
+                            plan.steps[*index] = step;
+                        } else {
+                            plan.todo_index.insert(id, plan.steps.len());
+                            plan.steps.push(step);
+                        }
+                    }
+                } else {
+                    plan.steps = parsed.steps;
+                    plan.todo_index = parsed.index;
                 }
+                if plan.status != Some(Status::AwaitingUser) {
+                    plan.status = None;
+                }
+                self.emit_plan(events);
                 self.reply(rpc, json!({}));
             }
             // Informational extension calls; Cursor ignores the reply.
             "cursor/task" | "cursor/generate_image" => self.reply(rpc, json!({})),
             _ => {
                 tracing::debug!(engine = ?self.profile, method, "declining an unsupported engine request");
-                self.outbox.push(json!({
+                self.rpc.outbox.push(json!({
                     "jsonrpc": "2.0",
                     "id": rpc,
                     "error": { "code": -32601, "message": format!("method not found: {method}") },
@@ -481,58 +797,101 @@ impl AcpDecoder {
 
     fn permission(&mut self, rpc: Value, params: &Value, events: &mut Vec<EngineEvent>) {
         let call = &params["toolCall"];
-        let Some(id) = call["toolCallId"].as_str() else {
-            self.reply(rpc, json!({ "outcome": { "outcome": "cancelled" } }));
-            return;
+        let parsed = permission_options(&params["options"]);
+        let id = call["toolCallId"]
+            .as_str()
+            .filter(|id| !id.trim().is_empty());
+        let (id, options) = match (id, parsed) {
+            (Some(id), Ok(options)) => (id, options),
+            (_, parsed) => {
+                let message = parsed
+                    .err()
+                    .unwrap_or_else(|| "permission request requires a nonempty toolCallId".into());
+                self.rpc.outbox.push(
+                    json!({"jsonrpc":"2.0","id":rpc,"error":{"code":-32602,"message":message}}),
+                );
+                self.questions += 1;
+                events.push(EngineEvent::Item {
+                    key: format!("permission-error:{}", self.questions),
+                    parent: None,
+                    status: Status::Failed,
+                    kind: ItemKind::Error {
+                        kind: ErrorKind::Execution,
+                        message: message.into(),
+                        retryable: false,
+                    },
+                });
+                return;
+            }
         };
         self.close_message(Phase::Commentary, events);
         self.merge_tool(id, call);
-        let options: Vec<(String, Decision)> = params["options"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|option| {
-                let decision = match option["kind"].as_str()? {
-                    "allow_once" => Decision::AllowOnce,
-                    "allow_always" => Decision::AllowAlways,
-                    "reject_once" => Decision::DenyOnce,
-                    "reject_always" => Decision::DenyAlways,
-                    _ => return None,
-                };
-                Some((option["optionId"].as_str()?.to_owned(), decision))
-            })
-            .collect();
         let tool = self.tools.get_mut(id).expect("merged above");
         let reason = content_blocks_text(&call["content"]);
         let request = match tool.kind.as_deref() {
             Some("execute") => ApprovalRequest::Command {
-                command: shell_command(tool),
+                command: (match shell_command(tool) {
+                    Ok(command) => command,
+                    Err(message) => {
+                        self.reply(rpc, json!({ "outcome": { "outcome": "cancelled" } }));
+                        events.push(EngineEvent::Item {
+                            key: format!("{id}:permission-error"),
+                            parent: None,
+                            status: Status::Failed,
+                            kind: ItemKind::Error {
+                                kind: ErrorKind::Execution,
+                                message: message.into(),
+                                retryable: false,
+                            },
+                        });
+                        return;
+                    }
+                })
+                .into(),
                 cwd: str_field(&tool.raw_input, &["cwd"]),
             },
             Some("edit" | "delete" | "move") => ApprovalRequest::FileChange,
             _ => ApprovalRequest::Action {
-                description: tool
+                description: (tool
                     .title
                     .clone()
-                    .unwrap_or_else(|| "Approve this tool call?".to_owned()),
+                    .unwrap_or_else(|| "Approve this tool call?".to_owned()))
+                .into(),
             },
         };
-        tool.approval = Some(Approval {
+        let approval = Approval {
             request,
-            reason: (!reason.is_empty()).then_some(reason),
+            reason: ((!reason.is_empty()).then_some(reason)).map(Into::into),
             options: options.iter().map(|(_, decision)| *decision).collect(),
             decision: None,
-        });
-        tool.status = Some(Status::AwaitingUser);
-        self.pending
-            .insert(id.to_owned(), Pending::Permission { rpc, options });
+        };
+        let key = format!("permission-request:{rpc}");
+        self.pending.insert(
+            key.clone(),
+            Pending::Permission {
+                rpc,
+                options,
+                target: id.to_owned(),
+                approval: approval.clone(),
+            },
+        );
         self.emit_tool(id, events);
+        events.push(EngineEvent::Approval {
+            key,
+            parent: None,
+            target: Some(id.to_owned()),
+            status: Status::AwaitingUser,
+            approval,
+        });
     }
 
     fn elicitation(&mut self, rpc: Value, params: &Value, events: &mut Vec<EngineEvent>) {
         let schema = &params["requestedSchema"];
         let Some(properties) = schema["properties"]
             .as_object()
+            .filter(|properties| {
+                !properties.is_empty() && properties.keys().all(|name| !name.trim().is_empty())
+            })
             .filter(|_| params["mode"].as_str().is_none_or(|mode| mode == "form"))
         else {
             self.reply(rpc, json!({ "action": "decline" }));
@@ -550,11 +909,22 @@ impl AcpDecoder {
             questions.push(Question {
                 id: key.clone(),
                 header: title.map(str::to_owned),
-                text: description.or(title).unwrap_or(message).to_owned(),
+                text: (description
+                    .or(title)
+                    .or_else(|| (!message.trim().is_empty()).then_some(message))
+                    .unwrap_or(key)
+                    .to_owned())
+                .into(),
                 multi_select: kind == "array",
-                options: schema_choices(property),
+                options: (schema_choices(property)).into(),
             });
-            fields.push((key.clone(), kind));
+            fields.push(ElicitationField {
+                name: key.clone(),
+                schema: property.clone(),
+                required: schema["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|name| name.as_str() == Some(key))),
+            });
         }
         self.questions += 1;
         let key = format!("question:{}", self.questions);
@@ -575,8 +945,9 @@ impl AcpDecoder {
             status: Status::AwaitingUser,
             kind: ItemKind::Question {
                 blocking,
-                questions,
+                questions: questions.into(),
                 answers: None,
+                answer_text: None,
             },
         });
     }
@@ -589,6 +960,42 @@ impl AcpDecoder {
             },
             str::to_owned,
         );
+        let parsed = <Vec<CursorQuestion> as serde::Deserialize>::deserialize(&params["questions"]);
+        let parsed = match parsed {
+            Ok(questions)
+                if !questions.is_empty()
+                    && questions.iter().all(|question| {
+                        !question.id.trim().is_empty()
+                            && !question.prompt.trim().is_empty()
+                            && question.options.iter().all(|option| {
+                                !option.id.trim().is_empty() && !option.label.trim().is_empty()
+                            })
+                    }) =>
+            {
+                questions
+            }
+            _ => {
+                tracing::warn!("Cursor supplied malformed questions");
+                self.rpc.outbox.push(json!({ "jsonrpc": "2.0", "id": rpc, "error": { "code": -32602, "message": "questions require nonempty IDs and prompts, with valid option IDs and labels" } }));
+                return;
+            }
+        };
+        let duplicates = {
+            let mut ids = HashSet::new();
+            parsed.iter().any(|question| {
+                !ids.insert(question.id.as_str()) || {
+                    let mut options = HashSet::new();
+                    question
+                        .options
+                        .iter()
+                        .any(|option| !options.insert(option.id.as_str()))
+                }
+            })
+        };
+        if duplicates {
+            self.rpc.outbox.push(json!({"jsonrpc":"2.0","id":rpc,"error":{"code":-32602,"message":"questions and their options require unique native IDs"}}));
+            return;
+        }
         self.hidden.insert(key.clone());
         let header = params["title"]
             .as_str()
@@ -596,31 +1003,27 @@ impl AcpDecoder {
             .map(str::to_owned);
         let mut ids = Vec::new();
         let mut questions = Vec::new();
-        for question in params["questions"].as_array().into_iter().flatten() {
-            let id = question["id"].as_str().unwrap_or_default().to_owned();
-            let options: Vec<(String, String)> = question["options"]
-                .as_array()
+        for question in parsed {
+            let id = question.id;
+            let options: Vec<(String, String)> = question
+                .options
                 .into_iter()
-                .flatten()
-                .filter_map(|option| {
-                    Some((
-                        option["id"].as_str()?.to_owned(),
-                        option["label"].as_str()?.to_owned(),
-                    ))
-                })
+                .map(|option| (option.id, option.label))
                 .collect();
             questions.push(Question {
                 id: id.clone(),
                 header: header.clone(),
-                text: question["prompt"].as_str().unwrap_or_default().to_owned(),
-                multi_select: question["allowMultiple"].as_bool().unwrap_or(false),
+                text: (question.prompt).into(),
+                multi_select: question.allow_multiple,
                 options: options
                     .iter()
-                    .map(|(_, label)| QuestionOption {
+                    .map(|(id, label)| QuestionOption {
+                        id: id.clone(),
                         label: label.clone(),
                         description: None,
                     })
-                    .collect(),
+                    .collect::<Vec<_>>()
+                    .into(),
             });
             ids.push((id, options));
         }
@@ -639,13 +1042,25 @@ impl AcpDecoder {
             status: Status::AwaitingUser,
             kind: ItemKind::Question {
                 blocking: true,
-                questions,
+                questions: questions.into(),
                 answers: None,
+                answer_text: None,
             },
         });
     }
 
     fn cursor_plan(&mut self, rpc: Value, params: &Value, events: &mut Vec<EngineEvent>) {
+        let parsed = match params
+            .get("todos")
+            .map(|todos| plan_steps(todos, true))
+            .transpose()
+        {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.invalid_plan_request(rpc, message, events);
+                return;
+            }
+        };
         if let Some(id) = params["toolCallId"].as_str() {
             self.hidden.insert(id.to_owned());
         }
@@ -660,12 +1075,15 @@ impl AcpDecoder {
             .unwrap_or("Approve this plan?")
             .to_owned();
         let plan = self.plan.get_or_insert_default();
-        if let Some(todos) = params["todos"].as_array().filter(|todos| !todos.is_empty()) {
-            plan.steps = plan_steps(todos, "content");
+        if let Some(parsed) = parsed {
+            plan.steps = parsed.steps;
+            plan.todo_index = parsed.index;
         }
-        plan.proposal = field("plan").map(str::to_owned);
+        plan.proposal = field("plan").map(|text| text.to_owned().into());
         plan.approval = Some(Approval {
-            request: ApprovalRequest::Action { description },
+            request: ApprovalRequest::Action {
+                description: description.into(),
+            },
             reason: None,
             options: vec![Decision::AllowOnce, Decision::DenyOnce],
             decision: None,
@@ -680,62 +1098,107 @@ impl AcpDecoder {
     /// Answers the approval or question on `key`. Unknown keys are ignored:
     /// the request may already have been cancelled.
     pub(crate) fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
+        let mut events = self.answer_raw(key, answer);
+        if let Err(error) = self.refresh_ownership(&events, true) {
+            events.push(crate::retained::ownership_error(key, error));
+        }
+        events
+    }
+
+    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         let Some(pending) = self.pending.remove(key) else {
             tracing::debug!(engine = ?self.profile, key, "answer for nothing pending");
             return events;
         };
         match (pending, answer) {
-            (Pending::Permission { rpc, options }, Answer::Approval { decision }) => {
-                let chosen = options
-                    .iter()
-                    .find(|(_, offered)| offered == decision)
-                    .or_else(|| {
-                        options
-                            .iter()
-                            .find(|(_, offered)| offered.allows() == decision.allows())
-                    })
-                    .filter(|_| *decision != Decision::Cancelled);
-                let outcome = match chosen {
-                    Some((option, _)) => json!({ "outcome": "selected", "optionId": option }),
-                    None => json!({ "outcome": "cancelled" }),
+            (
+                Pending::Permission {
+                    rpc,
+                    options,
+                    target,
+                    mut approval,
+                },
+                Answer::Approval { decision },
+            ) => {
+                let Some((option, _)) = options.iter().find(|(_, offered)| offered == decision)
+                else {
+                    self.pending.insert(
+                        key.to_owned(),
+                        Pending::Permission {
+                            rpc,
+                            options,
+                            target,
+                            approval,
+                        },
+                    );
+                    tracing::warn!(
+                        key,
+                        ?decision,
+                        "approval answer was not offered; request remains pending"
+                    );
+                    return events;
                 };
-                self.reply(rpc, json!({ "outcome": outcome }));
-                if let Some(tool) = self.tools.get_mut(key) {
-                    if let Some(approval) = &mut tool.approval {
-                        approval.decision = Some(*decision);
-                    }
-                    tool.status = Some(if decision.allows() {
-                        Status::Running
+                self.reply(
+                    rpc,
+                    json!({"outcome":{"outcome":"selected","optionId":option}}),
+                );
+                approval.decision = Some(*decision);
+                events.push(EngineEvent::Approval {
+                    key: key.to_owned(),
+                    parent: None,
+                    target: Some(target),
+                    status: if decision.allows() {
+                        Status::Done
                     } else {
                         Status::Declined
-                    });
-                }
-                self.emit_tool(key, &mut events);
+                    },
+                    approval,
+                });
             }
             (Pending::Elicitation { rpc, fields, asked }, Answer::Question { answers }) => {
                 if answers.iter().all(Option::is_none) {
                     self.reply(rpc, json!({ "action": "decline" }));
                 } else {
                     let mut content = Map::new();
-                    for ((name, kind), values) in fields.iter().zip(answers) {
-                        let Some(values) = values else { continue };
-                        let first = values.first().map_or("", String::as_str);
-                        let value = match kind.as_str() {
-                            "array" => json!(values),
-                            "boolean" => json!(
-                                first.eq_ignore_ascii_case("true")
-                                    || first.eq_ignore_ascii_case("yes")
-                            ),
-                            "integer" => {
-                                first.trim().parse::<i64>().map_or(Value::Null, Value::from)
-                            }
-                            "number" => {
-                                first.trim().parse::<f64>().map_or(Value::Null, Value::from)
-                            }
-                            _ => json!(first),
-                        };
-                        content.insert(name.clone(), value);
+                    let validated = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(index, field)| {
+                            field
+                                .value(answers.get(index).unwrap_or(&None))
+                                .map(|value| (field.name.clone(), value))
+                        })
+                        .collect::<Result<Vec<_>, _>>();
+                    let values = match validated {
+                        Ok(values) => values,
+                        Err(message) => {
+                            tracing::warn!(
+                                key,
+                                message,
+                                "invalid elicitation answer; request remains pending"
+                            );
+                            events.push(EngineEvent::Item {
+                                key: format!("answer-error:{key}"),
+                                parent: None,
+                                status: Status::Done,
+                                kind: ItemKind::Error {
+                                    kind: ErrorKind::Execution,
+                                    message: (message.clone()).into(),
+                                    retryable: true,
+                                },
+                            });
+                            self.pending.insert(
+                                key.to_owned(),
+                                Pending::Elicitation { rpc, fields, asked },
+                            );
+                            return events;
+                        }
+                    };
+                    for (name, value) in values {
+                        if let Some(value) = value {
+                            content.insert(name, value);
+                        }
                     }
                     self.reply(rpc, json!({ "action": "accept", "content": content }));
                 }
@@ -752,23 +1215,44 @@ impl AcpDecoder {
                 let outcome = if answers.iter().all(Option::is_none) {
                     json!({ "outcome": "skipped", "reason": "User skipped questions" })
                 } else {
-                    let answers: Vec<Value> = questions
+                    let selected = questions
                         .iter()
                         .zip(answers)
-                        .filter_map(|((id, options), values)| {
-                            let selected: Vec<&str> = values
-                                .as_ref()?
-                                .iter()
-                                .map(|value| {
-                                    options
-                                        .iter()
-                                        .find(|(option, label)| option == value || label == value)
-                                        .map_or(value.as_str(), |(option, _)| option.as_str())
-                                })
-                                .collect();
-                            Some(json!({ "questionId": id, "selectedOptionIds": selected }))
+                        .filter_map(|((id, options), answer)| {
+                            let answer = answer.as_ref()?;
+                            let artisan_api::QuestionAnswer::Choices { ids } = answer else {
+                                return Some(Err("Cursor accepts only choice IDs".to_owned()));
+                            };
+                            let Some(ids) = ids.inline() else {
+                                return Some(Err(
+                                    "Cursor submitted choices must be inline".to_owned()
+                                ));
+                            };
+                            if ids.iter().any(|selected| {
+                                !options.iter().any(|(option, _)| option == selected)
+                            }) {
+                                return Some(
+                                    Err("Cursor received an unknown choice ID".to_owned()),
+                                );
+                            }
+                            Some(Ok(json!({ "questionId": id, "selectedOptionIds": ids })))
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, String>>();
+                    let answers = match selected {
+                        Ok(answers) => answers,
+                        Err(message) => {
+                            events.push(crate::question::invalid_answer(key, message));
+                            self.pending.insert(
+                                key.to_owned(),
+                                Pending::CursorQuestion {
+                                    rpc,
+                                    questions,
+                                    asked,
+                                },
+                            );
+                            return events;
+                        }
+                    };
                     json!({ "outcome": "answered", "answers": answers })
                 };
                 self.reply(rpc, json!({ "outcome": outcome }));
@@ -804,7 +1288,7 @@ impl AcpDecoder {
         &self,
         key: &str,
         questions: Vec<Question>,
-        answers: &[Option<Vec<String>>],
+        answers: &[Option<artisan_api::QuestionAnswer>],
     ) -> EngineEvent {
         EngineEvent::Item {
             key: key.to_owned(),
@@ -812,8 +1296,9 @@ impl AcpDecoder {
             status: Status::Done,
             kind: ItemKind::Question {
                 blocking: self.profile == Profile::Cursor,
-                questions,
-                answers: Some(answers.to_vec()),
+                questions: questions.into(),
+                answers: Some(answers.to_vec().into()),
+                answer_text: None,
             },
         }
     }
@@ -821,23 +1306,39 @@ impl AcpDecoder {
     /// `session/cancel` obliges the client to settle every open request as
     /// cancelled.
     pub(crate) fn cancel_pending(&mut self) -> Vec<EngineEvent> {
+        self.cancel_pending_inner(true)
+    }
+
+    fn cancel_pending_inner(&mut self, include_nonblocking: bool) -> Vec<EngineEvent> {
         let mut events = Vec::new();
         let mut keys: Vec<String> = self.pending.keys().cloned().collect();
         keys.sort();
         for key in keys {
+            if !include_nonblocking
+                && self.profile == Profile::Grok
+                && matches!(self.pending.get(&key), Some(Pending::Elicitation { .. }))
+            {
+                continue;
+            }
             let Some(pending) = self.pending.remove(&key) else {
                 continue;
             };
             match pending {
-                Pending::Permission { rpc, .. } => {
-                    self.reply(rpc, json!({ "outcome": { "outcome": "cancelled" } }));
-                    if let Some(tool) = self.tools.get_mut(&key) {
-                        if let Some(approval) = &mut tool.approval {
-                            approval.decision = Some(Decision::Cancelled);
-                        }
-                        tool.status = Some(Status::Cancelled);
-                    }
-                    self.emit_tool(&key, &mut events);
+                Pending::Permission {
+                    rpc,
+                    target,
+                    mut approval,
+                    ..
+                } => {
+                    self.reply(rpc, json!({"outcome":{"outcome":"cancelled"}}));
+                    approval.decision = Some(Decision::Cancelled);
+                    events.push(EngineEvent::Approval {
+                        key,
+                        parent: None,
+                        target: Some(target),
+                        status: Status::Cancelled,
+                        approval,
+                    });
                 }
                 Pending::Elicitation { rpc, .. } => {
                     self.reply(rpc, json!({ "action": "cancel" }));
@@ -860,7 +1361,7 @@ impl AcpDecoder {
 
     /// Settles what the engine left open when the run ends.
     pub(crate) fn end_run(&mut self, cancelled: bool) -> Vec<EngineEvent> {
-        let mut events = self.cancel_pending();
+        let mut events = self.cancel_pending_inner(cancelled || self.profile == Profile::Cursor);
         self.close_message(Phase::Commentary, &mut events);
         if let Some(plan) = &self.plan
             && !plan.status.is_some_and(Status::is_terminal)
@@ -869,6 +1370,16 @@ impl AcpDecoder {
                 key: PLAN_KEY.to_owned(),
                 status: Status::Done,
             });
+        }
+        if let Some(plan) = &mut self.plan {
+            // A Status settlement reuses the already emitted source. Its native
+            // editable state must release source bodies just like a final Item.
+            for step in &mut plan.steps {
+                crate::retained::compact_text(&mut step.text);
+            }
+            if let Some(proposal) = &mut plan.proposal {
+                crate::retained::compact_text(proposal);
+            }
         }
         if cancelled {
             let mut open: Vec<&String> = self
@@ -889,7 +1400,8 @@ impl AcpDecoder {
     }
 
     fn reply(&mut self, rpc: Value, result: Value) {
-        self.outbox
+        self.rpc
+            .outbox
             .push(json!({ "jsonrpc": "2.0", "id": rpc, "result": result }));
     }
 
@@ -900,7 +1412,7 @@ impl AcpDecoder {
                 parent: None,
                 status: Status::Done,
                 kind: ItemKind::AssistantMessage {
-                    text: message.text,
+                    text: (message.text).into(),
                     phase,
                 },
             });
@@ -917,9 +1429,28 @@ impl AcpDecoder {
         }
         if !update["rawInput"].is_null() {
             tool.raw_input = update["rawInput"].clone();
+            tool.retained_kind = None;
+            tool.retained_agent = None;
         }
         if !update["rawOutput"].is_null() {
-            tool.raw_output = update["rawOutput"].clone();
+            let output = &update["rawOutput"];
+            tool.exit_code = ["exitCode", "exit_code"]
+                .iter()
+                .find_map(|name| output[name].as_i64())
+                .and_then(|code| i32::try_from(code).ok());
+            let text = match output {
+                Value::String(text) => text.clone(),
+                Value::Object(_) => ["output", "stdout", "content", "stderr", "error"]
+                    .iter()
+                    .filter_map(|name| output[name].as_str())
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            };
+            if !text.is_empty() {
+                tool.text = text;
+            }
         }
         if let Some(locations) = update["locations"].as_array() {
             tool.locations = locations
@@ -939,6 +1470,9 @@ impl AcpDecoder {
                 .collect();
             if !changes.is_empty() {
                 tool.changes = changes;
+                if let Some(ToolKind::Edit { changes }) = &mut tool.retained_kind {
+                    *changes = tool.changes.clone().into();
+                }
             }
         }
         let status = match update["status"].as_str() {
@@ -958,7 +1492,7 @@ impl AcpDecoder {
     }
 
     fn emit_tool(&mut self, id: &str, events: &mut Vec<EngineEvent>) {
-        let Some(tool) = self.tools.get(id) else {
+        let Some(tool) = self.tools.get_mut(id) else {
             return;
         };
         let input_name = tool.raw_input["_toolName"].as_str();
@@ -971,45 +1505,164 @@ impl AcpDecoder {
             return;
         }
         let status = tool.status.unwrap_or(Status::Running);
-        let kind = if input_name == Some("task") {
+        let kind = if let Some(mut agent) = tool.retained_agent.clone() {
+            if let ItemKind::Agent { result, .. } = &mut agent
+                && !tool.text.is_empty()
+                && status.is_terminal()
+            {
+                *result = Some(tool.text.clone().into());
+            }
+            agent
+        } else if input_name == Some("task") {
             let prompt = str_field(&tool.raw_input, &["prompt"]);
             let description = str_field(&tool.raw_input, &["description"]);
             ItemKind::Agent {
-                name: description
-                    .clone()
-                    .or_else(|| str_field(&tool.raw_input, &["subagentType"])),
-                description: prompt.or(description).unwrap_or_default(),
-                prompt: None,
+                name: str_field(&tool.raw_input, &["subagentType"]),
+                description: (description.unwrap_or_default()).into(),
+                prompt: prompt.map(Into::into),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: false,
-                result: (!tool.text.is_empty()).then(|| tool.text.clone()),
+                result: ((status.is_terminal() && !tool.text.is_empty())
+                    .then(|| tool.text.clone()))
+                .map(Into::into),
                 label: None,
             }
         } else {
-            let output = tool_output(tool);
+            if !status.is_terminal() && !tool.text.is_empty() {
+                let key = id.to_owned();
+                let target = if tool.kind.as_deref() == Some("execute") {
+                    LiveKind::Shell { key }
+                } else {
+                    LiveKind::Progress { key }
+                };
+                events.push(EngineEvent::Live {
+                    target,
+                    text: tool.text.clone(),
+                    append: false,
+                });
+            }
+            if status.is_terminal() && !tool.text.is_empty() {
+                tool.output = Some(Output::from_text(&tool.text));
+                tool.text = String::new();
+            }
+            let canonical = match tool
+                .retained_kind
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| tool_kind(tool))
+            {
+                Ok(kind) => kind,
+                Err(message) => {
+                    // ToolCall updates may announce identity before their input.
+                    // Only completed malformed calls become explicit errors.
+                    if status.is_terminal() {
+                        self.emit_changed(
+                            id,
+                            Status::Done,
+                            ItemKind::Error {
+                                kind: ErrorKind::Execution,
+                                message: message.into(),
+                                retryable: false,
+                            },
+                            events,
+                        );
+                    }
+                    return;
+                }
+            };
             ItemKind::Tool {
-                tool: tool_kind(tool),
+                tool: canonical,
                 title: tool.title.clone(),
-                output: (!output.is_empty()).then(|| Output::from_text(&output)),
-                exit_code: ["exitCode", "exit_code"]
-                    .iter()
-                    .find_map(|name| tool.raw_output[name].as_i64())
-                    .and_then(|code| i32::try_from(code).ok()),
-                approval: tool.approval.clone(),
+                output: status.is_terminal().then(|| tool.output.clone()).flatten(),
+                exit_code: tool.exit_code,
+                approval: None,
             }
         };
+        // Preserve the first full payload in the ordered output, while retaining
+        // only immutable references for later partial status/output callbacks.
+        let mut retained = kind.clone();
+        if status.is_terminal() {
+            if let Err(error) = crate::retained::compact_terminal(&mut retained) {
+                self.plan_error(
+                    format!("cannot normalize native tool records: {error}"),
+                    events,
+                );
+                return;
+            }
+            match retained {
+                ItemKind::Tool {
+                    tool: canonical,
+                    output,
+                    ..
+                } => {
+                    tool.retained_kind = Some(canonical);
+                    tool.output = output;
+                }
+                agent @ ItemKind::Agent { .. } => tool.retained_agent = Some(agent),
+                _ => {}
+            }
+            let native_name = tool.raw_input["_toolName"].as_str().map(str::to_owned);
+            tool.raw_input = native_name
+                .map(|name| json!({"_toolName": name}))
+                .unwrap_or(Value::Null);
+            tool.changes = Vec::new();
+            tool.text = String::new();
+        }
         self.emit_changed(id, status, kind, events);
     }
 
+    fn plan_error(&mut self, message: String, events: &mut Vec<EngineEvent>) {
+        self.questions += 1;
+        events.push(EngineEvent::Item {
+            key: format!("plan-error:{}", self.questions),
+            parent: None,
+            status: Status::Failed,
+            kind: ItemKind::Error {
+                kind: ErrorKind::Execution,
+                message: message.into(),
+                retryable: false,
+            },
+        });
+    }
+    fn invalid_plan_request(&mut self, rpc: Value, message: String, events: &mut Vec<EngineEvent>) {
+        self.rpc
+            .outbox
+            .push(json!({"jsonrpc":"2.0","id":rpc,"error":{"code":-32602,"message":message}}));
+        self.plan_error(message, events);
+    }
     fn emit_plan(&mut self, events: &mut Vec<EngineEvent>) {
         let Some(plan) = &self.plan else { return };
-        let status = plan.status.unwrap_or(Status::Running);
+        let status = plan.status.unwrap_or_else(|| {
+            if plan
+                .steps
+                .iter()
+                .all(|step| matches!(step.status, StepStatus::Done | StepStatus::Cancelled))
+            {
+                Status::Done
+            } else {
+                Status::Running
+            }
+        });
         let kind = ItemKind::Plan {
-            steps: plan.steps.clone(),
+            steps: (plan.steps.clone()).into(),
             proposal: plan.proposal.clone(),
             approval: plan.approval.clone(),
         };
         self.emit_changed(PLAN_KEY, status, kind, events);
+        if status.is_terminal() {
+            // Keep native todo IDs and editable records for real late deltas;
+            // release only source strings already present in the full event.
+            if let Some(plan) = &mut self.plan {
+                for step in &mut plan.steps {
+                    crate::retained::compact_text(&mut step.text);
+                }
+                if let Some(proposal) = &mut plan.proposal {
+                    crate::retained::compact_text(proposal);
+                }
+            }
+        }
     }
 
     fn emit_changed(
@@ -1023,25 +1676,17 @@ impl AcpDecoder {
         if self.emitted.get(key) == Some(&item) {
             return;
         }
-        self.emitted.insert(key.to_owned(), item.clone());
+        if status.is_terminal() {
+            self.emitted.remove(key);
+        } else {
+            self.emitted.insert(key.to_owned(), item.clone());
+        }
         events.push(EngineEvent::Item {
             key: key.to_owned(),
             parent: None,
             status: item.0,
             kind: item.1,
         });
-    }
-}
-
-fn rpc_error(error: &Value) -> String {
-    let message = error["message"].as_str().unwrap_or("engine error");
-    let detail = error["data"]["message"]
-        .as_str()
-        .or_else(|| error["data"].as_str());
-    match detail {
-        Some(detail) if detail.starts_with(message) => detail.to_owned(),
-        Some(detail) => format!("{message}: {detail}"),
-        _ => message.to_owned(),
     }
 }
 
@@ -1082,17 +1727,24 @@ fn str_field(value: &Value, names: &[&str]) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn shell_command(tool: &Tool) -> String {
+fn shell_command(tool: &Tool) -> Result<artisan_api::TextContent, String> {
+    if let Some(ToolKind::Shell { command, .. }) = &tool.retained_kind {
+        return Ok(command.clone());
+    }
     match &tool.raw_input["command"] {
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => str_field(&tool.raw_input, &["command", "cmd"])
-            // Cursor's permission requests carry the command only in the title.
-            .or_else(|| tool.title.as_deref().map(|title| title.trim().trim_matches('`').to_owned()))
-            .unwrap_or_default(),
+        Value::Array(parts) => {
+            let Some(parts) = parts.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+                return Err("ACP command contains a non-string argument".into());
+            };
+            shlex::try_join(parts)
+                .map(Into::into)
+                .map_err(|error| format!("ACP command cannot be represented: {error}"))
+        }
+        _ => str_field(&tool.raw_input,&["command","cmd"])
+            // Cursor permission messages may carry the actual command in title.
+            .or_else(||tool.title.as_deref().map(|title|title.trim().trim_matches('`').to_owned()))
+            .map(Into::into)
+            .ok_or_else(||"ACP command is missing".to_owned()),
     }
 }
 
@@ -1102,24 +1754,26 @@ fn tool_path(tool: &Tool) -> String {
         &["path", "file_path", "filePath", "abs_path"],
     )
     .or_else(|| tool.locations.first().cloned())
-    .or_else(|| tool.title.clone())
     .unwrap_or_default()
 }
 
-fn tool_kind(tool: &Tool) -> ToolKind {
+fn tool_kind(tool: &Tool) -> Result<ToolKind, String> {
     let input = &tool.raw_input;
-    match tool.kind.as_deref() {
+    let kind = match tool.kind.as_deref() {
         Some("execute") => ToolKind::Shell {
-            command: shell_command(tool),
+            command: (shell_command(tool)?).into(),
             cwd: str_field(input, &["cwd"]),
             background: false,
         },
         Some("read") => {
             let offset = input["offset"].as_u64();
-            let range = input["limit"].as_u64().map(|limit| {
-                let start = offset.unwrap_or(0) + 1;
-                (start, start + limit - 1)
-            });
+            let range = input["limit"]
+                .as_u64()
+                .filter(|limit| *limit > 0)
+                .map(|limit| {
+                    let start = offset.unwrap_or(0).saturating_add(1);
+                    (start, start.saturating_add(limit - 1))
+                });
             ToolKind::Read {
                 path: tool_path(tool),
                 range,
@@ -1151,7 +1805,9 @@ fn tool_kind(tool: &Tool) -> ToolKind {
             } else {
                 tool.changes.clone()
             };
-            ToolKind::Edit { changes }
+            ToolKind::Edit {
+                changes: changes.into(),
+            }
         }
         Some("search") => {
             if let Some(query) = str_field(input, &["searchTerm"]) {
@@ -1196,7 +1852,7 @@ fn tool_kind(tool: &Tool) -> ToolKind {
             (Some(server), Some(tool_name)) => ToolKind::Mcp {
                 server,
                 tool: tool_name,
-                input: input.get("args").map(Value::to_string),
+                input: (input.get("args").map(Value::to_string)).map(Into::into),
             },
             _ => ToolKind::Other {
                 name: tool
@@ -1204,25 +1860,37 @@ fn tool_kind(tool: &Tool) -> ToolKind {
                     .clone()
                     .or_else(|| tool.kind.clone())
                     .unwrap_or_else(|| "tool".to_owned()),
-                input: (!input.is_null()).then(|| input.to_string()),
+                input: ((!input.is_null()).then(|| input.to_string())).map(Into::into),
             },
         },
-    }
-}
-
-fn tool_output(tool: &Tool) -> String {
-    if !tool.text.is_empty() {
-        return tool.text.clone();
-    }
-    match &tool.raw_output {
-        Value::String(text) => text.clone(),
-        output @ Value::Object(_) => ["output", "stdout", "content", "stderr", "error"]
-            .iter()
-            .filter_map(|name| output[name].as_str())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
+    };
+    let invalid =
+        match &kind {
+            ToolKind::Shell { command, .. } => command
+                .inline()
+                .expect("adapter command is inline before storage")
+                .trim()
+                .is_empty(),
+            ToolKind::Read { path, .. } => path.trim().is_empty(),
+            ToolKind::Edit { changes } => changes.is_empty()
+                || changes
+                    .inline()
+                    .expect("new native changes are inline")
+                    .iter()
+                    .any(|change| {
+                        change.path.trim().is_empty()
+                            || matches!(&change.op,FileOp::Move {from} if from.trim().is_empty())
+                    }),
+            ToolKind::Search { pattern, .. } => pattern.trim().is_empty(),
+            ToolKind::WebFetch { url } => url.trim().is_empty(),
+            ToolKind::WebSearch { query } => query.trim().is_empty(),
+            ToolKind::Other { name, .. } => name.trim().is_empty(),
+            _ => false,
+        };
+    if invalid {
+        Err("ACP tool omitted required native fields".into())
+    } else {
+        Ok(kind)
     }
 }
 
@@ -1242,30 +1910,57 @@ fn file_change(kind: Option<&str>, block: &Value) -> Option<FileChange> {
     Some(FileChange {
         path,
         op,
-        diff: (!diff.is_empty()).then_some(diff),
+        diff: ((!diff.is_empty()).then_some(diff)).map(Into::into),
     })
 }
 
-fn plan_steps(entries: &[Value], text_field: &str) -> Vec<PlanStep> {
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let text = entry[text_field]
-                .as_str()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())?;
-            let status = match entry["status"].as_str() {
-                Some("in_progress") => StepStatus::InProgress,
-                Some("completed") => StepStatus::Done,
-                Some("cancelled") => StepStatus::Cancelled,
-                _ => StepStatus::Pending,
-            };
-            Some(PlanStep {
-                text: text.to_owned(),
-                status,
-            })
-        })
-        .collect()
+#[derive(serde::Deserialize)]
+struct NativePlanEntry {
+    #[serde(default)]
+    id: Option<String>,
+    content: String,
+    status: NativePlanStatus,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NativePlanStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+struct ParsedPlan {
+    steps: Vec<PlanStep>,
+    index: HashMap<String, usize>,
+}
+fn plan_steps(value: &Value, require_ids: bool) -> Result<ParsedPlan, String> {
+    let entries = <Vec<NativePlanEntry> as serde::Deserialize>::deserialize(value)
+        .map_err(|error| format!("malformed native plan entries: {error}"))?;
+    let mut steps = Vec::with_capacity(entries.len());
+    let mut index = HashMap::new();
+    for entry in entries {
+        if entry.content.trim().is_empty() {
+            return Err("native plan step is empty".into());
+        }
+        if require_ids && entry.id.as_ref().is_none_or(|id| id.trim().is_empty()) {
+            return Err("Cursor todo omitted its native ID".into());
+        }
+        if let Some(id) = entry.id {
+            if id.trim().is_empty() || index.insert(id, steps.len()).is_some() {
+                return Err("native todo IDs must be nonempty and unique".into());
+            }
+        }
+        steps.push(PlanStep {
+            text: (entry.content).into(),
+            status: match entry.status {
+                NativePlanStatus::Pending => StepStatus::Pending,
+                NativePlanStatus::InProgress => StepStatus::InProgress,
+                NativePlanStatus::Completed => StepStatus::Done,
+                NativePlanStatus::Cancelled => StepStatus::Cancelled,
+            },
+        });
+    }
+    Ok(ParsedPlan { steps, index })
 }
 
 /// Choices offered by one elicitation schema property.
@@ -1273,6 +1968,7 @@ fn schema_choices(property: &Value) -> Vec<QuestionOption> {
     let items = &property["items"];
     let choices = property["oneOf"]
         .as_array()
+        .or_else(|| property["anyOf"].as_array())
         .or_else(|| property["enum"].as_array())
         .or_else(|| items["anyOf"].as_array())
         .or_else(|| items["oneOf"].as_array())
@@ -1280,16 +1976,669 @@ fn schema_choices(property: &Value) -> Vec<QuestionOption> {
     choices
         .into_iter()
         .flatten()
-        .filter_map(|choice| match choice {
+        .enumerate()
+        .filter_map(|(index, choice)| match choice {
             Value::String(label) => Some(QuestionOption {
+                id: format!("option-{index}"),
                 label: label.clone(),
                 description: None,
             }),
             Value::Object(_) => Some(QuestionOption {
-                label: str_field(choice, &["title", "const"])?,
-                description: str_field(choice, &["description"]),
+                id: format!("option-{index}"),
+                label: str_field(choice, &["title"]).or_else(|| {
+                    choice.get("const").map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string())
+                    })
+                })?,
+                description: (str_field(choice, &["description"])).map(Into::into),
+            }),
+            Value::Number(_) | Value::Bool(_) => Some(QuestionOption {
+                id: format!("option-{index}"),
+                label: choice.to_string(),
+                description: None,
             }),
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod reform_validation_tests {
+    use super::*;
+    #[test]
+    fn completed_tool_output_releases_raw_text_and_survives_later_status_updates() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let text = "x".repeat(1024 * 1024);
+        decoder.merge_tool("shell", &json!({"kind":"execute","rawInput":{"command":"echo hello"},"rawOutput":text,"status":"completed"}));
+        let mut events = Vec::new();
+        decoder.emit_tool("shell", &mut events);
+        let original = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::Item {
+                    kind: ItemKind::Tool { output, .. },
+                    ..
+                } => output.clone(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(decoder.tools["shell"].text.is_empty());
+        assert_eq!(original.text.inline(), Some(text.as_str()));
+        assert_eq!(original.omitted_bytes, 0);
+        decoder.merge_tool("shell", &json!({"status":"completed"}));
+        events.clear();
+        decoder.emit_tool("shell", &mut events);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Tool { output: Some(output), .. }, .. } if output.text == artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&text)))));
+    }
+
+    #[test]
+    fn terminal_source_refs_preserve_large_command_and_genuine_late_output() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let command = "printf 😀 ".repeat(8192);
+        let output = "result\n".repeat(8192);
+        decoder.merge_tool("shell", &json!({"kind":"execute","rawInput":{"command":command},"rawOutput":output,"status":"completed"}));
+        let mut events = Vec::new();
+        decoder.emit_tool("shell", &mut events);
+        assert!(decoder.tools["shell"].raw_input.is_null());
+        assert!(
+            decoder.tools["shell"]
+                .output
+                .as_ref()
+                .unwrap()
+                .text
+                .resident_bytes()
+                < 256
+        );
+        decoder.merge_tool(
+            "shell",
+            &json!({"rawOutput":"later real output","status":"completed"}),
+        );
+        events.clear();
+        decoder.emit_tool("shell", &mut events);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Tool { tool: ToolKind::Shell { command: value, .. }, output: Some(output), .. }, .. } if value == &artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&command)) && output.text.inline() == Some("later real output"))));
+    }
+
+    #[test]
+    fn read_ranges_never_overflow_or_reverse_for_zero_limits() {
+        let mut tool = Tool {
+            kind: Some("read".into()),
+            raw_input: json!({"path":"file","offset":u64::MAX,"limit":u64::MAX}),
+            ..Default::default()
+        };
+        assert!(
+            matches!(tool_kind(&tool), Ok(ToolKind::Read { range: Some((start, end)), .. }) if start <= end)
+        );
+        tool.raw_input["limit"] = json!(0);
+        assert!(matches!(
+            tool_kind(&tool),
+            Ok(ToolKind::Read { range: None, .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_display_labels_deliver_the_selected_native_value() {
+        let mut decoder = AcpDecoder::new(Profile::Grok);
+        let events = decoder.feed(&json!({"jsonrpc":"2.0","id":91,"method":"elicitation/create","params":{
+            "mode":"form","requestedSchema":{"type":"object","properties":{"colour":{
+                "type":"string","oneOf":[{"title":"Same","const":"first"},{"title":"Same","const":"second"}]
+            }}}
+        }}).to_string()).unwrap();
+        let (key, options) = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::Item {
+                    key,
+                    kind: ItemKind::Question { questions, .. },
+                    ..
+                } => Some((
+                    key.clone(),
+                    questions.inline().unwrap()[0]
+                        .options
+                        .inline()
+                        .unwrap()
+                        .to_vec(),
+                )),
+                _ => None,
+            })
+            .expect("native question");
+        assert_eq!(options[0].label, options[1].label);
+        assert_ne!(options[0].id, options[1].id);
+        decoder.answer(
+            &key,
+            &Answer::Question {
+                answers: vec![Some(artisan_api::QuestionAnswer::Choices {
+                    ids: (vec![options[1].id.clone()]).into(),
+                })],
+            },
+        );
+        assert_eq!(
+            decoder.take_outbox()[0]["result"]["content"]["colour"],
+            "second"
+        );
+    }
+
+    #[test]
+    fn duplicate_cursor_labels_keep_native_option_identity() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let mut events = Vec::new();
+        decoder.cursor_question(json!(7), &json!({"toolCallId":"question","questions":[{
+            "id":"q","prompt":"Choose","options":[{"id":"first","label":"Same"},{"id":"second","label":"Same"}]
+        }]}), &mut events);
+        decoder.answer(
+            "question",
+            &Answer::Question {
+                answers: vec![Some(artisan_api::QuestionAnswer::Choices {
+                    ids: (vec!["second".into()]).into(),
+                })],
+            },
+        );
+        assert_eq!(
+            decoder.take_outbox()[0]["result"]["outcome"]["answers"][0]["selectedOptionIds"],
+            json!(["second"])
+        );
+    }
+
+    #[test]
+    fn malformed_cursor_questions_are_rejected_without_empty_items() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let mut events = Vec::new();
+        decoder.cursor_question(json!(7), &json!({ "toolCallId": "question", "questions": [{"id": "", "prompt": "Choose", "options": []}] }), &mut events);
+        assert!(events.is_empty() && decoder.pending.is_empty());
+        assert_eq!(decoder.take_outbox()[0]["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn array_item_types_and_numeric_choices_are_preserved() {
+        let field = ElicitationField {
+            name: "counts".into(),
+            required: true,
+            schema: json!({ "type": "array", "items": { "type": "integer", "minimum": 2 }, "minItems": 1 }),
+        };
+        assert_eq!(
+            field
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "[2,3]".into()
+                }))
+                .unwrap(),
+            Some(json!([2, 3]))
+        );
+        assert!(
+            field
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "[\"one\"]".into()
+                }))
+                .is_err()
+        );
+        assert!(
+            field
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "[1]".into()
+                }))
+                .is_err()
+        );
+        let choices = ElicitationField {
+            name: "count".into(),
+            required: true,
+            schema: json!({ "type": "integer", "enum": [1,2] }),
+        };
+        assert_eq!(
+            choices
+                .value(&Some(artisan_api::QuestionAnswer::Choices {
+                    ids: (vec!["option-1".into()]).into()
+                }))
+                .unwrap(),
+            Some(json!(2))
+        );
+        assert_eq!(schema_choices(&choices.schema)[1].label, "2");
+    }
+
+    #[test]
+    fn elicitation_preserves_choice_values_and_rejects_invalid_scalars() {
+        let choice = ElicitationField {
+            name: "color".into(),
+            required: true,
+            schema: json!({ "type": "string", "oneOf": [{ "title": "Blue", "const": "blue-id" }] }),
+        };
+        assert_eq!(
+            choice
+                .value(&Some(artisan_api::QuestionAnswer::Choices {
+                    ids: (vec!["option-0".into()]).into()
+                }))
+                .unwrap(),
+            Some(json!("blue-id"))
+        );
+        assert!(choice.value(&None).is_err());
+        let number = ElicitationField {
+            name: "count".into(),
+            required: true,
+            schema: json!({ "type": "integer", "minimum": 1, "maximum": 4 }),
+        };
+        assert!(
+            number
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "nope".into()
+                }))
+                .is_err()
+        );
+        assert!(
+            number
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "9".into()
+                }))
+                .is_err()
+        );
+        let boolean = ElicitationField {
+            name: "flag".into(),
+            required: true,
+            schema: json!({ "type": "boolean" }),
+        };
+        assert!(
+            boolean
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "maybe".into()
+                }))
+                .is_err()
+        );
+        assert_eq!(
+            boolean
+                .value(&Some(artisan_api::QuestionAnswer::Text {
+                    text: "false".into()
+                }))
+                .unwrap(),
+            Some(json!(false))
+        );
+    }
+}
+
+#[cfg(test)]
+mod missing_tool_input_tests {
+    use super::*;
+    #[test]
+    fn native_argv_keeps_argument_boundaries_and_quoted_whitespace() {
+        let native = vec!["printf", "a  b", "$literal"];
+        let tool = Tool {
+            kind: Some("execute".into()),
+            raw_input: json!({"command":native}),
+            ..Default::default()
+        };
+        let ToolKind::Shell { command, .. } = tool_kind(&tool).unwrap() else {
+            panic!("shell")
+        };
+        let artisan_api::TextContent::Inline(command) = command else {
+            panic!("native argv must remain inline before persistence")
+        };
+        assert_eq!(shlex::split(&command).unwrap(), native);
+    }
+
+    #[test]
+    fn completed_read_without_native_path_is_an_explicit_error() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        decoder.merge_tool(
+            "read",
+            &json!({"kind":"read","title":"Read file","status":"completed"}),
+        );
+        let mut events = Vec::new();
+        decoder.emit_tool("read", &mut events);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EngineEvent::Item {
+                kind: ItemKind::Error { .. },
+                ..
+            }
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            EngineEvent::Item {
+                kind: ItemKind::Tool { .. },
+                ..
+            }
+        )));
+    }
+}
+
+#[cfg(test)]
+mod native_question_identity_tests {
+    use super::*;
+    #[test]
+    fn duplicate_native_ids_are_rejected_without_an_unanswerable_question() {
+        for questions in [
+            json!([{"id":"q","prompt":"Choose","options":[{"id":"same","label":"First"},{"id":"same","label":"Second"}]}]),
+            json!([{"id":"q","prompt":"First","options":[]},{"id":"q","prompt":"Second","options":[]}]),
+        ] {
+            let mut decoder = AcpDecoder::new(Profile::Cursor);
+            let mut events = Vec::new();
+            decoder.cursor_question(json!(7), &json!({"questions":questions}), &mut events);
+            assert!(events.is_empty());
+            assert!(decoder.pending.is_empty());
+            assert_eq!(decoder.take_outbox()[0]["error"]["code"], -32602);
+        }
+    }
+}
+
+#[cfg(test)]
+mod malformed_frame_tests {
+    use super::*;
+    #[test]
+    fn malformed_json_and_nonobject_frames_are_protocol_errors() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        assert!(decoder.feed("{broken-json").is_err());
+        assert!(decoder.feed("null").is_err());
+        assert!(decoder.feed("[]").is_err());
+        assert!(decoder.feed("{}").is_err());
+    }
+}
+
+#[cfg(test)]
+mod native_todo_merge_tests {
+    use super::*;
+    #[test]
+    fn duplicate_display_text_uses_native_todo_identity_and_invalid_batch_is_atomic() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        decoder.feed(&json!({"jsonrpc":"2.0","id":20,"method":"cursor/create_plan","params":{"plan":"# Native plan","todos":[
+            {"id":"one","content":"Same","status":"pending"},{"id":"two","content":"Same","status":"pending"}
+        ]}}).to_string()).unwrap();
+        decoder.answer(
+            PLAN_KEY,
+            &Answer::Approval {
+                decision: Decision::AllowOnce,
+            },
+        );
+        decoder.take_outbox();
+        decoder.feed(&json!({"jsonrpc":"2.0","id":21,"method":"cursor/update_todos","params":{"merge":true,"todos":[{"id":"two","content":"Same","status":"completed"}]}}).to_string()).unwrap();
+        let plan = decoder.plan.as_ref().unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].status, StepStatus::Pending);
+        assert_eq!(plan.steps[1].status, StepStatus::Done);
+        decoder.take_outbox();
+        decoder.feed(&json!({"jsonrpc":"2.0","id":22,"method":"cursor/update_todos","params":{"merge":true,"todos":[{"id":"two","content":"Renamed","status":"in_progress"}]}}).to_string()).unwrap();
+        let before = decoder.plan.as_ref().unwrap().steps.clone();
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[1].text, "Renamed".into());
+        decoder.take_outbox();
+        let errors=decoder.feed(&json!({"jsonrpc":"2.0","id":23,"method":"cursor/update_todos","params":{"merge":true,"todos":[
+            {"id":"one","content":"Same","status":"completed"},{"id":"broken","status":"completed"}
+        ]}}).to_string()).unwrap();
+        assert_eq!(decoder.plan.as_ref().unwrap().steps, before);
+        assert!(errors.iter().any(|event| matches!(
+            event,
+            EngineEvent::Item {
+                kind: ItemKind::Error { .. },
+                ..
+            }
+        )));
+        let reply = decoder.take_outbox().pop().unwrap();
+        assert_eq!(reply["id"], 23);
+        assert_eq!(reply["error"]["code"], -32602);
+        decoder.feed(&json!({"jsonrpc":"2.0","id":24,"method":"cursor/update_todos","params":{"merge":false,"todos":[]}}).to_string()).unwrap();
+        assert!(decoder.plan.as_ref().unwrap().steps.is_empty());
+        assert!(decoder.plan.as_ref().unwrap().todo_index.is_empty());
+    }
+    #[test]
+    fn native_plan_rows_are_not_silently_filtered_or_assigned_unknown_status() {
+        for invalid in [
+            json!([{"status":"pending"}]),
+            json!([{"content":"Task","status":"future"}]),
+            json!([{"content":"Task","status":"pending","id":"same"},{"content":"Other","status":"pending","id":"same"}]),
+        ] {
+            assert!(plan_steps(&invalid, false).is_err());
+        }
+        assert!(plan_steps(&json!([{"content":"Task","status":"pending"}]), false).is_ok());
+        assert!(plan_steps(&json!([{"content":"Task","status":"pending"}]), true).is_err());
+    }
+    #[test]
+    fn malformed_permission_options_never_publish_partial_approval() {
+        for options in [
+            json!(null),
+            json!([]),
+            json!([{"optionId":"ok","kind":"allow_once"}, {"kind":"reject_once"}]),
+            json!([{"optionId":"ok","kind":"unknown"}]),
+            json!([{"optionId":"","kind":"allow_once"}]),
+            json!([{"optionId":"same","kind":"allow_once"},{"optionId":"same","kind":"reject_once"}]),
+        ] {
+            let mut decoder = AcpDecoder::new(Profile::Cursor);
+            let mut events = Vec::new();
+            decoder.permission(json!(7),&json!({"toolCall":{"toolCallId":"tool","kind":"execute","title":"echo ok"},"options":options}),&mut events);
+            assert!(decoder.pending.is_empty());
+            assert!(decoder.tools.is_empty());
+            assert_eq!(decoder.take_outbox()[0]["error"]["code"], json!(-32602));
+            assert!(matches!(
+                &events[..],
+                [EngineEvent::Item {
+                    status: Status::Failed,
+                    kind: ItemKind::Error { .. },
+                    ..
+                }]
+            ));
+        }
+    }
+
+    #[test]
+    fn permission_options_preserve_native_ids_and_decisions() {
+        let options=permission_options(&json!([{"optionId":"native-yes","kind":"allow_once"},{"optionId":"native-no","kind":"reject_always"}])).unwrap();
+        assert_eq!(
+            options,
+            vec![
+                ("native-yes".into(), Decision::AllowOnce),
+                ("native-no".into(), Decision::DenyAlways)
+            ]
+        );
+    }
+    #[test]
+    fn simultaneous_permission_callbacks_preserve_one_tool_and_both_native_replies() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let mut events = Vec::new();
+        let params = json!({"toolCall":{"toolCallId":"tool","kind":"execute","title":"echo ok"},"options":[{"optionId":"yes","kind":"allow_once"},{"optionId":"no","kind":"reject_once"}]});
+        decoder.permission(json!(1), &params, &mut events);
+        decoder.permission(json!(2), &params, &mut events);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    EngineEvent::Item {
+                        kind: ItemKind::Tool { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        let keys = events
+            .iter()
+            .filter_map(|event| {
+                if let EngineEvent::Approval {
+                    key,
+                    target: Some(target),
+                    status: Status::AwaitingUser,
+                    ..
+                } = event
+                {
+                    assert_eq!(target, "tool");
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1]);
+        assert!(
+            decoder
+                .answer(
+                    &keys[0],
+                    &Answer::Approval {
+                        decision: Decision::AllowAlways
+                    }
+                )
+                .is_empty()
+        );
+        assert_eq!(decoder.pending.len(), 2);
+        let second = decoder.answer(
+            &keys[1],
+            &Answer::Approval {
+                decision: Decision::DenyOnce,
+            },
+        );
+        assert!(matches!(
+            &second[..],
+            [EngineEvent::Approval {
+                status: Status::Declined,
+                ..
+            }]
+        ));
+        let first = decoder.answer(
+            &keys[0],
+            &Answer::Approval {
+                decision: Decision::AllowOnce,
+            },
+        );
+        assert!(matches!(
+            &first[..],
+            [EngineEvent::Approval {
+                status: Status::Done,
+                ..
+            }]
+        ));
+        let replies = decoder.take_outbox();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["id"], 2);
+        assert_eq!(replies[0]["result"]["outcome"]["optionId"], "no");
+        assert_eq!(replies[1]["id"], 1);
+        assert_eq!(replies[1]["result"]["outcome"]["optionId"], "yes");
+        assert!(
+            decoder
+                .answer(
+                    &keys[0],
+                    &Answer::Approval {
+                        decision: Decision::DenyOnce
+                    }
+                )
+                .is_empty()
+        );
+        assert!(decoder.take_outbox().is_empty());
+        decoder.permission(json!(3), &params, &mut events);
+        decoder.permission(json!(4), &params, &mut events);
+        let cancelled = decoder.cancel_pending();
+        assert_eq!(
+            cancelled
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    EngineEvent::Approval {
+                        status: Status::Cancelled,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(decoder.take_outbox().len(), 2);
+        assert!(decoder.pending.is_empty());
+        assert!(
+            decoder
+                .answer(
+                    "permission-request:3",
+                    &Answer::Approval {
+                        decision: Decision::AllowOnce
+                    }
+                )
+                .is_empty()
+        );
+        assert!(decoder.take_outbox().is_empty());
+        assert!(
+            !decoder.tools["tool"]
+                .status
+                .is_some_and(Status::is_terminal)
+        );
+    }
+}
+
+#[cfg(test)]
+mod editable_terminal_plan_tests {
+    use super::*;
+    #[test]
+    fn completed_unicode_steps_release_source_but_keep_exact_late_native_delta_identity() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let large = "界🙂 original\n".repeat(2048);
+        let mut todos = (0..5000).map(|id| json!({"id":format!("todo-{id}"),"content":format!("Step {id}"),"status":"completed"})).collect::<Vec<_>>();
+        todos[4999]["content"] = json!(large);
+        let events = decoder.feed(&json!({"jsonrpc":"2.0","id":1,"method":"cursor/update_todos","params":{"todos":todos}}).to_string()).unwrap();
+        let complete = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::Item {
+                    kind: ItemKind::Plan { steps, .. },
+                    ..
+                } => steps.inline(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(complete.len(), 5000);
+        assert_eq!(complete[4999].text.inline(), Some(large.as_str()));
+        let source = artisan_api::ContentRef::from_text(&large);
+        assert_eq!(
+            decoder.plan.as_ref().unwrap().steps[4999].text,
+            artisan_api::TextContent::Stored(source.clone())
+        );
+        decoder.feed(&json!({"jsonrpc":"2.0","id":2,"method":"cursor/update_todos","params":{"merge":true,"todos":[{"id":"todo-1","content":"Changed native step","status":"in_progress"}]}}).to_string()).unwrap();
+        let plan = decoder.plan.as_ref().unwrap();
+        assert_eq!(plan.steps.len(), 5000);
+        assert_eq!(plan.steps[1].text.inline(), Some("Changed native step"));
+        assert_eq!(plan.steps[1].status, StepStatus::InProgress);
+        assert_eq!(
+            plan.steps[4999].text,
+            artisan_api::TextContent::Stored(source)
+        );
+        assert_eq!(plan.todo_index["todo-4999"], 4999);
+    }
+}
+
+#[cfg(test)]
+mod retained_agent_tests {
+    use super::*;
+
+    #[test]
+    fn settled_agent_releases_native_body_and_keeps_partial_and_corrected_results() {
+        let mut decoder = AcpDecoder::new(Profile::Cursor);
+        let prompt = "task 界🙂 ".repeat(8192);
+        let result = "report 😀\n".repeat(8192);
+        decoder.merge_tool("agent", &json!({"rawInput":{"_toolName":"task", "prompt":prompt, "description":"Inspect", "subagentType":"reviewer"}, "rawOutput":result, "status":"completed"}));
+        let mut events = Vec::new();
+        decoder.emit_tool("agent", &mut events);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Agent { prompt: Some(p), result: Some(r), .. }, .. } if p.inline() == Some(prompt.as_str()) && r.inline() == Some(result.as_str()))));
+        let tool = &decoder.tools["agent"];
+        assert_eq!(tool.raw_input, json!({"_toolName":"task"}));
+        assert!(tool.text.is_empty());
+        let Some(ItemKind::Agent {
+            prompt: Some(p),
+            result: Some(r),
+            ..
+        }) = &tool.retained_agent
+        else {
+            panic!("retained canonical agent");
+        };
+        assert_eq!(
+            p,
+            &artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&prompt))
+        );
+        assert_eq!(
+            r,
+            &artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&result))
+        );
+        decoder.merge_tool("agent", &json!({"status":"completed"}));
+        events.clear();
+        decoder.emit_tool("agent", &mut events);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Agent { prompt: Some(p), result: Some(r), .. }, .. } if p == &artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&prompt)) && r == &artisan_api::TextContent::Stored(artisan_api::ContentRef::from_text(&result)))));
+        decoder.merge_tool(
+            "agent",
+            &json!({"rawOutput":"corrected report", "status":"completed"}),
+        );
+        events.clear();
+        decoder.emit_tool("agent", &mut events);
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::Agent { result: Some(r), .. }, .. } if r.inline() == Some("corrected report"))));
+        assert!(decoder.tools["agent"].text.is_empty());
+    }
 }

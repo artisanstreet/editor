@@ -1,7 +1,8 @@
 //! Pure mapping from Claude's stream-json lines onto items.
 
-use super::tools::{questions, todo_steps, tool_kind};
+use super::tools::{questions, todo_steps, tool_kind, validate_input};
 use crate::{EngineEvent, LiveKind, Outcome};
+use anyhow::Context as _;
 use artisan_api::{
     Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, Output, Phase,
     RunStatus, Status, ToolKind, Usage,
@@ -9,12 +10,19 @@ use artisan_api::{
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[derive(serde::Deserialize)]
+struct IndexedBlock {
+    index: u64,
+}
+
 const TITLE_REQUEST_ID: &str = "artisan-title";
 
 /// Decodes one Claude process's output. Holds just enough to settle items
 /// and answer the CLI; `feed` never does I/O.
 #[derive(Default)]
 pub struct ClaudeDecoder {
+    ownership: crate::retained::Ownership,
+    reasoning_summary: crate::reasoning::Summary,
     session: Option<String>,
     model: Option<String>,
     /// Messages announced by `message_start`; they settle on `message_delta`.
@@ -63,6 +71,7 @@ struct Tool {
     background: bool,
 }
 
+#[derive(serde::Serialize)]
 struct Pending {
     request_id: String,
     input: Value,
@@ -71,25 +80,80 @@ struct Pending {
 
 impl ClaudeDecoder {
     /// Maps one stdout line. Replies for the CLI collect in [`Self::take_replies`].
-    pub fn feed(&mut self, line: &str) -> Vec<EngineEvent> {
-        let mut out = Vec::new();
-        let frame: Value = match serde_json::from_str(line) {
-            Ok(frame) => frame,
-            Err(error) => {
-                tracing::warn!("unreadable Claude line ({error}): {}", truncate(line, 200));
-                return out;
+    pub fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
+        let frame: Value = serde_json::from_str(line).context("decoding Claude protocol JSON")?;
+        anyhow::ensure!(frame.is_object(), "Claude protocol frame must be an object");
+        anyhow::ensure!(
+            frame["type"].is_string(),
+            "native protocol frame is missing its required envelope identity"
+        );
+        if str_at(&frame, "type") == Some("assistant") {
+            anyhow::ensure!(
+                str_at(&frame["message"], "id")
+                    .or_else(|| str_at(&frame, "uuid"))
+                    .is_some_and(|id| !id.is_empty()),
+                "Claude assistant frame is missing its native message identity"
+            );
+        }
+        let pending_frame = str_at(&frame, "type") == Some("control_request")
+            && str_at(&frame["request"], "subtype") == Some("can_use_tool");
+        if pending_frame {
+            crate::retained::admit_pending(self.pending.len(), self.ownership.bytes(), &frame)?;
+        }
+        let pending_before = self.pending.len();
+        let events = self.feed_raw(&frame);
+        let events = self.reasoning_summary.normalize(events, true);
+        let mut touched = crate::retained::changed_keys(&events);
+        // TodoWrite has the canonical key `plan`, while Claude settles it by its
+        // native tool-use ID. Extract only the IDs in this frame; do not search
+        // the historical tools to recover that provider-specific alias.
+        if let Some(blocks) = frame["message"]["content"].as_array() {
+            for block in blocks {
+                if let Some(id) = str_at(block, "tool_use_id").or_else(|| {
+                    (str_at(block, "type") == Some("tool_use"))
+                        .then(|| str_at(block, "id"))
+                        .flatten()
+                }) {
+                    touched.insert(id);
+                }
             }
-        };
-        let parent = str_at(&frame, "parent_tool_use_id").map(str::to_owned);
-        match str_at(&frame, "type").unwrap_or_default() {
-            "system" => self.system(&frame, &mut out),
+        }
+        for key in touched {
+            if let Some(tool) = self.tools.get_mut(key) {
+                if tool.status.is_terminal() {
+                    crate::retained::compact_terminal(&mut tool.kind)?;
+                }
+                self.ownership.replace(
+                    key,
+                    crate::retained::owned_charge(&(&tool.kind, &tool.parent))?,
+                );
+            } else {
+                self.ownership.remove(key);
+            }
+        }
+        if pending_frame || self.pending.len() != pending_before {
+            self.ownership
+                .set_pending(crate::retained::owned_charge(&self.pending)?);
+        }
+        self.ownership.check()?;
+        Ok(events)
+    }
+
+    fn feed_raw(&mut self, frame: &Value) -> Vec<EngineEvent> {
+        let mut out = Vec::new();
+        let parent = str_at(frame, "parent_tool_use_id").map(str::to_owned);
+        match str_at(frame, "type").unwrap_or_default() {
+            "system" => self.system(frame, &mut out),
             "stream_event" if parent.is_none() => self.stream_event(&frame["event"], &mut out),
-            "assistant" => self.assistant(&frame, parent, &mut out),
-            "user" => self.user(&frame, &mut out),
-            "result" => self.result(&frame, &mut out),
-            "control_request" => self.control_request(&frame, &mut out),
-            "control_response" => self.control_response(&frame, &mut out),
-            _ => {}
+            "assistant" => self.assistant(frame, parent, &mut out),
+            "user" => self.user(frame, &mut out),
+            "result" => self.result(frame, &mut out),
+            "control_request" => self.control_request(frame, &mut out),
+            "control_response" => self.control_response(frame, &mut out),
+            _ => tracing::debug!(
+                kind = frame["type"].as_str(),
+                "ignored unsupported Claude frame"
+            ),
         }
         out
     }
@@ -97,6 +161,51 @@ impl ClaudeDecoder {
     /// Answers the approval or question on `key`. The reply for the CLI goes
     /// to [`Self::take_replies`].
     pub fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
+        let mut events = self.answer_raw(key, answer);
+        if let Some(item) = self.tools.get_mut(key)
+            && (item.status.is_terminal()
+                || matches!(
+                    &item.kind,
+                    ItemKind::Question {
+                        answers: Some(_),
+                        ..
+                    }
+                ))
+            && let Err(error) = crate::retained::compact_terminal(&mut item.kind)
+        {
+            events.push(crate::retained::error(key, error));
+        }
+        let refreshed = (|| -> anyhow::Result<()> {
+            if let Some(item) = self.tools.get(key) {
+                self.ownership
+                    .replace(key, crate::retained::owned_charge(&item.kind)?);
+            }
+            self.ownership
+                .set_pending(crate::retained::owned_charge(&self.pending)?);
+            self.ownership.check()
+        })();
+        if let Err(error) = refreshed {
+            events.push(crate::retained::ownership_error(key, error));
+        }
+
+        events
+    }
+
+    fn answer_raw(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
+        let native = if let Answer::Question { answers } = answer {
+            let Some(tool) = self.tools.get(key) else {
+                return Vec::new();
+            };
+            let ItemKind::Question { questions, .. } = &tool.kind else {
+                return Vec::new();
+            };
+            match crate::question::native_collection_answers(questions, answers) {
+                Ok(native) => native,
+                Err(message) => return vec![crate::question::invalid_answer(key, message)],
+            }
+        } else {
+            Vec::new()
+        };
         let (Some(pending), Some(tool)) = (self.pending.remove(key), self.tools.get_mut(key))
         else {
             tracing::debug!(key, "answer for an item Claude is not waiting on");
@@ -113,12 +222,24 @@ impl ClaudeDecoder {
                 },
             ) => {
                 let mut map = Map::new();
-                for (question, answer) in questions.iter().zip(answers) {
+                for (question, answer) in questions
+                    .inline()
+                    .expect("native question validated before mutation")
+                    .iter()
+                    .zip(&native)
+                {
                     if let Some(labels) = answer.as_ref().filter(|labels| !labels.is_empty()) {
-                        map.insert(question.text.clone(), Value::String(labels.join(", ")));
+                        map.insert(
+                            question
+                                .text
+                                .inline()
+                                .expect("adapter question is inline before storage")
+                                .to_owned(),
+                            Value::String(labels.join(", ")),
+                        );
                     }
                 }
-                *given = Some(answers.clone());
+                *given = Some(answers.clone().into());
                 if map.is_empty() {
                     (
                         deny("The user skipped the question.", false),
@@ -220,6 +341,15 @@ impl ClaudeDecoder {
     #[must_use]
     pub fn background_running(&self) -> bool {
         self.background > 0
+    }
+
+    /// What the decoder believes runs in the background, for the trace.
+    #[must_use]
+    pub fn background_summary(&self) -> String {
+        format!(
+            "{} background task(s); agents waiting on their own work: {:?}",
+            self.background, self.waiting_agents
+        )
     }
 
     pub fn take_result_seen(&mut self) -> bool {
@@ -370,9 +500,12 @@ impl ClaudeDecoder {
                     parent: None,
                     kind: ItemKind::Agent {
                         name: str_at(frame, "subagent_type").map(str::to_owned),
-                        description: str_at(frame, "description").unwrap_or_default().to_owned(),
+                        description: (str_at(frame, "description").unwrap_or_default().to_owned())
+                            .into(),
                         prompt: None,
                         agent_id: Some(task.to_owned()),
+                        context_used: None,
+                        model: None,
                         background: true,
                         result: None,
                         label: None,
@@ -427,17 +560,11 @@ impl ClaudeDecoder {
         match &mut tool.kind {
             // An agent notifies each time it stops, and a resumed
             // one reports again: the latest report is its result.
-            // Only a completed one reports; a stopped one's summary
-            // is its own description.
-            ItemKind::Agent {
-                result,
-                description,
-                ..
-            } => {
-                let summary = str_at(frame, "summary")
-                    .filter(|summary| status == Status::Done && *summary != description);
+            // Preserve the report verbatim, even when it repeats the task.
+            ItemKind::Agent { result, .. } => {
+                let summary = str_at(frame, "summary").filter(|_| status == Status::Done);
                 if let Some(summary) = summary {
-                    *result = Some(summary.to_owned());
+                    *result = Some(summary.into());
                 } else if tool.status.is_terminal() {
                     return;
                 }
@@ -447,6 +574,41 @@ impl ClaudeDecoder {
         }
         tool.status = status;
         out.push(tool.event());
+    }
+
+    /// A subagent's message carries its own usage: its agent's context and
+    /// model follow it, for the context meter in the agent's view.
+    fn agent_context(&mut self, parent: &str, message: &Value, out: &mut Vec<EngineEvent>) {
+        let usage = &message["usage"];
+        let Some(input) = usage["input_tokens"].as_u64() else {
+            return;
+        };
+        let used = input
+            + usage["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or_default()
+            + usage["cache_read_input_tokens"]
+                .as_u64()
+                .unwrap_or_default();
+        let Some(tool) = self.tools.get_mut(parent) else {
+            return;
+        };
+        if let ItemKind::Agent {
+            context_used,
+            model,
+            ..
+        } = &mut tool.kind
+        {
+            let seen = str_at(message, "model").map(str::to_owned);
+            if *context_used == Some(used) && (seen.is_none() || *model == seen) {
+                return;
+            }
+            *context_used = Some(used);
+            if seen.is_some() {
+                *model = seen;
+            }
+            out.push(tool.event());
+        }
     }
 
     fn stream_event(&mut self, event: &Value, out: &mut Vec<EngineEvent>) {
@@ -461,14 +623,19 @@ impl ClaudeDecoder {
                 let Some(id) = self.current.clone() else {
                     return;
                 };
-                let index = event["index"].as_u64().unwrap_or_default();
+                let Ok(IndexedBlock { index }) =
+                    <IndexedBlock as serde::Deserialize>::deserialize(event)
+                else {
+                    tracing::warn!("Claude content block omitted a valid index");
+                    return;
+                };
                 match str_at(&event["content_block"], "type") {
                     Some("text") => out.push(EngineEvent::Item {
                         key: format!("{id}:{index}"),
                         parent: None,
                         status: Status::Running,
                         kind: ItemKind::AssistantMessage {
-                            text: String::new(),
+                            text: (String::new()).into(),
                             phase: Phase::Commentary,
                         },
                     }),
@@ -484,11 +651,17 @@ impl ClaudeDecoder {
                 let Some(id) = self.current.as_deref() else {
                     return;
                 };
+                let Ok(IndexedBlock { index }) =
+                    <IndexedBlock as serde::Deserialize>::deserialize(event)
+                else {
+                    tracing::warn!("Claude content delta omitted a valid index");
+                    return;
+                };
                 let delta = &event["delta"];
                 let (target, text) = match str_at(delta, "type") {
                     Some("text_delta") => (
                         LiveKind::Text {
-                            key: format!("{id}:{}", event["index"].as_u64().unwrap_or_default()),
+                            key: format!("{id}:{index}"),
                         },
                         str_at(delta, "text"),
                     ),
@@ -546,6 +719,9 @@ impl ClaudeDecoder {
             return;
         };
         let streamed = self.streamed.contains(&id);
+        if let Some(parent) = &parent {
+            self.agent_context(parent, message, out);
+        }
         for block in message["content"].as_array().into_iter().flatten() {
             let entry = self.messages.entry(id.clone()).or_insert_with(|| Message {
                 parent: parent.clone(),
@@ -561,14 +737,28 @@ impl ClaudeDecoder {
                     }
                     let key = format!("{id}:{index}");
                     entry.texts.push((key.clone(), text.to_owned()));
-                    out.push(EngineEvent::Item {
-                        key,
-                        parent: parent.clone(),
-                        status: Status::Running,
-                        kind: ItemKind::AssistantMessage {
-                            text: text.to_owned(),
-                            phase: Phase::Commentary,
-                        },
+                    self.ownership.append_buffer(
+                        &id,
+                        key.len()
+                            .saturating_add(text.len())
+                            .saturating_add(128)
+                            .saturating_mul(4),
+                    );
+                    if !streamed {
+                        out.push(EngineEvent::Item {
+                            key: key.clone(),
+                            parent: parent.clone(),
+                            status: Status::Running,
+                            kind: ItemKind::AssistantMessage {
+                                text: (String::new()).into(),
+                                phase: Phase::Commentary,
+                            },
+                        });
+                    }
+                    out.push(EngineEvent::Live {
+                        target: LiveKind::Text { key },
+                        text: text.to_owned(),
+                        append: false,
                     });
                 }
                 Some("thinking") if !streamed && parent.is_none() => {
@@ -607,17 +797,26 @@ impl ClaudeDecoder {
         if self.tools.contains_key(id) {
             return;
         }
+        if let Err(message) = validate_input(name, input) {
+            out.push(error_item(
+                format!("invalid-tool:{id}"),
+                ErrorKind::Execution,
+                message,
+                false,
+            ));
+            return;
+        }
         let text = |field: &str| str_at(input, field).map(str::to_owned);
         let (key, kind, status) = match name {
             "Task" | "Agent" => (
                 id.to_owned(),
                 ItemKind::Agent {
                     name: text("subagent_type"),
-                    description: text("description")
-                        .or_else(|| text("prompt"))
-                        .unwrap_or_default(),
-                    prompt: text("prompt"),
+                    description: (text("description").unwrap_or_default()).into(),
+                    prompt: (text("prompt")).map(Into::into),
                     agent_id: None,
+                    context_used: None,
+                    model: None,
                     background: input["run_in_background"].as_bool() == Some(true),
                     result: None,
                     label: None,
@@ -626,9 +825,11 @@ impl ClaudeDecoder {
             ),
             // One todo list per run, replaced in place.
             "TodoWrite" => (
-                "plan".to_owned(),
+                parent
+                    .as_ref()
+                    .map_or_else(|| "plan".to_owned(), |parent| format!("plan:{parent}")),
                 ItemKind::Plan {
-                    steps: todo_steps(input),
+                    steps: (todo_steps(input)).into(),
                     proposal: None,
                     approval: None,
                 },
@@ -637,8 +838,8 @@ impl ClaudeDecoder {
             "ExitPlanMode" => (
                 id.to_owned(),
                 ItemKind::Plan {
-                    steps: Vec::new(),
-                    proposal: text("plan"),
+                    steps: (Vec::new()).into(),
+                    proposal: (text("plan")).map(Into::into),
                     approval: None,
                 },
                 Status::Running,
@@ -647,19 +848,27 @@ impl ClaudeDecoder {
                 id.to_owned(),
                 ItemKind::Question {
                     blocking: true,
-                    questions: questions(input),
+                    questions: (questions(input)).into(),
                     answers: None,
+                    answer_text: None,
                 },
                 Status::Running,
             ),
             _ => (
                 id.to_owned(),
-                ItemKind::Tool {
-                    tool: tool_kind(name, input),
-                    title: text("description"),
-                    output: None,
-                    exit_code: None,
-                    approval: None,
+                match tool_kind(name, input) {
+                    Ok(tool) => ItemKind::Tool {
+                        tool,
+                        title: text("description"),
+                        output: None,
+                        exit_code: None,
+                        approval: None,
+                    },
+                    Err(message) => ItemKind::Error {
+                        kind: ErrorKind::Execution,
+                        message: message.into(),
+                        retryable: false,
+                    },
                 },
                 Status::Running,
             ),
@@ -679,7 +888,7 @@ impl ClaudeDecoder {
     fn user(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         if frame["isReplay"].as_bool() == Some(true) {
             if let Some(Some(id)) = self.replays.pop_front() {
-                out.push(EngineEvent::SteerAccepted { id });
+                out.push(EngineEvent::InputAccepted { id });
             }
             return;
         }
@@ -701,7 +910,7 @@ impl ClaudeDecoder {
                 // A background agent's tool result only says it started.
                 ItemKind::Agent { .. } if tool.background && !failed => continue,
                 ItemKind::Agent { result, .. } => {
-                    *result = Some(text);
+                    *result = Some(text.into());
                     tool.status = settled;
                 }
                 ItemKind::Tool { output, .. } => {
@@ -843,17 +1052,18 @@ impl ClaudeDecoder {
             } => {
                 let request = match kind {
                     ToolKind::Shell { command, cwd, .. } => ApprovalRequest::Command {
-                        command: command.clone(),
+                        command: (command.clone()).into(),
                         cwd: cwd.clone(),
                     },
                     ToolKind::Edit { .. } => ApprovalRequest::FileChange,
                     _ => ApprovalRequest::Action {
-                        description: reason.clone().unwrap_or_else(|| format!("Use {name}")),
+                        description: (reason.clone().unwrap_or_else(|| format!("Use {name}")))
+                            .into(),
                     },
                 };
                 *approval = Some(Approval {
                     request,
-                    reason,
+                    reason: reason.map(Into::into),
                     options,
                     decision: None,
                 });
@@ -861,7 +1071,7 @@ impl ClaudeDecoder {
             ItemKind::Plan { approval, .. } => {
                 *approval = Some(Approval {
                     request: ApprovalRequest::Action {
-                        description: "Start implementing this plan".to_owned(),
+                        description: ("Start implementing this plan".to_owned()).into(),
                     },
                     reason: None,
                     options: vec![Decision::AllowOnce, Decision::DenyOnce],
@@ -904,6 +1114,7 @@ impl ClaudeDecoder {
             return;
         };
         let texts = std::mem::take(&mut message.texts);
+        self.ownership.remove_buffer(id);
         let last = texts.len().saturating_sub(1);
         for (index, (key, text)) in texts.into_iter().enumerate() {
             let phase = if end_turn && index == last {
@@ -915,12 +1126,18 @@ impl ClaudeDecoder {
                 key,
                 parent: message.parent.clone(),
                 status: Status::Done,
-                kind: ItemKind::AssistantMessage { text, phase },
+                kind: ItemKind::AssistantMessage {
+                    text: text.into(),
+                    phase,
+                },
             });
         }
     }
 
     fn settle_open_texts(&mut self, status: Status, out: &mut Vec<EngineEvent>) {
+        for id in self.messages.keys() {
+            self.ownership.remove_buffer(id);
+        }
         let mut keys: Vec<String> = self
             .messages
             .values_mut()
@@ -983,7 +1200,7 @@ fn error_item(key: String, kind: ErrorKind, message: String, retryable: bool) ->
         status: Status::Done,
         kind: ItemKind::Error {
             kind,
-            message,
+            message: message.into(),
             retryable,
         },
     }
@@ -993,10 +1210,161 @@ pub(super) fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
     value.get(field).and_then(Value::as_str)
 }
 
-fn truncate(text: &str, max: usize) -> &str {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end -= 1;
+#[cfg(test)]
+mod malformed_frame_tests {
+    use super::*;
+    #[test]
+    fn malformed_json_and_nonobject_frames_are_protocol_errors() {
+        let mut decoder = ClaudeDecoder::default();
+        assert!(decoder.feed("{broken-json").is_err());
+        assert!(decoder.feed("null").is_err());
+        assert!(decoder.feed("[]").is_err());
+        assert!(decoder.feed("{}").is_err());
+        assert!(
+            decoder
+                .feed(r#"{"type":"assistant","message":{"content":[]}}"#)
+                .is_err()
+        );
+        assert!(
+            decoder
+                .feed(r#"{"type":"assistant","message":{"id":"","content":[]}}"#)
+                .is_err()
+        );
     }
-    &text[..end]
+}
+
+#[cfg(test)]
+mod literal_agent_report_tests {
+    use super::*;
+    #[test]
+    fn completed_background_report_can_equal_the_task_description() {
+        let mut decoder = ClaudeDecoder::default();
+        decoder.feed(&serde_json::json!({
+            "type":"assistant", "message":{"id":"message-background-task", "content":[{
+                "type":"tool_use", "id":"background-task", "name":"Task",
+                "input":{"description":"Exact report", "prompt":"Run this task", "subagent_type":"general-purpose", "run_in_background":true}
+            }]}
+        }).to_string()).unwrap();
+        let events = decoder.feed(&serde_json::json!({
+            "type":"system", "subtype":"task_notification", "tool_use_id":"background-task", "status":"completed", "summary":"Exact report"
+        }).to_string()).unwrap();
+        assert!(events.iter().any(|event| matches!(event,
+            EngineEvent::Item { status:Status::Done, kind:ItemKind::Agent { result:Some(artisan_api::TextContent::Inline(result)), .. }, .. } if result == "Exact report"
+        )), "equal authored result must survive native normalization: {events:?}");
+    }
+}
+
+#[cfg(test)]
+mod native_pending_ownership_tests {
+    use super::*;
+    #[test]
+    fn aggregate_raw_unicode_inputs_are_admitted_before_callback_mutation_and_answer_releases_charge()
+     {
+        let mut decoder = ClaudeDecoder::default();
+        let payload = "界🙂".repeat(180_000);
+        let frame = |id: usize| {
+            json!({"type":"control_request","request_id":format!("rpc-{id}"),"request":{"subtype":"can_use_tool","tool_name":"mcp__example","tool_use_id":format!("tool-{id}"),"input":{"blob":payload}}}).to_string()
+        };
+        let mut accepted = 0;
+        for id in 0..32 {
+            let before = decoder.pending.len();
+            if let Err(error) = decoder.feed(&frame(id)) {
+                assert!(error.to_string().contains("32 MiB"));
+                assert_eq!(decoder.pending.len(), before);
+                assert!(!decoder.tools.contains_key(&format!("tool-{id}")));
+                break;
+            }
+            accepted += 1;
+        }
+        assert!(accepted > 0 && accepted < 32);
+        for id in 0..accepted {
+            decoder.answer(
+                &format!("tool-{id}"),
+                &Answer::Approval {
+                    decision: Decision::DenyOnce,
+                },
+            );
+        }
+        assert!(decoder.pending.is_empty());
+        assert!(decoder.feed(&frame(99)).is_ok());
+        assert_eq!(decoder.pending["tool-99"].input["blob"], payload);
+    }
+}
+
+#[cfg(test)]
+mod unfinished_owner_tests {
+    use super::*;
+    #[test]
+    fn streamed_complete_body_is_charged_until_native_message_settlement() {
+        let mut decoder = ClaudeDecoder::default();
+        decoder.feed(&json!({"type":"stream_event", "event":{"type":"message_start", "message":{"id":"message"}}}).to_string()).unwrap();
+        let text = "unsettled 界🙂 ".repeat(4096);
+        decoder.feed(&json!({"type":"assistant", "message":{"id":"message", "content":[{"type":"text", "text":text}]}}).to_string()).unwrap();
+        assert!(decoder.ownership.bytes() >= text.len() * 4);
+        let before = decoder.ownership.bytes();
+        decoder
+            .feed(&json!({"type":"extension"}).to_string())
+            .unwrap();
+        assert_eq!(decoder.ownership.bytes(), before);
+        let events = decoder.feed(&json!({"type":"stream_event", "event":{"type":"message_delta", "delta":{"stop_reason":"end_turn"}}}).to_string()).unwrap();
+        assert!(events.iter().any(|event| matches!(event, EngineEvent::Item { kind: ItemKind::AssistantMessage { text: complete, .. }, .. } if complete.inline() == Some(text.as_str()))));
+        assert!(decoder.messages["message"].texts.is_empty());
+        assert_eq!(decoder.ownership.bytes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod scoped_plan_tests {
+    use super::*;
+    #[test]
+    fn root_and_two_subagent_plans_replace_only_their_own_canonical_keys() {
+        let mut decoder = ClaudeDecoder::default();
+        let mut keys = Vec::new();
+        for (index, parent) in [
+            None,
+            Some("agent-a"),
+            Some("agent-b"),
+            Some("agent-a"),
+            None,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tool_id = format!("native-todo-{index}");
+            let events = decoder.feed(&json!({"type":"assistant","parent_tool_use_id":parent,"message":{"id":format!("message-{index}"),"content":[{"type":"tool_use","id":tool_id,"name":"TodoWrite","input":{"todos":[{"content":format!("task-{index}"),"status":"pending","activeForm":"Working"}]}}],"stop_reason":"tool_use"}}).to_string()).unwrap();
+            let (key, actual_parent, steps) = events
+                .iter()
+                .find_map(|event| match event {
+                    EngineEvent::Item {
+                        key,
+                        parent,
+                        kind: ItemKind::Plan { steps, .. },
+                        ..
+                    } => Some((key.clone(), parent.clone(), steps)),
+                    _ => None,
+                })
+                .expect("native TodoWrite must normalize into a canonical Plan");
+            assert_eq!(actual_parent.as_deref(), parent);
+            assert_eq!(
+                steps.inline().unwrap()[0].text.inline(),
+                Some(format!("task-{index}").as_str())
+            );
+            let canonical =
+                parent.map_or_else(|| "plan".to_owned(), |parent| format!("plan:{parent}"));
+            assert_eq!(key, canonical);
+            keys.push(key);
+            let settled = decoder.feed(&json!({"type":"user","parent_tool_use_id":parent,"message":{"content":[{"type":"tool_result","tool_use_id":tool_id,"content":"Updated"}]}}).to_string()).unwrap();
+            assert!(settled.iter().all(|event| !matches!(event, EngineEvent::Item { key, kind: ItemKind::Plan { .. }, .. } if key != &canonical)), "native completion must retain its original canonical plan identity");
+        }
+        assert_eq!(
+            keys,
+            [
+                "plan",
+                "plan:agent-a",
+                "plan:agent-b",
+                "plan:agent-a",
+                "plan"
+            ]
+        );
+    }
 }

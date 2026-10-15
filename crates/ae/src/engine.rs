@@ -1,11 +1,11 @@
 //! `ae engine …`: Forge's engine manager on the data directory. Installs
 //! take the engine install lock, so they are safe beside a running Forge
-//! (which notices the new version on its next status read).
+//! (which notices the new version at its next explicit refresh).
 
 use crate::EngineCommand;
 use anyhow::{Context, Result};
 use artisan_api::{EngineId, EngineStatus, InstallState, SignInState};
-use forge_engines::Engines;
+use forge_engines::{EngineChange, Engines};
 use std::io::IsTerminal;
 use std::path::Path;
 use tokio::io::AsyncBufReadExt;
@@ -97,12 +97,13 @@ async fn with_progress<T>(engines: &Engines, work: impl Future<Output = Result<T
     let progress = async {
         let mut last = String::new();
         loop {
-            let status = match statuses.recv().await {
-                Ok(status) => status,
+            let (engine, install) = match statuses.recv().await {
+                Ok(EngineChange::Full(status)) => (status.engine, status.install),
+                Ok(EngineChange::Install { engine, install }) => (engine, install),
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => return std::future::pending::<()>().await,
             };
-            let line = match &status.install {
+            let line = match &install {
                 InstallState::Downloading {
                     version,
                     received,
@@ -110,15 +111,15 @@ async fn with_progress<T>(engines: &Engines, work: impl Future<Output = Result<T
                 } if *total > 0 => {
                     format!(
                         "Downloading {} {version}: {}%",
-                        status.engine.display_name(),
+                        engine.display_name(),
                         received * 100 / total
                     )
                 }
                 InstallState::Downloading { version, .. } => {
-                    format!("Downloading {} {version}…", status.engine.display_name())
+                    format!("Downloading {} {version}…", engine.display_name())
                 }
                 InstallState::Verifying { version } => {
-                    format!("Verifying {} {version}…", status.engine.display_name())
+                    format!("Verifying {} {version}…", engine.display_name())
                 }
                 _ => continue,
             };
@@ -144,13 +145,15 @@ async fn login(engines: &Engines, engine: EngineId) -> Result<()> {
     );
     // Claude asks for a code shown in the browser after signing in.
     let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
-    let reads_code = engine == EngineId::Claude && std::io::stdin().is_terminal();
+    let interactive = std::io::stdin().is_terminal();
+    let mut reads_code = false;
     let (mut shown_url, mut shown_code) = (None, None);
     loop {
         tokio::select! {
             status = statuses.recv() => {
                 let status = match status {
-                    Ok(status) => status,
+                    Ok(EngineChange::Full(status)) => status,
+                    Ok(EngineChange::Install {..}) => continue,
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => anyhow::bail!("the sign-in stopped reporting"),
                 };
@@ -158,7 +161,8 @@ async fn login(engines: &Engines, engine: EngineId) -> Result<()> {
                     continue;
                 }
                 match status.sign_in {
-                    SignInState::LoggingIn { url, code } => {
+                    SignInState::LoggingIn { url, code, accepts_code, .. } => {
+                        reads_code=accepts_code && interactive;
                         if url.is_some() && url != shown_url {
                             println!("Open this link to sign in: {}", url.as_deref().unwrap_or_default());
                             if reads_code {

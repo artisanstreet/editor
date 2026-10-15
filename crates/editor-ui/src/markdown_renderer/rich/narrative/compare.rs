@@ -2,11 +2,13 @@
 //! transcript. The recommended option is named in the accent above its
 //! column; hovering a column highlights it.
 
+use crate::markdown_renderer::rich::budget;
 use gpui::{
     AnyElement, App, Div, Entity, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
     Stateful, Styled as _, Window, div, prelude::*, px,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
@@ -15,66 +17,86 @@ use crate::theme::ArtisanTheme;
 
 /// The `compare` spec.
 #[derive(Debug, Deserialize)]
-pub(super) struct Compare {
+struct CompareSpec {
     options: Vec<String>,
-    rows: Vec<Row>,
+    rows: Vec<RowSpec>,
     #[serde(default)]
     recommended: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Row {
+struct RowSpec {
     criterion: String,
     #[serde(default)]
     values: Vec<String>,
 }
 
-impl Compare {
-    /// The recommended option's column, matched without regard to case.
-    fn recommended(&self) -> Option<usize> {
-        let wanted = self.recommended.as_deref()?.trim();
-        self.options
-            .iter()
-            .position(|option| option.trim().eq_ignore_ascii_case(wanted))
+#[derive(Debug, Deserialize)]
+#[serde(try_from = "CompareSpec")]
+pub(super) struct Compare(Arc<CompareData>);
+#[derive(Debug)]
+struct CompareData {
+    options: Vec<SharedString>,
+    rows: Vec<Row>,
+    recommended: Option<usize>,
+}
+#[derive(Debug)]
+struct Row {
+    criterion: SharedString,
+    values: Vec<SharedString>,
+}
+impl TryFrom<CompareSpec> for Compare {
+    type Error = String;
+    fn try_from(spec: CompareSpec) -> Result<Self, String> {
+        if spec.options.is_empty() || spec.options.len() > 16 || spec.rows.len() > 4096 {
+            return Err("comparison preview needs 1–16 options and at most 4096 criteria".into());
+        }
+        let recommended = spec.recommended.as_ref().and_then(|wanted| {
+            spec.options
+                .iter()
+                .position(|option| option.trim().eq_ignore_ascii_case(wanted.trim()))
+        });
+        let text = |text: String| SharedString::from(text.trim().to_owned());
+        Ok(Self(Arc::new(CompareData {
+            options: spec.options.into_iter().map(text).collect(),
+            rows: spec
+                .rows
+                .into_iter()
+                .map(|row| Row {
+                    criterion: text(row.criterion),
+                    values: row.values.into_iter().map(text).collect(),
+                })
+                .collect(),
+            recommended,
+        })))
     }
 }
 
 impl RichBlock for Compare {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<CompareData>()
+            + budget::vector(&self.0.options)
+            + self.0.options.iter().map(|text| text.len()).sum::<usize>()
+            + budget::vector(&self.0.rows)
+            + self
+                .0
+                .rows
+                .iter()
+                .map(|row| {
+                    row.criterion.len()
+                        + budget::vector(&row.values)
+                        + row.values.iter().map(|text| text.len()).sum::<usize>()
+                })
+                .sum::<usize>()
+    }
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         CompareView {
             id: cx.key("compare"),
             theme: *cx.theme,
-            options: self.options.clone(),
-            rows: self.rows.clone(),
-            recommended: self.recommended(),
+            data: self.0.clone(),
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        let recommended = self.recommended();
-        let mut header = vec![String::new()];
-        header.extend(self.options.iter().enumerate().map(|(index, option)| {
-            if Some(index) == recommended {
-                format!("{} (recommended)", option.trim())
-            } else {
-                option.trim().to_owned()
-            }
-        }));
-        let rows: Vec<Vec<String>> = self
-            .rows
-            .iter()
-            .map(|row| {
-                let mut cells = vec![format!("**{}**", row.criterion.trim())];
-                cells.extend((0..self.options.len()).map(|index| {
-                    row.values
-                        .get(index)
-                        .map_or_else(String::new, |value| value.trim().to_owned())
-                }));
-                cells
-            })
-            .collect();
-        kit::markdown_table(&header, &rows)
     }
 }
 
@@ -82,17 +104,17 @@ impl RichBlock for Compare {
 struct CompareView {
     id: SharedString,
     theme: ArtisanTheme,
-    options: Vec<String>,
-    rows: Vec<Row>,
-    recommended: Option<usize>,
+    data: Arc<CompareData>,
 }
 
-#[derive(Default)]
 struct HoverState {
     column: Option<usize>,
+    data: Arc<CompareData>,
+    rows: gpui::ListState,
 }
 
 /// What every cell needs to draw and report hover.
+#[derive(Clone)]
 struct Grid {
     id: SharedString,
     theme: ArtisanTheme,
@@ -135,19 +157,32 @@ impl Grid {
 impl RenderOnce for CompareView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
-        let state = kit::keyed(window, cx, part(&self.id, "state"), HoverState::default);
+        let data = self.data;
+        let state = kit::keyed(window, cx, part(&self.id, "state"), || HoverState {
+            column: None,
+            data: data.clone(),
+            rows: gpui::ListState::new(data.rows.len(), gpui::ListAlignment::Top, px(96.0)),
+        });
+        state.update(cx, |state, _| {
+            if !Arc::ptr_eq(&state.data, &data) {
+                state.data = data.clone();
+                state.column = None;
+                state.rows.reset(data.rows.len());
+            }
+        });
+        let rows = state.read(cx).rows.clone();
         let hovered = state.read(cx).column;
         let grid = Grid {
             id: self.id,
             theme,
             state,
             hovered,
-            recommended: self.recommended,
+            recommended: data.recommended,
         };
-        let columns = self.options.len();
-        let criterion = |text: SharedString| {
+        let columns = data.options.len();
+        let criterion = move |text: SharedString| {
             div()
-                .w(px(140.0))
+                .w(gpui::relative(0.24))
                 .flex_shrink_0()
                 .px(px(10.0))
                 .py(px(7.0))
@@ -157,7 +192,7 @@ impl RenderOnce for CompareView {
             .flex()
             .items_end()
             .child(criterion(SharedString::default()))
-            .children(self.options.iter().enumerate().map(|(column, option)| {
+            .children(data.options.iter().enumerate().map(|(column, option)| {
                 let recommended = grid.recommended == Some(column);
                 let accent = Tone::Accent.color(&theme).to_paint();
                 grid.cell("option", column).child(
@@ -169,32 +204,81 @@ impl RenderOnce for CompareView {
                             head.child(kit::label(&theme, "Recommended").text_color(accent))
                         })
                         .child(
-                            kit::title(&theme, option.trim().to_owned())
+                            kit::title(&theme, option.clone())
                                 .when(recommended, |title| title.text_color(accent)),
                         ),
                 )
             }));
-        div().w_full().flex().flex_col().child(header).children(
-            self.rows.into_iter().enumerate().map(|(index, row)| {
+        let minimum = px(columns as f32 * 96.0 + 128.0);
+        let row_grid = grid.clone();
+        let height = px(data.rows.len().min(6) as f32 * 40.0);
+        let selection = data.options.get(hovered.unwrap_or(usize::MAX)).cloned();
+        let body = gpui::list(rows, move |index, _, _| {
+            let Some(row) = data.rows.get(index) else {
+                return div().into_any_element();
+            };
+            div()
+                .w_full()
+                .min_w(minimum)
+                .flex()
+                .border_t_1()
+                .border_color(kit::hairline(&theme))
+                .child(criterion(row.criterion.clone()))
+                .children((0..columns).map(|column| {
+                    let value = row.values.get(column).cloned().unwrap_or_default();
+                    row_grid
+                        .cell(&format!("row{index}"), column)
+                        .child(if value.is_empty() {
+                            kit::muted(&theme, "–")
+                        } else {
+                            kit::body(&theme, value)
+                                .text_size(px(13.0))
+                                .line_height(px(20.0))
+                        })
+                }))
+                .into_any_element()
+        })
+        .w_full()
+        .min_w(minimum)
+        .h(height);
+        let table = div()
+            .id(part(&grid.id, "viewport"))
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .child(
                 div()
+                    .min_w(minimum)
+                    .w_full()
                     .flex()
-                    .border_t_1()
-                    .border_color(kit::hairline(&theme))
-                    .child(criterion(SharedString::from(
-                        row.criterion.trim().to_owned(),
-                    )))
-                    .children((0..columns).map(|column| {
-                        let value = row.values.get(column).map_or("", |value| value.trim());
-                        grid.cell(&format!("row{index}"), column)
-                            .child(if value.is_empty() {
-                                kit::muted(&theme, "–")
-                            } else {
-                                kit::body(&theme, value.to_owned())
-                                    .text_size(px(13.0))
-                                    .line_height(px(20.0))
-                            })
-                    }))
-            }),
+                    .flex_col()
+                    .child(header)
+                    .child(body),
+            );
+        let keyboard = grid.state.clone();
+        let mut navigation = crate::chart_navigation::ChartNavigation::new(
+            part(&grid.id, "navigation"),
+            theme,
+            "Comparison. Arrows select options; Escape clears the highlight.",
+            0..columns,
+            table,
+            move |command, _, cx| {
+                keyboard.update(cx, |state, cx| {
+                    state.column = match command {
+                        crate::chart_navigation::ChartCommand::Select(index)
+                        | crate::chart_navigation::ChartCommand::Activate(index) => Some(index),
+                        crate::chart_navigation::ChartCommand::Parent
+                        | crate::chart_navigation::ChartCommand::Reset => None,
+                    };
+                    cx.notify();
+                });
+            },
         )
+        .selected(hovered)
+        .content_height();
+        if let Some(label) = selection {
+            navigation = navigation.selection_label(label);
+        }
+        navigation
     }
 }

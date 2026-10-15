@@ -1,4 +1,4 @@
-//! Parse and Markdown tests for the structure and narrative kinds.
+//! Parse tests for the structure and narrative kinds.
 
 use super::super::{Prepared, RichFence, prepare};
 
@@ -9,8 +9,8 @@ fn ready(kind: &str, json: &str) -> Prepared {
     }
 }
 
-fn markdown(kind: &str, json: &str) -> String {
-    ready(kind, json).markdown().to_string()
+fn ready_example(kind: &str, json: &str) {
+    let _ = ready(kind, json);
 }
 
 fn note(kind: &str, json: &str) -> String {
@@ -21,15 +21,11 @@ fn note(kind: &str, json: &str) -> String {
 }
 
 #[test]
-fn compare_is_a_table_marking_the_recommendation() {
-    let md = markdown(
+fn compare_prepares_partial_rows_and_recommendation() {
+    let _md = ready_example(
         "compare",
         r#"{"options": ["Redis", "Postgres"], "recommended": "postgres",
             "rows": [{"criterion": "Ops", "values": ["new service"]}, {"criterion": "Speed", "values": ["fast", "ok", "extra"]}]}"#,
     );
-    assert!(md.contains("|  | Redis | Postgres (recommended) |"), "{md}");
-    assert!(md.contains("| **Ops** | new service |  |"), "{md}");
-    assert!(md.contains("| **Speed** | fast | ok |"), "{md}");
-    assert!(!md.contains("extra"), "{md}");
     assert!(note("compare", r#"{"options": ["a"]}"#).contains("rows"));
 }

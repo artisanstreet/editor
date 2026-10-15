@@ -14,11 +14,7 @@ use crate::decode::Audio;
 /// Mono feeds the first two output channels, stereo is averaged for a mono
 /// device, and output channels beyond stereo stay silent. Pads with
 /// silence past the end and returns whether the track's last frame was read.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "samples narrow to f32 by design, and the whole-frame advance is a small non-negative count"
-)]
+#[cfg(test)]
 pub(crate) fn render(
     audio: &Audio,
     cursor: &mut usize,
@@ -27,11 +23,30 @@ pub(crate) fn render(
     out: &mut [f32],
     out_channels: usize,
 ) -> bool {
+    render_mapped(audio, cursor, phase, step, out, out_channels, |sample| {
+        sample
+    })
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "samples narrow to f32 by design, and the whole-frame advance is a small non-negative count"
+)]
+pub(crate) fn render_mapped<T: Copy>(
+    audio: &Audio,
+    cursor: &mut usize,
+    phase: &mut f64,
+    step: f64,
+    out: &mut [T],
+    out_channels: usize,
+    convert: impl Fn(f32) -> T,
+) -> bool {
     let frames = audio.frames();
     let channels = audio.channels;
     for frame in out.chunks_mut(out_channels.max(1)) {
         if *cursor >= frames {
-            frame.fill(0.0);
+            frame.fill(convert(0.0));
             continue;
         }
         let next = (*cursor + 1).min(frames - 1);
@@ -39,21 +54,22 @@ pub(crate) fn render(
             f64::from(audio.samples[frame * channels + channel.min(channels - 1)])
         };
         let sample = |channel: usize| {
-            (at(*cursor, channel) * (1.0 - *phase) + at(next, channel) * *phase) as f32
+            let mixed = (at(*cursor, channel) * (1.0 - *phase) + at(next, channel) * *phase) as f32;
+            if mixed.is_finite() { mixed } else { 0.0 }
         };
         let (left, right) = (sample(0), sample(1));
         match frame {
             [only] => {
-                *only = if channels == 1 {
+                *only = convert(if channels == 1 {
                     left
                 } else {
                     f32::midpoint(left, right)
-                }
+                })
             }
             [first, second, rest @ ..] => {
-                *first = left;
-                *second = right;
-                rest.fill(0.0);
+                *first = convert(left);
+                *second = convert(right);
+                rest.fill(convert(0.0));
             }
             [] => {}
         }
@@ -72,7 +88,7 @@ mod tests {
 
     fn audio(samples: &[f32], channels: usize) -> Audio {
         Audio {
-            samples: samples.to_vec(),
+            samples: samples.to_vec().into(),
             channels,
             rate: 1000,
         }
@@ -108,5 +124,37 @@ mod tests {
         let (mut cursor, mut phase, mut out) = (0, 0.0, [9.0; 1]);
         render(&audio, &mut cursor, &mut phase, 1.0, &mut out, 1);
         assert!((out[0] - 0.4).abs() < 1e-6);
+    }
+    #[test]
+    fn mapped_device_samples_preserve_resampling_and_channel_layout() {
+        let track = audio(&[0.0, 1.0], 1);
+        let (mut cursor, mut phase, mut out) = (0, 0.0, [9.0f64; 8]);
+        assert!(render_mapped(
+            &track,
+            &mut cursor,
+            &mut phase,
+            0.5,
+            &mut out,
+            2,
+            f64::from
+        ));
+        assert_eq!(out, [0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(cursor, 2);
+    }
+}
+
+#[cfg(test)]
+mod invalid_float_output_tests {
+    use super::*;
+    #[test]
+    fn mapped_float_output_never_carries_nan_or_infinity() {
+        let audio = Audio {
+            samples: [f32::NAN, f32::INFINITY].into(),
+            channels: 1,
+            rate: 48000,
+        };
+        let mut out = [9.0f64; 2];
+        render_mapped(&audio, &mut 0, &mut 0.0, 1.0, &mut out, 1, f64::from);
+        assert_eq!(out, [0.0, 0.0]);
     }
 }

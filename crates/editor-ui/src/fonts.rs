@@ -1,14 +1,13 @@
-//! Register the static weight faces of the two bundled Spline families before any window paints.
+//! Register the bundled font faces before any window paints.
 
 use gpui::{App, SharedString};
 
 /// Registers every face in [`editor_assets::fonts::ALL`] with the
-/// application's text system (DirectWrite in-memory font-file references on
-/// Windows, `gpui-0.2.2/src/platform/windows/direct_write.rs:284–322`).
+/// application's text system. The production Windows and Linux backends both
+/// use Cosmic, with static weight faces to preserve the same glyph shapes.
 ///
-/// Idempotency is the platform's: repeated calls re-add the same in-memory
-/// references and rebuild the custom collection, so callers invoke this
-/// exactly once at startup.
+/// Call once at startup; repeated registration can duplicate platform font
+/// entries.
 ///
 /// # Errors
 ///

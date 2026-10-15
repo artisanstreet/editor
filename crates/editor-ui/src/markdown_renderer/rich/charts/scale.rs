@@ -202,7 +202,7 @@ pub(super) fn quantile(sorted: &[f64], q: f64) -> Option<f64> {
     let below = index_of(position).min(last);
     let above = (below + 1).min(last);
     let t = position - f64_of(below);
-    Some(sorted[below] + (sorted[above] - sorted[below]) * t)
+    Some(sorted[below] * (1.0 - t) + sorted[above] * t)
 }
 
 /// The finite values, sorted.

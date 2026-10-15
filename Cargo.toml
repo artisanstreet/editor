@@ -2,6 +2,7 @@
 members = [
     "crates/ae",
     "crates/artisan-api",
+    "crates/artisan-markdown-index",
     "crates/editor",
     "crates/editor-assets",
     "crates/editor-audio",
@@ -18,6 +19,11 @@ members = [
     "crates/forge-runs",
     "crates/forge-store",
 ]
+exclude = [
+    "vendor/highlighting/syntect",
+    "vendor/highlighting/onig",
+    "vendor/highlighting/validation",
+]
 resolver = "3"
 
 [workspace.package]
@@ -28,6 +34,14 @@ rust-version = "1.98.0"
 version = "0.0.0"
 
 [workspace.dependencies]
+ropey = "=1.6.1"
+glam = "=0.34.1"
+color = "=0.3.3"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
+url = "=2.5.8"
+data-url = "=0.3.2"
+unicode-width = "=0.2.2"
+vte = { version = "=0.15.0", default-features = false }
 anyhow = "=1.0.104"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "http2", "json", "query", "tokio"] }
 clap = { version = "=4.6.6", features = ["derive", "env"] }
@@ -44,13 +58,18 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 cpal = { version = "=0.18.2", default-features = false }
 fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
+gethostname = "=1.1.0"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "124c65d4a50ace08ec1c432c324677584367253b", features = ["wgpu"] }
+gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "f82ca3fe86540bc1d96acd1e295fefe4e8e7529e" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "f82ca3fe86540bc1d96acd1e295fefe4e8e7529e", features = ["cosmic-text"] }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
+ufbx = "=0.11.3"
+stl_io = "=0.11.0"
+ply-rs-bw = "=4.0.0"
+gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
-mimalloc = { version = "=0.1.52", default-features = false }
+mimalloc = { version = "=0.1.52", default-features = false, features = ["no_thp"] }
 native-dialog = { version = "=0.9.7", default-features = false, features = [
     "windows_dpi_awareness",
 ] }
@@ -67,9 +86,11 @@ rustls = { version = "=0.23.43", default-features = false, features = [
     "ring",
     "std",
 ] }
-serde = { version = "=1.0.229", default-features = false, features = ["derive", "std"] }
+serde = { version = "=1.0.229", default-features = false, features = ["derive", "std", "rc"] }
 serde_json = { version = "=1.0.151", features = ["preserve_order"] }
-statig = "=0.4.1"
+sse-core = { version = "=0.2.3", default-features = false, features = ["std", "stream"] }
+rodio = { version = "=0.21.1", default-features = false, features = ["symphonia-all"] }
+crossbeam-channel = "=0.5.15"
 symphonia = { version = "=0.5.5", default-features = false, features = [
     "aac",
     "flac",
@@ -83,13 +104,13 @@ symphonia = { version = "=0.5.5", default-features = false, features = [
 syntect = { version = "=5.3.0", default-features = false, features = [
     "parsing",
     "default-syntaxes",
-    "regex-fancy",
+    "regex-onig",
 ] }
-roxmltree = "=0.20.0"
 image = { version = "=0.25.10", default-features = false }
 webp = { version = "=0.3.1", default-features = false }
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
 sha2 = "=0.11.0"
+hex = "=0.4.3"
 similar = "=2.7.0"
 tar = "=0.4.46"
 tempfile = "=3.27.0"
@@ -150,3 +171,8 @@ must_use_candidate = "allow"
 repository = "https://github.com/artisanstreet/gpui-ce"
 branch = "artisan/editor"
 purpose = "wgpu renderer, backdrop blur materials, Oklab gradients, native color emoji"
+
+# Bounded Oniguruma search with the original fancy engine as the limit fallback.
+[patch.crates-io]
+syntect = { path = "vendor/highlighting/syntect" }
+onig = { path = "vendor/highlighting/onig" }

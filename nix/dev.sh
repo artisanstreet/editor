@@ -22,7 +22,7 @@ linux=false
 from=""
 while (($#)); do
     case "$1" in
-        run | forge | editor | stop | import) command="$1" ;;
+        build | run | forge | editor | stop | import) command="$1" ;;
         ae)
             command=ae
             shift
@@ -46,8 +46,6 @@ export ARTISAN_FORGE_LISTEN="127.0.0.1:${ARTISAN_DEV_PORT:-47901}"
 bin="$ARTISAN_HOME/bin"
 ae="$bin/ae"
 editor="$bin/artisan-editor"
-pid_file="$ARTISAN_FORGE_DATA/forge.pid"
-forge_log="$ARTISAN_FORGE_DATA/forge.log"
 
 if [[ "$command" == ae ]]; then
     [[ -x "$ae" ]] || die "there is no dev ae yet; run \`nix run .#dev\` first"
@@ -68,7 +66,7 @@ esac
 # ---- building ---------------------------------------------------------------
 
 # The default dev shell caps Cargo at two jobs for interactive use.
-unset CARGO_BUILD_JOBS CARGO_TARGET_DIR CARGO_BUILD_TARGET
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET
 
 # cargo_build <dev shell> <platform> <cargo args>: each platform has its own
 # target directory, since the shells' environments differ.
@@ -91,16 +89,6 @@ put() {
 
 # ---- the dev Forge ----------------------------------------------------------
 
-# The pid in forge.pid if it is the dev `ae` (replaced binaries read "(deleted)").
-forge_pid() {
-    local pid exe
-    pid="$(cat "$pid_file" 2>/dev/null)" || return 1
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
-    [[ "$exe" == "$ae" || "$exe" == "$ae (deleted)" ]] || return 1
-    echo "$pid"
-}
-
 # Stops a process and waits for it: TERM, then KILL after <seconds>.
 stop_pid() {
     local pid="$1" seconds="$2"
@@ -113,38 +101,12 @@ stop_pid() {
 }
 
 stop_forge() {
-    local pid
-    if pid="$(forge_pid)"; then
-        say "stopping the dev Forge (pid $pid)"
-        stop_pid "$pid" 30
-    fi
-    rm -f "$pid_file"
+    [[ -x "$ae" ]] || return 0
+    "$ae" forge stop
 }
 
 start_forge() {
-    local pid host port
-    mkdir -p "$ARTISAN_FORGE_DATA"
-    if [[ -f "$forge_log" ]] && (($(stat -c %s "$forge_log") > 16 * 1024 * 1024)); then
-        mv -f "$forge_log" "$forge_log.1"
-    fi
-    # Its own session: no terminal hangup reaches it, and it outlives this run.
-    setsid "$ae" forge serve >> "$forge_log" 2>&1 < /dev/null &
-    pid=$!
-    echo "$pid" > "$pid_file"
-    host="${ARTISAN_FORGE_LISTEN%:*}"
-    port="${ARTISAN_FORGE_LISTEN##*:}"
-    for _ in $(seq 100); do
-        if ! kill -0 "$pid" 2> /dev/null; then
-            tail -n 20 "$forge_log" >&2
-            die "the dev Forge exited while starting; log: $forge_log"
-        fi
-        if (exec 3<> "/dev/tcp/$host/$port") 2> /dev/null; then
-            say "dev Forge on $ARTISAN_FORGE_LISTEN (pid $pid, data $ARTISAN_FORGE_DATA, log $forge_log)"
-            return
-        fi
-        sleep 0.1
-    done
-    die "the dev Forge (pid $pid) is not listening on $ARTISAN_FORGE_LISTEN after 10 s; log: $forge_log"
+    "$ae" forge start
 }
 
 # The bash that `wsl.exe -- …` starts for the dev Windows Editor sources this
@@ -283,6 +245,11 @@ relaunch_editor() {
 }
 
 case "$command" in
+    build)
+        build_ae_and_linux_editor true
+        if [[ "$windows" == true ]]; then cargo_build cargo-windows windows -p editor --bin artisan-editor; fi
+        say "build complete; binaries are in target/dev (no running process changed)"
+        ;;
     run)
         # Everything builds before anything running is touched.
         build_ae_and_linux_editor true

@@ -1,15 +1,15 @@
-//! Chart kinds: parsing, layout and the Markdown rendition.
+//! Chart kinds: parsing and layout.
 
 use super::super::{RichFence, prepare};
-use super::chart::ChartSpec;
 use super::chart::model::Model;
+use super::chart::{ChartSpec, ChartStyle};
 use super::funnel::Funnel;
 use super::heatmap::Heatmap;
 use super::spans::layout_for_tests;
 
-fn markdown(kind: &str, json: &str) -> String {
+fn ready_example(kind: &str, json: &str) {
     match prepare(Some(&format!("artisan-{kind}")), json, true) {
-        Some(RichFence::Ready(prepared)) => prepared.markdown().to_string(),
+        Some(RichFence::Ready(_)) => (),
         other => panic!("expected artisan-{kind} to parse, got {other:?}"),
     }
 }
@@ -21,10 +21,10 @@ fn invalid(kind: &str, json: &str) -> String {
     }
 }
 
-fn chart(json: &str) -> (ChartSpec, Model) {
+fn chart(json: &str) -> (ChartStyle, Model) {
     let spec: ChartSpec = serde_json::from_str(json).expect("chart spec");
     let model = Model::from_spec(&spec);
-    (spec, model)
+    (spec.into(), model)
 }
 
 #[test]
@@ -43,13 +43,12 @@ fn odd_charts_do_not_panic() {
         let ticks = super::chart::model::y_ticks(&tracks, view, spec.mark, spec.stacks(), &spec.y);
         assert!(ticks.domain.span() > 0.0, "{json}");
         assert!(view.span() > 0.0, "{json}");
-        let _ = super::chart::markdown(&spec, &model);
     }
 }
 
 #[test]
-fn chart_parses_and_renders_markdown() {
-    let text = markdown(
+fn chart_prepares_optional_annotations_and_parameters() {
+    let _text = ready_example(
         "chart",
         r#"{"title": "Latency", "mark": "bar", "categories": ["a", "b"],
             "series": [{"name": "p50", "values": [12, 14.5]}, {"name": "p99", "values": [40, null]}],
@@ -57,13 +56,6 @@ fn chart_parses_and_renders_markdown() {
             "annotations": [{"y": 30, "label": "SLO"}, {"x": "a", "x_end": "b", "label": "rollout"}],
             "params": [{"id": "t", "kind": "threshold", "label": "Budget", "min": 0, "max": 50, "value": 25}]}"#,
     );
-    assert!(text.starts_with("**Latency**"), "{text}");
-    assert!(text.contains("| Category | p50 | p99 |"), "{text}");
-    assert!(text.contains("| b | 14.5 |  |"), "{text}");
-    assert!(text.contains("y in ms"), "{text}");
-    assert!(text.contains("- SLO (y = 30)"), "{text}");
-    assert!(text.contains("- rollout (x a to b)"), "{text}");
-    assert!(text.contains("- Budget: 25"), "{text}");
 }
 
 #[test]
@@ -77,7 +69,7 @@ fn required_fields_name_the_problem() {
 }
 
 #[test]
-fn heatmap_colors_and_markdown() {
+fn heatmap_positions_values_and_prepares_labels() {
     let spec: Heatmap = serde_json::from_str(
         r#"{"x": ["mon", "tue"], "y": ["am", "pm"], "values": [[1, null], [3, 5]], "scale": "diverging"}"#,
     )
@@ -86,31 +78,20 @@ fn heatmap_colors_and_markdown() {
     assert_eq!(spec.cell(0, 1), None);
     assert!((spec.position(5.0) - 1.0).abs() < 1e-6);
     assert!((spec.position(-5.0) + 1.0).abs() < 1e-6);
-    let text = markdown(
+    let _text = ready_example(
         "heatmap",
         r#"{"x": ["mon", "tue"], "y": ["am"], "values": [[1, null]], "unit": "ms"}"#,
     );
-    assert!(text.contains("|  | mon | tue |"), "{text}");
-    assert!(text.contains("| am | 1 |  |"), "{text}");
-    assert!(text.contains("_Values in ms_"), "{text}");
     let flat: Heatmap = serde_json::from_str(r#"{"values": [[2, 2]]}"#).expect("flat");
     assert!(flat.position(2.0).is_finite());
 }
 
 #[test]
-fn distribution_markdown_summarizes_each_series() {
-    let text = markdown(
+fn distribution_prepares_series_and_threshold() {
+    let _text = ready_example(
         "distribution",
         r#"{"series": [{"name": "build", "values": [1, 2, 3, 4, null]}], "bins": 2, "unit": "s", "threshold": 2}"#,
     );
-    assert!(
-        text.contains("| Series | n | min | q1 | median | q3 | max | mean |"),
-        "{text}"
-    );
-    assert!(text.contains("| build | 4 | 1 |"), "{text}");
-    assert!(text.contains("| Bin | build |"), "{text}");
-    assert!(text.contains("- Threshold: 2"), "{text}");
-    assert!(text.contains("build: 50% at or below"), "{text}");
 }
 
 #[test]
@@ -128,21 +109,18 @@ fn funnel_reads_shares_and_drops() {
         serde_json::from_str(r#"{"steps": [{"label": "a", "value": 0}]}"#).expect("zero");
     assert_eq!(empty.widths(), vec![0.0]);
     assert_eq!(empty.reading(0).of_first, None);
-    let text = markdown(
+    let _text = ready_example(
         "funnel",
         r#"{"steps": [{"label": "Visit", "value": 10}, {"label": "Pay", "value": 4}]}"#,
     );
-    assert!(text.contains("| Pay | 4 | 40% | −6 (−60%) |"), "{text}");
 }
 
 #[test]
-fn sankey_markdown_lists_flows() {
-    let text = markdown(
+fn sankey_prepares_node_labels_and_flows() {
+    let _text = ready_example(
         "sankey",
         r#"{"nodes": [{"id": "a", "label": "Inbox"}], "links": [{"from": "a", "to": "b", "value": 2}]}"#,
     );
-    assert!(text.contains("| From | To | Value |"), "{text}");
-    assert!(text.contains("| Inbox | b | 2 |"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -163,10 +141,8 @@ fn tree_json() -> serde_json::Value {
 }
 
 #[test]
-fn hierarchy_needs_a_size_and_outlines_as_markdown() {
-    let out = markdown("hierarchy", &tree_json().to_string());
-    assert!(out.contains("- **src** \u{2014} 40 (100%)"), "{out}");
-    assert!(out.contains("  - **core** \u{2014} 30 (75%)"), "{out}");
+fn hierarchy_prepares_positive_size_and_rejects_bad_layout() {
+    let _out = ready_example("hierarchy", &tree_json().to_string());
     assert!(invalid("hierarchy", r#"{"name": "x"}"#).contains("positive"));
     assert!(invalid("hierarchy", r#"{"value": 1, "layout": "pie"}"#).contains("pie"));
 }
@@ -224,9 +200,74 @@ fn spans_read_dates_and_refuse_mixed_times() {
     }));
     assert!(mixed.expect_err("mixed").contains("mixes"));
     assert!(invalid("spans", r#"{"spans": [{"start": "soon", "end": 1}]}"#).contains("ISO date"));
-    let out = markdown(
+    let _out = ready_example(
         "spans",
         r#"{"spans": [{"label": "a", "start": 1, "end": 3, "lane": "x"}]}"#,
     );
-    assert!(out.contains("| a | x | 1 | 3 | 2 |"), "{out}");
+}
+
+#[test]
+fn malformed_chart_data_is_rejected_instead_of_silently_changed() {
+    assert!(invalid("funnel", r#"{"steps":[{"value":-1}]}"#).contains("nonnegative"));
+    assert!(
+        invalid(
+            "sankey",
+            r#"{"links":[{"from":"a","to":"b","value":1},{"from":"b","to":"a","value":1}]}"#
+        )
+        .contains("cyclic")
+    );
+    assert!(
+        invalid("sankey", r#"{"links":[{"from":"a","to":"a","value":1}]}"#).contains("distinct")
+    );
+    assert!(
+        invalid(
+            "hierarchy",
+            r#"{"children":[{"value":1e308},{"value":1e308}]}"#
+        )
+        .contains("finite")
+    );
+    assert!(invalid("spans", r#"{"spans":[{"start":2,"end":1}]}"#).contains("precedes"));
+    assert!(
+        invalid(
+            "spans",
+            r#"{"spans":[{"start":"2026-10-13T12:30:00Z","end":"2026-10-14"}]}"#
+        )
+        .contains("ISO date")
+    );
+}
+
+#[test]
+fn same_day_calendar_span_has_a_day_sized_domain() {
+    let layout = layout_for_tests(
+        &serde_json::json!({"spans":[{"start":"2024-02-29","end":"2024-02-29","lane":" "}]}),
+    )
+    .expect("leap-day span");
+    assert_eq!(layout.domain.span(), 1.0);
+    assert!(layout.lanes.is_empty());
+    assert_eq!(layout.time(layout.spans[0].start), "Feb 29, 2024");
+}
+
+#[test]
+fn normalized_stacks_preserve_shares_when_raw_totals_overflow() {
+    let (_, model) =
+        chart(r#"{"normalize":true,"series":[{"values":[1e308]},{"values":[1e308]}]}"#);
+    let tracks = model.tracks(&[true, true], true, true);
+    assert_eq!(tracks[0][0].1, Some((0.0, 50.0)));
+    assert_eq!(tracks[1][0].1, Some((50.0, 100.0)));
+}
+
+#[test]
+fn sparse_stacked_input_cannot_expand_into_an_unbounded_matrix() {
+    let series: Vec<_> = (0..128)
+        .map(|index| serde_json::json!({"points":[[index * 2, 1], [index * 2 + 1, 1]]}))
+        .collect();
+    let value = serde_json::json!({"stacked":true,"series":series});
+    assert!(
+        super::chart::parse(&value)
+            .err()
+            .unwrap()
+            .contains("aligned cells")
+    );
+    let value = serde_json::json!({"series":series});
+    assert!(super::chart::parse(&value).is_ok());
 }

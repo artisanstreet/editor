@@ -1,0 +1,14 @@
+[package]
+name = "artisan-markdown-index"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+
+[dependencies]
+pulldown-cmark = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

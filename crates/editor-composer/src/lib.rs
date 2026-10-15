@@ -7,13 +7,13 @@
 //! steer: Forge decides, the composer only says so on the button.
 
 mod attachment;
+mod draft_session;
 mod encode;
 mod goal_strip;
 mod mentions;
 mod picker;
 mod placeholder;
 mod questionnaire;
-mod send;
 
 pub use goal_strip::{ComposerGoal, ComposerGoalState};
 pub use questionnaire::ComposerQuestionnaire;
@@ -25,30 +25,22 @@ use artisan_api::{
     BlobHash, CreateThread, EngineConfig, EngineId, ItemId, ProjectId, SendMessage, SignInState,
     ThreadId,
 };
+use draft_session::{DraftSession, SessionEvent, Submission};
 use editor_core::{Core, HostData, HostEvent, HostId, Screen};
 use editor_ui::AssetId;
-use editor_ui::asset_seam::asset_glyph;
-use editor_ui::button::{AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant};
-use editor_ui::glass::{
-    GlassStrength, card_shadows, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
-use editor_ui::motion::{MotionDuration, MotionPolicy};
-use editor_ui::picker_motion::smooth_out;
-use editor_ui::tab_card::{TabCardStrip, tab_card_with_strip};
-use editor_ui::theme::{ArtisanTheme, DesktopTheme, RadiusTokens, ThemeMode};
-use gpui::prelude::FluentBuilder as _;
+use editor_ui::button::{Button, ButtonShape, ButtonVariant};
+use editor_ui::glass::ComposerFrame;
+use editor_ui::tab_card::{TabCard, TabCardStrip};
+use editor_ui::theme::ArtisanTheme;
 use gpui::{
-    AnyElement, App, AppContext as _, ColorExt as _, Context, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Task, Window, canvas, div, img, px,
+    App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderImage, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use serde::{Deserialize, Serialize};
-use statig::blocking::{IntoStateMachineExt as _, StateMachine};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// What the composer sends to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,14 +74,9 @@ pub enum ComposerEvent {
     NewProject,
 }
 
-const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(400);
-/// The Editor-local setting holding, per host id, the engine settings last
-/// picked or sent with. New threads on that host start from them.
-/// Forge's setting for the engine settings new threads start with; Settings
-/// → Engines edits the same one, so the latest choice wins either way.
+/// Forge persists this default when it accepts a new message. Settings uses
+/// the same value when choosing the configuration for a new thread.
 const DEFAULT_CONFIG_KEY: &str = "default_engine_config";
-const RADIUS: f32 = 18.0;
-const TILE: f32 = 72.0;
 
 /// What `/drafts/{scope}` holds.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -100,25 +87,20 @@ struct DraftBody {
     images: Vec<BlobHash>,
     #[serde(default)]
     config: Option<EngineConfig>,
-}
-
-/// The message in flight; kept so a retry sends exactly the same thing.
-struct Outgoing {
-    message: SendMessage,
-    /// Set until Forge created the thread.
-    create: Option<CreateThread>,
-    /// The draft to clear once Forge has the message.
-    scope: String,
+    /// Choosing another project carries this draft; its original slot stays stable.
+    #[serde(default)]
+    project: Option<ProjectId>,
 }
 
 pub(crate) struct Attachment {
     key: u64,
     name: SharedString,
-    machine: StateMachine<attachment::Machine>,
-    /// The WebP, once encoded or fetched back from Forge.
-    preview: Option<Arc<Image>>,
-    /// The picture as given, shown blurred while the WebP encodes.
-    draft: Option<Arc<Image>>,
+    state: attachment::State,
+    /// Decoded pixels shared by the tile and the full-window preview.
+    preview: Option<Arc<RenderImage>>,
+    /// Encoded bytes move into the upload once conversion finishes.
+    encoded: Option<Vec<u8>>,
+    preview_error: Option<String>,
     /// When the preview arrived: it sharpens out of the blur from then.
     revealed: Option<Instant>,
     /// Hash and length of the picture as given, to spot it pasted twice.
@@ -135,6 +117,18 @@ enum Menu {
 pub struct Composer {
     core: Entity<Core>,
     target: ComposerTarget,
+    target_generation: u64,
+    edit_revision: u64,
+    cancelling: bool,
+    #[cfg(test)]
+    cancel_completion_gate: Option<(
+        Arc<std::sync::atomic::AtomicBool>,
+        futures::channel::oneshot::Receiver<bool>,
+    )>,
+    #[cfg(test)]
+    cancel_requests: Vec<ThreadId>,
+    #[cfg(test)]
+    cancel_completions: usize,
     editor: Entity<TextEditor>,
     has_text: bool,
     attachments: Vec<Attachment>,
@@ -142,8 +136,10 @@ pub struct Composer {
     /// The attachment a duplicate paste or drop shook, and when; every
     /// repeat restarts it.
     shake: Option<(u64, Instant)>,
-    send: StateMachine<send::Machine>,
-    outgoing: Option<Outgoing>,
+    session: Option<Entity<DraftSession>>,
+    session_lease: Option<std::rc::Rc<()>>,
+    session_subscription: Option<Subscription>,
+    restore_revision: Option<u64>,
     /// Failures outside sending (stop, attachments read from disk).
     notice: Option<String>,
     /// The user's engine choice; `None` follows the thread.
@@ -153,13 +149,10 @@ pub struct Composer {
     menu: Option<Menu>,
     /// The engine whose models the open model menu shows.
     browsing: Option<EngineId>,
-    /// The policy dropdown open in the model menu.
+    /// The active model and project choices.
+    picker: picker::PickerState,
     axis: Option<picker::Axis>,
-    /// The picker surfaces' motion, hover pills, engine light and tooltip.
-    picker: picker::PickerMotion,
-    /// The window's width at the last render; the model menu fits it.
     viewport_width: f32,
-    /// The window's height at the last render; the project menu fits it.
     viewport_height: f32,
     /// The thread's goal, on the strip along the card's top edge.
     goal: goal_strip::GoalStrip,
@@ -167,15 +160,11 @@ pub struct Composer {
     /// empties again.
     placeholder_generation: u64,
     placeholder_was_visible: bool,
-    /// Focus for the primary (send or stop) button.
-    button_focus: FocusHandle,
     /// Skills and connectors named in the draft, and their menu.
     mentions: mentions::Mentions,
     /// The agent's open questions, answered from the card.
     questionnaire: questionnaire::QuestionnairePanel,
-    /// Pending debounced draft save; dropping it cancels.
-    save: Option<Task<()>>,
-    load_draft: Task<()>,
+
     host_subscription: Option<Subscription>,
     _editor_subscriptions: Vec<Subscription>,
 }
@@ -195,6 +184,8 @@ impl Composer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.on_release(|composer, cx| composer.clear_attachments(cx))
+            .detach();
         let editor = cx.new(|cx| TextEditor::new("", placeholder::phrase(0), cx).prompt());
         let editor_subscriptions = vec![
             cx.subscribe(&editor, Self::on_editor_event),
@@ -215,30 +206,38 @@ impl Composer {
         let mut composer = Self {
             core,
             target,
+            target_generation: 0,
+            edit_revision: 0,
+            cancelling: false,
+            #[cfg(test)]
+            cancel_completion_gate: None,
+            #[cfg(test)]
+            cancel_requests: Vec::new(),
+            #[cfg(test)]
+            cancel_completions: 0,
             editor,
             has_text: false,
             attachments: Vec::new(),
             next_key: 0,
             shake: None,
-            send: send::Machine.state_machine(),
-            outgoing: None,
+            session: None,
+            session_lease: None,
+            session_subscription: None,
+            restore_revision: Some(0),
             notice: None,
             config: None,
             project: None,
             menu: None,
             browsing: None,
+            picker: picker::PickerState::default(),
             axis: None,
-            picker: picker::PickerMotion::default(),
-            viewport_width: 1_280.0,
+            viewport_width: 1280.0,
             viewport_height: 800.0,
             goal: goal_strip::GoalStrip::default(),
             placeholder_generation: 0,
             placeholder_was_visible: false,
-            button_focus: cx.focus_handle(),
             mentions: mentions::Mentions::default(),
             questionnaire: questionnaire::QuestionnairePanel::default(),
-            save: None,
-            load_draft: Task::ready(()),
             host_subscription: None,
             _editor_subscriptions: editor_subscriptions,
         };
@@ -249,7 +248,10 @@ impl Composer {
     /// Shows the thread's goal on the strip along the card's top edge, or
     /// retracts it.
     pub fn set_goal(&mut self, goal: Option<ComposerGoal>, cx: &mut Context<Self>) {
-        if self.goal.set(goal, std::time::Instant::now(), false) {
+        if self
+            .goal
+            .set(goal, std::time::Instant::now(), cx.reduce_motion())
+        {
             cx.notify();
         }
     }
@@ -263,22 +265,27 @@ impl Composer {
         if target == self.target {
             return;
         }
-        if self.save.take().is_some() {
-            self.save_now(cx);
+        if let Some(session) = &self.session {
+            session.update(cx, |session, cx| session.flush(cx));
         }
         self.leave_questionnaires();
-        if target.host() != self.target.host() {
-            self.mentions.forget_skills();
-        }
+        // A target switch is a scope change, never a goal-strip transition.
+        self.goal = goal_strip::GoalStrip::default();
+        self.mentions.forget_skills();
         self.target = target;
+        self.target_generation = self.target_generation.wrapping_add(1);
+        self.edit_revision = 0;
+        self.cancelling = false;
         self.editor.update(cx, |editor, cx| {
             editor.set_text("", cx);
             editor.set_disabled(false, cx);
         });
         self.has_text = false;
-        self.attachments.clear();
-        self.send = send::Machine.state_machine();
-        self.outgoing = None;
+        self.clear_attachments(cx);
+        self.session = None;
+        self.session_lease = None;
+        self.session_subscription = None;
+        self.restore_revision = Some(0);
         self.notice = None;
         self.config = None;
         self.project = None;
@@ -314,6 +321,11 @@ impl Composer {
                 if matches!(event, HostEvent::Changed | HostEvent::Reset) {
                     // Settings may have added or removed an MCP server.
                     this.refresh_mention_catalog(cx);
+                    this.refresh_picker_catalog(cx);
+                    cx.notify();
+                } else if matches!(event, HostEvent::ImagesChanged) {
+                    this.sync_attachment_previews(cx);
+                } else if matches!(event, HostEvent::ThreadChanged { .. }) {
                     cx.notify();
                 }
             })
@@ -323,37 +335,105 @@ impl Composer {
             return;
         };
         self.load_skills(cx);
-        let client = host.read(cx).client.clone();
-        let scope = self.scope();
-        let target = self.target.clone();
-        self.load_draft = cx.spawn(async move |this, cx| {
-            let body = match client.draft(&scope).await {
-                Ok(serde_json::Value::Null) => return,
-                Ok(value) => match serde_json::from_value::<DraftBody>(value) {
-                    Ok(body) => body,
-                    Err(error) => {
-                        tracing::warn!(%scope, "ignored an unreadable draft: {error}");
-                        return;
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(%scope, "couldn't load the draft: {error:#}");
-                    return;
+        let session = draft_session::session(
+            &self.core,
+            self.target.host().clone(),
+            self.scope(),
+            host.read(cx).client.clone(),
+            cx,
+        );
+        let Some((session, lease)) = session else {
+            self.notice=Some("There are 64 open or unsaved drafts. Finish saving a draft, then reopen this thread.".into());
+            self.editor
+                .update(cx, |editor, cx| editor.set_disabled(true, cx));
+            return;
+        };
+        self.session_lease = Some(lease);
+        self.session_subscription = Some(cx.subscribe(&session, Self::session_changed));
+        self.session = Some(session);
+        self.sync_session(cx);
+    }
+
+    fn session_changed(
+        &mut self,
+        _: Entity<DraftSession>,
+        event: &SessionEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SessionEvent::Accepted { thread, item } => {
+                // This draft's settings have been consumed. Follow the thread's
+                // authoritative settings, including changes made by commands.
+                self.config = None;
+                self.editor.update(cx, |editor, cx| {
+                    editor.set_text("", cx);
+                    editor.set_disabled(false, cx);
+                });
+                self.has_text = false;
+                self.clear_attachments(cx);
+                self.restore_revision = None;
+                let host = self.target.host().clone();
+                if matches!(self.target, ComposerTarget::NewThread { .. }) {
+                    self.core.update(cx, |core, cx| {
+                        core.navigate(
+                            Screen::Thread {
+                                host,
+                                thread: thread.clone(),
+                            },
+                            cx,
+                        )
+                    });
                 }
-            };
-            let _ = this.update(cx, |this, cx| this.restore(&target, body, cx));
-        });
+                cx.emit(ComposerEvent::Sent {
+                    thread: thread.clone(),
+                    item: item.clone(),
+                });
+            }
+            SessionEvent::Reloaded => {
+                self.editor.update(cx, |editor, cx| editor.set_text("", cx));
+                self.has_text = false;
+                self.clear_attachments(cx);
+                self.restore_revision = Some(self.edit_revision);
+                self.sync_session(cx);
+            }
+            SessionEvent::Changed => self.sync_session(cx),
+        }
+        cx.notify();
+    }
+    fn sync_session(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        self.sync_editor_enabled(cx);
+        if !session.read(cx).loaded {
+            return;
+        }
+        if self.restore_revision.take() == Some(self.edit_revision) {
+            let body = session.read(cx).body.clone();
+            if body != serde_json::Value::Null {
+                match serde_json::from_value(body) {
+                    Ok(body) => self.restore(&self.target.clone(), body, cx),
+                    Err(error) => self.notice = Some(format!("Couldn't read this draft: {error}")),
+                }
+            }
+        }
     }
 
     fn restore(&mut self, target: &ComposerTarget, body: DraftBody, cx: &mut Context<Self>) {
         // The user started typing before the draft arrived: theirs wins.
-        if &self.target != target || self.has_text || !self.attachments.is_empty() {
+        if &self.target != target
+            || (!self.writing_answer() && self.has_text)
+            || !self.attachments.is_empty()
+        {
             return;
         }
-        self.editor
-            .update(cx, |editor, cx| editor.set_text(&body.text, cx));
-        self.has_text = !body.text.trim().is_empty();
+        if !self.questionnaire.restore_aside_text(&body.text) {
+            self.editor
+                .update(cx, |editor, cx| editor.set_text(&body.text, cx));
+            self.has_text = !body.text.trim().is_empty();
+        }
         self.config = body.config;
+        self.project = body.project;
         for hash in body.images {
             self.restore_attachment(hash, cx);
         }
@@ -401,66 +481,38 @@ impl Composer {
         }
     }
 
-    /// The draft changed: a failed or sent message is now a new draft.
+    /// Queue every edit immediately; the session owns debounce and lifecycle flush.
     fn edited(&mut self, cx: &mut Context<Self>) {
-        if !self.send.state().is_sending() {
-            let mut effects = Vec::new();
-            self.send
-                .handle_with_context(&send::Input::Edited, &mut effects);
-            self.outgoing = None;
-        }
+        self.edit_revision = self.edit_revision.wrapping_add(1);
         self.schedule_save(cx);
     }
-
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
-        self.save = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(DRAFT_SAVE_DELAY).await;
-            let _ = this.update(cx, |this, cx| {
-                this.save = None;
-                this.save_now(cx);
-            });
-        }));
-    }
-
-    fn save_now(&mut self, cx: &mut Context<Self>) {
-        // While an answer is written, the draft is the one put aside.
-        let text = self
-            .questionnaire
-            .aside_text()
-            .unwrap_or_else(|| self.editor.read(cx).text())
-            .to_owned();
-        let attachments = self
-            .questionnaire
-            .aside_attachments()
-            .unwrap_or(&self.attachments);
         let body = DraftBody {
-            text,
-            images: attachments
+            text: self
+                .questionnaire
+                .aside_text()
+                .unwrap_or_else(|| self.editor.read(cx).text())
+                .to_owned(),
+            images: self
+                .attachments
                 .iter()
-                .filter_map(|attachment| attachment.machine.state().hash().cloned())
+                .filter_map(|attachment| attachment.state.hash().cloned())
                 .collect(),
             config: self.config.clone(),
+            project: self.project.clone(),
         };
-        let value = if body.text.is_empty() && body.images.is_empty() && body.config.is_none() {
+        let value = if body.text.is_empty()
+            && body.images.is_empty()
+            && body.config.is_none()
+            && body.project.is_none()
+        {
             serde_json::Value::Null
         } else {
-            serde_json::to_value(&body).unwrap_or_default()
+            serde_json::to_value(body).expect("DraftBody serializes")
         };
-        self.put_draft(self.scope(), value, cx);
-    }
-
-    fn put_draft(&self, scope: String, value: serde_json::Value, cx: &mut Context<Self>) {
-        let Some(host) = self.host(cx) else {
-            return;
-        };
-        let client = host.read(cx).client.clone();
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = client.set_draft(&scope, &value).await {
-                    tracing::warn!(%scope, "couldn't save the draft: {error:#}");
-                }
-            })
-            .detach();
+        if let Some(session) = &self.session {
+            session.update(cx, |session, cx| session.queue(value, cx));
+        }
     }
 
     // Engine settings.
@@ -482,46 +534,43 @@ impl Composer {
         }
     }
 
+    fn sync_editor_enabled(&mut self, cx: &mut Context<Self>) {
+        let disabled = !self.draft_editable(cx) || self.questionnaire.sending();
+        self.editor
+            .update(cx, |editor, cx| editor.set_disabled(disabled, cx));
+    }
+
+    fn draft_editable(&self, cx: &App) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| !session.read(cx).sending())
+    }
+
+    fn metadata_ready(&self, cx: &App) -> bool {
+        match &self.target {
+            ComposerTarget::NewThread { .. } => true,
+            ComposerTarget::Thread { thread, .. } => self
+                .host(cx)
+                .is_some_and(|host| host.read(cx).threads.contains_key(thread)),
+        }
+    }
     fn choose_config(&mut self, config: EngineConfig, cx: &mut Context<Self>) {
-        self.remember_config(&config, cx);
+        if !self.metadata_ready(cx) || !self.draft_editable(cx) {
+            return;
+        }
         self.config = Some(config);
-        self.schedule_save(cx);
+        self.edited(cx);
         cx.notify();
     }
 
-    /// Makes `config` what the next new thread on this host starts with.
-    fn remember_config(&self, config: &EngineConfig, cx: &mut Context<Self>) {
-        let Some(host) = self.host(cx) else {
-            return;
-        };
-        let host = host.read(cx);
-        let value = match serde_json::to_value(config) {
-            Ok(value) => value,
-            Err(error) => {
-                tracing::error!(host = %host.id, "couldn't encode the engine settings to remember: {error}");
-                return;
-            }
-        };
-        if host.setting(DEFAULT_CONFIG_KEY) == Some(&value) {
-            return;
-        }
-        let (client, id) = (host.client.clone(), host.id.clone());
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = client.set_setting(DEFAULT_CONFIG_KEY, &value).await {
-                    tracing::warn!(host = %id, "couldn't remember the engine settings: {error:#}");
-                }
-            })
-            .detach();
-    }
-
-    fn project(&self) -> Option<ProjectId> {
+    /// The project a new thread goes to: the one picked in the tab, else
+    /// the one it was opened for.
+    pub(crate) fn project(&self) -> Option<ProjectId> {
         match &self.target {
-            ComposerTarget::NewThread {
-                project: Some(project),
-                ..
-            } => Some(project.clone()),
-            _ => self.project.clone(),
+            ComposerTarget::NewThread { project, .. } => {
+                self.project.clone().or_else(|| project.clone())
+            }
+            ComposerTarget::Thread { .. } => self.project.clone(),
         }
     }
 
@@ -538,77 +587,99 @@ impl Composer {
     }
 
     fn add_image(&mut self, source: Source, name: SharedString, cx: &mut Context<Self>) {
+        if !self.draft_editable(cx) {
+            return;
+        }
+        if self.attachments.len() >= 8 {
+            self.notice = Some("A message can contain at most 8 images.".into());
+            cx.notify();
+            return;
+        }
+        if matches!(&source, Source::Bytes(bytes) if bytes.len() > encode::MAX_INPUT_BYTES) {
+            self.notice = Some("Images must be at most 32 MiB.".into());
+            cx.notify();
+            return;
+        }
         let key = self.next_key;
         self.next_key += 1;
+        let renderer = cx.svg_renderer();
         let task = cx.spawn(async move |this, cx| {
+            static CONVERSION: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
             let background = cx.background_executor().clone();
-            let encoded = match background.spawn(async move { source.into_bytes() }).await {
-                Ok(bytes) => {
-                    let bytes = Arc::new(bytes);
-                    let source = source_key(&bytes);
-                    let kept = this
-                        .update(cx, |this, cx| {
-                            let duplicate = this
-                                .attachments
-                                .iter()
-                                .find(|other| other.key != key && other.source == Some(source));
-                            if let Some(existing) = duplicate.map(|other| other.key) {
-                                this.drop_duplicate(key, existing, cx);
-                                return false;
-                            }
-                            if let Some(attachment) = this.attachment_mut(key) {
-                                attachment.source = Some(source);
-                                attachment.draft = draft_image(&bytes);
-                                cx.notify();
-                            }
-                            true
-                        })
-                        .unwrap_or(false);
-                    if !kept {
-                        return;
-                    }
-                    background
-                        .spawn(async move { encode::to_webp(&bytes) })
-                        .await
-                }
-                Err(error) => Err(error),
-            };
-            let _ = this.update(cx, |this, cx| match encoded {
-                Ok(webp) => {
-                    // Another file or paste that encodes to the same image.
-                    let duplicate = this.attachments.iter().find(|other| {
-                        other.key != key
-                            && other
-                                .preview
-                                .as_ref()
-                                .is_some_and(|preview| preview.bytes == webp)
+            let (read, permit) = background
+                .spawn(async move {
+                    let permit = CONVERSION.lock().await;
+                    (source.into_bytes(), permit)
+                })
+                .await;
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.drive_attachment(
+                            key,
+                            &attachment::Input::Failed(format!("{error:#}")),
+                            cx,
+                        )
                     });
-                    if let Some(existing) = duplicate.map(|other| other.key) {
+                    return;
+                }
+            };
+            let source = source_key(&bytes);
+            let keep = this
+                .update(cx, |this, cx| {
+                    if let Some(existing) = this
+                        .attachments
+                        .iter()
+                        .find(|other| other.key != key && other.source == Some(source))
+                        .map(|a| a.key)
+                    {
                         this.drop_duplicate(key, existing, cx);
+                        return false;
+                    }
+                    let Some(attachment) = this.attachment_mut(key) else {
+                        return false;
+                    };
+                    attachment.source = Some(source);
+                    true
+                })
+                .unwrap_or(false);
+            if !keep {
+                return;
+            }
+            let result = background
+                .spawn(async move {
+                    // Keep the permit in the CPU task even if its view is dropped.
+                    let _permit = permit;
+                    let webp = encode::to_webp(&bytes)?;
+                    let preview = editor_ui::markdown_renderer::decode_image_bytes(&webp, renderer)
+                        .map_err(anyhow::Error::msg)?;
+                    Ok::<_, anyhow::Error>((webp, preview))
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok((webp, preview)) => {
+                    if let Err(error) = this.admit_preview(key, preview, cx) {
+                        this.drive_attachment(key, &attachment::Input::Failed(error), cx);
                         return;
                     }
                     if let Some(attachment) = this.attachment_mut(key) {
-                        attachment.preview =
-                            Some(Arc::new(Image::from_bytes(ImageFormat::Webp, webp)));
-                        attachment.revealed = Some(Instant::now());
+                        attachment.encoded = Some(webp);
                     }
                     this.drive_attachment(key, &attachment::Input::Encoded, cx);
                 }
                 Err(error) => {
-                    this.drive_attachment(
-                        key,
-                        &attachment::Input::Failed(format!("{error:#}")),
-                        cx,
-                    );
+                    this.drive_attachment(key, &attachment::Input::Failed(format!("{error:#}")), cx)
                 }
             });
         });
         self.attachments.push(Attachment {
             key,
             name,
-            machine: attachment::Machine.state_machine(),
+            state: attachment::State::Encoding,
             preview: None,
-            draft: None,
+            encoded: None,
+            preview_error: None,
             revealed: None,
             source: None,
             task,
@@ -616,45 +687,109 @@ impl Composer {
         self.edited(cx);
         cx.notify();
     }
-
     fn restore_attachment(&mut self, hash: BlobHash, cx: &mut Context<Self>) {
+        if self.attachments.len() >= 8 {
+            self.notice = Some("This draft exceeds the 8 image limit.".into());
+            return;
+        }
         let key = self.next_key;
         self.next_key += 1;
-        let mut machine = attachment::Machine.state_machine();
-        machine.handle_with_context(&attachment::Input::Restored(hash.clone()), &mut Vec::new());
-        let task = match self.host(cx) {
-            Some(host) => {
-                let client = host.read(cx).client.clone();
-                cx.spawn(async move |this, cx| match client.blob(&hash).await {
-                    Ok(bytes) => {
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(attachment) = this
-                                .attachments
-                                .iter_mut()
-                                .find(|attachment| attachment.key == key)
-                            {
-                                attachment.preview =
-                                    Some(Arc::new(Image::from_bytes(ImageFormat::Webp, bytes)));
-                                attachment.revealed = Some(Instant::now());
-                                cx.notify();
-                            }
-                        });
-                    }
-                    Err(error) => tracing::warn!(%hash, "couldn't fetch a draft image: {error:#}"),
-                })
-            }
-            None => Task::ready(()),
-        };
         self.attachments.push(Attachment {
             key,
             name: "Image".into(),
-            machine,
+            state: attachment::State::Ready(hash.clone()),
             preview: None,
-            draft: None,
+            encoded: None,
+            preview_error: None,
             revealed: None,
             source: None,
-            task,
+            task: Task::ready(()),
         });
+        if let Some(host) = self.host(cx) {
+            host.update(cx, |host, cx| host.load_image(hash, false, cx));
+        }
+        self.sync_attachment_previews(cx);
+    }
+    fn admit_preview(
+        &mut self,
+        key: u64,
+        image: Arc<RenderImage>,
+        cx: &mut App,
+    ) -> Result<(), String> {
+        let retained = self
+            .attachments
+            .iter()
+            .filter(|a| a.key != key)
+            .filter_map(|a| a.preview.as_ref())
+            .map(|image| editor_ui::markdown_renderer::image_resident_bytes(image))
+            .sum();
+        if !preview_fits(
+            retained,
+            editor_ui::markdown_renderer::image_resident_bytes(&image),
+        ) {
+            return Err("Image previews exceed the message's 128 MiB budget".into());
+        }
+        if let Some(attachment) = self.attachment_mut(key) {
+            let previous = attachment.preview.replace(image);
+            release_preview(previous, cx);
+            attachment.preview_error = None;
+            attachment.revealed = Some(Instant::now());
+        }
+        Ok(())
+    }
+    fn sync_attachment_previews(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.host(cx) else {
+            return;
+        };
+        let requested: Vec<_> = self
+            .attachments
+            .iter()
+            .filter(|a| a.preview.is_none() && a.preview_error.is_none())
+            .filter_map(|a| a.state.hash().cloned())
+            .collect();
+        for hash in requested {
+            host.update(cx, |host, cx| host.load_image(hash, false, cx));
+        }
+        let pending: Vec<_> = self
+            .attachments
+            .iter()
+            .filter(|a| a.preview.is_none() && a.preview_error.is_none())
+            .filter_map(|a| {
+                a.state
+                    .hash()
+                    .and_then(|hash| host.read(cx).image(hash))
+                    .map(|image| (a.key, image))
+            })
+            .collect();
+        for (key, image) in pending {
+            let error = match image {
+                editor_core::BlobImage::Ready(image) => self.admit_preview(key, image, cx).err(),
+                editor_core::BlobImage::Failed(error) => Some(error.to_string()),
+                editor_core::BlobImage::Loading => None,
+            };
+            if let Some(error) = error
+                && let Some(attachment) = self.attachment_mut(key)
+            {
+                attachment.preview_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+    fn retry_preview(&mut self, key: u64, cx: &mut Context<Self>) {
+        let hash = self
+            .attachments
+            .iter()
+            .find(|a| a.key == key)
+            .and_then(|a| a.state.hash())
+            .cloned();
+        if let (Some(hash), Some(host)) = (hash, self.host(cx)) {
+            if let Some(attachment) = self.attachment_mut(key) {
+                attachment.preview_error = None;
+            }
+            host.update(cx, |host, cx| host.load_image(hash, true, cx));
+            self.sync_attachment_previews(cx);
+            cx.notify();
+        }
     }
 
     fn drive_attachment(&mut self, key: u64, input: &attachment::Input, cx: &mut Context<Self>) {
@@ -666,29 +801,21 @@ impl Composer {
         else {
             return;
         };
-        let mut effects = Vec::new();
-        attachment.machine.handle_with_context(input, &mut effects);
-        if let Some(reason) = attachment.machine.state().failure() {
-            tracing::warn!(name = %attachment.name, "attachment failed: {reason}");
-        }
-        for effect in effects {
-            match effect {
-                attachment::Effect::Upload => {
-                    let (Some(client), Some(preview)) =
-                        (client.clone(), attachment.preview.clone())
-                    else {
-                        continue;
+        if attachment.state.accept(input) {
+            if let (Some(client), Some(encoded)) = (client, attachment.encoded.take()) {
+                attachment.task = cx.spawn(async move |this, cx| {
+                    let input = match client.put_blob(encoded).await {
+                        Ok(blob) => attachment::Input::Uploaded(blob.hash),
+                        Err(error) => {
+                            attachment::Input::Failed(format!("Upload failed: {error:#}"))
+                        }
                     };
-                    attachment.task = cx.spawn(async move |this, cx| {
-                        let input = match client.put_blob(preview.bytes.clone()).await {
-                            Ok(blob) => attachment::Input::Uploaded(blob.hash),
-                            Err(error) => {
-                                attachment::Input::Failed(format!("upload failed: {error:#}"))
-                            }
-                        };
-                        let _ = this.update(cx, |this, cx| this.drive_attachment(key, &input, cx));
-                    });
-                }
+                    let _ = this.update(cx, |this, cx| this.drive_attachment(key, &input, cx));
+                });
+            } else {
+                attachment.state = attachment::State::Failed(
+                    "Upload has no connected Forge or encoded image.".into(),
+                );
             }
         }
         if matches!(input, attachment::Input::Uploaded(_)) {
@@ -697,25 +824,18 @@ impl Composer {
         cx.notify();
     }
 
-    /// The image is already in the tray (master's duplicate check): drop
-    /// the new tile and shake the one that holds it.
+    /// Remove the duplicate attachment and shake the existing tile.
     fn drop_duplicate(&mut self, key: u64, existing: u64, cx: &mut Context<Self>) {
         if let Some(index) = self.attachments.iter().position(|a| a.key == key) {
             // Called from that attachment's own task: let it finish rather
             // than cancel it mid-poll.
             let attachment = self.attachments.remove(index);
+            release_preview(attachment.preview, cx);
             attachment.task.detach();
         }
         self.shake = Some((existing, Instant::now()));
         self.edited(cx);
         cx.notify();
-    }
-
-    /// How far into its duplicate shake the tile `key` is, while it shakes.
-    fn shaking(&self, key: u64, reduce_motion: bool) -> Option<Duration> {
-        let (shaken, since) = self.shake?;
-        let elapsed = since.elapsed();
-        (shaken == key && !reduce_motion && elapsed < SHAKE).then_some(elapsed)
     }
 
     fn attachment_mut(&mut self, key: u64) -> Option<&mut Attachment> {
@@ -725,9 +845,25 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, key: u64, cx: &mut Context<Self>) {
-        self.attachments.retain(|attachment| attachment.key != key);
+        if !self.draft_editable(cx) {
+            return;
+        }
+        if let Some(index) = self
+            .attachments
+            .iter()
+            .position(|attachment| attachment.key == key)
+        {
+            let attachment = self.attachments.remove(index);
+            release_preview(attachment.preview, cx);
+        }
         self.edited(cx);
         cx.notify();
+    }
+
+    fn clear_attachments(&mut self, cx: &mut App) {
+        for attachment in self.attachments.drain(..) {
+            release_preview(attachment.preview, cx);
+        }
     }
 
     // Sending.
@@ -743,7 +879,17 @@ impl Composer {
 
     /// Why sending is not possible right now, if it isn't.
     fn blocked(&self, cx: &App) -> Option<&'static str> {
-        if self.send.state().is_sending() {
+        if !self.metadata_ready(cx) {
+            return Some("Loading thread settings…");
+        }
+        if self.session.is_none() {
+            return Some("Draft unavailable");
+        }
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.read(cx).sending())
+        {
             return Some("Sending…");
         }
         if !self.has_text && self.attachments.is_empty() {
@@ -752,14 +898,14 @@ impl Composer {
         if self
             .attachments
             .iter()
-            .any(|attachment| attachment.machine.state().failure().is_some())
+            .any(|attachment| attachment.state.failure().is_some())
         {
             return Some("Remove the images that failed");
         }
         if self
             .attachments
             .iter()
-            .any(|attachment| attachment.machine.state().hash().is_none())
+            .any(|attachment| attachment.state.hash().is_none())
         {
             return Some("Preparing images…");
         }
@@ -782,36 +928,24 @@ impl Composer {
         if self.blocked(cx).is_some() {
             return;
         }
-        if self.send.state().retry_id().is_some() && self.outgoing.is_none() {
-            self.send
-                .handle_with_context(&send::Input::Edited, &mut Vec::new());
-        }
-        let id = if let (Some(id), Some(_)) = (self.send.state().retry_id(), &self.outgoing) {
-            id.clone()
-        } else {
-            let Some(outgoing) = self.outgoing_message(cx) else {
-                return;
-            };
-            if let Some(config) = self.effective_config(cx) {
-                self.remember_config(&config, cx);
-            }
-            let id = outgoing.message.id.clone();
-            self.outgoing = Some(outgoing);
-            id
+        let Some(submission) = self.outgoing_message(cx) else {
+            return;
         };
-        let mut effects = Vec::new();
-        self.send
-            .handle_with_context(&send::Input::Send(id), &mut effects);
-        self.perform(effects, cx);
+        self.reset_picker();
+        self.schedule_save(cx);
+        if let Some(session) = &self.session {
+            session.update(cx, |session, cx| session.submit(submission, cx));
+        }
+        cx.notify();
     }
 
-    fn outgoing_message(&self, cx: &App) -> Option<Outgoing> {
+    fn outgoing_message(&self, cx: &App) -> Option<Submission> {
         let config = self.effective_config(cx)?;
         let text = self.editor.read(cx).text().trim().to_owned();
         let images = self
             .attachments
             .iter()
-            .filter_map(|attachment| attachment.machine.state().hash().cloned())
+            .filter_map(|attachment| attachment.state.hash().cloned())
             .collect();
         let host = self.host(cx)?;
         let (create, thread_config) = match &self.target {
@@ -834,150 +968,72 @@ impl Composer {
             }
         };
         let config = (thread_config.as_ref() != Some(&config)).then_some(config);
-        Some(Outgoing {
+        let thread = create
+            .as_ref()
+            .map(|create| create.id.clone())
+            .or_else(|| match &self.target {
+                ComposerTarget::Thread { thread, .. } => Some(thread.clone()),
+                _ => None,
+            })?;
+        Some(Submission {
             message: SendMessage {
                 id: ItemId::new(),
-                text,
+                text: text.into(),
                 images,
                 config,
+                draft: None,
             },
             create,
-            scope: self.scope(),
+            thread,
         })
-    }
-
-    fn perform(&mut self, effects: Vec<send::Effect>, cx: &mut Context<Self>) {
-        for effect in effects {
-            match effect {
-                send::Effect::Post(_) => self.post(cx),
-                send::Effect::Clear => self.clear_sent(cx),
-            }
-        }
-        cx.notify();
-    }
-
-    fn post(&mut self, cx: &mut Context<Self>) {
-        let (Some(host), Some(outgoing)) = (self.host(cx), self.outgoing.as_ref()) else {
-            return;
-        };
-        let client = host.read(cx).client.clone();
-        let message = outgoing.message.clone();
-        let create = outgoing.create.clone();
-        let thread = match (&self.target, &create) {
-            (_, Some(create)) => create.id.clone(),
-            (ComposerTarget::Thread { thread, .. }, None) => thread.clone(),
-            (ComposerTarget::NewThread { .. }, None) => return,
-        };
-        self.editor
-            .update(cx, |editor, cx| editor.set_disabled(true, cx));
-        self.notice = None;
-        cx.spawn(async move |this, cx| {
-            if let Some(create) = create {
-                if let Err(error) = client.create_thread(&create).await {
-                    let error = format!("Couldn't create the thread: {error:#}");
-                    let _ = this.update(cx, |this, cx| this.finish(&message.id, Err(error), cx));
-                    return;
-                }
-                let _ = this.update(cx, |this, cx| this.created(&message.id, &thread, cx));
-            }
-            let sent = client
-                .send_message(&thread, &message)
-                .await
-                .context("Couldn't send the message");
-            let _ = this.update(cx, |this, cx| {
-                this.finish(
-                    &message.id,
-                    sent.map(drop).map_err(|error| format!("{error:#}")),
-                    cx,
-                );
-            });
-        })
-        .detach();
-    }
-
-    /// Forge made the thread; the composer now belongs to it, so a retry
-    /// sends there instead of creating another.
-    fn created(&mut self, id: &ItemId, thread: &ThreadId, cx: &mut Context<Self>) {
-        // The user moved on to another target meanwhile.
-        if !self.send.state().is_sending_id(id) {
-            return;
-        }
-        if let Some(outgoing) = &mut self.outgoing {
-            outgoing.create = None;
-        }
-        let host = self.target.host().clone();
-        self.target = ComposerTarget::Thread {
-            host: host.clone(),
-            thread: thread.clone(),
-        };
-        self.project = None;
-        self.open_target(cx);
-        self.core.update(cx, |core, cx| {
-            core.navigate(
-                Screen::Thread {
-                    host,
-                    thread: thread.clone(),
-                },
-                cx,
-            );
-        });
-        cx.notify();
-    }
-
-    fn finish(&mut self, id: &ItemId, result: Result<(), String>, cx: &mut Context<Self>) {
-        if !self.send.state().is_sending_id(id) {
-            return;
-        }
-        self.editor
-            .update(cx, |editor, cx| editor.set_disabled(false, cx));
-        let input = match result {
-            Ok(()) => send::Input::Accepted,
-            Err(error) => {
-                tracing::warn!(target = ?self.target, "send failed: {error}");
-                send::Input::Rejected(error)
-            }
-        };
-        let mut effects = Vec::new();
-        self.send.handle_with_context(&input, &mut effects);
-        self.perform(effects, cx);
-    }
-
-    fn clear_sent(&mut self, cx: &mut Context<Self>) {
-        let Some(outgoing) = self.outgoing.take() else {
-            return;
-        };
-        self.save = None;
-        self.editor.update(cx, |editor, cx| editor.set_text("", cx));
-        self.has_text = false;
-        self.attachments.clear();
-        self.put_draft(outgoing.scope.clone(), serde_json::Value::Null, cx);
-        if outgoing.scope != self.scope() && self.config.is_some() {
-            // The new thread carries the choice now.
-            self.config = None;
-        }
-        if let ComposerTarget::Thread { thread, .. } = &self.target {
-            cx.emit(ComposerEvent::Sent {
-                thread: thread.clone(),
-                item: outgoing.message.id,
-            });
-        }
     }
 
     /// Stops the thread's live run.
     fn stop(&mut self, cx: &mut Context<Self>) {
+        if self.cancelling {
+            return;
+        }
         let (ComposerTarget::Thread { thread, .. }, Some(host)) = (&self.target, self.host(cx))
         else {
             return;
         };
         let client = host.read(cx).client.clone();
         let thread = thread.clone();
+        let generation = self.target_generation;
+        self.cancelling = true;
+        #[cfg(test)]
+        let completion_gate = {
+            self.cancel_requests.push(thread.clone());
+            self.cancel_completion_gate.take()
+        };
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            if let Err(error) = client.cancel(&thread).await {
-                let _ = this.update(cx, |this, cx| {
+            let result = client.cancel(&thread).await;
+            #[cfg(test)]
+            let result = if let Some((arrived, release)) = completion_gate {
+                arrived.store(true, std::sync::atomic::Ordering::Release);
+                if release.await.unwrap_or(false) {
+                    Err(anyhow::anyhow!("injected cancellation failure"))
+                } else {
+                    result
+                }
+            } else {
+                result
+            };
+            let _ = this.update(cx, |this, cx| {
+                #[cfg(test)]
+                {
+                    this.cancel_completions += 1;
+                }
+                if this.target_generation != generation {
+                    return;
+                }
+                this.cancelling = false;
+                if let Err(error) = result {
                     this.notice = Some(format!("Couldn't stop the run: {error:#}"));
-                    cx.notify();
-                });
-            }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -1016,6 +1072,7 @@ fn remembered_config(host: &HostData) -> Option<EngineConfig> {
         && !status.models.is_empty()
     {
         let model = status.models.iter().find(|model| &model.id == id)?;
+        model.normalize_context_window(&mut config);
         if config
             .effort
             .as_ref()
@@ -1075,9 +1132,29 @@ enum Source {
 impl Source {
     fn into_bytes(self) -> anyhow::Result<Vec<u8>> {
         match self {
-            Self::Bytes(bytes) => Ok(bytes),
+            Self::Bytes(bytes) => {
+                anyhow::ensure!(
+                    bytes.len() <= encode::MAX_INPUT_BYTES,
+                    "Images must be at most 32 MiB"
+                );
+                Ok(bytes)
+            }
             Self::Path(path) => {
-                std::fs::read(&path).with_context(|| format!("read {}", path.display()))
+                use std::io::Read as _;
+                let file = std::fs::File::open(&path)
+                    .with_context(|| format!("read {}", path.display()))?;
+                anyhow::ensure!(
+                    file.metadata()?.len() <= encode::MAX_INPUT_BYTES as u64,
+                    "Images must be at most 32 MiB"
+                );
+                let mut bytes = Vec::new();
+                file.take((encode::MAX_INPUT_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)?;
+                anyhow::ensure!(
+                    bytes.len() <= encode::MAX_INPUT_BYTES,
+                    "Images must be at most 32 MiB"
+                );
+                Ok(bytes)
             }
         }
     }
@@ -1092,117 +1169,11 @@ fn source_key(bytes: &[u8]) -> (u64, usize) {
     (hasher.finish(), bytes.len())
 }
 
-/// Duplicate-attachment shake (master's, the transitions.dev error shake):
-/// two 80 ms swings and two 60 ms recovery legs.
-const SHAKE: Duration = Duration::from_millis(280);
-
-/// The tile's horizontal offset `elapsed` into the shake: rest, +6 px,
-/// -6 px, +4 px, rest, each leg on its own smooth-out curve.
-fn shake_offset(elapsed: Duration) -> f32 {
-    const STOPS: [(f32, f32); 5] = [
-        (0.0, 0.0),
-        (80.0 / 280.0, 6.0),
-        (160.0 / 280.0, -6.0),
-        (220.0 / 280.0, 4.0),
-        (1.0, 0.0),
-    ];
-    let progress = (elapsed.as_secs_f32() / SHAKE.as_secs_f32()).clamp(0.0, 1.0);
-    STOPS
-        .windows(2)
-        .find(|leg| progress <= leg[1].0)
-        .map_or(0.0, |leg| {
-            let ((start, from), (end, to)) = (leg[0], leg[1]);
-            from + (to - from) * smooth_out((progress - start) / (end - start))
-        })
-}
-
-/// The picture as given, for the blurred tile while it encodes; formats
-/// GPUI can't draw keep the plain tile.
-fn draft_image(bytes: &[u8]) -> Option<Arc<Image>> {
-    let format = match image::guess_format(bytes).ok()? {
-        image::ImageFormat::Png => ImageFormat::Png,
-        image::ImageFormat::Jpeg => ImageFormat::Jpeg,
-        image::ImageFormat::WebP => ImageFormat::Webp,
-        image::ImageFormat::Gif => ImageFormat::Gif,
-        image::ImageFormat::Bmp => ImageFormat::Bmp,
-        _ => return None,
-    };
-    Some(Arc::new(Image::from_bytes(format, bytes.to_vec())))
-}
-
-impl Attachment {
-    /// The best picture to open in the preview: the WebP, else the draft.
-    fn viewable(&self) -> Option<Arc<Image>> {
-        self.preview.clone().or_else(|| self.draft.clone())
-    }
-
-    /// The tile's picture: the draft blurred while it encodes, then the
-    /// preview sharpening out of that blur (smooth-out over 350 ms). The
-    /// flag says it is still sharpening.
-    fn picture(&self, radius: Pixels, reduce_motion: bool) -> Option<(AnyElement, bool)> {
-        let Some(preview) = self.preview.clone() else {
-            let draft = self.draft.clone()?;
-            return Some((
-                blurred_tile_image(draft, TILE_BLUR, radius).into_any_element(),
-                false,
-            ));
-        };
-        let reveal = self
-            .revealed
-            .filter(|_| !reduce_motion)
-            .map(|since| {
-                since.elapsed().as_secs_f32() / MotionDuration::Medium.as_duration().as_secs_f32()
-            })
-            .filter(|progress| *progress < 1.0);
-        Some(match reveal {
-            Some(progress) => (
-                blurred_tile_image(preview, TILE_BLUR * (1.0 - smooth_out(progress)), radius)
-                    .into_any_element(),
-                true,
-            ),
-            None => (
-                img(preview)
-                    .size_full()
-                    .rounded(radius)
-                    .object_fit(ObjectFit::Cover)
-                    .into_any_element(),
-                false,
-            ),
-        })
-    }
-}
-
-/// How soft a tile is while its image prepares.
-const TILE_BLUR: f32 = 10.0;
-
-/// An image filling a tile with the tile's corner, blurred by `blur`. It
-/// rounds itself: the tile's clip is square (GPUI clips to rectangles), so
-/// an image overhanging it showed square corners until it sharpened.
-fn blurred_tile_image(image: Arc<Image>, blur: f32, corner: Pixels) -> gpui::Div {
-    div().absolute().inset_0().blur(px(blur)).child(
-        img(image)
-            .size_full()
-            .rounded(corner)
-            .object_fit(ObjectFit::Cover),
-    )
-}
-
 // Rendering.
 
-/// The composer card's corner (`NATIVE_COMPOSER_RADIUS_PX`).
-const CARD_RADIUS: f32 = RADIUS;
-/// 64 px editor, 32 px controls and 8 px padding on each edge.
-const CARD_MIN_HEIGHT: f32 = 112.0;
-
 impl Composer {
-    /// The attachment tray (`attachment_tray`): 72 px card tiles with a
-    /// corner concentric to the composer card, each with its remove chip.
-    fn render_attachments(
-        &self,
-        theme: &ArtisanTheme,
-        desktop: DesktopTheme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// AttachmentTile owns each preview, loading/error state and remove action.
+    fn render_attachments(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div()
             .id("composer-attachments")
             .w_full()
@@ -1213,93 +1184,38 @@ impl Composer {
             .pt(px(4.0))
             .pb(px(8.0))
             .overflow_x_scroll();
-        // The 18 px card radius less its 8 px padding and the 4 px inset.
-        let tile_radius = RadiusTokens::nested(px(CARD_RADIUS), px(8.0 + 4.0));
-        let reduce_motion = cx.reduce_motion();
-        let mut animating = false;
         for attachment in &self.attachments {
             let key = attachment.key;
-            let state = attachment.machine.state();
-            let mut tile = div()
-                .id(SharedString::from(format!("composer-attachment-{key}")))
-                .relative()
-                .size(px(TILE))
-                .flex_none()
-                .overflow_hidden()
-                .rounded(tile_radius)
-                .shadow(card_shadows(theme))
-                .bg(desktop.field)
-                .cursor_pointer()
-                .when_some(attachment.viewable(), |tile, image| {
-                    tile.on_click(editor_ui::image_preview::open_on_click(image))
+            let owner = cx.entity().downgrade();
+            let mut tile = editor_ui::attachment_tile::AttachmentTile::new(
+                format!("composer-attachment-{key}"),
+                *theme,
+                attachment.name.clone(),
+            )
+            .preview(attachment.preview.clone(), attachment.revealed)
+            .error(
+                attachment
+                    .state
+                    .failure()
+                    .or(attachment.preview_error.as_deref())
+                    .map(str::to_owned),
+            )
+            .shaking(
+                self.shake
+                    .filter(|(shaken, _)| *shaken == key)
+                    .map(|(_, since)| since),
+            )
+            .removable(self.draft_editable(cx))
+            .on_remove(move |_, cx| {
+                let _ = owner.update(cx, |this, cx| this.remove_attachment(key, cx));
+            });
+            if attachment.preview_error.is_some() {
+                let owner = cx.entity().downgrade();
+                tile = tile.on_retry(move |_, cx| {
+                    let _ = owner.update(cx, |this, cx| this.retry_preview(key, cx));
                 });
-            if let Some(elapsed) = self.shaking(key, reduce_motion) {
-                animating = true;
-                tile = tile.left(px(shake_offset(elapsed)));
             }
-            tile = match (&attachment.preview, state.failure()) {
-                (_, Some(reason)) => tile.border_1().border_color(destructive()).child(
-                    div()
-                        .size_full()
-                        .p(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(destructive())
-                        .child(SharedString::from(format!(
-                            "{} failed: {reason}",
-                            attachment.name
-                        ))),
-                ),
-                (_, None)
-                    if let Some((picture, sharpening)) =
-                        attachment.picture(tile_radius, reduce_motion) =>
-                {
-                    animating |= sharpening;
-                    tile.child(picture)
-                }
-                (_, None) => tile.child(
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .px(px(5.0))
-                        .text_size(px(11.0))
-                        .text_color(desktop.secondary)
-                        .child("Preparing…"),
-                ),
-            };
-            let remove = div()
-                .id(SharedString::from(format!(
-                    "composer-attachment-remove-{key}"
-                )))
-                .absolute()
-                .top(px(3.2))
-                .right(px(3.2))
-                .size(px(22.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(desktop.chrome.opacity(0.9))
-                .text_color(desktop.foreground)
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.remove_attachment(key, cx);
-                }))
-                .child(asset_glyph(AssetId::TABLER_X).size(px(14.0)));
-            row = row.child(tile.child(remove));
-        }
-        if animating {
-            // A paint-time probe keeps frames coming while a tile sharpens.
-            row = row.child(
-                canvas(
-                    |_, _, _| {},
-                    |_, (), window, _| window.request_animation_frame(),
-                )
-                .absolute()
-                .size_0(),
-            );
+            row = row.child(tile);
         }
         row
     }
@@ -1322,48 +1238,40 @@ impl Composer {
             (AssetId::TABLER_ARROW_UP, "Send message")
         };
         let entity = cx.entity().downgrade();
-        let button = AccessibleLabel::new(label).ok().and_then(|label| {
-            Button::new(
+        let button = Button::icon(
+            if stop_face {
+                "composer-stop"
+            } else {
+                "composer-send"
+            },
+            theme,
+            icon,
+            label,
+        )
+        .debug_selector(if stop_face {
+            "composer-stop"
+        } else {
+            "composer-send"
+        })
+        .variant(ButtonVariant::Ghost)
+        .shape(ButtonShape::Rounded)
+        .disabled(if stop_face { self.cancelling } else { !ready })
+        .on_activate(move |_, _, cx| {
+            let _ = entity.update(cx, |this, cx| {
                 if stop_face {
-                    "composer-stop"
+                    this.stop(cx);
                 } else {
-                    "composer-send"
-                },
-                self.button_focus.clone(),
-                theme,
-                MotionPolicy::Reduced,
-                ButtonVariant::Ghost,
-                ButtonSize::IconSmall,
-                ButtonContent::icon_only(icon, label),
-            )
-            .ok()
+                    this.send(cx);
+                }
+            });
         });
-        let mut right = div().flex().flex_row().items_center().gap(px(4.0));
-        if let Some(button) = button {
-            right = right.child(
-                button
-                    .corner_radius(px(10.0))
-                    .disabled(!stop_face && !ready)
-                    .on_activate(move |_, _, cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            if stop_face {
-                                this.stop(cx);
-                            } else {
-                                this.send(cx);
-                            }
-                        });
-                    }),
-            );
-        }
-        right
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .child(button)
     }
-}
-
-fn destructive() -> gpui::Hsla {
-    ArtisanTheme::for_mode(ThemeMode::Dark)
-        .colors
-        .destructive
-        .to_paint()
 }
 
 impl Render for Composer {
@@ -1372,13 +1280,13 @@ impl Render for Composer {
         reason = "one GPUI builder stacks the card, its tab, the error line and the picker tooltip in visual order"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let desktop = DesktopTheme::neutral_dark();
+        let theme = ArtisanTheme::default();
         self.viewport_width = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
+        let desktop = theme.workspace;
         // Each time the draft empties again, the next phrase shows.
         let placeholder_visible = !self.has_text && self.attachments.is_empty();
-        if let Some(answer) = self.answer_placeholder() {
+        if let Some(answer) = self.answer_placeholder(cx) {
             self.editor
                 .update(cx, |editor, cx| editor.set_placeholder(answer, cx));
         } else if placeholder_visible && !self.placeholder_was_visible {
@@ -1390,12 +1298,17 @@ impl Render for Composer {
         // An answer's placeholder hands back to the next phrase.
         self.placeholder_was_visible = placeholder_visible && !self.writing_answer();
         let error = self
-            .send
-            .state()
-            .error()
-            .map(str::to_owned)
+            .session
+            .as_ref()
+            .and_then(|session| session.read(cx).error.clone())
             .or_else(|| self.notice.clone());
 
+        let metadata_error = match &self.target {
+            ComposerTarget::Thread { thread, .. } => self
+                .host(cx)
+                .and_then(|host| host.read(cx).thread_load_error(thread).map(str::to_owned)),
+            _ => None,
+        };
         let controls = div()
             .id("composer-controls")
             .w_full()
@@ -1419,28 +1332,29 @@ impl Render for Composer {
             .child(self.render_primary(&theme, cx));
 
         let mut card = div()
-            .id("composer")
-            .relative()
             .w_full()
             .flex()
             .flex_col()
-            .min_h(px(CARD_MIN_HEIGHT))
-            .p(px(8.0))
-            .rounded(px(CARD_RADIUS))
-            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(&theme))
-            .shadow(glass_card_shadows())
-            .child(glass_material_layer(GlassStrength::Quiet, px(CARD_RADIUS)))
-            .child(glass_highlight_layer(GlassStrength::Quiet, px(CARD_RADIUS)))
-            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.add_paths(paths.paths().to_vec(), cx);
+            .children(metadata_error.map(|error| {
+                div().text_xs().child(error).child(
+                    Button::text("composer-thread-retry", theme, "Retry thread settings")
+                        .variant(ButtonVariant::Ghost)
+                        .on_activate(cx.listener(|this, _, _, cx| {
+                            if let ComposerTarget::Thread { thread, .. } = &this.target {
+                                let thread = thread.clone();
+                                if let Some(host) = this.host(cx) {
+                                    host.update(cx, |host, cx| host.ensure_thread(&thread, cx));
+                                }
+                            }
+                        })),
+                )
             }));
         // Open agent questions extend the card upward, above the editor.
         if let Some(panel) = self.render_questionnaires(desktop, cx) {
             card = card.child(panel);
         }
-        if !self.attachments.is_empty() {
-            card = card.child(self.render_attachments(&theme, desktop, cx));
+        if !self.writing_answer() && !self.attachments.is_empty() {
+            card = card.child(self.render_attachments(&theme, cx));
         }
         card = card.child(self.editor.clone());
         // The mention menu hangs above the card at its full width.
@@ -1448,6 +1362,13 @@ impl Render for Composer {
             card = card.child(menu);
         }
         card = card.child(controls);
+        let card = div()
+            .id("composer")
+            .w_full()
+            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_paths(paths.paths().to_vec(), cx);
+            }))
+            .child(ComposerFrame::new(theme, card));
 
         // The tab frames only the card; the goal grows out of it.
         let card = match self.render_tab(&theme, desktop, cx) {
@@ -1455,7 +1376,12 @@ impl Render for Composer {
                 let mut moving = false;
                 let strip = self
                     .goal
-                    .frame(std::time::Instant::now(), desktop, &mut moving)
+                    .frame(
+                        std::time::Instant::now(),
+                        theme,
+                        cx.reduce_motion(),
+                        &mut moving,
+                    )
                     .map(|frame| TabCardStrip {
                         reveal: frame.reveal,
                         content: frame.content,
@@ -1463,7 +1389,9 @@ impl Render for Composer {
                 if moving {
                     window.request_animation_frame();
                 }
-                tab_card_with_strip(tab, strip, card, px(CARD_RADIUS)).into_any_element()
+                TabCard::new("composer-tab-card", theme, tab, card)
+                    .strip(strip)
+                    .into_any_element()
             }
             None => card.into_any_element(),
         };
@@ -1473,9 +1401,42 @@ impl Render for Composer {
                 div()
                     .px(px(12.0))
                     .text_size(px(13.0))
-                    .text_color(destructive())
+                    .text_color(theme.colors.destructive.to_paint())
                     .child(error),
             );
+        }
+        if let Some(session) = self
+            .session
+            .as_ref()
+            .filter(|session| session.read(cx).error.is_some())
+        {
+            if session.read(cx).conflict {
+                let local = session.clone();
+                let remote = session.clone();
+                shell = shell.child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .child(
+                            Button::text("draft-keep-local", theme, "Keep my draft").on_activate(
+                                move |_, _, cx| {
+                                    local.update(cx, |session, cx| session.keep_local(cx))
+                                },
+                            ),
+                        )
+                        .child(
+                            Button::text("draft-use-remote", theme, "Load other draft")
+                                .on_activate(move |_, _, cx| {
+                                    remote.update(cx, |session, cx| session.use_remote(cx))
+                                }),
+                        ),
+                );
+            } else {
+                let session = session.clone();
+                shell = shell.child(Button::text("draft-retry", theme, "Retry").on_activate(
+                    move |_, _, cx| session.update(cx, |session, cx| session.retry(cx)),
+                ));
+            }
         }
         shell = shell.child(card);
         if let Some(tooltip) = self.render_tooltip(&theme, window.viewport_size()) {
@@ -1487,3 +1448,31 @@ impl Render for Composer {
 
 #[cfg(test)]
 mod tests;
+
+fn preview_fits(retained: usize, incoming: usize) -> bool {
+    retained
+        .checked_add(incoming)
+        .is_some_and(|total| total <= 128 * 1024 * 1024)
+}
+#[cfg(test)]
+mod preview_budget_tests {
+    #[test]
+    fn restored_and_encoded_previews_share_aggregate_admission() {
+        let budget = 128 * 1024 * 1024;
+        assert!(super::preview_fits(budget - 1, 1));
+        assert!(!super::preview_fits(budget - 1, 2));
+        assert!(!super::preview_fits(usize::MAX, 1));
+    }
+}
+
+/// GPUI's image atlas is independent of the decoded Arc's lifetime.
+fn release_preview(image: Option<Arc<RenderImage>>, cx: &mut App) {
+    if let Some(image) = image {
+        cx.defer(move |cx| {
+            cx.drop_image(image, None);
+            // Other visible owners can retain these pixels after this owner
+            // releases them. Invalidate cached scenes before they reuse a tile.
+            cx.refresh_windows();
+        });
+    }
+}

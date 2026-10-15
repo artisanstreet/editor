@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 160
 expression: "replay(\"steer\")"
 ---
 [
@@ -28,8 +29,15 @@ expression: "replay(\"steer\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Planning initial shell command execution**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Planning initial shell command execution",
+            append: false,
         },
     ),
     Event(
@@ -38,7 +46,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -58,7 +68,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I’ll run the requested command now.",
+                text: Inline(
+                    "I’ll run the requested command now.",
+                ),
                 phase: Commentary,
             },
         },
@@ -70,7 +82,9 @@ expression: "replay(\"steer\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 4",
+                    command: Inline(
+                        "sleep 4",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -116,7 +130,9 @@ expression: "replay(\"steer\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 4",
+                    command: Inline(
+                        "sleep 4",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -157,7 +173,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -177,7 +195,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "done banana",
+                text: Inline(
+                    "done banana",
+                ),
                 phase: Final,
             },
         },

@@ -6,12 +6,28 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+artisan-markdown-index = { path = "../artisan-markdown-index" }
+unicode-bidi = "0.3.18"
+ropey.workspace = true
+glam.workspace = true
+color.workspace = true
+chrono.workspace = true
+url.workspace = true
+data-url.workspace = true
+vte.workspace = true
+unicode-width.workspace = true
+artisan-api = { path = "../artisan-api" }
+futures.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 editor-assets = { path = "../editor-assets" }
 editor-audio = { path = "../editor-audio" }
 base64.workspace = true
-flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] } # workspace-absent
 gpui.workspace = true
 image = { version = "=0.25.10", default-features = false } # workspace-absent
+gltf.workspace = true
+ufbx.workspace = true
+stl_io.workspace = true
+ply-rs-bw.workspace = true
 mermaid-rs-renderer.workspace = true
 pulldown-cmark.workspace = true
 serde.workspace = true
@@ -24,4 +40,7 @@ unicode-segmentation.workspace = true
 workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+gpui_platform.workspace = true
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 gpui = { workspace = true, features = ["test-support"] }

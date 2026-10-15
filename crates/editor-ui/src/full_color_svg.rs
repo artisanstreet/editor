@@ -89,10 +89,6 @@ impl Element for FullColorSvg {
         self.interactivity.source_location()
     }
 
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "intrinsic device-pixel dimensions are small and exactly representable in f32"
-    )]
     fn request_layout(
         &mut self,
         global_id: Option<&GlobalElementId>,
@@ -108,7 +104,7 @@ impl Element for FullColorSvg {
                 &renderer,
                 editor_assets::get(self.asset_id).source.as_bytes(),
             )
-            .map(|(_, size)| size.map(|v| px(v.0 as f32 / SUPERSAMPLE_FACTOR)));
+            .map(|(_, size)| size);
         let layout_id = self.interactivity.request_layout(
             global_id,
             inspector_id,
@@ -243,7 +239,7 @@ struct RasterKey {
 struct ParsedSvgEntry {
     asset_id: AssetId,
     parsed: Arc<gpui::ParsedSvg>,
-    intrinsic_size: Size<DevicePixels>,
+    intrinsic_size: Size<Pixels>,
 }
 
 struct RasterEntry {
@@ -315,7 +311,7 @@ impl FullColorSvgCache {
         asset_id: AssetId,
         renderer: &SvgRenderer,
         bytes: &[u8],
-    ) -> Option<(Arc<gpui::ParsedSvg>, Size<DevicePixels>)> {
+    ) -> Option<(Arc<gpui::ParsedSvg>, Size<Pixels>)> {
         if let Some(index) = self
             .parsed
             .iter()
@@ -328,14 +324,8 @@ impl FullColorSvgCache {
         }
 
         let parsed = Arc::new(renderer.parse_svg(bytes).ok()?);
-        // Rendering once at the document's natural scale supplies a stable
-        // aspect ratio without introducing a second XML parser. The resulting
-        // image is not retained; all visible rasters are keyed by layout size.
-        let intrinsic_size = renderer
-            .render_parsed(parsed.as_ref(), SvgSize::ScaleFactor(1.0))
-            .ok()?
-            .size(0);
-        if intrinsic_size.width.0 <= 0 || intrinsic_size.height.0 <= 0 {
+        let intrinsic_size = parsed.size();
+        if intrinsic_size.width <= px(0.0) || intrinsic_size.height <= px(0.0) {
             return None;
         }
         self.parsed.push_front(ParsedSvgEntry {
@@ -369,15 +359,11 @@ impl FullColorSvgCache {
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "intrinsic device-pixel dimensions are small and exactly representable in f32"
-)]
-fn contain_size(bounds: Size<Pixels>, intrinsic: Size<DevicePixels>) -> Size<Pixels> {
+fn contain_size(bounds: Size<Pixels>, intrinsic: Size<Pixels>) -> Size<Pixels> {
     let width = f32::from(bounds.width).max(0.0);
     let height = f32::from(bounds.height).max(0.0);
-    let intrinsic_width = u32::from(intrinsic.width) as f32;
-    let intrinsic_height = u32::from(intrinsic.height) as f32;
+    let intrinsic_width = f32::from(intrinsic.width);
+    let intrinsic_height = f32::from(intrinsic.height);
     if width <= 0.0 || height <= 0.0 || intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
         return size(px(0.0), px(0.0));
     }
@@ -487,17 +473,30 @@ mod tests {
     }
 
     #[test]
-    fn fitted_target_preserves_intrinsic_aspect_ratio_without_stretching() {
-        let fitted = contain_size(
-            size(px(80.0), px(40.0)),
-            Size::new(DevicePixels(200), DevicePixels(100)),
+    fn intrinsic_layout_preserves_fractional_svg_dimensions() {
+        let mut cache = FullColorSvgCache::default();
+        let asset_id = editor_assets::ALL[0].id;
+        let parsed = cache
+            .parsed_for(
+                asset_id,
+                &renderer(),
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="0.25" height="0.5"></svg>"#,
+            )
+            .expect("a subpixel SVG still has a valid intrinsic layout size");
+        assert_eq!(parsed.1, size(px(0.25), px(0.5)));
+        assert!(cache.rasters.is_empty());
+        assert_eq!(
+            contain_size(size(px(40.0), px(40.0)), parsed.1),
+            size(px(20.0), px(40.0))
         );
+    }
+
+    #[test]
+    fn fitted_target_preserves_intrinsic_aspect_ratio_without_stretching() {
+        let fitted = contain_size(size(px(80.0), px(40.0)), size(px(200.0), px(100.0)));
         assert_eq!(fitted, size(px(80.0), px(40.0)));
 
-        let letterboxed = contain_size(
-            size(px(40.0), px(80.0)),
-            Size::new(DevicePixels(200), DevicePixels(100)),
-        );
+        let letterboxed = contain_size(size(px(40.0), px(80.0)), size(px(200.0), px(100.0)));
         assert_eq!(letterboxed, size(px(40.0), px(20.0)));
     }
 }

@@ -2,16 +2,16 @@
 //! several series overlaid, with a threshold slider in histogram and CDF
 //! modes reporting the share at or below it.
 
-use std::fmt::Write as _;
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::{BlockContext, RichBlock, kit, spec};
+use super::super::{BlockContext, RichBlock, spec};
 use super::chart::series_name;
-use super::scale::{Domain, exact, f64_of, index_of, nice_step, percent, quantile, sorted_finite};
+use super::scale::{Domain, f64_of, index_of, nice_step, quantile, sorted_finite};
 
 mod view;
 
@@ -53,36 +53,47 @@ pub(super) struct DistributionSpec {
 }
 
 /// One series' finite values, sorted.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Sample {
     pub(super) name: String,
     pub(super) sorted: Vec<f64>,
+    pub(super) summary: Option<Summary>,
+    pub(super) counts: Vec<usize>,
 }
 
 /// A parsed distribution, its samples sorted once.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(super) struct Distribution {
     pub(super) mode: Mode,
     pub(super) unit: Option<String>,
     pub(super) threshold: Option<f64>,
     pub(super) samples: Vec<Sample>,
     pub(super) bins: Bins,
+    domain: Domain,
+    slider: (Domain, f64, f64),
 }
 
-pub(super) fn parse(value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let spec = spec::<DistributionSpec>(value)?;
-    Ok(Rc::new(Block(Rc::new(Distribution::from_spec(spec)))))
+    let data = Distribution::from_spec(spec);
+    if !data.domain.lo.is_finite() || !data.domain.hi.is_finite() || !data.domain.span().is_finite()
+    {
+        return Err("distribution range exceeds the finite preview domain".to_owned());
+    }
+    Ok(Arc::new(Block(Arc::new(data))))
 }
 
 impl Distribution {
     pub(super) fn from_spec(spec: DistributionSpec) -> Self {
-        let samples: Vec<Sample> = spec
+        let mut samples: Vec<Sample> = spec
             .series
             .into_iter()
             .enumerate()
             .map(|(index, series)| Sample {
                 name: series_name(&series.name, index).to_string(),
                 sorted: sorted_finite(series.values.into_iter().flatten()),
+                summary: None,
+                counts: Vec::new(),
             })
             .collect();
         let pooled = sorted_finite(
@@ -90,13 +101,26 @@ impl Distribution {
                 .iter()
                 .flat_map(|sample| sample.sorted.iter().copied()),
         );
-        let bins = Bins::new(&pooled, spec.bins);
+        let threshold = spec.threshold.filter(|value| value.is_finite());
+        let mut bins = Bins::new(&pooled, spec.bins);
+        let start = threshold
+            .or_else(|| quantile(&pooled, 0.5))
+            .unwrap_or(bins.domain.lo);
+        let domain = bins.domain.including(start);
+        bins.domain = domain;
+        let slider = (domain, nice_step(domain.span() / 100.0), start);
+        for sample in &mut samples {
+            sample.summary = summary(&sample.sorted);
+            sample.counts = bins.counts(&sample.sorted);
+        }
         Self {
             mode: spec.mode,
             unit: spec.unit.filter(|unit| !unit.trim().is_empty()),
-            threshold: spec.threshold.filter(|threshold| threshold.is_finite()),
+            threshold,
             samples,
             bins,
+            domain,
+            slider,
         }
     }
 
@@ -106,28 +130,12 @@ impl Distribution {
 
     /// The extent of every value.
     pub(super) fn domain(&self) -> Domain {
-        Domain::of(
-            self.samples
-                .iter()
-                .flat_map(|sample| sample.sorted.iter().copied()),
-        )
-        .unwrap_or_else(|| Domain::new(0.0, 1.0))
+        self.domain
     }
 
     /// The threshold slider's range, step, and starting value.
     pub(super) fn slider(&self) -> (Domain, f64, f64) {
-        let domain = self.domain();
-        let step = nice_step(domain.span() / 100.0);
-        let pooled = sorted_finite(
-            self.samples
-                .iter()
-                .flat_map(|sample| sample.sorted.iter().copied()),
-        );
-        let start = self
-            .threshold
-            .or_else(|| quantile(&pooled, 0.5))
-            .unwrap_or(domain.lo);
-        (domain.including(start), step, start)
+        self.slider
     }
 }
 
@@ -236,7 +244,14 @@ pub(super) fn summary(sorted: &[f64]) -> Option<Summary> {
         median,
         q3,
         max,
-        mean: sorted.iter().sum::<f64>() / f64_of(sorted.len()),
+        mean: {
+            let scale = min.abs().max(max.abs());
+            if scale == 0.0 {
+                0.0
+            } else {
+                sorted.iter().map(|value| value / scale).sum::<f64>() / f64_of(sorted.len()) * scale
+            }
+        },
         whiskers,
         outliers,
     })
@@ -252,95 +267,53 @@ pub(super) fn share_at_or_below(sorted: &[f64], threshold: f64) -> f64 {
 
 /// The block: a shared distribution, so frames don't copy the samples.
 #[derive(Debug)]
-pub(super) struct Block(pub(super) Rc<Distribution>);
+pub(super) struct Block(pub(super) Arc<Distribution>);
 
 impl RichBlock for Block {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Distribution>()
+            + budget::optional(&self.0.unit)
+            + budget::vector(&self.0.samples)
+            + self
+                .0
+                .samples
+                .iter()
+                .map(|sample| {
+                    sample.name.capacity()
+                        + budget::vector(&sample.sorted)
+                        + budget::vector(&sample.counts)
+                        + sample
+                            .summary
+                            .as_ref()
+                            .map_or(0, |summary| budget::vector(&summary.outliers))
+                })
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         view::DistributionView {
             id: cx.key("distribution"),
             theme: *cx.theme,
-            data: Rc::clone(&self.0),
+            data: Arc::clone(&self.0),
         }
         .into_any_element()
     }
-
-    fn markdown(&self) -> String {
-        self.0.markdown()
-    }
 }
 
-impl Distribution {
-    /// The summary table, the bins in histogram mode, and the threshold.
-    pub(super) fn markdown(&self) -> String {
-        if self.is_empty() {
-            return "_No data._\n".to_owned();
-        }
-        let header: Vec<String> = ["Series", "n", "min", "q1", "median", "q3", "max", "mean"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let rows: Vec<Vec<String>> = self
-            .samples
-            .iter()
-            .filter_map(|sample| {
-                let summary = summary(&sample.sorted)?;
-                Some(vec![
-                    sample.name.clone(),
-                    summary.count.to_string(),
-                    kit::format_number(summary.min),
-                    kit::format_number(summary.q1),
-                    kit::format_number(summary.median),
-                    kit::format_number(summary.q3),
-                    kit::format_number(summary.max),
-                    kit::format_number(summary.mean),
-                ])
-            })
-            .collect();
-        let mut out = kit::markdown_table(&header, &rows);
-        if self.mode == Mode::Histogram {
-            out.push('\n');
-            out.push_str(&self.bins_table());
-        }
-        if let Some(unit) = &self.unit {
-            let _ = write!(out, "\n_Values in {}_\n", unit.trim());
-        }
-        if let Some(threshold) = self.threshold {
-            let _ = write!(out, "\n- Threshold: {}", exact(threshold));
-            for sample in &self.samples {
-                let _ = write!(
-                    out,
-                    "\n  - {}: {} at or below",
-                    sample.name,
-                    percent(share_at_or_below(&sample.sorted, threshold))
-                );
-            }
-            out.push('\n');
-        }
-        out
-    }
-}
-
-impl Distribution {
-    fn bins_table(&self) -> String {
-        let mut header = vec!["Bin".to_owned()];
-        header.extend(self.samples.iter().map(|sample| sample.name.clone()));
-        let counts: Vec<Vec<usize>> = self
-            .samples
-            .iter()
-            .map(|sample| self.bins.counts(&sample.sorted))
-            .collect();
-        let rows: Vec<Vec<String>> = (0..self.bins.count)
-            .map(|bin| {
-                let (lo, hi) = self.bins.edges(bin);
-                let mut row = vec![format!(
-                    "{} – {}",
-                    kit::format_number(lo),
-                    kit::format_number(hi)
-                )];
-                row.extend(counts.iter().map(|counts| counts[bin].to_string()));
-                row
-            })
-            .collect();
-        kit::markdown_table(&header, &rows)
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn threshold_and_summary_remain_finite_at_numeric_boundaries() {
+        let data = Distribution::from_spec(
+            serde_json::from_value(
+                serde_json::json!({"series":[{"values":[1,2]}],"threshold":100}),
+            )
+            .unwrap(),
+        );
+        assert!(data.domain().contains(100.0));
+        assert_eq!(data.slider().0, data.domain());
+        assert!(summary(&[1e308, 1e308]).unwrap().mean.is_finite());
     }
 }

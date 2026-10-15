@@ -1,7 +1,7 @@
 //! The window's layout. Forwards nothing but focus and visibility; every
 //! section talks to `Core` and Forge itself.
 
-use crate::context_meter::{ContextReading, context_card, context_ring};
+use crate::context_meter::{ContextMeter, ContextReading};
 use crate::home::Home;
 use crate::notifications::Notifications;
 use crate::palette::{Palette, PaletteEvent};
@@ -15,24 +15,15 @@ use editor_settings::{BuildInfo, Settings};
 use editor_sidebar::Sidebar;
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
+use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::glass::glass_badge;
-use editor_ui::motion::MotionDuration;
-use editor_ui::picker_motion::{MenuEntrance, MenuMotion, animate_menu};
-use editor_ui::theme::{ArtisanTheme, DesktopTheme, ProseTypography, SurfaceStep, ThemeMode};
+use editor_ui::theme::{ArtisanTheme, ProseTypography, SurfaceStep, WorkspaceColors};
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
+    AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window,
     WindowControlArea, div, px,
 };
-use gpui::{Bounds, Task};
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-use std::time::Duration;
-
-/// The context card's entrance and exit, the profile menu's own.
-const CONTEXT_CARD_OPEN: Duration = MotionDuration::Fast.as_duration();
-const CONTEXT_CARD_CLOSE: Duration = MotionDuration::Quick.as_duration();
 
 pub const KEY_CONTEXT: &str = "Workspace";
 
@@ -48,9 +39,9 @@ pub const COLUMN_WIDTH: f32 = 327.0;
 const COLUMN_MIN_WIDTH: f32 = 240.0;
 /// The chat's comfortable minimum: the 768 px reading column plus 48 px of
 /// rail clearance each side. Columns shrink, then hide, before it does.
-const CHAT_MIN_WIDTH: f32 = 768.0 + 2.0 * 48.0;
+pub const CHAT_MIN_WIDTH: f32 = 768.0 + 2.0 * 48.0;
 /// A caption button's width.
-const CONTROL_WIDTH: f32 = 46.0;
+use editor_ui::window_controls::CONTROL_WIDTH;
 /// Gap between the context ring and the rule or controls to its right.
 const CONTEXT_METER_GAP: f32 = 16.0;
 /// The ring's slot width.
@@ -89,21 +80,16 @@ pub struct Workspace {
     sidebar: Entity<Sidebar>,
     conversation: Entity<Conversation>,
     inspector: Entity<Inspector>,
-    settings: Entity<Settings>,
-    marketplace: Entity<Marketplace>,
-    home: Entity<Home>,
+    settings: Option<Entity<Settings>>,
+    build: BuildInfo,
+    marketplace: Option<Entity<Marketplace>>,
+    home: Option<Entity<Home>>,
     palette: Option<Entity<Palette>>,
+    resource_preview: Option<Entity<crate::resource_preview::ResourcePreview>>,
+    copy_menu: Option<editor_ui::markdown_renderer::ShowCopyMenu>,
     show_sidebar: bool,
     show_inspector: bool,
-    /// Whether the pointer is over the context ring, showing its card.
-    context_card_open: bool,
-    /// The card pops in and out on the profile menu's motion.
-    context_motion: Rc<RefCell<MenuMotion>>,
-    context_settle: Option<Task<()>>,
-    /// The ring's bounds, which the card hangs from.
-    context_bounds: Rc<Cell<Bounds<Pixels>>>,
-    /// The project whose repository was last asked for.
-    repository_for: Option<artisan_api::ProjectId>,
+    _repository: Entity<crate::repository_context::RepositoryContext>,
     /// Shown above everything until dismissed.
     failure: Option<String>,
     focus: FocusHandle,
@@ -153,14 +139,14 @@ impl Workspace {
             .to_owned(),
             target: env!("EDITOR_TARGET").to_owned(),
         };
-        let settings = cx.new(|cx| Settings::new(core.clone(), build, window, cx));
         editor_settings::frame_rate::initialize(core.read(cx), window);
-        let home = cx.new(|cx| Home::new(core.clone(), cx));
-        let marketplace = cx.new(|cx| Marketplace::new(core.clone(), cx));
         let subscriptions = vec![
             cx.subscribe_in(&core, window, |this, _, event, window, cx| {
                 if matches!(event, CoreEvent::HostsChanged) {
                     this.follow_hosts(window, cx);
+                }
+                if matches!(event, CoreEvent::ScreenChanged | CoreEvent::HostsChanged) {
+                    this.mount_screen(window, cx);
                 }
                 cx.notify();
             }),
@@ -171,35 +157,60 @@ impl Workspace {
                     ConversationEvent::NewProject => this.sidebar.update(cx, Sidebar::add_project),
                     // The title shows the open subagent.
                     ConversationEvent::AgentChanged => cx.notify(),
-                    ConversationEvent::ItemsChanged => {}
+                    // An open agent's context meter follows its messages.
+                    ConversationEvent::ItemsChanged => {
+                        if this.conversation.read(cx).agent_context().is_some() {
+                            cx.notify();
+                        }
+                    }
                 }
             }),
         ];
+        let repository =
+            cx.new(|cx| crate::repository_context::RepositoryContext::new(core.clone(), cx));
         let mut workspace = Self {
             core,
             sidebar,
             conversation,
             inspector,
-            settings,
-            marketplace,
-            home,
+            settings: None,
+            build,
+            marketplace: None,
+            home: None,
             palette: None,
+            resource_preview: None,
+            copy_menu: None,
             show_sidebar: true,
             show_inspector: true,
-            context_card_open: false,
-            context_motion: Rc::default(),
-            context_settle: None,
-            context_bounds: Rc::default(),
-            repository_for: None,
+            _repository: repository,
             failure,
             focus: cx.focus_handle(),
             notifications: Notifications::default(),
             host_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         };
+        workspace.mount_screen(window, cx);
         workspace.follow_hosts(window, cx);
         window.focus(&workspace.focus, cx);
         workspace
+    }
+
+    fn mount_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.core.read(cx).screen() {
+            Screen::Settings(_) if self.settings.is_none() => {
+                self.settings =
+                    Some(cx.new(|cx| {
+                        Settings::new(self.core.clone(), self.build.clone(), window, cx)
+                    }));
+            }
+            Screen::Marketplace if self.marketplace.is_none() => {
+                self.marketplace = Some(cx.new(|cx| Marketplace::new(self.core.clone(), cx)));
+            }
+            Screen::Home if self.home.is_none() => {
+                self.home = Some(cx.new(|cx| Home::new(self.core.clone(), cx)));
+            }
+            _ => {}
+        }
     }
 
     /// Re-renders the connection notice when a host's status moves, and
@@ -211,20 +222,49 @@ impl Workspace {
             .hosts()
             .map(|(_, host)| host.clone())
             .collect();
+        self.notifications.retain_hosts(
+            &hosts
+                .iter()
+                .map(|host| host.read(cx).id.clone())
+                .collect::<Vec<_>>(),
+        );
+        for host in &hosts {
+            self.notifications.reset(host.read(cx));
+        }
         self.host_subscriptions = hosts
             .into_iter()
             .map(|host| {
-                cx.subscribe_in(&host, window, |this, host, event, window, cx| {
-                    if matches!(event, HostEvent::Changed | HostEvent::Reset) {
-                        this.notify_changes(host, window, cx);
+                cx.subscribe_in(&host, window, |this, host, event, window, cx| match event {
+                    HostEvent::ThreadChanged { thread_id } => {
+                        this.notify_changes(host, thread_id, window, cx);
+                        if this
+                            .open_thread(cx)
+                            .is_some_and(|open| open.thread == *thread_id && open.host == *host)
+                        {
+                            cx.notify();
+                        }
+                    }
+                    HostEvent::Reset => {
+                        this.notifications.reset(host.read(cx));
                         cx.notify();
                     }
+                    HostEvent::Changed => {
+                        this.notifications.sync_connection(host.read(cx));
+                        cx.notify();
+                    }
+                    _ => {}
                 })
             })
             .collect();
     }
 
-    fn notify_changes(&mut self, host: &Entity<HostData>, window: &Window, cx: &mut Context<Self>) {
+    fn notify_changes(
+        &mut self,
+        host: &Entity<HostData>,
+        thread: &artisan_api::ThreadId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let core = self.core.read(cx);
         let enabled = core
             .settings
@@ -240,12 +280,81 @@ impl Workspace {
             }
             _ => None,
         };
-        let posted = self.notifications.observe(host, watching);
-        if enabled {
-            for notification in posted {
-                cx.show_system_notification(notification);
-            }
+        let posted = self.notifications.observe(host, thread, watching);
+        if enabled && let Some(notification) = posted {
+            cx.show_system_notification(notification);
         }
+    }
+
+    fn open_reference(
+        &mut self,
+        reference: &editor_ui::markdown_renderer::OpenReference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let client = reference.scope.as_ref().and_then(|scope| {
+            self.core
+                .read(cx)
+                .host(&editor_core::HostId(scope.host.clone()))
+                .map(|host| host.read(cx).client.clone())
+        });
+        editor_ui::overlay::begin("resource-preview", window, cx);
+        let preview = cx
+            .new(|cx| crate::resource_preview::ResourcePreview::new(reference.clone(), client, cx));
+        cx.subscribe(
+            &preview,
+            |this, _, _: &crate::resource_preview::Dismissed, cx| {
+                this.resource_preview = None;
+                cx.notify();
+            },
+        )
+        .detach();
+        self.resource_preview = Some(preview);
+        cx.notify();
+    }
+
+    fn show_copy_menu(
+        &mut self,
+        menu: &editor_ui::markdown_renderer::ShowCopyMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        editor_ui::overlay::begin("copy-menu", window, cx);
+        self.copy_menu = Some(menu.clone());
+        cx.notify();
+    }
+
+    fn render_copy_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let menu = self.copy_menu.as_ref()?;
+        let theme = ArtisanTheme::default();
+        let rows = menu.entries.iter().enumerate().map(|(index, entry)| {
+            let text = entry.text.clone();
+            editor_ui::button::Button::text(("copy-value", index), theme, entry.label.clone())
+                .debug_selector(format!("copy-value-{index}"))
+                .variant(editor_ui::button::ButtonVariant::Ghost)
+                .on_activate(cx.listener(move |this, _, window, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
+                    this.copy_menu = None;
+                    editor_ui::overlay::dismiss("copy-menu", window, cx);
+                    cx.notify();
+                }))
+        });
+        let this = cx.entity().downgrade();
+        Some(
+            editor_ui::popover::Popover::new(
+                "copy-menu",
+                "Copy value",
+                menu.position,
+                div().flex().flex_col().gap(px(4.0)).children(rows),
+                move |_, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.copy_menu = None;
+                        cx.notify();
+                    });
+                },
+            )
+            .into_any_element(),
+        )
     }
 
     fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -256,7 +365,7 @@ impl Workspace {
         cx.subscribe_in(&palette, window, |this, _, event, window, cx| match event {
             PaletteEvent::Dismissed => {
                 this.palette = None;
-                window.focus(&this.focus, cx);
+                editor_ui::overlay::dismiss("command-palette", window, cx);
                 cx.notify();
             }
         })
@@ -307,24 +416,9 @@ impl Workspace {
         })
     }
 
-    /// Asks the open thread's Forge for its project's branch and remote
-    /// each time another project opens.
-    fn follow_repository(&mut self, cx: &mut Context<Self>) {
-        let open = self.open_thread(cx);
-        let project = open.as_ref().and_then(|open| open.project.clone());
-        if project == self.repository_for {
-            return;
-        }
-        self.repository_for.clone_from(&project);
-        if let (Some(open), Some(project)) = (open, project) {
-            open.host
-                .update(cx, |host, cx| host.load_repository(&project, true, cx));
-        }
-    }
-
     /// The titlebar's leading section above the sidebar: the `Artisan
     /// Editor` wordmark, which goes home, and the build badge.
-    fn brand(theme: &ArtisanTheme, desktop: DesktopTheme, cx: &Context<Self>) -> Div {
+    fn brand(theme: &ArtisanTheme, desktop: WorkspaceColors, cx: &Context<Self>) -> Div {
         div()
             .w_full()
             .flex()
@@ -337,6 +431,7 @@ impl Workspace {
             .child(
                 div()
                     .id("artisan-brand-home")
+                    .focusable().tab_index(0).role(gpui::Role::Button).aria_label("Artisan Editor home")
                     .debug_selector(|| "artisan-brand-home".to_owned())
                     .block_mouse_except_scroll()
                     .line_height(px(28.0))
@@ -367,9 +462,10 @@ impl Workspace {
                     .text_color(desktop.foreground)
                     .child("Artisan Editor"),
             )
-            .children(build_badge().map(|badge| {
-                glass_badge(theme, badge).debug_selector(|| "artisan-brand-build".to_owned())
-            }))
+            .children(
+                build_badge()
+                    .map(|badge| glass_badge(theme, badge).debug_selector("artisan-brand-build")),
+            )
     }
 
     /// The workspace header on a thread: the repository's host mark and
@@ -408,6 +504,10 @@ impl Workspace {
                 cluster = cluster.child(div().flex_shrink_0().child(glyph)).child(
                     div()
                         .id("artisan-desktop-titlebar-repository-link")
+                        .focusable()
+                        .tab_index(0)
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Open {}", qualified_label(&web_url)))
                         .cursor_pointer()
                         .flex_shrink_0()
                         .text_color(theme.colors.banner_info.to_paint())
@@ -459,6 +559,10 @@ impl Workspace {
             title = title.flex_1();
         } else {
             title = title
+                .focusable()
+                .tab_index(0)
+                .role(gpui::Role::Button)
+                .aria_label("Open parent thread")
                 .flex_shrink(1.0)
                 .cursor_pointer()
                 .hover(|style| style.text_color(theme.colors.foreground.to_paint()))
@@ -480,6 +584,10 @@ impl Workspace {
             } else {
                 let conversation = self.conversation.clone();
                 crumb = crumb
+                    .focusable()
+                    .tab_index(0)
+                    .role(gpui::Role::Button)
+                    .aria_label("Open parent agent")
                     .cursor_pointer()
                     .hover(|style| style.text_color(theme.colors.foreground.to_paint()))
                     .on_click(move |_, _, cx| {
@@ -494,60 +602,31 @@ impl Workspace {
         Some(cluster.into_any_element())
     }
 
-    /// The open thread's context reading, from its latest run.
-    /// Pops the context card in or out.
-    fn set_context_card_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if open == self.context_card_open {
-            return;
-        }
-        self.context_card_open = open;
-        let generation = if open {
-            self.context_motion.borrow_mut().begin_open()
-        } else {
-            self.context_motion.borrow_mut().begin_close()
-        };
-        let settle = move |this: &mut Self| {
-            let mut motion = this.context_motion.borrow_mut();
-            if open {
-                motion.finish_open(generation)
-            } else {
-                motion.finish_close(generation)
-            }
-        };
-        if cx.reduce_motion() {
-            settle(self);
-            self.context_settle = None;
-        } else {
-            let duration = if open {
-                CONTEXT_CARD_OPEN
-            } else {
-                CONTEXT_CARD_CLOSE
-            };
-            self.context_settle = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(duration).await;
-                this.update(cx, |this, cx| {
-                    if settle(this) {
-                        this.context_settle = None;
-                        cx.notify();
-                    }
-                })
-                .ok();
-            }));
-        }
-        cx.notify();
-    }
-
+    /// The meter's reading: the open thread's run, or the open agent's own
+    /// context while its view is shown (an agent's model can differ).
     fn context_reading(&self, cx: &Context<Self>) -> Option<ContextReading> {
         let open = self.open_thread(cx)?;
         let host = open.host.read(cx);
         let run = host.runs.get(&open.thread)?;
-        let model = run.model.as_deref()?;
-        let name = host
+        let (used, model) = match self.conversation.read(cx).agent_context() {
+            Some(agent) => {
+                let (used, model) = agent?;
+                (used, model.or_else(|| run.model.clone())?)
+            }
+            None => (run.usage.context_used?, run.model.clone()?),
+        };
+        let known = host
             .engines
             .get(&run.engine)
-            .and_then(|engine| engine.models.iter().find(|known| known.id == model))
-            .map_or_else(|| model.to_owned(), |known| known.name.clone());
-        ContextReading::new(name, run.usage.context_used?, run.usage.context_window?)
+            .and_then(|engine| engine.models.iter().find(|known| known.id == model));
+        let window = if run.model.as_deref() == Some(model.as_str()) {
+            run.usage.context_window
+        } else {
+            None
+        }
+        .or_else(|| known.and_then(|known| known.context_window))?;
+        let name = known.map_or_else(|| model.clone(), |known| known.name.clone());
+        ContextReading::new(name, used, window)
     }
 
     /// The titlebar across the window: the brand above the sidebar, the
@@ -562,8 +641,8 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let desktop = DesktopTheme::neutral_dark();
+        let theme = ArtisanTheme::default();
+        let desktop = editor_ui::theme::ArtisanTheme::default().workspace;
         let reading = self.context_reading(cx);
         let controls_width = px(CONTROL_WIDTH * 3.0);
         let meter_right = inspector.unwrap_or(px(0.0)).max(controls_width) + px(CONTEXT_METER_GAP);
@@ -618,21 +697,8 @@ impl Workspace {
                             .window_control_area(WindowControlArea::Drag),
                     ),
             );
-        let controls = div()
-            .flex()
-            .h_full()
-            .flex_shrink_0()
-            .child(caption_button(
-                &theme,
-                WindowControlArea::Min,
-                "artisan-desktop-titlebar-minimize",
-            ))
-            .child(maximize_button(desktop, window.is_maximized(), rule))
-            .child(caption_button(
-                &theme,
-                WindowControlArea::Close,
-                "artisan-desktop-titlebar-close",
-            ));
+        let controls =
+            editor_ui::window_controls::WindowControls::new(theme, window.is_maximized());
         let meter = reading.map(|reading| {
             div()
                 .absolute()
@@ -641,42 +707,7 @@ impl Workspace {
                 .h(px(TITLEBAR_HEIGHT))
                 .flex()
                 .items_center()
-                .child({
-                    let bounds = Rc::clone(&self.context_bounds);
-                    div()
-                        .child(context_ring(&reading, &theme).on_hover(cx.listener(
-                            |this, hovered: &bool, _, cx| this.set_context_card_open(*hovered, cx),
-                        )))
-                        .on_children_prepainted(move |children, _, _| {
-                            if let Some(first) = children.first() {
-                                bounds.set(*first);
-                            }
-                        })
-                })
-                .children(self.context_motion.borrow().painted().then(|| {
-                    let ring = self.context_bounds.get();
-                    gpui::deferred(
-                        gpui::anchored()
-                            .anchor(gpui::Anchor::TopRight)
-                            .position(ring.top_right())
-                            .offset(gpui::point(px(0.0), ring.size.height + px(8.0)))
-                            .child(animate_menu(
-                                div()
-                                    .id("artisan-context-card")
-                                    .child(context_card(&reading, &theme)),
-                                &self.context_motion,
-                                "context",
-                                // The card hangs below the ring, aligned to
-                                // its right edge: it grows from that corner.
-                                MenuEntrance::Scale {
-                                    origin: gpui::point(1.0, 0.0),
-                                },
-                                CONTEXT_CARD_OPEN,
-                                CONTEXT_CARD_CLOSE,
-                            )),
-                    )
-                    .with_priority(1)
-                }))
+                .child(ContextMeter::new(reading, theme))
         });
         div()
             .relative()
@@ -717,12 +748,14 @@ impl Workspace {
     }
 
     /// The active host's connection, when it isn't live.
-    fn connection_notice(&self, theme: DesktopTheme, cx: &Context<Self>) -> Option<AnyElement> {
+    fn connection_notice(&self, theme: WorkspaceColors, cx: &Context<Self>) -> Option<AnyElement> {
         let host = self.core.read(cx).active_host()?.read(cx);
         let text = match &host.status {
             ConnectionStatus::Live => return None,
             ConnectionStatus::Connecting => format!("Connecting to {}…", host.name),
-            ConnectionStatus::Offline { attempt, reason } => {
+            ConnectionStatus::Offline {
+                attempt, reason, ..
+            } => {
                 format!(
                     "{} is unreachable ({reason}). Retrying, attempt {attempt}.",
                     host.name
@@ -733,7 +766,7 @@ impl Workspace {
     }
 }
 
-fn notice(theme: DesktopTheme, text: String, dismiss: Option<AnyElement>) -> AnyElement {
+fn notice(theme: WorkspaceColors, text: String, dismiss: Option<AnyElement>) -> AnyElement {
     div()
         .w_full()
         .px(px(14.0))
@@ -754,8 +787,7 @@ fn notice(theme: DesktopTheme, text: String, dismiss: Option<AnyElement>) -> Any
 impl Render for Workspace {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.follow_repository(cx);
-        let theme = DesktopTheme::neutral_dark();
+        let theme = editor_ui::theme::ArtisanTheme::default().workspace;
         let screen = self.core.read(cx).screen().clone();
         let rule = px(1.0 / window.scale_factor().max(0.5));
         let window_width = f32::from(window.viewport_size().width);
@@ -772,9 +804,24 @@ impl Render for Workspace {
         .then(|| inspector_width(content_width))
         .flatten();
         let center: AnyElement = match &screen {
-            Screen::Home => self.home.clone().into_any_element(),
-            Screen::Settings(_) => self.settings.clone().into_any_element(),
-            Screen::Marketplace => self.marketplace.clone().into_any_element(),
+            Screen::Home => self
+                .home
+                .as_ref()
+                .expect("home mounted on navigation")
+                .clone()
+                .into_any_element(),
+            Screen::Settings(_) => self
+                .settings
+                .as_ref()
+                .expect("settings mounted on navigation")
+                .clone()
+                .into_any_element(),
+            Screen::Marketplace => self
+                .marketplace
+                .as_ref()
+                .expect("marketplace mounted on navigation")
+                .clone()
+                .into_any_element(),
             Screen::Thread { .. } | Screen::NewThread { .. } => {
                 self.conversation.clone().into_any_element()
             }
@@ -820,12 +867,9 @@ impl Render for Workspace {
                 .child(self.sidebar.clone())
         });
         let failure = self.failure.clone().map(|text| {
-            let dismiss = div()
-                .id("dismiss-failure")
-                .cursor_pointer()
-                .text_color(theme.secondary)
-                .child("Dismiss")
-                .on_click(cx.listener(|this, _, _, cx| {
+            let dismiss = Button::text("dismiss-failure", ArtisanTheme::default(), "Dismiss")
+                .variant(ButtonVariant::Ghost)
+                .on_activate(cx.listener(|this, _, _, cx| {
                     this.failure = None;
                     cx.notify();
                 }))
@@ -842,8 +886,12 @@ impl Render for Workspace {
 
         div()
             .id("workspace")
+            .on_action(editor_ui::focus_navigation::focus_next)
+            .on_action(editor_ui::focus_navigation::focus_previous)
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
+            .on_action(cx.listener(Self::open_reference))
+            .on_action(cx.listener(Self::show_copy_menu))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::new_thread))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
@@ -868,7 +916,7 @@ impl Render for Workspace {
             // own surfaces above it.
             .bg(gpui::rgb(SHELL_BLACK))
             .text_color(theme.foreground)
-            .font_family(ArtisanTheme::for_mode(ThemeMode::Dark).typography.sans.family)
+            .font_family(ArtisanTheme::default().typography.sans.family)
             .text_size(px(14.0))
             // One tracking for every text in the window, at its own size.
             .tracking(ProseTypography::TRACKING_EM)
@@ -898,10 +946,12 @@ impl Render for Workspace {
                     .cached(StyleRefinement::default().absolute().inset_0()),
             )
             .children(self.palette.clone())
+            .children(self.resource_preview.clone())
+            .children(self.render_copy_menu(cx))
             // Above everything: an image opened from the composer or a
             // thread.
             .children(editor_ui::image_preview::overlay(
-                &ArtisanTheme::for_mode(ThemeMode::Dark),
+                &ArtisanTheme::default(),
                 window,
                 cx,
             ))
@@ -951,100 +1001,6 @@ fn qualified_label(web_url: &str) -> String {
     }
 }
 
-/// One caption button. The platform handles mouse presses on caption
-/// areas; the click handler is the keyboard path.
-fn caption_button(
-    theme: &ArtisanTheme,
-    area: WindowControlArea,
-    selector: &'static str,
-) -> Stateful<Div> {
-    let (hover_background, hover_foreground): (Hsla, Hsla) = match area {
-        WindowControlArea::Close => (
-            gpui::rgb_to_hsla(gpui::rgb(0x00e8_1123)),
-            gpui::rgb_to_hsla(gpui::rgb(0x00ff_ffff)),
-        ),
-        _ => (
-            theme.colors.muted.with_alpha(0.5).to_paint(),
-            theme.colors.foreground.to_paint(),
-        ),
-    };
-    let glyph = match area {
-        WindowControlArea::Max => AssetId::TABLER_MAXIMIZE,
-        WindowControlArea::Close => AssetId::TABLER_X,
-        WindowControlArea::Min | WindowControlArea::Drag => AssetId::TABLER_MINUS,
-    };
-    div()
-        .id(selector)
-        .debug_selector(move || selector.to_owned())
-        .w(px(CONTROL_WIDTH))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
-        .window_control_area(area)
-        .on_click(move |event, window, _| {
-            if !event.is_keyboard() {
-                return;
-            }
-            match area {
-                WindowControlArea::Min => window.minimize_window(),
-                WindowControlArea::Max => window.zoom_window(),
-                WindowControlArea::Close => window.remove_window(),
-                WindowControlArea::Drag => {}
-            }
-        })
-        .child(asset_glyph(glyph).size(px(16.0)))
-}
-
-/// The maximise / restore glyph follows the window's state: one square, or
-/// two overlapping ones while maximised.
-fn maximize_button(theme: DesktopTheme, maximized: bool, stroke: Pixels) -> Stateful<Div> {
-    let mut glyph = div().relative().w(px(10.0)).h(px(10.0));
-    if maximized {
-        glyph = glyph
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .border_t(stroke)
-                    .border_r(stroke)
-                    .border_color(theme.foreground),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(7.0))
-                    .h(px(7.0))
-                    .border(stroke)
-                    .border_color(theme.foreground),
-            );
-    } else {
-        glyph = glyph.border(stroke).border_color(theme.foreground);
-    }
-    div()
-        .id("artisan-desktop-titlebar-maximize")
-        .w(px(CONTROL_WIDTH))
-        .h_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .hover(move |style| style.bg(theme.selected))
-        .window_control_area(WindowControlArea::Max)
-        .on_click(|event, window, _| {
-            if event.is_keyboard() {
-                window.zoom_window();
-            }
-        })
-        .child(glyph)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{inspector_width, qualified_label, sidebar_width};
@@ -1069,5 +1025,296 @@ mod tests {
             qualified_label("https://gitlab.com/group/sub/repo/"),
             "sub/repo"
         );
+    }
+}
+
+#[cfg(all(test, feature = "capture"))]
+mod rich_action_tests {
+    use super::*;
+    use editor_ui::markdown_renderer::{CopyEntry, OpenReference, ResourceScope, ShowCopyMenu};
+    use gpui::{TestAppContext, point};
+
+    #[gpui::test]
+    fn workspace_dispatches_scoped_references_and_native_copy_menu(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = cx.new(|cx| {
+            Core::new(
+                editor_core::EditorFiles {
+                    dir: dir.path().to_owned(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        // Appearance needs no host or pairing discovery. This fixture cannot
+        // launch, stop, install, pair with, or mutate the running application.
+        core.update(cx, |core, cx| {
+            core.navigate(Screen::Settings(editor_core::SettingsPage::Appearance), cx)
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(core.clone(), None, window, cx));
+        cx.run_until_parked();
+        let reference = OpenReference {
+            scope: Some(ResourceScope {
+                host: "unavailable-owning-forge".into(),
+                thread: artisan_api::ThreadId::new(),
+            }),
+            path: "/owning/forge/reference.rs".into(),
+            line: Some(12),
+        };
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string("before reference".into()));
+            assert!(window.is_action_available(&reference, cx));
+            window.dispatch_action(Box::new(reference), cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.resource_preview.is_some(),
+                "reference must open its Forge preview even when the owning Forge is unavailable"
+            )
+        });
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            "before reference"
+        );
+        let menu = ShowCopyMenu {
+            position: point(px(100.0), px(100.0)),
+            entries: vec![
+                CopyEntry::primary("Copy original", "original value"),
+                CopyEntry::alternative("Copy converted", "converted value"),
+            ],
+        };
+        cx.update(|window, cx| {
+            assert!(window.is_action_available(&menu, cx));
+            window.dispatch_action(Box::new(menu), cx);
+        });
+        cx.run_until_parked();
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.copy_menu.as_ref().unwrap().entries.len(), 2)
+        });
+        let entry = cx
+            .debug_bounds("copy-value-1")
+            .expect("shared menu alternative must be painted");
+        cx.simulate_click(entry.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            "converted value"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(
+                workspace.copy_menu.is_none(),
+                "native menu selection dismisses the menu"
+            )
+        });
+    }
+    #[derive(Clone, Debug, Default)]
+    struct StalledSocket {
+        bytes: usize,
+        prefix: Vec<u8>,
+        eof: bool,
+        error: Option<String>,
+    }
+    /// Owns only loopback sockets. It never completes TLS or speaks HTTP.
+    /// Nonblocking reads/accept and an owned stop flag bound teardown on panic.
+    struct StalledTls {
+        address: std::net::SocketAddr,
+        sockets: std::sync::Arc<std::sync::Mutex<Vec<StalledSocket>>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl StalledTls {
+        fn new() -> Self {
+            use std::io::Read as _;
+            use std::sync::{
+                Arc, Mutex,
+                atomic::{AtomicBool, Ordering},
+            };
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let sockets = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let observed = sockets.clone();
+            let stopped = stop.clone();
+            let worker = std::thread::spawn(move || {
+                let mut streams = Vec::new();
+                while !stopped.load(Ordering::Acquire) {
+                    loop {
+                        if stopped.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                stream.set_nonblocking(true).unwrap();
+                                streams.push(stream);
+                                observed.lock().unwrap().push(StalledSocket::default());
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(_) => return,
+                        }
+                    }
+                    for (index, stream) in streams.iter_mut().enumerate() {
+                        let mut states = observed.lock().unwrap();
+                        let state = &mut states[index];
+                        if state.eof || state.error.is_some() {
+                            continue;
+                        }
+                        let mut bytes = [0u8; 4096];
+                        match stream.read(&mut bytes) {
+                            Ok(0) => state.eof = true,
+                            Ok(count) => {
+                                state.bytes += count;
+                                let take = count.min(3usize.saturating_sub(state.prefix.len()));
+                                state.prefix.extend_from_slice(&bytes[..take]);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(error) => state.error = Some(error.to_string()),
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            });
+            Self {
+                address,
+                sockets,
+                stop,
+                worker: Some(worker),
+            }
+        }
+        fn sockets(&self) -> Vec<StalledSocket> {
+            self.sockets.lock().unwrap().clone()
+        }
+    }
+    impl Drop for StalledTls {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+    fn wait_for_preview_socket(
+        cx: &mut gpui::VisualTestContext,
+        server: &StalledTls,
+        label: &str,
+        ready: impl Fn(&[StalledSocket]) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            cx.run_until_parked();
+            let sockets = server.sockets();
+            if ready(&sockets) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{label}: {sockets:?}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[gpui::test]
+    fn closing_a_scoped_preview_releases_its_pending_request(cx: &mut TestAppContext) {
+        use editor_core::{EditorFiles, HostConfig, HostId, HostKind, hosts::HostsFile};
+        cx.executor().allow_parking();
+        let server = StalledTls::new();
+        let dir = tempfile::tempdir().unwrap();
+        let files = EditorFiles {
+            dir: dir.path().to_owned(),
+        };
+        let identity = files.identity().unwrap();
+        let fingerprint =
+            artisan_api::tls::fingerprint(identity.certificate_der().unwrap().as_ref());
+        let host = HostId("isolated-preview-cancellation".into());
+        files
+            .save_hosts(&HostsFile {
+                hosts: vec![HostConfig {
+                    id: host.clone(),
+                    name: "Isolated TLS stall".into(),
+                    address: server.address.to_string(),
+                    fingerprint,
+                    kind: HostKind::Remote,
+                }],
+                last: None,
+            })
+            .unwrap();
+        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        // Appearance leaves only HostData's normal state fetch in flight.
+        core.update(cx, |core, cx| {
+            core.navigate(Screen::Settings(editor_core::SettingsPage::Appearance), cx)
+        });
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::new(core.clone(), None, window, cx));
+        wait_for_preview_socket(cx, &server, "HostData state TLS ClientHello", |sockets| {
+            sockets.len() == 1 && sockets[0].bytes > 0 && sockets[0].prefix.starts_with(&[22, 3])
+        });
+        let reference = OpenReference {
+            scope: Some(ResourceScope {
+                host: host.0.clone(),
+                thread: artisan_api::ThreadId::new(),
+            }),
+            path: "/isolated/source.rs".into(),
+            line: Some(7),
+        };
+        let opened_at = std::time::Instant::now();
+        cx.update(|window, cx| {
+            assert!(window.is_action_available(&reference, cx));
+            window.dispatch_action(Box::new(reference), cx);
+        });
+        wait_for_preview_socket(cx, &server, "ResourcePreview TLS ClientHello", |sockets| {
+            sockets.len() == 2 && sockets[1].bytes > 0 && sockets[1].prefix.starts_with(&[22, 3])
+        });
+        let preview = workspace.read_with(cx, |workspace, _| {
+            workspace.resource_preview.as_ref().unwrap().downgrade()
+        });
+        assert!(preview.upgrade().is_some());
+        let closed_at = std::time::Instant::now();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx); // The actual Dialog installs Escape/focus.
+            window.dispatch_event(
+                gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::KeyUp(gpui::KeyUpEvent {
+                    keystroke: gpui::Keystroke::parse("escape").unwrap(),
+                }),
+                cx,
+            );
+        });
+        wait_for_preview_socket(
+            cx,
+            &server,
+            "closed preview request EOF before TLS timeout",
+            |sockets| sockets.len() == 2 && sockets[1].eof,
+        );
+        assert!(closed_at.elapsed() < std::time::Duration::from_secs(2));
+        assert!(
+            opened_at.elapsed() < std::time::Duration::from_secs(10),
+            "request cancellation must precede the production TLS connect timeout"
+        );
+        workspace.read_with(cx, |workspace, _| {
+            assert!(workspace.resource_preview.is_none())
+        });
+        assert!(
+            preview.upgrade().is_none(),
+            "Workspace close must release the pending preview owner"
+        );
+        let sockets = server.sockets();
+        assert!(
+            !sockets[0].eof && sockets[0].error.is_none(),
+            "closing the preview must not cancel HostData's separate state fetch: {sockets:?}"
+        );
+        assert!(
+            sockets[1].error.is_none(),
+            "preview canceled with EOF: {sockets:?}"
+        );
+        // The fake peer has sent no TLS response, so its 10-second connect
+        // timeout cannot be mistaken for successful parsing or normal EOF.
+        // StalledTls::drop closes only these sockets and joins a polling worker.
     }
 }

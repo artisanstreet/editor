@@ -227,6 +227,31 @@ pub struct Asset {
     pub source: &'static str,
 }
 
+impl Asset {
+    /// Intrinsic catalog dimensions, parsed once rather than during painting.
+    pub fn intrinsic_dimensions(self) -> Option<(f32, f32)> {
+        static DIMENSIONS: std::sync::OnceLock<Box<[Option<(f32, f32)>]>> =
+            std::sync::OnceLock::new();
+        DIMENSIONS.get_or_init(|| {
+            ALL.iter()
+                .map(|asset| {
+                    let mut values = asset.view_box?.split_whitespace();
+                    let _: f32 = values.next()?.parse().ok()?;
+                    let _: f32 = values.next()?.parse().ok()?;
+                    let width: f32 = values.next()?.parse().ok()?;
+                    let height: f32 = values.next()?.parse().ok()?;
+                    (values.next().is_none()
+                        && width.is_finite()
+                        && height.is_finite()
+                        && width > 0.0
+                        && height > 0.0)
+                        .then_some((width, height))
+                })
+                .collect()
+        })[self.id.index]
+    }
+}
+
 macro_rules! catalog {
     ($(($const_name:ident, $id:literal, $family:expr, $view_box:expr, $monochrome:literal, $path:literal)),* $(,)?) => {
         /// Stable id keys in catalog order; backs compile-time index sealing.

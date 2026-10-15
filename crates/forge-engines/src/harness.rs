@@ -5,7 +5,7 @@
 //! JSON shapes, handshakes) stays behind this boundary.
 
 use artisan_api::{
-    Answer, EngineConfig, EngineId, ItemId, ItemKind, RunStatus, Status, ThreadId, Usage,
+    Answer, Approval, EngineConfig, EngineId, ItemId, ItemKind, RunStatus, Status, ThreadId, Usage,
 };
 use futures::future::BoxFuture;
 use std::path::PathBuf;
@@ -28,6 +28,8 @@ pub struct Turn {
     pub input: UserInput,
     /// Extra arguments and environment from customisation (MCP, settings).
     pub launch: Launch,
+    /// Explicit diagnostic trace destination. Normal runs do not record raw content.
+    pub trace_dir: Option<PathBuf>,
 }
 
 /// A user message as the engine receives it.
@@ -80,6 +82,21 @@ pub enum EngineEvent {
         status: Status,
         kind: ItemKind,
     },
+    /// A request has its own lifecycle; target names the execution it gates.
+    Approval {
+        key: String,
+        parent: Option<String>,
+        target: Option<String>,
+        status: Status,
+        approval: Approval,
+    },
+    /// An adapter produced an image file; Forge stores it as a canonical blob.
+    Image {
+        key: String,
+        parent: Option<String>,
+        path: PathBuf,
+        caption: Option<String>,
+    },
     /// Change only an item's status.
     Status {
         key: String,
@@ -92,8 +109,8 @@ pub enum EngineEvent {
         append: bool,
     },
     Usage(Usage),
-    /// A steer reached the engine.
-    SteerAccepted {
+    /// An initial input or steer reached the engine.
+    InputAccepted {
         id: ItemId,
     },
 }

@@ -1,56 +1,54 @@
-//! Compact native GPUI card primitive for the reached conversation surfaces.
-//!
-//! Ported from the audited legacy wrapper
-//! (`modules/frontend/src/lib/components/ui/card/card.svelte`; INVENTORY §2
-//! row 7) at the single configuration the product actually reaches: the
-//! compact `data-size="sm"` Card/CardContent pair used by
-//! `conversation-change` and `conversation-prompt`. The legacy root classes
-//! `ring-foreground/10 bg-card text-card-foreground gap-(--card-spacing)
-//! overflow-hidden rounded-2xl py-(--card-spacing) text-sm ring-1
-//! [--card-spacing:--spacing(6)] … data-[size=sm]:[--card-spacing:--spacing(4)]
-//! flex flex-col` therefore map onto exactly one recipe here: flex column,
-//! 16 px gap, 16 px default vertical padding, an 18 px `--radius-2xl`
-//! silhouette, mode-resolved `card`/`card-foreground` colors, 14 px shared
-//! control typography, rectangular `overflow_hidden`, and the legacy 1 px
-//! `ring-foreground/10` hairline carried as one zero-blur spread shadow.
-//!
-//! Deliberately absent because no reached call site uses them: the default
-//! 24 px spacing step, the `Header`/`Title`/`Description`/`Footer`/`Action`
-//! slots, a size enum, destructive/color variants, prose measure widths, and
-//! the legacy first-image corner special cases. Callers resolve
-//! [`CardStyle::resolve`] once for their mode and pass that one recipe value
-//! to both [`compact_card`] and [`compact_card_content`], so the root and its
-//! content band always share a single audited spacing step; further
-//! [`gpui::Styled`] refinements chain onto the returned [`Div`]s and later
-//! values win, keeping the audited tighter vertical paddings reachable
-//! without new APIs.
-//!
-//! ## Known rendering limitations (pinned GPUI 0.2.2)
-//!
-//! - **Rounded clipping is not honored for children.** `overflow_hidden`
-//!   installs a rectangular [`gpui::ContentMask`] built purely from the
-//!   element bounds (`gpui-0.2.2/src/style.rs:552–589`,
-//!   `overflow_mask`; applied at `elements/div.rs:1674/1825`). Corner radii
-//!   round the painted background quad and the ring shadow, but children are
-//!   clipped to the straight-edged rectangle, so content reaching the corners
-//!   can overpaint the transparent 18 px corner area. Every reached call site
-//!   keeps content inset, and the geometry tests below pin the insets that
-//!   guarantee it; a rounded clip would need first-party masking work.
-//! - **The legacy `ring-1` is a shadow, not a border.** GPUI shrinks the
-//!   overflow clip rectangle inward by any opaque border widths
-//!   (`style.rs:568–576`) and borders consume paint inside the bounds, while
-//!   the CSS ring floats over the edge without affecting layout. The recipe
-//!   reproduces the ring as one `BoxShadow` with zero offset, zero blur, and
-//!   a 1 px spread in `foreground` at 10% alpha: layout-neutral, outside the
-//!   clip computation, and following the rounded silhouette like the legacy
-//!   ring did.
-
-use gpui::{BoxShadow, Div, Hsla, Pixels, Styled, div, point, px};
-
+//! Compact cards own frame geometry; callers provide content or divided bands.
 use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use gpui::{
+    AnyElement, App, BoxShadow, Div, Hsla, IntoElement, ParentElement as _, Pixels, RenderOnce,
+    Styled as _, Window, div, point, px,
+};
 
-/// Legacy `ring-foreground/10`: the shared foreground at 10% alpha
-/// (`card.svelte` `ring-foreground/10`).
+#[derive(IntoElement)]
+pub struct Card {
+    theme: ArtisanTheme,
+    bands: Vec<AnyElement>,
+    divided: bool,
+}
+impl Card {
+    pub fn new(theme: ArtisanTheme, content: impl IntoElement) -> Self {
+        Self {
+            theme,
+            bands: vec![content.into_any_element()],
+            divided: false,
+        }
+    }
+    pub fn bands(theme: ArtisanTheme, bands: Vec<AnyElement>) -> Self {
+        Self {
+            theme,
+            bands,
+            divided: true,
+        }
+    }
+}
+impl RenderOnce for Card {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let theme = self.theme;
+        let style = CardStyle::resolve(theme);
+        let padding = style.content_horizontal_padding;
+        let mut root = compact_card(style).w_full().py(px(0.0));
+        if !self.divided {
+            root = root.py(padding);
+        }
+        for (index, band) in self.bands.into_iter().enumerate() {
+            let mut band = div().w_full().px(padding).child(band);
+            if self.divided && index > 0 {
+                band = band
+                    .border_t_1()
+                    .border_color(theme.colors.border.to_paint());
+            }
+            root = root.child(band);
+        }
+        root
+    }
+}
+
 const RING_ALPHA: f32 = 0.10;
 
 /// Legacy `ring-1`: a one-pixel hairline around the card.

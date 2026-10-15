@@ -67,12 +67,7 @@ impl Profile {
                 if let Some(model) = model {
                     args.extend([
                         "--model".to_owned(),
-                        cursor_model(
-                            model,
-                            effort,
-                            config.speed.as_deref() == Some("fast")
-                                || config.options.get("fast") == Some(&Value::Bool(true)),
-                        ),
+                        cursor_model(model, effort, config.speed.as_deref() == Some("fast")),
                     ]);
                 }
                 // Cursor has no automatic mode: Auto is its default, which
@@ -197,6 +192,11 @@ impl Run {
             }
         }
         self.prompt(std::slice::from_ref(&turn.input)).await?;
+        self.io
+            .emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
         self.prompt_loop().await
     }
 
@@ -267,7 +267,7 @@ impl Run {
                         let steers = std::mem::take(&mut self.steers);
                         self.prompt(&steers).await?;
                         for steer in steers {
-                            self.io.emit(EngineEvent::SteerAccepted { id: steer.id }).await;
+                            self.io.emit(EngineEvent::InputAccepted { id: steer.id }).await;
                         }
                     }
                 }
@@ -358,7 +358,7 @@ impl Run {
     }
 
     async fn handle_line(&mut self, line: &str) -> Result<()> {
-        let events = self.decoder.feed(line);
+        let events = self.decoder.feed(line)?;
         self.emit(events).await;
         self.flush().await
     }

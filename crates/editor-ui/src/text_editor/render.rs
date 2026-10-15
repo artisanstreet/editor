@@ -3,13 +3,14 @@
 
 #![forbid(unsafe_code)]
 
+use gpui::prelude::FluentBuilder as _;
 use std::{ops::Range, panic};
 
 use crate::{
     asset_seam::asset_glyph,
     text_runs::{TextRunOverride, compile_text_runs},
     textarea::TextareaStyle,
-    theme::{ArtisanTheme, DesktopTheme, ProseTypography, ThemeMode},
+    theme::{ArtisanTheme, ProseTypography, WorkspaceColors},
 };
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId,
@@ -161,7 +162,7 @@ impl TextEditor {
 
     /// Token styles under the selection wash or the IME underline. A
     /// selected token keeps its own colour.
-    fn highlights(&mut self, theme: DesktopTheme) -> Vec<(Range<usize>, HighlightStyle)> {
+    fn highlights(&mut self, theme: WorkspaceColors) -> Vec<(Range<usize>, HighlightStyle)> {
         let tokens = self.tokens();
         let mut overlay = self.overlay_highlights(theme);
         if tokens.is_empty() {
@@ -178,7 +179,7 @@ impl TextEditor {
     }
 
     /// Selection highlight, or the underline of an IME composition.
-    fn overlay_highlights(&self, theme: DesktopTheme) -> Vec<(Range<usize>, HighlightStyle)> {
+    fn overlay_highlights(&self, theme: WorkspaceColors) -> Vec<(Range<usize>, HighlightStyle)> {
         if let Some(marked) = self.marked_range.clone().filter(|range| !range.is_empty()) {
             return vec![(
                 marked,
@@ -208,7 +209,7 @@ impl TextEditor {
 
 impl TextEditor {
     /// The sigil range, sigil, icon and icon colour of each glyph token.
-    fn glyphs(&mut self, desktop: DesktopTheme) -> Vec<Glyph> {
+    fn glyphs(&mut self, desktop: WorkspaceColors) -> Vec<Glyph> {
         self.tokens()
             .iter()
             .filter_map(|token| {
@@ -232,9 +233,9 @@ type Glyph = (Range<usize>, char, crate::AssetId, gpui::Hsla);
 
 impl Render for TextEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let style = TextareaStyle::resolve(theme, false);
-        let desktop = DesktopTheme::neutral_dark();
+        let theme = ArtisanTheme::default();
+        let style = TextareaStyle::resolve(theme);
+        let desktop = theme.workspace;
 
         let highlights = self.highlights(desktop);
         let glyphs = self.glyphs(desktop);
@@ -321,6 +322,19 @@ impl Render for TextEditor {
                 .on_action(cx.listener(Self::cut));
         }
 
+        let root = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(root)
+            .when(self.limit_notice, |root| {
+                root.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.colors.destructive.to_paint())
+                        .child("Text is limited to 64 KiB. Attach a file for larger content."),
+                )
+            });
         InputElement {
             child: root.into_any_element(),
             view: cx.entity(),

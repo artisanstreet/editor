@@ -1,10 +1,8 @@
-//! What the Marketplace shows, derived from Forge data (master's
-//! `marketplace_presentation`): the catalog grouped into sections, each
-//! engine named, and each per-engine status turned into a chip.
+//! Groups Forge catalog entries and formats engine status chips.
 
 use artisan_api::{
-    CatalogSkill, EngineId, GlobalPrompt, PromptEngineState, PromptEngineStatus, SkillEngineState,
-    SkillEngineStatus, SkillOrigin,
+    CatalogSkill, EngineId, GlobalPrompt, PromptEngineStatus, SkillEngineState, SkillEngineStatus,
+    SkillOrigin,
 };
 use editor_ui::AssetId;
 use editor_ui::status_chip::{ChipTone, EngineChip};
@@ -150,41 +148,13 @@ pub(crate) fn prompt_summary(prompt: &GlobalPrompt) -> PromptSummary {
     PromptSummary {
         empty: first_line.is_none(),
         preview: first_line.unwrap_or_else(|| "No global prompt yet.".to_owned()),
-        chips: prompt.engines.iter().map(prompt_chip).collect(),
+        chips: prompt
+            .engines
+            .iter()
+            .map(editor_ui::status_chip::prompt_status)
+            .collect(),
         attention,
     }
-}
-
-fn prompt_chip(state: &PromptEngineState) -> EngineChip {
-    let (label, tone, icon) = match state.status {
-        PromptEngineStatus::Synced => ("Synced", ChipTone::Success, AssetId::TABLER_CHECK),
-        PromptEngineStatus::Drifted => {
-            ("Edited", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE)
-        }
-        PromptEngineStatus::AwaitingChoice => {
-            ("Waiting", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE)
-        }
-        PromptEngineStatus::EngineAbsent => {
-            ("Not installed", ChipTone::Muted, AssetId::TABLER_MINUS)
-        }
-        PromptEngineStatus::Unavailable => ("Unavailable", ChipTone::Muted, AssetId::TABLER_MINUS),
-        PromptEngineStatus::Failed => ("Failed", ChipTone::Danger, AssetId::TABLER_X),
-    };
-    let reason = state.reason.clone().or_else(|| {
-        state
-            .file
-            .as_ref()
-            .filter(|_| state.status == PromptEngineStatus::Synced)
-            .map(|file| format!("{}: {file}", engine_name(state.engine)))
-    });
-    EngineChip::new(
-        state.engine.as_str(),
-        engine_name(state.engine),
-        label,
-        tone,
-        icon,
-        reason.as_deref(),
-    )
 }
 
 /// An engine's product name, as the previous Editor wrote it.

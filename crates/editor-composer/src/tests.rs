@@ -1,16 +1,15 @@
-//! The composer against a real in-process Forge with a scripted engine:
-//! what the user types and pastes is what Forge stores.
+#[path = "../../editor-ui/test_support/forge.rs"]
+mod forge_fixture;
+// The composer against a real in-process Forge with a scripted engine:
+// what the user types and pastes is what Forge stores.
 
 use super::*;
 use artisan_api::{CreateProject, EngineId, Item, ItemKind, ItemsQuery, Phase, Status};
-use editor_core::EditorFiles;
-use editor_core::hosts::{self, HostKind, HostsFile};
-use editor_core::runtime::runtime;
 use forge_engines::{EngineEvent, Harness, Input, Outcome, RunIo, Turn};
 use futures::future::BoxFuture;
-use gpui::{ClipboardItem, TestAppContext, VisualTestContext, size};
+use gpui::{ClipboardItem, Image, ImageFormat, TestAppContext, VisualTestContext, size};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Replies "ok". A message containing "hold" keeps the run live until a
 /// steer arrives.
@@ -35,11 +34,15 @@ impl Harness for Engine {
             .unwrap()
             .push((turn.thread_id.clone(), turn.config.clone()));
         Box::pin(async move {
+            io.emit(EngineEvent::InputAccepted {
+                id: turn.input.id.clone(),
+            })
+            .await;
             if turn.input.text.contains("hold") {
                 tokio::select! {
                     input = io.inbox.recv() => {
                         if let Some(Input::Steer(steer)) = input {
-                            io.emit(EngineEvent::SteerAccepted { id: steer.id }).await;
+                            io.emit(EngineEvent::InputAccepted { id: steer.id }).await;
                         }
                     }
                     () = io.cancel.cancelled() => return Outcome::cancelled(),
@@ -60,17 +63,17 @@ impl Harness for Engine {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     core: Entity<Core>,
-    host: HostId,
-    project: ProjectId,
+    pub(super) host: HostId,
+    pub(super) project: ProjectId,
     store: forge_store::Store,
     forge: tokio::runtime::Runtime,
     dir: tempfile::TempDir,
 }
 
 impl Fixture {
-    fn new(cx: &mut TestAppContext) -> Self {
+    pub(super) fn new(cx: &mut TestAppContext) -> Self {
         // Forge and the network runtime wake GPUI tasks from their threads.
         cx.executor().allow_parking();
         let dir = tempfile::tempdir().unwrap();
@@ -98,7 +101,7 @@ impl Fixture {
         let listing = serde_json::json!({
             "fetchedAt": 1,
             "catalog": { "surface": "cc", "config": { "id": "cc", "models": [
-                { "id": "sonnet", "name": "Sonnet", "thinking": { "type": "adaptive",
+                { "id": "sonnet", "name": "Sonnet", "runtime": { "max_input_tokens": 1000000 }, "thinking": { "type": "adaptive",
                     "effort_options": [effort("low"),
                         { "id": "medium", "badge": { "message": "Default" } }, effort("high")] },
                   "fast_mode": { "type": "toggle", "name": "Fast mode", "options": [
@@ -130,29 +133,8 @@ impl Fixture {
         let store = server.store().clone();
         forge.spawn(server.run());
 
-        let files = EditorFiles {
-            dir: dir.path().join("editor"),
-        };
-        let identity = files.identity().unwrap();
-        let invite = forge.block_on(forge_http::invite(&store)).unwrap();
-        let fingerprint = forge_http::tls::fingerprint_of(&invite.forge_certificate).unwrap();
-        let host = runtime()
-            .block_on(hosts::pair(
-                &address,
-                &invite.code,
-                &fingerprint,
-                &identity,
-                "test",
-                "Forge".into(),
-                HostKind::Local,
-            ))
-            .unwrap();
-        files
-            .save_hosts(&HostsFile {
-                hosts: vec![host.clone()],
-                last: Some(host.id.clone()),
-            })
-            .unwrap();
+        let (files, host) =
+            forge_fixture::pair(&store, &forge, &address, &dir.path().join("editor"));
         let project = forge
             .block_on(store.create_project(CreateProject {
                 id: ProjectId::new(),
@@ -214,10 +196,11 @@ impl Fixture {
     }
 
     fn draft(&self, scope: &str) -> Option<serde_json::Value> {
-        self.forge.block_on(self.store.draft(scope)).unwrap()
+        let body = self.forge.block_on(self.store.draft(scope)).unwrap().body;
+        (body != serde_json::Value::Null).then_some(body)
     }
 
-    fn open<'a>(
+    pub(super) fn open<'a>(
         &self,
         cx: &'a mut TestAppContext,
         target: ComposerTarget,
@@ -249,7 +232,7 @@ impl Fixture {
 
 /// Lets GPUI and the network threads run until `done`; Forge answers on
 /// its own threads, so the test executor alone can't get there.
-fn wait(
+pub(super) fn wait(
     cx: &mut VisualTestContext,
     what: &str,
     mut done: impl FnMut(&mut VisualTestContext) -> bool,
@@ -320,7 +303,7 @@ fn sending_stores_one_message_and_clears_the_draft(cx: &mut TestAppContext) {
         "one send stores one message: {messages:?}"
     );
     assert!(
-        matches!(&messages[0].kind, ItemKind::UserMessage { text, steer: false, .. } if text == "hello forge"),
+        matches!(&messages[0].kind, ItemKind::UserMessage { text, steer: false, .. } if text.inline() == Some("hello forge")),
         "{messages:?}"
     );
 }
@@ -356,6 +339,9 @@ fn sending_during_a_live_run_steers_it(cx: &mut TestAppContext) {
         })
     });
 
+    wait(cx, "the first submission to release the input", |cx| {
+        text(cx, &composer).is_empty() && sent.get() == 1
+    });
     cx.simulate_input("also this");
     cx.simulate_keystrokes("enter");
     wait(cx, "the steer", |_| forge.user_messages(&thread).len() == 2);
@@ -365,10 +351,16 @@ fn sending_during_a_live_run_steers_it(cx: &mut TestAppContext) {
 
     let messages = forge.user_messages(&thread);
     assert!(
-        matches!(&messages[1].kind, ItemKind::UserMessage { text, steer: true, .. } if text == "also this"),
+        matches!(&messages[1].kind, ItemKind::UserMessage { text, steer: true, .. } if text.inline() == Some("also this")),
         "the second message is a steer of the live run: {messages:?}"
     );
-    let holding = cx.read(|app| composer.read(app).outgoing.is_some());
+    let holding = cx.read(|app| {
+        composer
+            .read(app)
+            .session
+            .as_ref()
+            .is_some_and(|session| session.read(app).has_outgoing())
+    });
     assert!(!holding, "nothing stays pending in the composer");
 }
 
@@ -405,7 +397,7 @@ fn a_pasted_png_is_sent_as_webp(cx: &mut TestAppContext) {
                 && composer
                     .attachments
                     .iter()
-                    .all(|a| a.machine.state().hash().is_some())
+                    .all(|a| a.state.hash().is_some())
         })
     });
     cx.simulate_keystrokes("enter");
@@ -422,7 +414,7 @@ fn a_pasted_png_is_sent_as_webp(cx: &mut TestAppContext) {
     let ItemKind::UserMessage { text, images, .. } = &messages[0].kind else {
         unreachable!()
     };
-    assert_eq!(text, "what is this?");
+    assert_eq!(text.inline(), Some("what is this?"));
     assert_eq!(images.len(), 1, "the message references the pasted image");
     let stored = std::fs::read(forge.store.blob_path(&images[0]).unwrap()).unwrap();
     assert!(
@@ -445,7 +437,9 @@ fn a_new_thread_starts_with_the_model_last_used(cx: &mut TestAppContext) {
     picked.permissions = artisan_api::Permissions::Full;
     let chosen = picked.clone();
     composer.update(vcx, |composer, cx| composer.choose_config(chosen, cx));
-    // Forge keeps it as the default Settings → Engines shows.
+    // Choosing only changes the draft. Acceptance remembers the actual run config.
+    vcx.simulate_input("remember this model");
+    vcx.simulate_keystrokes("enter");
     let expected = serde_json::to_value(&picked).unwrap();
     wait(vcx, "Forge to keep the choice as its default", |_| {
         forge
@@ -628,7 +622,7 @@ fn a_skill_chosen_from_the_mention_menu_is_sent_as_its_mention(cx: &mut TestAppC
     });
     let messages = forge.user_messages(&thread);
     assert!(
-        matches!(&messages[0].kind, ItemKind::UserMessage { text, .. } if text == "$review this diff"),
+        matches!(&messages[0].kind, ItemKind::UserMessage { text, .. } if text.inline() == Some("$review this diff")),
         "{messages:?}"
     );
 }
@@ -707,11 +701,13 @@ fn choosing_fast_runs_the_thread_at_that_speed(cx: &mut TestAppContext) {
         vcx.run_until_parked();
     };
     // Sonnet's speeds: Standard, the default, then Fast.
-    click(vcx, "composer-axis-Speed");
-    click(vcx, "composer-axis-Speed-1");
-    assert!(
-        vcx.debug_bounds("composer-model-speed").is_some(),
-        "the model button names the chosen tier"
+    click(vcx, "composer-axis-Speed-trigger");
+    vcx.simulate_keystrokes("end enter escape");
+    assert_eq!(
+        composer.read_with(vcx, |composer, cx| composer
+            .effective_config(cx)
+            .and_then(|config| config.speed)),
+        Some("fast".into())
     );
 
     vcx.update(|window, app| {
@@ -784,4 +780,717 @@ fn pasting_the_same_image_twice_attaches_it_once(cx: &mut TestAppContext) {
             composer.shake.is_some() && composer.attachments.len() == 1
         })
     });
+}
+
+/// A new thread starts in the selected project; its tab can change the project.
+#[gpui::test]
+fn a_new_threads_project_can_be_switched(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let other_dir = forge.dir.path().join("other");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let other = forge
+        .forge
+        .block_on(forge.store.create_project(CreateProject {
+            id: ProjectId::new(),
+            path: other_dir.display().to_string(),
+            name: None,
+        }))
+        .unwrap()
+        .id;
+    let target = ComposerTarget::NewThread {
+        host: forge.host.clone(),
+        project: Some(forge.project.clone()),
+    };
+    let (composer, vcx) = forge.open(cx, target);
+    let (core, host, known) = (forge.core.clone(), forge.host.clone(), other.clone());
+    wait(vcx, "the second project", move |cx| {
+        cx.read(|app| {
+            core.read(app)
+                .host(&host)
+                .is_some_and(|host| host.read(app).projects.contains_key(&known))
+        })
+    });
+    let starts = composer.read_with(vcx, |composer, _| composer.project());
+    assert_eq!(
+        starts,
+        Some(forge.project.clone()),
+        "it starts where it was opened"
+    );
+    let click = |vcx: &mut VisualTestContext, selector: String| {
+        // `debug_bounds` takes a static selector.
+        let selector: &'static str = Box::leak(selector.into_boxed_str());
+        let mut bounds = None;
+        wait(vcx, selector, |vcx| {
+            vcx.update(|window, _| window.refresh());
+            bounds = vcx.debug_bounds(selector);
+            bounds.is_some()
+        });
+        vcx.simulate_click(bounds.unwrap().center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+    };
+    click(vcx, "composer-project".to_owned());
+    click(vcx, format!("composer-project-row-{other}"));
+    let chosen = composer.read_with(vcx, |composer, _| composer.project());
+    assert_eq!(
+        chosen,
+        Some(other),
+        "the tab switched the new thread's project"
+    );
+}
+
+#[gpui::test]
+fn immediate_send_then_navigation_finishes_original_draft_once(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let first = fixture.thread();
+    let second = fixture.thread();
+    let (composer, cx) = fixture.open(
+        cx,
+        ComposerTarget::Thread {
+            host: fixture.host.clone(),
+            thread: first.clone(),
+        },
+    );
+    wait(cx, "both thread summaries", |cx| {
+        knows_thread(cx, &fixture.core, &fixture.host, &first)
+            && knows_thread(cx, &fixture.core, &fixture.host, &second)
+    });
+    cx.simulate_input("send without waiting for debounce");
+    cx.update(|window, app| {
+        composer.update(app, |composer, cx| {
+            composer.send(cx);
+            composer.set_target(
+                ComposerTarget::Thread {
+                    host: fixture.host.clone(),
+                    thread: second.clone(),
+                },
+                window,
+                cx,
+            );
+        })
+    });
+    cx.simulate_input("second draft stays here");
+    wait(cx, "original acceptance", |_| {
+        fixture.user_messages(&first).len() == 1
+            && fixture.draft(&format!("thread:{first}")).is_none()
+    });
+    assert_eq!(text(cx, &composer), "second draft stays here");
+    cx.update(|window, app| {
+        composer.update(app, |composer, cx| {
+            composer.set_target(
+                ComposerTarget::Thread {
+                    host: fixture.host.clone(),
+                    thread: first.clone(),
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    wait(cx, "the accepted scope is empty", |cx| {
+        text(cx, &composer).is_empty()
+    });
+    assert_eq!(fixture.user_messages(&first).len(), 1);
+}
+
+#[gpui::test]
+fn selected_project_survives_draft_restore(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    std::fs::create_dir_all(fixture.dir.path().join("different")).unwrap();
+    let second = fixture
+        .forge
+        .block_on(fixture.store.create_project(CreateProject {
+            id: ProjectId::new(),
+            path: fixture.dir.path().join("different").display().to_string(),
+            name: Some("Second".into()),
+        }))
+        .unwrap()
+        .id;
+    let target = ComposerTarget::NewThread {
+        host: fixture.host.clone(),
+        project: Some(fixture.project.clone()),
+    };
+    let (composer, cx) = fixture.open(cx, target.clone());
+    composer.update(cx, |composer, cx| {
+        composer.project = Some(second.clone());
+        composer.edited(cx);
+    });
+    cx.simulate_input("carried draft");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    wait(cx, "project in draft", |_| {
+        fixture
+            .draft(&format!("new:{}", fixture.project))
+            .is_some_and(|body| body["project"] == second.as_str())
+    });
+    cx.update(|window, app| {
+        composer.update(app, |composer, cx| {
+            composer.set_target(
+                ComposerTarget::NewThread {
+                    host: fixture.host.clone(),
+                    project: None,
+                },
+                window,
+                cx,
+            );
+            composer.set_target(target.clone(), window, cx);
+        })
+    });
+    assert_eq!(
+        composer.read_with(cx, |composer, _| composer.project()),
+        Some(second)
+    );
+    assert_eq!(text(cx, &composer), "carried draft");
+}
+
+#[gpui::test]
+fn a_concurrent_draft_is_kept_until_the_reader_resolves_the_conflict(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let thread = fixture.thread();
+    let target = ComposerTarget::Thread {
+        host: fixture.host.clone(),
+        thread: thread.clone(),
+    };
+    let (composer, cx) = fixture.open(cx, target);
+    wait(cx, "initial draft snapshot", |cx| {
+        cx.read(|cx| {
+            composer
+                .read(cx)
+                .session
+                .as_ref()
+                .is_some_and(|session| session.read(cx).loaded)
+        })
+    });
+    let scope = format!("thread:{thread}");
+    let snapshot = fixture.forge.block_on(fixture.store.draft(&scope)).unwrap();
+    let remote = serde_json::json!({"text":"remote draft","images":[]});
+    fixture
+        .forge
+        .block_on(fixture.store.set_draft(
+            scope.clone(),
+            artisan_api::WriteDraft {
+                expected_revision: snapshot.revision,
+                body: remote.clone(),
+            },
+        ))
+        .unwrap();
+    composer.update(cx, |this, cx| {
+        this.editor
+            .update(cx, |editor, cx| editor.set_text("local draft", cx));
+        this.has_text = true;
+        this.edited(cx);
+        this.session
+            .as_ref()
+            .unwrap()
+            .update(cx, |session, cx| session.flush(cx));
+    });
+    wait(cx, "draft conflict", |cx| {
+        cx.read(|cx| {
+            composer
+                .read(cx)
+                .session
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .conflict
+        })
+    });
+    assert_eq!(fixture.draft(&scope), Some(remote));
+    composer.update(cx, |this, cx| {
+        this.session
+            .as_ref()
+            .unwrap()
+            .update(cx, |session, cx| session.keep_local(cx))
+    });
+    wait(cx, "local draft resolution", |_| {
+        fixture
+            .draft(&scope)
+            .is_some_and(|body| body["text"] == "local draft")
+    });
+    assert_eq!(
+        fixture
+            .forge
+            .block_on(fixture.store.draft(&scope))
+            .unwrap()
+            .revision,
+        snapshot.revision + 2
+    );
+}
+
+#[gpui::test]
+fn submitted_draft_rejects_attachment_and_configuration_changes_until_settled(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let thread = fixture.thread();
+    let (composer, cx) = fixture.open(
+        cx,
+        ComposerTarget::Thread {
+            host: fixture.host.clone(),
+            thread,
+        },
+    );
+    cx.simulate_input("submit one immutable draft");
+    composer.update(cx, |composer, cx| {
+        let original_config = composer.config.clone();
+        composer.send(cx);
+        assert!(composer.session.as_ref().unwrap().read(cx).sending());
+        composer.add_image(crate::Source::Bytes(vec![1, 2, 3]), "late image".into(), cx);
+        composer.choose_config(EngineConfig::new(EngineId::Codex), cx);
+        composer.open_menu(crate::Menu::Model, cx);
+        assert!(composer.attachments.is_empty());
+        assert_eq!(composer.config, original_config);
+        assert!(composer.menu.is_none());
+    });
+}
+
+#[gpui::test]
+fn removing_an_attachment_releases_its_uploaded_preview(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let target = ComposerTarget::NewThread {
+        host: forge.host.clone(),
+        project: Some(forge.project.clone()),
+    };
+    let (composer, cx) = forge.open(cx, target);
+    wait(cx, "the editable draft", |cx| {
+        composer.read_with(cx, |this, cx| this.draft_editable(cx))
+    });
+    let image = Arc::new(RenderImage::new(vec![image::Frame::new(
+        image::RgbaImage::from_pixel(16, 12, image::Rgba([20, 30, 40, 255])),
+    )]));
+    composer.update(cx, |this, cx| {
+        this.attachments.push(Attachment {
+            key: 1,
+            name: "image".into(),
+            state: attachment::State::Encoding,
+            preview: None,
+            encoded: None,
+            preview_error: None,
+            revealed: None,
+            source: None,
+            task: Task::ready(()),
+        });
+        this.admit_preview(1, image.clone(), cx).unwrap();
+        cx.notify();
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(window.has_image_atlas_entry(&image));
+    });
+    composer.update(cx, |this, cx| this.remove_attachment(1, cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(!window.has_image_atlas_entry(&image));
+    });
+    assert!(composer.read_with(cx, |this, _| this.attachments.is_empty()));
+}
+
+#[gpui::test]
+fn restored_preview_failure_is_retryable_without_losing_blob(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let thread = fixture.thread();
+    let (composer, cx) = fixture.open(
+        cx,
+        ComposerTarget::Thread {
+            host: fixture.host.clone(),
+            thread: thread.clone(),
+        },
+    );
+    let pixels = image::RgbaImage::from_pixel(24, 24, image::Rgba([23, 72, 131, 255]));
+    let encoded = webp::Encoder::from_rgba(pixels.as_raw(), 24, 24)
+        .encode_lossless()
+        .to_vec();
+    let blob = fixture
+        .forge
+        .block_on(fixture.store.put_blob(encoded.clone()))
+        .unwrap();
+    let path = fixture.store.blob_path(&blob.hash).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    composer.update(cx, |composer, cx| {
+        composer.restore_attachment(blob.hash.clone(), cx)
+    });
+    wait(cx, "real missing-blob preview failure", |cx| {
+        cx.read(|app| {
+            composer
+                .read(app)
+                .attachments
+                .first()
+                .is_some_and(|a| a.preview_error.is_some())
+        })
+    });
+    assert_eq!(
+        cx.read(|app| composer.read(app).attachments[0].state.hash().cloned()),
+        Some(blob.hash.clone())
+    );
+    assert!(cx.read(|app| composer.read(app).attachments[0].preview.is_none()));
+    // Restore the same remote blob; retry must bypass the cached failure.
+    std::fs::write(path, encoded).unwrap();
+    let tile = cx.debug_bounds("composer-attachment-0").unwrap();
+    cx.simulate_click(
+        gpui::point(tile.left() + px(15.0), tile.bottom() - px(15.0)),
+        gpui::Modifiers::none(),
+    );
+    wait(cx, "actual retry action decodes preview", |cx| {
+        cx.read(|app| {
+            composer.read(app).attachments[0].preview.is_some()
+                && composer.read(app).attachments[0].preview_error.is_none()
+        })
+    });
+    assert_eq!(
+        cx.read(|app| composer.read(app).attachments[0].state.hash().cloned()),
+        Some(blob.hash.clone())
+    );
+    cx.update(|window, app| window.focus(&composer.read(app).focus_handle(app), app));
+    cx.simulate_input("send restored image");
+    assert_eq!(text(cx, &composer), "send restored image");
+    assert_eq!(cx.read(|app| composer.read(app).blocked(app)), None);
+    cx.simulate_keystrokes("enter");
+    wait(cx, "restored blob remains sendable", |_| {
+        fixture.user_messages(&thread).len() == 1
+    });
+    let messages = fixture.user_messages(&thread);
+    let ItemKind::UserMessage { images, .. } = &messages[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(images, &vec![blob.hash]);
+}
+
+fn stop_then_navigate(cx: &mut TestAppContext, fail: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let fixture = Fixture::new(cx);
+    let original = fixture.thread();
+    let next = fixture.thread();
+    let (composer, cx) = fixture.open(
+        cx,
+        ComposerTarget::Thread {
+            host: fixture.host.clone(),
+            thread: original.clone(),
+        },
+    );
+    wait(cx, "both summaries", |cx| {
+        knows_thread(cx, &fixture.core, &fixture.host, &original)
+            && knows_thread(cx, &fixture.core, &fixture.host, &next)
+    });
+    cx.simulate_input("hold the original run");
+    assert_eq!(text(cx, &composer), "hold the original run");
+    assert_eq!(cx.read(|app| composer.read(app).blocked(app)), None);
+    cx.simulate_keystrokes("enter");
+    wait(cx, "native Stop button", |cx| {
+        cx.debug_bounds("composer-stop").is_some()
+    });
+    let arrived = Arc::new(AtomicBool::new(false));
+    let (release, receive) = futures::channel::oneshot::channel();
+    composer.update(cx, |composer, _| {
+        composer.cancel_completion_gate = Some((arrived.clone(), receive))
+    });
+    let stop = cx.debug_bounds("composer-stop").unwrap();
+    cx.simulate_click(stop.center(), gpui::Modifiers::none());
+    // A second Stop during pending cancellation must not create another RPC.
+    cx.simulate_click(stop.center(), gpui::Modifiers::none());
+    wait(cx, "original cancellation response held", |_| {
+        arrived.load(Ordering::Acquire)
+    });
+    assert_eq!(
+        cx.read(|app| composer.read(app).cancel_requests.clone()),
+        vec![original.clone()]
+    );
+    cx.update(|window, app| {
+        composer.update(app, |composer, cx| {
+            composer.set_target(
+                ComposerTarget::Thread {
+                    host: fixture.host.clone(),
+                    thread: next.clone(),
+                },
+                window,
+                cx,
+            );
+            composer.notice = Some("new target notice".into());
+            window.focus(&composer.focus_handle(cx), cx);
+        })
+    });
+    cx.simulate_input("keep the new draft");
+    assert_eq!(text(cx, &composer), "keep the new draft");
+    release.send(fail).unwrap();
+    wait(cx, "obsolete cancellation completion", |cx| {
+        cx.read(|app| composer.read(app).cancel_completions == 1)
+    });
+    assert_eq!(text(cx, &composer), "keep the new draft");
+    assert_eq!(
+        cx.read(|app| composer.read(app).notice.clone()),
+        Some("new target notice".into())
+    );
+    assert!(!cx.read(|app| composer.read(app).cancelling));
+    assert_eq!(
+        cx.read(|app| composer.read(app).cancel_requests.clone()),
+        vec![original]
+    );
+    assert!(fixture.user_messages(&next).is_empty());
+}
+
+#[gpui::test]
+fn repeated_stop_then_navigation_ignores_original_cancel_failure(cx: &mut TestAppContext) {
+    stop_then_navigate(cx, true);
+}
+
+#[gpui::test]
+fn repeated_stop_then_navigation_ignores_original_cancel_success(cx: &mut TestAppContext) {
+    stop_then_navigate(cx, false);
+}
+
+#[gpui::test]
+fn context_window_choice_reaches_the_run_and_standard_clears_the_override(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let (composer, vcx) = forge.open(
+        cx,
+        ComposerTarget::NewThread {
+            host: forge.host.clone(),
+            project: Some(forge.project.clone()),
+        },
+    );
+    let mut sonnet = EngineConfig::new(EngineId::Claude);
+    sonnet.model = Some("sonnet".into());
+    composer.update(vcx, |composer, cx| {
+        composer.choose_config(sonnet, cx);
+        composer.open_menu(crate::Menu::Model, cx);
+    });
+    let click = |vcx: &mut VisualTestContext, selector: &'static str| {
+        let mut bounds = None;
+        wait(vcx, selector, |vcx| {
+            bounds = vcx.debug_bounds(selector);
+            bounds.is_some()
+        });
+        vcx.simulate_click(bounds.unwrap().center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+    };
+    click(vcx, "composer-axis-Context-trigger");
+    click(vcx, "composer-axis-Context-0");
+    assert_eq!(
+        composer.read_with(vcx, |composer, cx| composer
+            .effective_config(cx)
+            .unwrap()
+            .context_window_override()),
+        Some(400_000)
+    );
+    click(vcx, "composer-axis-Context-trigger");
+    click(vcx, "composer-axis-Context-1");
+    assert_eq!(
+        composer.read_with(vcx, |composer, cx| composer
+            .effective_config(cx)
+            .unwrap()
+            .context_window_override()),
+        None
+    );
+    click(vcx, "composer-axis-Context-trigger");
+    click(vcx, "composer-axis-Context-0");
+    composer.update(vcx, |composer, cx| composer.close_menu(cx));
+    vcx.update(|window, app| window.focus(&composer.read(app).focus_handle(app), app));
+    vcx.simulate_input("use the selected context window");
+    vcx.simulate_keystrokes("enter");
+    let mut thread = None;
+    wait(vcx, "the configured run", |vcx| {
+        thread = vcx.read(|cx| forge.core.read(cx).screen().thread().cloned());
+        thread
+            .as_ref()
+            .is_some_and(|thread| !runs_of(thread).is_empty())
+    });
+    assert_eq!(
+        runs_of(&thread.unwrap())[0].context_window_override(),
+        Some(400_000)
+    );
+}
+
+#[gpui::test]
+fn model_picker_wheel_glides_once_and_hides_hover_outside_the_list(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let (composer, vcx) = forge.open(
+        cx,
+        ComposerTarget::NewThread {
+            host: forge.host.clone(),
+            project: Some(forge.project.clone()),
+        },
+    );
+    wait(vcx, "the model catalog", |vcx| {
+        composer.read_with(vcx, |composer, cx| {
+            composer.host(cx).is_some_and(|host| {
+                host.read(cx)
+                    .engines
+                    .get(&EngineId::Claude)
+                    .is_some_and(|engine| !engine.models.is_empty())
+            })
+        })
+    });
+    composer.update(vcx, |composer, cx| {
+        let host = composer.host(cx).unwrap();
+        host.update(cx, |host, cx| {
+            let models = &mut host.engines.get_mut(&EngineId::Claude).unwrap().models;
+            let template = models[0].clone();
+            let mut extended = models.to_vec();
+            for index in 0..80 {
+                let mut model = template.clone();
+                model.id = format!("scroll-model-{index}");
+                model.name = model.id.clone();
+                extended.push(model);
+            }
+            *models = extended.into();
+            cx.notify();
+        });
+        composer.open_menu(crate::Menu::Model, cx);
+    });
+    let mut viewport = None;
+    wait(vcx, "the scrollable model list", |vcx| {
+        viewport = vcx.debug_bounds("composer-model-viewport");
+        viewport.is_some()
+    });
+    let viewport = viewport.unwrap();
+    vcx.simulate_mouse_move(viewport.center(), None, gpui::Modifiers::none());
+    let handle = composer.read_with(vcx, |composer, _| {
+        composer.picker.model_scroll.0.borrow().base_handle.clone()
+    });
+    let step = vcx.update(|window, _| f32::from(window.line_height()) * 3.0);
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+        ..Default::default()
+    });
+    assert_eq!(
+        handle.offset().y,
+        px(0.0),
+        "wheel scrolling starts with a glide, not an immediate native jump"
+    );
+    assert!(composer.read_with(vcx, |composer, _| composer.picker.model_glide.active()));
+    wait(vcx, "the wheel glide to finish", |vcx| {
+        std::thread::sleep(Duration::from_millis(10));
+        vcx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        !composer.read_with(vcx, |composer, _| composer.picker.model_glide.active())
+    });
+    assert!(
+        (f32::from(handle.offset().y) + step).abs() < 0.5,
+        "the native list must consume the wheel distance exactly once"
+    );
+    vcx.simulate_mouse_move(
+        viewport.origin - gpui::point(px(0.0), px(10.0)),
+        None,
+        gpui::Modifiers::none(),
+    );
+    assert!(!composer.read_with(vcx, |composer, _| {
+        composer.picker.model_hover.borrow().visible()
+    }));
+    vcx.update(|_, cx| cx.set_reduce_motion(true));
+    let before = handle.offset().y;
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: viewport.center(),
+        delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+        ..Default::default()
+    });
+    assert!((f32::from(handle.offset().y - before) + step).abs() < 0.5);
+    assert!(!composer.read_with(vcx, |composer, _| composer.picker.model_glide.active()));
+}
+
+#[gpui::test]
+fn slash_setting_is_thread_scoped_and_survives_the_next_submission(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let thread = forge.thread();
+    let (composer, vcx) = forge.open(
+        cx,
+        ComposerTarget::Thread {
+            host: forge.host.clone(),
+            thread: thread.clone(),
+        },
+    );
+    wait(vcx, "the command thread", |vcx| {
+        knows_thread(vcx, &forge.core, &forge.host, &thread)
+    });
+    let mut config = EngineConfig::new(EngineId::Claude);
+    config.model = Some("sonnet".into());
+    config.effort = Some("high".into());
+    composer.update(vcx, |composer, cx| composer.choose_config(config, cx));
+    vcx.simulate_input("/ultracode on");
+    vcx.simulate_keystrokes("enter");
+    wait(vcx, "the command's authoritative thread settings", |vcx| {
+        composer.read_with(vcx, |composer, cx| {
+            composer.host(cx).is_some_and(|host| {
+                host.read(cx).threads.get(&thread).is_some_and(|thread| {
+                    thread.config.session_options.get("ultracode") == Some(&serde_json::json!(true))
+                })
+            })
+        }) && text(vcx, &composer).is_empty()
+    });
+    assert!(forge.user_messages(&thread).is_empty());
+    assert!(
+        runs_of(&thread).is_empty(),
+        "a settings command starts no model turn"
+    );
+    vcx.simulate_input("now work on this thread");
+    vcx.simulate_keystrokes("enter");
+    wait(vcx, "the next configured run", |_| {
+        !runs_of(&thread).is_empty()
+    });
+    let runs = runs_of(&thread);
+    assert_eq!(
+        runs[0].session_options.get("ultracode"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(runs[0].effort.as_deref(), Some("high"));
+    let defaults = forge
+        .forge
+        .block_on(forge.store.setting("default_engine_config"))
+        .unwrap()
+        .unwrap();
+    let defaults: EngineConfig = serde_json::from_value(defaults).unwrap();
+    assert!(
+        defaults.session_options.is_empty(),
+        "new threads must not inherit a session command"
+    );
+}
+
+#[gpui::test]
+fn effort_header_is_not_a_keyboard_choice(cx: &mut TestAppContext) {
+    // This test targets dropdown semantics; motion has separate native coverage.
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let forge = Fixture::new(cx);
+    let (composer, vcx) = forge.open(
+        cx,
+        ComposerTarget::NewThread {
+            host: forge.host.clone(),
+            project: Some(forge.project.clone()),
+        },
+    );
+    wait(vcx, "the effort model", |vcx| {
+        composer.read_with(vcx, |composer, cx| {
+            composer.host(cx).is_some_and(|host| {
+                host.read(cx)
+                    .engines
+                    .get(&EngineId::Claude)
+                    .is_some_and(|engine| !engine.models.is_empty())
+            })
+        })
+    });
+    composer.update(vcx, |composer, cx| {
+        let mut config = EngineConfig::new(EngineId::Claude);
+        config.model = Some("sonnet".into());
+        config.effort = Some("low".into());
+        composer.choose_config(config, cx);
+        composer.open_menu(crate::Menu::Model, cx);
+    });
+    let mut trigger = None;
+    wait(vcx, "the effort control", |vcx| {
+        trigger = vcx.debug_bounds("composer-axis-Thinking-trigger");
+        trigger.is_some()
+    });
+    vcx.simulate_click(trigger.unwrap().center(), gpui::Modifiers::none());
+    wait(vcx, "the effort heading", |vcx| {
+        vcx.debug_bounds("composer-axis-Thinking-header").is_some()
+    });
+    vcx.simulate_keystrokes("end enter");
+    assert_eq!(
+        composer.read_with(vcx, |composer, cx| composer
+            .effective_config(cx)
+            .unwrap()
+            .effort),
+        Some("high".into())
+    );
 }

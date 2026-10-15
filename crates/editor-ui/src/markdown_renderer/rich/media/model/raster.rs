@@ -393,9 +393,9 @@ fn shade(
             |values: &[Vec3]| values[first] * qa + values[first + 1] * qb + values[first + 2] * qc;
         let point = blend(&projection.view);
         let eye = Vec3::new(-point.x, -point.y, camera.distance - point.z)
-            .normalized()
+            .try_normalize()
             .unwrap_or(Vec3::new(0.0, 0.0, 1.0));
-        let mut normal = blend(&projection.normals).normalized().unwrap_or(eye);
+        let mut normal = blend(&projection.normals).try_normalize().unwrap_or(eye);
         // Two-sided: a face seen from behind lights as its front.
         if normal.dot(eye) < 0.0 {
             normal = -normal;
@@ -467,7 +467,7 @@ impl Lights {
     const GROUND: Vec3 = Vec3::new(0.12, 0.11, 0.1);
 
     fn new() -> Self {
-        let unit = |v: Vec3| v.normalized().unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+        let unit = |v: Vec3| v.try_normalize().unwrap_or(Vec3::new(0.0, 0.0, 1.0));
         let key = unit(Vec3::new(-0.45, 0.65, 0.6));
         Self {
             key,

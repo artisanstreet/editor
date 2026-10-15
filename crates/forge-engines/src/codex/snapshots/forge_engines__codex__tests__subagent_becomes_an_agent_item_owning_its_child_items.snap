@@ -1,6 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 150
+assertion_line: 165
 expression: "replay(\"subagent\")"
 ---
 [
@@ -29,8 +29,15 @@ expression: "replay(\"subagent\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Inspecting tools for subagent availability**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Inspecting tools for subagent availability",
+            append: false,
         },
     ),
     Event(
@@ -56,8 +63,15 @@ expression: "replay(\"subagent\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Clarifying process spawn and wait behavior**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Clarifying process spawn and wait behavior",
+            append: false,
         },
     ),
     Event(
@@ -67,9 +81,17 @@ expression: "replay(\"subagent\")"
             status: Running,
             kind: Agent {
                 name: None,
-                description: "Reply with the word pong.",
-                prompt: None,
+                description: Inline(
+                    "",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Reply with the word pong.",
+                    ),
+                ),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: false,
                 result: None,
                 label: None,
@@ -84,7 +106,9 @@ expression: "replay(\"subagent\")"
             ),
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -106,7 +130,9 @@ expression: "replay(\"subagent\")"
             ),
             status: Done,
             kind: AssistantMessage {
-                text: "pong",
+                text: Inline(
+                    "pong",
+                ),
                 phase: Final,
             },
         },
@@ -138,12 +164,22 @@ expression: "replay(\"subagent\")"
             status: Done,
             kind: Agent {
                 name: None,
-                description: "Reply with the word pong.",
-                prompt: None,
+                description: Inline(
+                    "",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Reply with the word pong.",
+                    ),
+                ),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: false,
                 result: Some(
-                    "pong",
+                    Inline(
+                        "pong",
+                    ),
                 ),
                 label: None,
             },
@@ -175,7 +211,9 @@ expression: "replay(\"subagent\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -195,7 +233,9 @@ expression: "replay(\"subagent\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "pong",
+                text: Inline(
+                    "pong",
+                ),
                 phase: Final,
             },
         },

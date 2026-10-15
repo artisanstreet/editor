@@ -120,10 +120,16 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, serde_json::to_vec_pretty(value)?)
-        .with_context(|| format!("write {}", temporary.display()))?;
-    std::fs::rename(&temporary, path).with_context(|| format!("replace {}", path.display()))
+    use std::io::Write as _;
+    let parent = path.parent().context("configuration directory")?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).context("create configuration temporary")?;
+    serde_json::to_writer_pretty(temporary.as_file_mut(), value)?;
+    temporary.flush()?;
+    temporary
+        .persist(path)
+        .with_context(|| format!("replace {}", path.display()))?;
+    Ok(())
 }
 
 /// What `ae forge pair --json` prints.
@@ -207,30 +213,26 @@ pub async fn pair_local(
 
 /// The WSL distributions installed on this Windows machine; empty elsewhere
 /// or when `wsl.exe` is missing.
-pub async fn wsl_distros() -> Vec<String> {
+pub(crate) async fn wsl_distros() -> Result<Vec<String>> {
     if !cfg!(windows) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut command = tokio::process::Command::new("wsl.exe");
-    command.args(["--list", "--quiet"]);
-    let output = match runtime().spawn(async move { command.output().await }).await {
-        Ok(Ok(output)) if output.status.success() => output.stdout,
-        Ok(Ok(output)) => {
-            tracing::warn!(
-                "`wsl.exe --list` failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Vec::new();
-        }
-        Ok(Err(error)) => {
-            tracing::debug!("can't run wsl.exe: {error}");
-            return Vec::new();
-        }
-        Err(error) => {
-            tracing::warn!("listing WSL distributions: {error}");
-            return Vec::new();
-        }
-    };
+    command.args(["--list", "--quiet"]).kill_on_drop(true);
+    let output = runtime()
+        .spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await
+        })
+        .await
+        .context("WSL discovery task failed")?
+        .context("WSL discovery timed out")?
+        .context("Could not list WSL distributions")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "WSL discovery failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let output = output.stdout;
     // wsl.exe prints UTF-16LE.
     let units: Vec<u16> = output
         .as_chunks::<2>()
@@ -238,14 +240,14 @@ pub async fn wsl_distros() -> Vec<String> {
         .iter()
         .map(|pair| u16::from_le_bytes(*pair))
         .collect();
-    String::from_utf16_lossy(&units)
+    Ok(String::from_utf16_lossy(&units)
         .lines()
         .map(|line| {
             line.trim_matches(|c: char| c.is_whitespace() || c == '\0')
                 .to_owned()
         })
         .filter(|line| !line.is_empty())
-        .collect()
+        .collect())
 }
 
 /// A remote pairing string: `<host:port> <CODE> <fingerprint>` (as `ae
@@ -280,7 +282,6 @@ pub async fn pair(
         .pair(&PairRequest {
             code: code.to_owned(),
             device_name: device_name.to_owned(),
-            public_key: identity.certificate.clone(),
         })
         .await
         .with_context(|| format!("pair with Forge at {address}"))?;

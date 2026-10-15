@@ -5,18 +5,19 @@
 
 use crate::Sidebar;
 use crate::hover::HoverSurface;
-use crate::list::{ProjectMark, RowData, RowState};
+use crate::list::{RowData, RowState};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::icon::{IconSize, IconStyle, IconTint, icon};
 use editor_ui::theme::ArtisanTheme;
+use gpui::RenderImage;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, InteractiveElement as _, IntoElement,
-    MouseButton, ObjectFit, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, WeakEntity, Window, div, img,
-    px,
+    Animation, AnimationExt as _, AnyElement, InteractiveElement as _, IntoElement, MouseButton,
+    ObjectFit, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledImage as _, WeakEntity, div, img, px,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Height of one two-line thread row.
@@ -28,65 +29,36 @@ const WORKING_PULSE: Duration = Duration::from_millis(1_600);
 /// The dimmest the working dot gets mid-pulse.
 const WORKING_PULSE_FLOOR: f32 = 0.4;
 
-pub(crate) struct ThreadRow {
-    data: RowData,
-    theme: ArtisanTheme,
-    sidebar: WeakEntity<Sidebar>,
-    /// The thread list's sliding pill.
-    hover: HoverSurface,
-}
-
-impl ThreadRow {
-    pub(crate) fn new(
-        data: RowData,
-        theme: ArtisanTheme,
-        sidebar: WeakEntity<Sidebar>,
-        hover: HoverSurface,
-    ) -> Self {
-        Self {
-            data,
-            theme,
-            sidebar,
-            hover,
-        }
-    }
-
-    pub(crate) fn set(&mut self, data: RowData, cx: &mut Context<Self>) {
-        if self.data != data {
-            self.data = data;
-            cx.notify();
-        }
-    }
-}
-
 /// The 14 px mark before a row's subtitle.
-pub(crate) fn project_mark(mark: &ProjectMark, theme: &ArtisanTheme) -> AnyElement {
+pub(crate) fn project_mark(
+    image: Option<Arc<RenderImage>>,
+    host: Option<Option<String>>,
+    theme: &ArtisanTheme,
+) -> AnyElement {
     let slot = div().size(px(14.0)).flex_shrink_0();
-    match mark {
-        ProjectMark::Icon(image) => slot
-            .child(
-                img(image.clone())
-                    .size(px(14.0))
-                    .rounded(px(3.0))
-                    .object_fit(ObjectFit::Contain),
-            )
-            .into_any_element(),
-        ProjectMark::Host(host) => {
-            let (asset, monochrome) = host_mark(host.as_deref());
-            let mut glyph = asset_glyph(asset).size(px(14.0));
-            if monochrome {
-                glyph = glyph.text_color(theme.colors.muted_foreground.to_paint());
-            }
-            slot.child(glyph).into_any_element()
+    if let Some(image) = image {
+        slot.child(
+            img(image)
+                .size(px(14.0))
+                .rounded(px(3.0))
+                .object_fit(ObjectFit::Contain),
+        )
+        .into_any_element()
+    } else if let Some(host) = host {
+        let (asset, monochrome) = host_mark(host.as_deref());
+        let mut glyph = asset_glyph(asset).size(px(14.0));
+        if monochrome {
+            glyph = glyph.text_color(theme.colors.muted_foreground.to_paint());
         }
-        ProjectMark::Folder => slot
-            .child(icon(IconStyle::resolve(
-                *theme,
-                AssetId::TABLER_FOLDER,
-                IconSize::Compact,
-                IconTint::Muted,
-            )))
-            .into_any_element(),
+        slot.child(glyph).into_any_element()
+    } else {
+        slot.child(icon(IconStyle::resolve(
+            *theme,
+            AssetId::TABLER_FOLDER,
+            IconSize::Compact,
+            IconTint::Muted,
+        )))
+        .into_any_element()
     }
 }
 
@@ -104,33 +76,57 @@ pub(crate) fn host_mark(host: Option<&str>) -> (AssetId, bool) {
     }
 }
 
-impl Render for ThreadRow {
-    #[allow(clippy::too_many_lines)]
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = self.theme;
-        let colors = &theme.colors;
-        let data = &self.data;
-        // The open thread's title reads in the link colour; the hover fill
-        // stays the pointer's alone.
-        let title_color = if data.selected {
-            colors.banner_info.to_paint()
-        } else {
-            colors.foreground.to_paint()
-        };
-        let dot = match data.state {
-            RowState::Idle => None,
-            RowState::Working => Some(colors.primary),
-            RowState::Waiting => Some(colors.question_from),
-            RowState::Unread => Some(colors.unread),
-            RowState::Failed => Some(colors.destructive),
-        };
-        let selector = format!("sidebar-thread-{}", data.id);
-        let title_selector = format!("{selector}-title");
-        let subtitle_selector = format!("{selector}-subtitle");
-        let (open_id, menu_id) = (data.id.clone(), data.id.clone());
-        let hover_id = selector.clone();
-        div()
+pub(crate) fn render(
+    data: RowData,
+    image: Option<Arc<RenderImage>>,
+    host: Option<Option<String>>,
+    theme: ArtisanTheme,
+    sidebar: WeakEntity<Sidebar>,
+    hover: HoverSurface,
+    reduced: bool,
+) -> AnyElement {
+    let colors = &theme.colors;
+    let title_color = if data.selected {
+        colors.banner_info.to_paint()
+    } else {
+        colors.foreground.to_paint()
+    };
+    let dot = match data.state {
+        RowState::Idle => None,
+        RowState::Working => Some(colors.primary),
+        RowState::Waiting => Some(colors.question_from),
+        RowState::Unread => Some(colors.unread),
+        RowState::Failed => Some(colors.destructive),
+    };
+    let selector = format!("sidebar-thread-{}", data.id);
+    let title_selector = format!("{selector}-title");
+    let subtitle_selector = format!("{selector}-subtitle");
+    let (open_id, menu_id) = (data.id.clone(), data.id.clone());
+    let state_label = match data.state {
+        RowState::Idle => "",
+        RowState::Working => "Working",
+        RowState::Waiting => "Needs answer",
+        RowState::Unread => "Unread",
+        RowState::Failed => "Failed",
+    };
+    let hover_id = selector.clone();
+    let bounds = std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::<gpui::Pixels>::default()));
+    let measured = bounds.clone();
+    let keyboard_menu = menu_id.clone();
+    let keyboard_owner = sidebar.clone();
+    div()
             .id(SharedString::from(selector.clone()))
+            .role(gpui::Role::Button).aria_label(data.title.clone()).aria_selected(data.selected)
+            .aria_description(format!("{}; {state_label}; Thread actions: Shift+F10", data.subtitle))
+            .focusable().tab_index(0)
+            .child(gpui::canvas(|_, _, _| {}, move |current, (), _, _| measured.set(current)).absolute().size_full())
+            .on_key_down(move |event: &gpui::KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "contextmenu" | "menu") || (event.keystroke.key == "f10" && event.keystroke.modifiers.shift) {
+                    let bounds = bounds.get();
+                    cx.stop_propagation();
+                    let _ = keyboard_owner.update(cx, |sidebar, cx| sidebar.open_thread_menu(keyboard_menu.clone(), gpui::point(bounds.left(), bounds.bottom()), cx));
+                }
+            })
             .debug_selector(move || selector.clone())
             .relative()
             .w_full()
@@ -145,10 +141,11 @@ impl Render for ThreadRow {
             .cursor_pointer()
             // The list's one pill flies to the row under the pointer; the
             // list measures the row, since a cached view's paint replays.
-            .on_hover(cx.listener(move |row, hovered: &bool, _, cx| {
-                row.hover.hovered(&hover_id, *hovered);
-                row.sidebar.update(cx, |_, cx| cx.notify()).ok();
-            }))
+            .child(hover.row_probe(hover_id.clone()))
+            .on_hover({ let owner = sidebar.clone(); move |hovered: &bool, _, cx| {
+                hover.hovered(&hover_id, *hovered);
+                owner.update(cx, |_, cx| cx.notify()).ok();
+            }})
             .child(
                 div()
                     .flex_1()
@@ -175,7 +172,7 @@ impl Render for ThreadRow {
                             .text_size(theme.typography.label_text)
                             .text_color(colors.muted_foreground.to_paint())
                             .debug_selector(move || subtitle_selector.clone())
-                            .child(project_mark(&data.mark, &theme))
+                            .child(project_mark(image, host, &theme))
                             .child(
                                 div()
                                     .flex_1()
@@ -194,7 +191,7 @@ impl Render for ThreadRow {
                     .flex_shrink_0()
                     .rounded_full()
                     .bg(tone.to_paint());
-                if data.state == RowState::Working {
+                if data.state == RowState::Working && !reduced {
                     row.child(dot.with_animation(
                         "working-pulse",
                         Animation::new(WORKING_PULSE).repeat(),
@@ -209,22 +206,12 @@ impl Render for ThreadRow {
                     row.child(dot)
                 }
             })
-            .on_click(cx.listener(move |row, _, _, cx| {
-                let id = open_id.clone();
-                row.sidebar
-                    .update(cx, |sidebar, cx| sidebar.open_thread(id, cx))
-                    .ok();
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |row, event: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    let id = menu_id.clone();
-                    let position = event.position;
-                    row.sidebar
-                        .update(cx, |sidebar, cx| sidebar.open_thread_menu(id, position, cx))
-                        .ok();
-                }),
-            )
-    }
+            .on_click({ let owner = sidebar.clone(); move |_, _, cx| {
+                owner.update(cx, |sidebar, cx| sidebar.open_thread(open_id.clone(), cx)).ok();
+            }})
+            .on_mouse_down(MouseButton::Right, move |event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                sidebar.update(cx, |sidebar, cx| sidebar.open_thread_menu(menu_id.clone(), event.position, cx)).ok();
+            })
+            .into_any_element()
 }

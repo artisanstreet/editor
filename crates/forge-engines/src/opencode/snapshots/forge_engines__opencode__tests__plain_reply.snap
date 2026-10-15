@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 117
 expression: "replay(\"plain\")"
 ---
 [
@@ -14,7 +15,9 @@ expression: "replay(\"plain\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -29,14 +32,12 @@ expression: "replay(\"plain\")"
         },
     ),
     Event(
-        Item {
-            key: "msg_129ce7506001BjFHA0BTJrp0ZL/text-0",
-            parent: None,
-            status: Done,
-            kind: AssistantMessage {
-                text: "ok",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_129ce7506001BjFHA0BTJrp0ZL/text-0",
             },
+            text: "ok",
+            append: false,
         },
     ),
     Event(
@@ -65,7 +66,9 @@ expression: "replay(\"plain\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "ok",
+                text: Inline(
+                    "ok",
+                ),
                 phase: Final,
             },
         },

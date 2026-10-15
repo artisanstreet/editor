@@ -7,8 +7,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement as _,
-    SharedString, Styled as _, div, prelude::*, px, relative,
+    AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString,
+    Styled as _, div, px, relative,
 };
 
 use super::super::kit;
@@ -107,22 +107,7 @@ impl Frame {
                 .text_color(muted)
                 .child(tick.label)
         });
-        let x_labels = self.x_ticks.into_iter().map(|tick| {
-            div()
-                .absolute()
-                .top_0()
-                .left(relative(tick.at))
-                .ml(px(-X_LABEL_WIDTH / 2.0))
-                .w(px(X_LABEL_WIDTH))
-                .flex()
-                .justify_center()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(11.0))
-                .line_height(px(16.0))
-                .text_color(muted)
-                .child(tick.label)
-        });
+        let x_labels = x_tick_strip(theme, self.x_ticks);
         let title = |text: SharedString| {
             div()
                 .text_size(px(11.0))
@@ -165,14 +150,7 @@ impl Frame {
                     .w_full()
                     .flex()
                     .child(div().flex_shrink_0().w(px(self.y_axis_width)))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(16.0))
-                            .children(x_labels),
-                    )
+                    .child(div().flex_1().min_w_0().child(x_labels))
                     .child(div().flex_shrink_0().w(px(gutter_width))),
             )
             .children(
@@ -180,6 +158,30 @@ impl Frame {
                     .map(|text| div().w_full().flex().justify_end().child(title(text))),
             )
     }
+}
+
+/// Shared bounded x-axis text placement for fixed and windowed plot rows.
+pub(super) fn x_tick_strip(theme: &ArtisanTheme, ticks: Vec<Tick>) -> Div {
+    let muted = theme.colors.muted_foreground.to_paint();
+    div()
+        .relative()
+        .h(px(16.0))
+        .children(ticks.into_iter().map(|tick| {
+            div()
+                .absolute()
+                .top_0()
+                .left(relative(tick.at))
+                .ml(px(-X_LABEL_WIDTH / 2.0))
+                .w(px(X_LABEL_WIDTH))
+                .flex()
+                .justify_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(muted)
+                .child(tick.label)
+        }))
 }
 
 /// The right gutter holding direct series labels.
@@ -239,6 +241,19 @@ impl ReadoutRow {
     }
 }
 
+/// Native focus value uses the same prepared reading as the visual card.
+pub(super) fn reading_label(heading: Option<&str>, rows: &[ReadoutRow]) -> SharedString {
+    let mut pieces = Vec::with_capacity(rows.len() + 1);
+    if let Some(heading) = heading.filter(|text| !text.is_empty()) {
+        pieces.push(heading.to_owned());
+    }
+    pieces.extend(
+        rows.iter()
+            .map(|row| format!("{}: {}", row.label, row.value)),
+    );
+    SharedString::from(pieces.join("; "))
+}
+
 /// The glass hover card near plot fraction `x`, flipping to the left of it
 /// past the middle so it stays inside the plot. It wears the app's hover
 /// card: a semibold heading, then one row per value with the label muted and
@@ -280,7 +295,8 @@ fn readout_card(
             rows.into_iter()
                 .map(|row| hover_card_row(theme, row.color, row.label, row.value)),
         );
-    let card = glass_hover_card(theme, content)
+    let card = div()
+        .child(glass_hover_card(theme, content))
         .absolute()
         .min_w(px(140.0))
         .max_w(px(280.0));
@@ -325,41 +341,32 @@ pub(super) fn legend(
                 } else {
                     entry.color
                 });
-            let row = div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "{id}-legend-{index}"
-                ))))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .opacity(alpha)
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(theme.colors.foreground.to_paint())
-                .child(swatch)
-                .child(entry.name);
+            let entry_id = kit::part(id, format_args!("legend-{index}"));
             match toggle.cloned() {
-                Some(toggle) => row
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| toggle(index, cx))
+                Some(toggle) => crate::button::Button::text(entry_id, *theme, entry.name)
+                    .variant(crate::button::ButtonVariant::Ghost)
+                    .icon_slot(swatch)
+                    .on_activate(move |_, _, cx| toggle(index, cx))
                     .into_any_element(),
-                None => row.into_any_element(),
+                None => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .opacity(alpha)
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.colors.foreground.to_paint())
+                    .child(swatch)
+                    .child(entry.name)
+                    .into_any_element(),
             }
         }))
 }
 
 /// The quiet stand-in for a block with nothing to draw.
 pub(super) fn empty(theme: &ArtisanTheme, text: &str) -> AnyElement {
-    div()
-        .w_full()
-        .h(px(72.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(kit::inner_radius())
-        .border_1()
-        .border_color(kit::hairline(theme))
-        .child(kit::muted(theme, text.to_owned()))
+    crate::empty_state::EmptyState::new(*theme, text.to_owned())
+        .variant(crate::empty_state::EmptyStateVariant::Framed)
         .into_any_element()
 }
 

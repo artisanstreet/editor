@@ -1,67 +1,42 @@
-//! Decoding a whole audio file into memory with `symphonia`.
-//!
-//! Tracks linked in chat are short, so the player decodes them completely
-//! before playing: seeking is then a cursor move and the output never waits on
-//! the disk. Files longer than [`MAX_DURATION`] fail instead of filling memory.
-
+//! Maintained streaming decoder. One chunk is decoded on the producer thread;
+//! codec probing, packet buffering and seeking belong to rodio/Symphonia.
+use rodio::{Decoder, Source};
+use std::collections::VecDeque;
 use std::f32::consts::FRAC_1_SQRT_2;
 use std::fs::File;
-use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
-use symphonia::core::errors::Error as DecodeError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-
-/// The longest track the player decodes.
-pub(crate) const MAX_DURATION: Duration = Duration::from_mins(30);
-
+pub(crate) const CHUNK_FRAMES: usize = 2048;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
-/// A decoded track: interleaved frames of one or two channels at the file's
-/// native sample rate.
+/// The small interleaved window currently available to the output callback.
 #[derive(Debug)]
 pub(crate) struct Audio {
-    /// Interleaved samples, `channels` per frame.
-    pub(crate) samples: Vec<f32>,
-    /// 1 or 2; wider layouts are folded to stereo while decoding.
+    pub(crate) samples: VecDeque<f32>,
     pub(crate) channels: usize,
-    /// Frames per second.
     pub(crate) rate: u32,
 }
-
 impl Audio {
-    /// The number of frames.
     pub(crate) fn frames(&self) -> usize {
         self.samples.len() / self.channels
     }
-
-    /// The track's length.
     pub(crate) fn duration(&self) -> Duration {
         self.time_at(self.frames())
     }
-
-    /// The time at which `frame` plays.
     pub(crate) fn time_at(&self, frame: usize) -> Duration {
         let nanos = frame as u128 * NANOS_PER_SECOND / u128::from(self.rate.max(1));
         Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
-
-    /// The frame playing at `position`, clamped to the end of the track.
     pub(crate) fn frame_at(&self, position: Duration) -> usize {
-        let frame = position.as_nanos() * u128::from(self.rate) / NANOS_PER_SECOND;
-        usize::try_from(frame)
+        self.absolute_frame_at(position).min(self.frames())
+    }
+    pub(crate) fn absolute_frame_at(&self, position: Duration) -> usize {
+        usize::try_from(position.as_nanos() * u128::from(self.rate) / NANOS_PER_SECOND)
             .unwrap_or(usize::MAX)
-            .min(self.frames())
     }
 }
-
-/// The file name of `path`, for messages and the stream title.
 pub(crate) fn display_name(path: &Path) -> String {
     path.file_name()
         .unwrap_or(path.as_os_str())
@@ -69,121 +44,100 @@ pub(crate) fn display_name(path: &Path) -> String {
         .into_owned()
 }
 
-/// Decodes the first audio track of `path` into memory.
-///
-/// # Errors
-///
-/// A short message naming the cause: the file can't be read, its format or
-/// codec isn't supported, it holds no audio, or it is longer than
-/// [`MAX_DURATION`].
-pub(crate) fn decode(path: &Path) -> Result<Audio, String> {
-    let name = display_name(path);
-    let file = File::open(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
-    decode_source(&name, Box::new(file), path)
+pub(crate) struct StreamDecoder {
+    source: Box<dyn Source + Send>,
+    pub(crate) channels: usize,
+    pub(crate) rate: u32,
+    pub(crate) duration: Option<Duration>,
+    input_channels: usize,
 }
-
-/// Decodes the first audio track of `bytes`, an encoded file held in
-/// memory; `track` names it in messages and hints its format.
-///
-/// # Errors
-///
-/// As [`decode`], minus reading a file.
-pub(crate) fn decode_bytes(track: &Path, bytes: std::sync::Arc<[u8]>) -> Result<Audio, String> {
-    let name = display_name(track);
-    decode_source(&name, Box::new(std::io::Cursor::new(bytes)), track)
-}
-
-fn decode_source(
-    name: &str,
-    media: Box<dyn symphonia::core::io::MediaSource>,
-    track: &Path,
-) -> Result<Audio, String> {
-    let name = name.to_owned();
-    let source = MediaSourceStream::new(media, MediaSourceStreamOptions::default());
-    let mut hint = Hint::new();
-    if let Some(extension) = track.extension().and_then(|extension| extension.to_str()) {
-        hint.with_extension(extension);
+impl StreamDecoder {
+    pub(crate) fn open(path: &Path) -> Result<Self, String> {
+        let name = display_name(path);
+        let file = File::open(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
+        Self::new(Decoder::try_from(file).map_err(describe)?)
     }
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            source,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|error| describe(&name, &error))?;
-    let mut format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or_else(|| format!("{name} has no audio track"))?;
-    let track_id = track.id;
-    let mut rate = track.codec_params.sample_rate;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|error| describe(&name, &error))?;
-
-    let mut samples = Vec::new();
-    let mut channels = None;
-    let mut buffer: Option<SampleBuffer<f32>> = None;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(DecodeError::IoError(error)) if error.kind() == ErrorKind::UnexpectedEof => break,
-            // A chained stream (a new logical track) starts; the first one is the track.
-            Err(DecodeError::ResetRequired) => break,
-            Err(error) => return Err(describe(&name, &error)),
-        };
-        if packet.track_id() != track_id {
-            continue;
+    pub(crate) fn bytes(bytes: Arc<[u8]>) -> Result<Self, String> {
+        Self::new(Decoder::try_from(std::io::Cursor::new(bytes)).map_err(describe)?)
+    }
+    fn new(source: impl Source + Send + 'static) -> Result<Self, String> {
+        let input_channels = usize::from(source.channels());
+        let rate = source.sample_rate();
+        if input_channels == 0 || input_channels > 32 || rate == 0 {
+            return Err("Audio has an unsupported channel layout or sample rate".to_owned());
         }
-        let frames = match decoder.decode(&packet) {
-            Ok(buffer) => buffer,
-            // A corrupt packet is skipped, as players do; the rest still plays.
-            Err(DecodeError::DecodeError(_)) => continue,
-            Err(error) => return Err(describe(&name, &error)),
-        };
-        let spec = *frames.spec();
-        let count = spec.channels.count();
-        if *channels.get_or_insert(count) != count {
-            return Err(format!(
-                "Couldn't decode {name}: its channel layout changes"
-            ));
+        Ok(Self {
+            duration: source.total_duration(),
+            source: Box::new(source),
+            channels: input_channels.min(2),
+            rate,
+            input_channels,
+        })
+    }
+    pub(crate) fn seek(&mut self, position: Duration) -> Result<(), String> {
+        self.source
+            .try_seek(position)
+            .map_err(|error| format!("Couldn't seek audio: {error}"))
+    }
+    pub(crate) fn chunk(&mut self) -> Result<Vec<f32>, String> {
+        let input: Vec<_> = self
+            .source
+            .by_ref()
+            .take(CHUNK_FRAMES * self.input_channels)
+            .collect();
+        if usize::from(self.source.channels()) != self.input_channels
+            || self.source.sample_rate() != self.rate
+        {
+            return Err("Audio channel layout or sample rate changes within the track".to_owned());
         }
-        let rate = *rate.get_or_insert(spec.rate);
-        let needed = frames.capacity() * count;
-        let buffer = match &mut buffer {
-            Some(buffer) if buffer.capacity() >= needed => buffer,
-            slot => slot.insert(SampleBuffer::new(frames.capacity() as u64, spec)),
-        };
-        buffer.copy_interleaved_ref(frames);
-        fold_to_stereo(buffer.samples(), count, &mut samples);
-        let limit = u128::from(rate) * MAX_DURATION.as_nanos() / NANOS_PER_SECOND;
-        if (samples.len() / count.min(2)) as u128 > limit {
-            return Err(format!("{name} is longer than 30 minutes"));
+        let mut samples = Vec::with_capacity(CHUNK_FRAMES * self.channels);
+        fold_to_stereo(&input, self.input_channels, &mut samples);
+        Ok(samples)
+    }
+    pub(crate) fn audio(&self, samples: Vec<f32>) -> Audio {
+        Audio {
+            samples: samples.into(),
+            channels: self.channels,
+            rate: self.rate,
         }
     }
-
-    let channels = channels.ok_or_else(|| format!("{name} contains no audio"))?;
-    let rate = rate
-        .filter(|rate| *rate > 0)
-        .ok_or_else(|| format!("Couldn't decode {name}: unknown sample rate"))?;
-    Ok(Audio {
-        samples,
-        channels: channels.min(2),
-        rate,
-    })
 }
-
-/// Turns a `symphonia` error into a short message naming the cause.
-fn describe(name: &str, error: &DecodeError) -> String {
+fn describe(error: rodio::decoder::DecoderError) -> String {
     match error {
-        DecodeError::Unsupported(_) => "Unsupported audio format".to_owned(),
-        DecodeError::IoError(error) => format!("Couldn't read {name}: {error}"),
-        DecodeError::LimitError(limit) => format!("Couldn't decode {name}: {limit}"),
-        DecodeError::DecodeError(cause) => format!("Couldn't decode {name}: {cause}"),
-        other => format!("Couldn't decode {name}: {other}"),
+        rodio::decoder::DecoderError::UnrecognizedFormat
+        | rodio::decoder::DecoderError::NoStreams => "Unsupported audio format".to_owned(),
+        error => format!("Couldn't decode audio: {error}"),
+    }
+}
+
+// Fixtures collect a short source only. Production never materializes a track.
+#[cfg(test)]
+fn collect(mut decoder: StreamDecoder) -> Result<Audio, String> {
+    let mut samples = Vec::new();
+    loop {
+        let chunk = decoder.chunk()?;
+        if chunk.is_empty() {
+            break;
+        }
+        samples.extend(chunk);
+    }
+    Ok(decoder.audio(samples))
+}
+#[cfg(test)]
+fn decode(path: &Path) -> Result<Audio, String> {
+    collect(StreamDecoder::open(path)?)
+}
+#[cfg(test)]
+fn decode_bytes(_: &Path, bytes: Arc<[u8]>) -> Result<Audio, String> {
+    collect(StreamDecoder::bytes(bytes)?)
+}
+
+/// Decoded float samples are normalized before gain arithmetic or output.
+pub(crate) fn sanitize(sample: f32) -> f32 {
+    if sample.is_finite() {
+        sample.clamp(-1.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -196,7 +150,7 @@ fn describe(name: &str, error: &DecodeError) -> String {
 /// the fold can't clip.
 pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>) {
     if channels <= 2 {
-        out.extend_from_slice(frames);
+        out.extend(frames.iter().copied().map(sanitize));
         return;
     }
     let gains = (0..channels).map(|channel| match channel {
@@ -212,12 +166,14 @@ pub(crate) fn fold_to_stereo(frames: &[f32], channels: usize, out: &mut Vec<f32>
         .fold((0.0, 0.0), |(left, right), (l, r)| (left + l, right + r));
     out.reserve(frames.len() / channels * 2);
     for frame in frames.chunks_exact(channels) {
-        let (left, right) = frame
-            .iter()
-            .zip(gains.clone())
-            .fold((0.0, 0.0), |(left, right), (sample, (l, r))| {
-                (left + sample * l, right + sample * r)
-            });
+        let (left, right) =
+            frame
+                .iter()
+                .zip(gains.clone())
+                .fold((0.0, 0.0), |(left, right), (sample, (l, r))| {
+                    let sample = sanitize(*sample);
+                    (left + sample * l, right + sample * r)
+                });
         out.push(left / left_total);
         out.push(right / right_total);
     }
@@ -306,5 +262,65 @@ mod tests {
     fn missing_files_name_the_file() {
         let error = decode(Path::new("/nonexistent/song.mp3")).expect_err("fails");
         assert!(error.starts_with("Couldn't read song.mp3: "), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod stream_budget_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CountingSource(Arc<AtomicUsize>);
+    impl Iterator for CountingSource {
+        type Item = f32;
+        fn next(&mut self) -> Option<f32> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Some(0.25)
+        }
+    }
+    impl Source for CountingSource {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            1
+        }
+        fn sample_rate(&self) -> u32 {
+            48000
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            Some(Duration::from_secs(3600))
+        }
+    }
+    #[test]
+    fn a_long_source_decodes_only_one_bounded_chunk() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut decoder = StreamDecoder::new(CountingSource(reads.clone())).unwrap();
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert_eq!(decoder.duration, Some(Duration::from_secs(3600)));
+        assert_eq!(decoder.chunk().unwrap().len(), CHUNK_FRAMES);
+        assert_eq!(reads.load(Ordering::Relaxed), CHUNK_FRAMES);
+    }
+}
+
+#[cfg(test)]
+mod sample_boundary_tests {
+    use super::*;
+    #[test]
+    fn decoded_nonfinite_samples_are_silent_in_each_layout() {
+        for channels in [1, 2, 6] {
+            let mut samples = Vec::new();
+            fold_to_stereo(&[f32::NAN; 12], channels, &mut samples);
+            assert!(samples.iter().all(|sample| *sample == 0.0));
+            samples.clear();
+            fold_to_stereo(&[f32::INFINITY; 12], channels, &mut samples);
+            assert!(samples.iter().all(|sample| *sample == 0.0));
+            samples.clear();
+            fold_to_stereo(&[f32::MAX; 12], channels, &mut samples);
+            assert!(
+                samples
+                    .iter()
+                    .all(|sample| sample.is_finite() && sample.abs() <= 1.0)
+            );
+        }
     }
 }

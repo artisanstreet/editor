@@ -1,33 +1,6 @@
-//! A reusable multiline plain-text editor for long documents.
-//!
-//! GPUI has no editable multiline widget, and the message composer's editor
-//! is bound to message-sending state. This entity adapts the composer's text
-//! machinery (UTF-8 selection with an anchor, IME marked text through
-//! [`gpui::EntityInputHandler`], soft-wrapped vertical movement with a goal
-//! x, snapshot undo/redo) into a standalone editor with no send semantics:
-//! Enter inserts a newline and Tab inserts two spaces.
-//!
-//! The document is bounded to [`TextEditor::MAX_BYTES`]; input that
-//! would exceed it is truncated at a character boundary, or refused when
-//! nothing fits. Every user edit emits [`TextEditorEvent::Changed`];
-//! programmatic [`TextEditor::set_text`] does not.
-//!
-//! [`TextEditor::single_line`] makes a compact field for one line of
-//! text, such as a name: Enter emits [`TextEditorEvent::Submitted`]
-//! instead of breaking the line, Tab inserts nothing, and any line break or
-//! tab typed, pasted, or composed becomes a space.
-//!
-//! [`TextEditor::prompt`] makes a message prompt (the composer): Enter
-//! submits and Shift+Enter breaks the line, there is no byte cap and no
-//! chrome of its own, the text scrolls inside once it reaches 40% of the
-//! window (keeping the caret in view), Tab moves focus, and pasted images
-//! or files are emitted as [`PastedFiles`] instead of being inserted.
-//!
-//! An owner can recognise parts of the text as [`Token`]s (the composer's
-//! mentions) through [`TextEditor::set_tokenizer`]: each paints in its own
-//! style and is edited as one unit. While an owner's list hangs over the
-//! editor ([`TextEditor::set_list_open`]), the keys that drive it are
-//! emitted as [`ListKey`]s instead of moving the caret or submitting.
+//! Bounded text editing with grapheme movement, cached word boundaries, IME and byte-budgeted undo.
+//! Single-line fields normalize newlines and tabs. Prompt mode emits submit/list/pasted-file events.
+//! All modes share MAX_BYTES; rejected input shows a limit notice. Programmatic replacement is UTF-8 clipped and also reports the limit.
 
 #![forbid(unsafe_code)]
 
@@ -39,8 +12,6 @@ use gpui::{
     App, Bounds, Context, EventEmitter, FocusHandle, Focusable, HighlightStyle, Pixels,
     ScrollHandle, SharedString, TextLayout, Window, actions, size,
 };
-
-use crate::theme::DesktopTheme;
 
 use crate::text_navigation::SelectionUnit;
 
@@ -121,6 +92,7 @@ pub const TEXT_EDITOR_PLACEHOLDER_SELECTOR: &str = "text-editor-placeholder";
 
 /// Undo snapshots kept per editor; the oldest is dropped first.
 const UNDO_LIMIT: usize = 64;
+const HISTORY_BYTES: usize = 1024 * 1024;
 /// Text inserted by the Tab key.
 const TAB_TEXT: &str = "  ";
 
@@ -196,6 +168,8 @@ pub struct TextEditor {
     /// Shared copy of `text` handed to the text element; rebuilt only after
     /// an edit so an unchanged document is not copied on every render.
     shared_text: Option<SharedString>,
+    word_boundaries: Option<Rc<crate::text_navigation::WordBoundaries>>,
+    limit_notice: bool,
     placeholder: SharedString,
     disabled: bool,
     focus_handle: FocusHandle,
@@ -245,11 +219,14 @@ impl TextEditor {
     /// Creates an editor holding `text` (truncated to [`Self::MAX_BYTES`])
     /// with the caret at its end.
     pub fn new(text: &str, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        let limit_notice = text.len() > Self::MAX_BYTES;
         let text = text::truncate_to_bytes(text, Self::MAX_BYTES).to_owned();
         let end = text.len();
         Self {
             text,
             shared_text: None,
+            word_boundaries: None,
+            limit_notice,
             placeholder: placeholder.into(),
             disabled: false,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -291,13 +268,15 @@ impl TextEditor {
         self
     }
 
-    /// The byte cap: documents and fields are bounded, a prompt is not.
+    /// Fields and prompts share a visible 64 KiB bound; large source belongs in attachments.
     fn max_bytes(&self) -> usize {
-        if self.mode == Mode::Prompt {
-            usize::MAX
-        } else {
-            Self::MAX_BYTES
-        }
+        Self::MAX_BYTES
+    }
+
+    fn word_boundaries(&mut self) -> Rc<crate::text_navigation::WordBoundaries> {
+        self.word_boundaries
+            .get_or_insert_with(|| Rc::new(crate::text_navigation::WordBoundaries::new(&self.text)))
+            .clone()
     }
 
     /// Selects the whole text, as for replacing it outright.
@@ -325,8 +304,17 @@ impl TextEditor {
     /// are cleared and the caret moves to the end. Does not emit
     /// [`TextEditorEvent::Changed`].
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let normalized;
+        let text = if self.mode == Mode::SingleLine {
+            normalized = text.replace(['\r', '\n', '\t'], " ");
+            normalized.as_str()
+        } else {
+            text
+        };
+        self.limit_notice = text.len() > self.max_bytes();
         text::truncate_to_bytes(text, self.max_bytes()).clone_into(&mut self.text);
         self.shared_text = None;
+        self.word_boundaries = None;
         self.tokens = None;
         self.undo.clear();
         self.redo.clear();
@@ -461,7 +449,54 @@ impl TextEditor {
         }
         Some(gpui::fill(
             Bounds::new(origin, size(gpui::px(2.0), line_height)),
-            DesktopTheme::neutral_dark().foreground,
+            crate::theme::ArtisanTheme::default().workspace.foreground,
         ))
+    }
+}
+
+#[cfg(test)]
+mod reform_tests {
+    use super::*;
+    use gpui::{AppContext as _, TestAppContext};
+
+    #[gpui::test]
+    fn all_modes_reject_oversized_user_edits_without_losing_existing_text(cx: &mut TestAppContext) {
+        let input = "x".repeat(TextEditor::MAX_BYTES);
+        let editor = cx.new(|cx| TextEditor::new(&input, "", cx).prompt());
+        editor.update(cx, |editor, cx| {
+            editor.replace(0..0, "extra", cx);
+            assert_eq!(editor.text(), input);
+            assert!(editor.limit_notice);
+            assert!(editor.undo.is_empty());
+            editor.replace(0..1, "a", cx);
+            assert!(!editor.limit_notice);
+            assert_eq!(editor.text().len(), TextEditor::MAX_BYTES);
+        });
+    }
+
+    #[gpui::test]
+    fn single_line_replacement_and_history_share_the_size_contract(cx: &mut TestAppContext) {
+        let editor = cx.new(|cx| TextEditor::new("a\nb", "", cx).single_line());
+        editor.update(cx, |editor, cx| {
+            assert_eq!(editor.text(), "a b");
+            editor.set_text("a\tb\rc", cx);
+            assert_eq!(editor.text(), "a b c");
+            editor.set_text(&"x".repeat(60_000), cx);
+            let words = editor.word_boundaries();
+            assert!(Rc::ptr_eq(&words, &editor.word_boundaries()));
+            for index in 0..100 {
+                editor.replace(0..1, if index % 2 == 0 { "a" } else { "b" }, cx);
+            }
+            assert!(!Rc::ptr_eq(&words, &editor.word_boundaries()));
+            assert!(
+                editor
+                    .undo
+                    .iter()
+                    .chain(&editor.redo)
+                    .map(|s| s.text.len())
+                    .sum::<usize>()
+                    <= HISTORY_BYTES
+            );
+        });
     }
 }

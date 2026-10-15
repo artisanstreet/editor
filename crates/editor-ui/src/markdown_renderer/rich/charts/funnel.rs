@@ -1,6 +1,9 @@
 //! `funnel`: centered bars narrowing step by step; hovering a step reads its
 //! value, its share of the first step, and the drop from the step before.
 
+use crate::markdown_renderer::rich::budget;
+use std::sync::Arc;
+
 use gpui::{
     AnyElement, App, ElementId, FontWeight, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, prelude::*, px, relative,
@@ -9,10 +12,10 @@ use serde::Deserialize;
 
 use super::super::{BlockContext, RichBlock, kit};
 use super::frame;
-use super::scale::{exact, f32_of, percent};
+use super::scale::{f32_of, percent};
 use crate::theme::ArtisanTheme;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Step {
     #[serde(default)]
     label: String,
@@ -20,9 +23,35 @@ struct Step {
 }
 
 /// The `funnel` spec.
-#[derive(Clone, Debug, Deserialize)]
-pub(super) struct Funnel {
+#[derive(Debug, Deserialize)]
+struct FunnelSpec {
     steps: Vec<Step>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "FunnelSpec")]
+pub(super) struct Funnel {
+    steps: Arc<Vec<Step>>,
+    widest: f64,
+}
+impl TryFrom<FunnelSpec> for Funnel {
+    type Error = String;
+    fn try_from(spec: FunnelSpec) -> Result<Self, String> {
+        if spec
+            .steps
+            .iter()
+            .any(|step| !step.value.is_finite() || step.value < 0.0)
+        {
+            return Err("funnel values must be finite and nonnegative".to_owned());
+        }
+        if spec.steps.len() > 64 {
+            return Err("funnel preview supports at most 64 steps".to_owned());
+        }
+        let widest = spec.steps.iter().map(|step| step.value).fold(0.0, f64::max);
+        Ok(Self {
+            steps: Arc::new(spec.steps),
+            widest,
+        })
+    }
 }
 
 /// What a step reads against the first and the one before.
@@ -68,24 +97,33 @@ impl Funnel {
         }
     }
 
-    /// Bar widths as fractions of the widest step.
+    fn width(&self, index: usize) -> f32 {
+        if self.widest > 0.0 {
+            f32_of(self.value(index) / self.widest)
+        } else {
+            0.0
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn widths(&self) -> Vec<f32> {
-        let widest = (0..self.steps.len())
-            .map(|index| self.value(index))
-            .fold(0.0, f64::max);
         (0..self.steps.len())
-            .map(|index| {
-                if widest > 0.0 {
-                    f32_of(self.value(index).max(0.0) / widest)
-                } else {
-                    0.0
-                }
-            })
+            .map(|index| self.width(index))
             .collect()
     }
 }
 
 impl RichBlock for Funnel {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + budget::vector(&self.steps)
+            + self
+                .steps
+                .iter()
+                .map(|step| step.label.capacity())
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         FunnelView {
             id: cx.key("funnel"),
@@ -93,31 +131,6 @@ impl RichBlock for Funnel {
             funnel: self.clone(),
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        if self.steps.is_empty() {
-            return "_No steps._\n".to_owned();
-        }
-        let header: Vec<String> = ["Step", "Value", "Of first", "Drop from previous"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let rows: Vec<Vec<String>> = (0..self.steps.len())
-            .map(|index| {
-                let reading = self.reading(index);
-                vec![
-                    self.label(index),
-                    exact(reading.value),
-                    reading.of_first.map(percent).unwrap_or_default(),
-                    reading
-                        .drop
-                        .map(|(drop, share)| drop_text(drop, share))
-                        .unwrap_or_default(),
-                ]
-            })
-            .collect();
-        kit::markdown_table(&header, &rows)
     }
 }
 
@@ -138,7 +151,9 @@ struct FunnelView {
 }
 
 struct FunnelState {
+    model: Arc<Vec<Step>>,
     hover: Option<usize>,
+    rows: gpui::UniformListScrollHandle,
 }
 
 impl RenderOnce for FunnelView {
@@ -149,89 +164,164 @@ impl RenderOnce for FunnelView {
             return frame::empty(&theme, "No steps");
         }
         let state = kit::keyed(window, cx, ElementId::Name(self.id.clone()), || {
-            FunnelState { hover: None }
+            let rows = gpui::UniformListScrollHandle::new();
+            FunnelState {
+                model: funnel.steps.clone(),
+                hover: None,
+                rows,
+            }
+        });
+        state.update(cx, |state, _| {
+            if !Arc::ptr_eq(&state.model, &funnel.steps) {
+                let changed = *state.model != *funnel.steps;
+                state.model = funnel.steps.clone();
+                if changed {
+                    state.hover = None;
+                    state.rows = gpui::UniformListScrollHandle::new();
+                }
+            }
         });
         let hover = state.read(cx).hover;
-        let widths = funnel.widths();
+        let list_state = state.read(cx).rows.clone();
         let color = kit::series_color(&theme, 0);
-        let rows = widths.iter().enumerate().map(|(index, width)| {
-            let reading = funnel.reading(index);
-            let hovered = hover == Some(index);
-            let alpha = match hover {
-                Some(_) if !hovered => 0.45,
-                _ => 0.85,
-            };
-            let entering = state.clone();
-            div()
-                .id(ElementId::Name(format!("{}-step-{index}", self.id).into()))
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .on_hover(move |hovered, _, cx| {
-                    entering.update(cx, |state, cx| {
-                        if *hovered {
-                            state.hover = Some(index);
-                        } else if state.hover == Some(index) {
-                            state.hover = None;
-                        }
-                        cx.notify();
-                    });
-                })
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(140.0))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(kit::muted(&theme, funnel.label(index))),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(28.0))
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .h_full()
-                                .w(relative(width.max(0.004)))
-                                .rounded(px(4.0))
-                                .bg(color.with_alpha(alpha).to_paint()),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(120.0))
-                        .flex()
-                        .justify_end()
-                        .gap(px(6.0))
-                        .text_size(px(13.0))
-                        .line_height(px(20.0))
-                        .child(
-                            div()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.colors.foreground.to_paint())
-                                .child(kit::format_number(reading.value)),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.colors.muted_foreground.to_paint())
-                                .child(reading.of_first.map(percent).unwrap_or_default()),
-                        ),
-                )
-        });
+        let row_funnel = funnel.clone();
+        let row_state = state.clone();
+        let row_id = self.id.clone();
+        let rows = gpui::uniform_list(
+            kit::part(&self.id, "rows"),
+            funnel.steps.len(),
+            move |range, _, _| {
+                range
+                    .map(|index| {
+                        let funnel = &row_funnel;
+                        let reading = funnel.reading(index);
+                        let hovered = hover == Some(index);
+                        let alpha = match hover {
+                            Some(_) if !hovered => 0.45,
+                            _ => 0.85,
+                        };
+                        let entering = row_state.clone();
+                        div()
+                            .id(kit::part(&row_id, format_args!("step-{index}")))
+                            .debug_selector({
+                                let id = row_id.clone();
+                                move || format!("{id}-step-{index}")
+                            })
+                            .w_full()
+                            .h(theme.density.control_sm)
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .on_hover(move |hovered, _, cx| {
+                                entering.update(cx, |state, cx| {
+                                    if *hovered {
+                                        state.hover = Some(index);
+                                    } else if state.hover == Some(index) {
+                                        state.hover = None;
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(relative(0.24))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .child(kit::muted(&theme, funnel.label(index))),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(theme.density.control_sm - px(4.0))
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(funnel.width(index)))
+                                            .rounded(px(4.0))
+                                            .bg(color.with_alpha(alpha).to_paint()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .w(relative(0.28))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .flex()
+                                    .justify_end()
+                                    .gap(px(6.0))
+                                    .text_size(px(13.0))
+                                    .line_height(px(20.0))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.colors.foreground.to_paint())
+                                            .child(kit::format_number(reading.value)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme.colors.muted_foreground.to_paint())
+                                            .child(
+                                                reading.of_first.map(percent).unwrap_or_default(),
+                                            ),
+                                    ),
+                            )
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .track_scroll(&list_state)
+        .w_full()
+        .h(theme.density.control_sm * funnel.steps.len().min(10) as f32);
         let summary = self.summary(hover);
-        div()
+        let selection_label = hover.map(|index| {
+            format!(
+                "{}: {}; {}",
+                funnel.label(index),
+                kit::format_number(funnel.value(index)),
+                summary
+            )
+        });
+        let content = div()
             .w_full()
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .children(rows)
-            .child(div().pt(px(4.0)).child(kit::muted(&theme, summary)))
-            .into_any_element()
+            .child(rows)
+            .child(div().pt(px(4.0)).child(kit::muted(&theme, summary)));
+        let keyboard = state.clone();
+        let mut navigation = crate::chart_navigation::ChartNavigation::new(
+            ElementId::Name(format!("{}-navigation", self.id).into()),
+            theme,
+            "Funnel. Arrows explore steps; Escape clears the reading.",
+            0..funnel.steps.len(),
+            content,
+            move |command, _, cx| {
+                keyboard.update(cx, |state, cx| {
+                    use crate::chart_navigation::ChartCommand;
+                    state.hover = match command {
+                        ChartCommand::Select(index) | ChartCommand::Activate(index) => {
+                            list_state.scroll_to_item(index, gpui::ScrollStrategy::Nearest);
+                            Some(index)
+                        }
+                        ChartCommand::Parent | ChartCommand::Reset => None,
+                    };
+                    cx.notify();
+                })
+            },
+        )
+        .selected(hover)
+        .content_height();
+        if let Some(label) = selection_label {
+            navigation = navigation.selection_label(label);
+        }
+        navigation.into_any_element()
     }
 }
 
@@ -270,5 +360,99 @@ impl FunnelView {
                 _ => String::new(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod native_window_tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext};
+    struct Fixture {
+        funnel: Funnel,
+        focus: gpui::FocusHandle,
+    }
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(640.0))
+                .track_focus(&self.focus)
+                .tab_stop(false)
+                .on_action(crate::focus_navigation::focus_next)
+                .on_action(crate::focus_navigation::focus_previous)
+                .child(FunnelView {
+                    id: "native-funnel".into(),
+                    theme: ArtisanTheme::default(),
+                    funnel: self.funnel.clone(),
+                })
+        }
+    }
+    #[gpui::test]
+    fn steps_keep_native_row_pitch_and_keyboard_reveals_last(cx: &mut TestAppContext) {
+        cx.update(crate::focus_navigation::bind_actions);
+        let (view, cx) = cx.add_window_view(|window, cx| Fixture {
+            focus: crate::focus_navigation::fixture_root_focus(window, cx),
+            funnel: Funnel::try_from(FunnelSpec {
+                steps: (0..64)
+                    .map(|index| Step {
+                        label: format!("Step {index}"),
+                        value: (64 - index) as f64,
+                    })
+                    .collect(),
+            })
+            .unwrap(),
+        });
+        assert_eq!(
+            cx.debug_bounds("native-funnel-step-0").unwrap().size.height,
+            ArtisanTheme::default().density.control_sm
+        );
+        assert!(cx.debug_bounds("native-funnel-step-40").is_none());
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        cx.simulate_keystrokes("end");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("native-funnel-step-63")
+                .unwrap()
+                .size
+                .height,
+            ArtisanTheme::default().density.control_sm
+        );
+        // Parsing an unchanged source can produce a new Arc. It must preserve
+        // the selected endpoint and the native list's viewport.
+        cx.update(|_, cx| {
+            view.update(cx, |fixture, cx| {
+                fixture.funnel.steps = Arc::new((*fixture.funnel.steps).clone());
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("native-funnel-step-63")
+                .unwrap()
+                .size
+                .height,
+            ArtisanTheme::default().density.control_sm
+        );
+        cx.simulate_keystrokes("home");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(
+            cx.debug_bounds("native-funnel-step-0").unwrap().size.height,
+            ArtisanTheme::default().density.control_sm
+        );
+        assert!(cx.debug_bounds("native-funnel-step-63").is_none());
     }
 }

@@ -2,13 +2,14 @@
 //! fractions, from the model and the current interaction state.
 
 use gpui::{Hsla, SharedString};
+use std::rc::Rc;
 
 use super::super::super::kit;
 use super::super::frame::{self, EndLabel, PlotLabel, Tick};
 use super::super::scale::{Domain, Ticks, f64_of, reading, ticks_within};
 use super::super::scene::{Shape, hover_band, hrule, vrule};
 use super::model::{Model, Track, XScale, y_ticks};
-use super::{Axis, ChartSpec, Mark};
+use super::{Axis, ChartStyle, Mark};
 use crate::theme::ArtisanTheme;
 
 /// The interaction state a frame draws from.
@@ -33,7 +34,9 @@ impl Snapshot<'_> {
 
 /// Everything one frame of the plot draws.
 pub(super) struct Geometry {
-    pub(super) shapes: Vec<Shape>,
+    pub(super) shapes: Rc<[Shape]>,
+    tracks: Vec<Track>,
+    y: Domain,
     pub(super) x_ticks: Vec<Tick>,
     pub(super) y_ticks: Vec<Tick>,
     pub(super) labels: Vec<PlotLabel>,
@@ -44,7 +47,7 @@ pub(super) struct Geometry {
 }
 
 /// The y axis as drawn: shares pin to 0..100 unless the spec pins it.
-pub(super) fn effective_axis(spec: &ChartSpec) -> Axis {
+pub(super) fn effective_axis(spec: &ChartStyle) -> Axis {
     let mut axis = spec.y.clone();
     if spec.normalize {
         axis.min = axis.min.or(Some(0.0));
@@ -56,7 +59,7 @@ pub(super) fn effective_axis(spec: &ChartSpec) -> Axis {
 
 pub(super) fn layout(
     theme: &ArtisanTheme,
-    spec: &ChartSpec,
+    spec: &ChartStyle,
     model: &Model,
     snapshot: &Snapshot<'_>,
 ) -> Geometry {
@@ -134,13 +137,60 @@ pub(super) fn layout(
     }
     let end_labels = end_labels(theme, spec, model, &tracks, view, &y, axis.unit.as_deref());
     Geometry {
-        shapes,
+        shapes: shapes.into(),
+        tracks,
+        y: y.domain,
         x_ticks: x_labels,
         y_ticks: y_labels,
         labels,
         end_labels,
         view,
     }
+}
+
+/// Small interaction overlay; never rebuilds aligned tracks or data marks.
+pub(super) fn interaction(
+    theme: &ArtisanTheme,
+    spec: &ChartStyle,
+    model: &Model,
+    geometry: &Geometry,
+    snapshot: &Snapshot<'_>,
+) -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    if let Some(x) = snapshot.hover.and_then(|index| model.xs.get(index)) {
+        if spec.mark == Mark::Bar {
+            let half = model.band() / 2.0;
+            shapes.push(hover_band(
+                theme,
+                geometry.view.fraction(x - half),
+                geometry.view.fraction(x + half),
+            ));
+        } else {
+            shapes.push(vrule(
+                geometry.view.fraction(*x),
+                theme.colors.foreground.with_alpha(0.3).to_paint(),
+                false,
+            ));
+            Marks {
+                theme,
+                model,
+                view: geometry.view,
+                y: geometry.y,
+                stacked: spec.stacks(),
+            }
+            .hover_dots(&geometry.tracks, *x, &mut shapes);
+        }
+    }
+    if let Some((from, to)) = snapshot.drag {
+        shapes.push(Shape::Rect {
+            x0: geometry.view.fraction(from),
+            y0: 0.0,
+            x1: geometry.view.fraction(to),
+            y1: 1.0,
+            color: theme.colors.foreground.with_alpha(0.08).to_paint(),
+        });
+    }
+    shapes
 }
 
 /// Most series labelled directly; more fall back to the legend alone.
@@ -150,7 +200,7 @@ const END_LABEL_SERIES_MAX: usize = 8;
 /// the reader does not shuttle between the plot and the legend.
 fn end_labels(
     theme: &ArtisanTheme,
-    spec: &ChartSpec,
+    spec: &ChartStyle,
     model: &Model,
     tracks: &[Track],
     view: Domain,
@@ -230,7 +280,7 @@ fn x_ticks(model: &Model, view: Domain, width: f32) -> Vec<Tick> {
 
 fn annotations(
     theme: &ArtisanTheme,
-    spec: &ChartSpec,
+    spec: &ChartStyle,
     model: &Model,
     view: Domain,
     y: &Ticks,

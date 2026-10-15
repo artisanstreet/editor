@@ -65,7 +65,6 @@ async fn pair_json_beside_a_running_forge_pairs_an_editor() {
     let pair = PairRequest {
         code: invite["code"].as_str().unwrap().to_owned(),
         device_name: "laptop".into(),
-        public_key: identity.certificate.clone(),
     };
     let paired = http
         .post(format!("{base}/pair"))

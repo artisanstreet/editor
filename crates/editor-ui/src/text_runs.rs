@@ -1,17 +1,6 @@
-//! Shared `TextRun` compiler for selectable text.
-//!
-//! The vendor `StyledText::with_font_family_overrides` recolors existing
-//! runs without splitting them, so it cannot give code ranges their own
-//! family and spacing while keeping the caller's highlight weights and the
-//! selection wash. This module is the one shared compiler instead: it
-//! unions highlight and font-override boundaries and emits exact-coverage
-//! [`TextRun`](gpui::TextRun)s from the inherited window style. Both the
-//! prose worker (`markdown_renderer`/theme/fonts) and the renderer worker
-//! (`inline_code_text` + conversation surface) use this function; no second
-//! typography compiler is allowed.
-//!
-//! Re-exported through [`crate::selectable_text`] so existing consumers
-//! keep one import path.
+//! Compiles highlight and font-override ranges into exact-coverage text runs.
+//! Selectable prose and status text use the same boundary and shaping rules.
+//! The compiler preserves inherited text style outside explicit overrides.
 
 use std::ops::Range;
 

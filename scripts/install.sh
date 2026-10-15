@@ -6,7 +6,7 @@
 #
 # Downloads release.json and this platform's archive, checks the archive's
 # SHA-256 against release.json, and runs the `ae` inside with `install`.
-# `ae install` downloads the release again and verifies release.json's
+# `ae install` reuses these files and verifies release.json's
 # Ed25519 signature before installing anything. ARTISAN_RELEASES overrides
 # the feed (a release.json URL or a directory holding a release).
 set -eu
@@ -44,6 +44,7 @@ esac
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 fetch "$feed" "$tmp/release.json"
+fetch "$feed.sig" "$tmp/release.json.sig"
 
 # release.json lists one artifact per line.
 line="$(grep "\"os\":\"$os\"" "$tmp/release.json" | grep "\"arch\":\"$arch\"" | head -n1 || true)"
@@ -69,7 +70,7 @@ mkdir "$tmp/unpacked"
 tar -xzf "$tmp/$file" -C "$tmp/unpacked" ae
 # Piped into sh, stdin is this script; `ae install` may ask questions.
 if [ -r /dev/tty ]; then
-    "$tmp/unpacked/ae" install --from "$source" "$@" < /dev/tty
+    ARTISAN_RELEASE_CACHE="$tmp" "$tmp/unpacked/ae" install --from "$source" "$@" < /dev/tty
 else
-    "$tmp/unpacked/ae" install --from "$source" "$@"
+    ARTISAN_RELEASE_CACHE="$tmp" "$tmp/unpacked/ae" install --from "$source" "$@"
 fi

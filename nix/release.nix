@@ -31,6 +31,8 @@ pkgs.runCommand "artisan-release-${version}"
   }
   ''
     mkdir -p "$out" linux windows
+    install -m644 ${../vendor/highlighting/NOTICE.txt} linux/HIGHLIGHTING-NOTICES.txt
+    install -m644 ${../vendor/highlighting/NOTICE.txt} windows/HIGHLIGHTING-NOTICES.txt
 
     # Linux binaries run on ordinary glibc distributions (WSL Ubuntu above
     # all): the system loader and the system's libraries, not the store's.
@@ -42,12 +44,18 @@ pkgs.runCommand "artisan-release-${version}"
       echo "error: $newest is newer than Ubuntu 24.04's glibc 2.39" >&2
       exit 1
     fi
+    install -m644 ${../LICENSE.md} linux/LICENSE.md
+    cp -R ${../crates/editor-assets/licenses} linux/notices
+    chmod -R u+w linux/notices
     tar --sort=name --mtime=@315532800 --owner=0 --group=0 --numeric-owner --mode=0755 \
-      -C linux -cf - ae artisan-editor | gzip -9n > "$out/${linuxName}"
+      -C linux -cf - ae artisan-editor LICENSE.md notices HIGHLIGHTING-NOTICES.txt | gzip -9n > "$out/${linuxName}"
 
     install -m755 ${windows.ae}/bin/ae.exe ${windows.editor}/bin/artisan-editor.exe windows/
-    touch -d @315532800 windows/*
-    (cd windows && TZ=UTC zip -X -9 -q "$out/${windowsName}" ae.exe artisan-editor.exe)
+    install -m644 ${../LICENSE.md} windows/LICENSE.md
+    cp -R ${../crates/editor-assets/licenses} windows/notices
+    chmod -R u+w windows/notices
+    find windows -exec touch -d @315532800 {} +
+    (cd windows && TZ=UTC zip -X -9 -q -r "$out/${windowsName}" ae.exe artisan-editor.exe LICENSE.md notices HIGHLIGHTING-NOTICES.txt)
 
     # One artifact per line: install.sh reads it without a JSON parser.
     artifact() {
@@ -64,7 +72,8 @@ pkgs.runCommand "artisan-release-${version}"
     jq -e . "$out/release.json" > /dev/null
 
     # The bootstrap installers default to the feed `ae` itself uses.
-    feed="$(sed -n 's/^pub const DEFAULT_FEED: &str = "\(.*\)";$/\1/p' ${../crates/ae/src/install/release.rs})"
+    feed="$(sed -n '/^pub const DEFAULT_FEED: &str =/,/;/p' ${../crates/ae/src/install/release.rs} | sed -n 's/.*"\([^"]*\)";.*/\1/p')"
+    [ -n "$feed" ] || { echo "error: release feed extraction failed" >&2; exit 1; }
     for script in ${../scripts/install.sh} ${../scripts/install.ps1}; do
       if ! grep -qF "$feed" "$script"; then
         echo "error: $script does not default to $feed" >&2

@@ -1,4 +1,4 @@
-# `nix run .#dev`: the development loop.
+# `nix run .#dev`: build, install and relaunch the development app.
 #
 # Builds `ae` and `artisan-editor` with Cargo in the checkout's dev shells
 # (`cargo-linux`, and `cargo-windows` for the Windows Editor), incremental
@@ -27,6 +27,8 @@
 # sources wsl-env.sh and runs the dev `ae` against the dev Forge.
 #
 #   nix run .#dev                     build both, restart the dev Forge, relaunch the Editor
+#   nix run .#dev -- build            build both; running processes are untouched
+#   nix run .#dev -- run              build both, restart the dev Forge, relaunch the Editor
 #   nix run .#dev -- forge            build `ae`, restart the dev Forge only
 #   nix run .#dev -- editor           build and relaunch the Editor only
 #   nix run .#dev -- stop             stop the dev Forge and the dev Editor
@@ -41,7 +43,7 @@
 #   --linux        inside WSL, run the Linux Editor (WSLg) instead of the Windows one
 #   ARTISAN_DEV_PROFILE   debug (default: dependencies optimised, workspace at
 #                         opt-level 1) or release (what ships; slow to build)
-#   CARGO_BUILD_JOBS      unset by default, so Cargo uses every core
+#   CARGO_BUILD_JOBS      respected; the dev shell defaults to two jobs
 {
   pkgs,
   graphicsLibraryPath,
@@ -66,5 +68,5 @@ in
 {
   type = "app";
   program = "${runner}/bin/dev";
-  meta.description = "Build ae and the Editor and run them as the dev install (dev Forge, dev Editor)";
+  meta.description = "Build, install and relaunch the dev Forge and Editor";
 }

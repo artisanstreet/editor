@@ -11,20 +11,20 @@
 //! - **Icicle** stacks levels top down, each part as wide as its share.
 //! - **Flame** is the icicle upside down, the usual reading of a profile.
 
-use std::fmt::Write as _;
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _, SharedString};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::{BlockContext, RichBlock, kit, spec};
-use super::scale::{f32_of, percent};
+use super::super::{BlockContext, RichBlock, spec};
+use super::scale::f32_of;
 
 mod view;
 
 /// Deepest level the Markdown outline lists.
-const OUTLINE_LEVELS: usize = 3;
+const MAX_LEVELS: usize = 12;
 
 /// Space around a treemap group's children and the height of its name strip.
 pub(super) const GROUP_PAD: f32 = 2.0;
@@ -68,18 +68,19 @@ struct HierarchySpec {
 }
 
 /// One node of the flattened tree.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct TreeNode {
     pub(super) name: SharedString,
     /// The larger of the node's own value and its children's sum.
     pub(super) size: f64,
     pub(super) parent: Option<usize>,
+    sibling: usize,
     /// Largest first.
     pub(super) children: Vec<usize>,
 }
 
 /// The tree, flattened; node 0 is the root.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Tree {
     pub(super) nodes: Vec<TreeNode>,
 }
@@ -103,6 +104,7 @@ impl Tree {
             }),
             size: 0.0,
             parent,
+            sibling: 0,
             children: Vec::new(),
         });
         let mut children = Vec::with_capacity(spec.children.len());
@@ -110,9 +112,14 @@ impl Tree {
             let child = self.push(child, Some(index));
             if self.nodes[child].size > 0.0 {
                 children.push(child);
+            } else {
+                self.nodes.truncate(child);
             }
         }
         children.sort_by(|a, b| self.nodes[*b].size.total_cmp(&self.nodes[*a].size));
+        for (sibling, child) in children.iter().enumerate() {
+            self.nodes[*child].sibling = sibling;
+        }
         let sum: f64 = children.iter().map(|child| self.nodes[*child].size).sum();
         let own = spec
             .value
@@ -146,10 +153,7 @@ impl Tree {
         let mut at = index;
         while let Some(parent) = self.nodes[at].parent {
             if parent == focus {
-                return self.nodes[focus]
-                    .children
-                    .iter()
-                    .position(|child| *child == at);
+                return Some(self.nodes[at].sibling);
             }
             at = parent;
         }
@@ -206,7 +210,15 @@ pub(super) fn treemap(
         w: width,
         h: height,
     };
-    place(tree, focus, plot, levels.max(1), &mut cells);
+    if tree.node(focus).children.is_empty() {
+        cells.push(Cell {
+            node: focus,
+            rect: plot,
+            group: false,
+        });
+    } else {
+        place(tree, focus, plot, levels.clamp(1, MAX_LEVELS), &mut cells);
+    }
     cells
 }
 
@@ -224,12 +236,13 @@ fn place(tree: &Tree, parent: usize, rect: Rect, levels: usize, cells: &mut Vec<
     let own_area = area - items.iter().map(|(_, area)| area).sum::<f64>();
     if own_area > area * 1e-9 {
         // The parent's own share: laid out, then left empty.
-        items.push((None, own_area));
+        items.push((Some(parent), own_area));
         items.sort_by(|a, b| b.1.total_cmp(&a.1));
     }
     for (child, rect) in squarify(&items, rect) {
         let Some(child) = child else { continue };
-        let nested = levels > 1
+        let nested = child != parent
+            && levels > 1
             && !tree.node(child).children.is_empty()
             && rect.w >= MIN_GROUP_SIDE
             && rect.h >= MIN_GROUP_SIDE;
@@ -248,11 +261,6 @@ fn place(tree: &Tree, parent: usize, rect: Rect, levels: usize, cells: &mut Vec<
 /// Squarified treemap layout (Bruls, Huizing, van Wijk): `items` are areas
 /// in square pixels, largest first, summing to `rect`'s area.
 pub(super) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)> {
-    let items: Vec<(T, f64)> = items
-        .iter()
-        .copied()
-        .filter(|(_, area)| area.is_finite() && *area > 0.0)
-        .collect();
     let mut out = Vec::with_capacity(items.len());
     let mut rect = rect;
     let mut start = 0;
@@ -262,17 +270,28 @@ pub(super) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)
             break;
         }
         let mut end = start + 1;
-        let mut worst = worst_ratio(&items[start..end], short);
+        let mut sum = items[start].1;
+        let mut min = sum;
+        let mut max = sum;
+        let ratio = |sum: f64, min: f64, max: f64| {
+            let side = short * short;
+            (side * max / (sum * sum)).max(sum * sum / (side * min))
+        };
+        let mut worst = ratio(sum, min, max);
         while end < items.len() {
-            let next = worst_ratio(&items[start..=end], short);
+            let area = items[end].1;
+            let next = ratio(sum + area, min.min(area), max.max(area));
             if next > worst {
                 break;
             }
             worst = next;
+            sum += area;
+            min = min.min(area);
+            max = max.max(area);
             end += 1;
         }
         let row = &items[start..end];
-        let sum: f64 = row.iter().map(|(_, area)| area).sum();
+
         if rect.w >= rect.h {
             // A column along the left edge.
             let width = f32_of(sum / f64::from(rect.h)).min(rect.w);
@@ -313,16 +332,6 @@ pub(super) fn squarify<T: Copy>(items: &[(T, f64)], rect: Rect) -> Vec<(T, Rect)
         start = end;
     }
     out
-}
-
-/// The worst aspect ratio in a row of `areas` laid along a side of `short`.
-fn worst_ratio<T>(areas: &[(T, f64)], short: f64) -> f64 {
-    let sum: f64 = areas.iter().map(|(_, area)| area).sum();
-    let side = short * short;
-    areas
-        .iter()
-        .map(|(_, area)| (side * area / (sum * sum)).max(sum * sum / (side * area)))
-        .fold(0.0, f64::max)
 }
 
 // ---------------------------------------------------------------------------
@@ -380,72 +389,89 @@ pub(super) fn partition(tree: &Tree, focus: usize, levels: usize) -> Vec<Bar> {
 
 #[derive(Debug)]
 pub(super) struct Hierarchy {
-    spec: HierarchySpec,
-    tree: Rc<Tree>,
+    layout: Layout,
+    unit: Option<String>,
+    depth: Option<usize>,
+    tree: Arc<Tree>,
 }
 
-pub(super) fn parse(value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let spec = spec::<HierarchySpec>(value)?;
     let tree = Tree::from_spec(&spec.root);
-    if tree.node(0).size <= 0.0 {
-        return Err("needs a positive `value` on the root or its children".to_owned());
+    if tree.nodes.len() > 4096 {
+        return Err("hierarchy preview supports at most 4096 nodes".into());
     }
-    Ok(Rc::new(Hierarchy {
-        spec,
-        tree: Rc::new(tree),
+    if tree.node(0).size <= 0.0 || !tree.node(0).size.is_finite() {
+        return Err("needs a finite positive total `value` on the root or its children".to_owned());
+    }
+    Ok(Arc::new(Hierarchy {
+        layout: spec.layout,
+        unit: spec.unit,
+        depth: spec.depth,
+        tree: Arc::new(tree),
     }))
 }
 
 impl Hierarchy {
     fn levels(&self) -> usize {
-        self.spec
-            .depth
+        self.depth
             .filter(|depth| *depth > 0)
-            .unwrap_or(match self.spec.layout {
+            .unwrap_or(match self.layout {
                 Layout::Treemap => 2,
                 Layout::Icicle | Layout::Flame => 6,
             })
-    }
-
-    fn reading(&self, size: f64) -> String {
-        kit::with_unit(&kit::format_number(size), self.spec.unit.as_deref())
-    }
-
-    fn outline(&self, out: &mut String, index: usize, depth: usize) {
-        let node = self.tree.node(index);
-        let total = self.tree.node(0).size;
-        let _ = writeln!(
-            out,
-            "{}- **{}** \u{2014} {} ({})",
-            "  ".repeat(depth),
-            node.name,
-            self.reading(node.size),
-            percent(node.size / total),
-        );
-        if depth + 1 < OUTLINE_LEVELS {
-            for child in &node.children {
-                self.outline(out, *child, depth + 1);
-            }
-        }
+            .min(MAX_LEVELS)
     }
 }
 
 impl RichBlock for Hierarchy {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Tree>()
+            + budget::optional(&self.unit)
+            + budget::vector(&self.tree.nodes)
+            + self
+                .tree
+                .nodes
+                .iter()
+                .map(|node| node.name.len() + budget::vector(&node.children))
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         view::HierarchyView {
             id: cx.key("hierarchy"),
             theme: *cx.theme,
-            tree: Rc::clone(&self.tree),
-            layout: self.spec.layout,
-            unit: self.spec.unit.clone().map(SharedString::from),
+            tree: Arc::clone(&self.tree),
+            layout: self.layout,
+            unit: self.unit.clone().map(SharedString::from),
             levels: self.levels(),
         }
         .into_any_element()
     }
+}
 
-    fn markdown(&self) -> String {
-        let mut out = String::new();
-        self.outline(&mut out, 0, 0);
-        out
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn positive_focused_leaf_fills_the_treemap() {
+        let tree = Tree::from_spec(&NodeSpec {
+            name: "root".into(),
+            value: Some(10.0),
+            children: Vec::new(),
+        });
+        let cells = treemap(&tree, 0, 2, 320.0, 240.0);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].node, 0);
+        assert_eq!(
+            cells[0].rect,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 320.0,
+                h: 240.0
+            }
+        );
     }
 }

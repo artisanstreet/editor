@@ -1,6 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 503
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -17,11 +17,17 @@ expression: "(events, outcome)"
             status: Running,
             kind: Agent {
                 name: None,
-                description: "Slow job",
+                description: Inline(
+                    "Slow job",
+                ),
                 prompt: Some(
-                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
                 ),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: true,
                 result: None,
                 label: None,
@@ -33,13 +39,19 @@ expression: "(events, outcome)"
             status: Running,
             kind: Agent {
                 name: None,
-                description: "Slow job",
+                description: Inline(
+                    "Slow job",
+                ),
                 prompt: Some(
-                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
                 ),
                 agent_id: Some(
                     "a58a45ec42e0863b4",
                 ),
+                context_used: None,
+                model: None,
                 background: true,
                 result: None,
                 label: None,
@@ -50,16 +62,27 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "LAUNCHED",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011CfxituuyHhuJ34hVTgMmv:0",
+            },
+            text: "LAUNCHED",
+            append: false,
         },
         Item {
             key: "msg_011CfxituuyHhuJ34hVTgMmv:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "LAUNCHED",
+                text: Inline(
+                    "LAUNCHED",
+                ),
                 phase: Commentary,
             },
         },
@@ -82,6 +105,34 @@ expression: "(events, outcome)"
             },
         ),
         Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Slow job",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                context_used: Some(
+                    17031,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
             key: "toolu_01VxsbM3h1iKz5DC6g9Qk9Wm",
             parent: Some(
                 "toolu_01HT1MeY1yu44rbiC6SCH5zc",
@@ -89,7 +140,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 60 && echo finished",
+                    command: Inline(
+                        "sleep 60 && echo finished",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -109,7 +162,9 @@ expression: "(events, outcome)"
             status: Failed,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 60 && echo finished",
+                    command: Inline(
+                        "sleep 60 && echo finished",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -118,13 +173,42 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "<tool_use_error>Blocked: sleep 60 followed by: echo finished. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "<tool_use_error>Blocked: sleep 60 followed by: echo finished. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
                 approval: None,
+            },
+        },
+        Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Slow job",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                context_used: Some(
+                    18812,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
             },
         },
         Item {
@@ -134,9 +218,18 @@ expression: "(events, outcome)"
             ),
             status: Running,
             kind: AssistantMessage {
-                text: "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011CfxitzkfjrbhPfvqF8wNm:1",
+            },
+            text: "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+            append: false,
         },
         Item {
             key: "msg_011CfxitzkfjrbhPfvqF8wNm:1",
@@ -145,7 +238,9 @@ expression: "(events, outcome)"
             ),
             status: Done,
             kind: AssistantMessage {
-                text: "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+                text: Inline(
+                    "The foreground version was blocked by the harness. I'll run the same command in the background, which the block message suggests for waiting on a command.",
+                ),
                 phase: Commentary,
             },
         },
@@ -157,7 +252,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 60 && echo finished",
+                    command: Inline(
+                        "sleep 60 && echo finished",
+                    ),
                     cwd: None,
                     background: true,
                 },
@@ -177,7 +274,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 60 && echo finished",
+                    command: Inline(
+                        "sleep 60 && echo finished",
+                    ),
                     cwd: None,
                     background: true,
                 },
@@ -186,9 +285,10 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -196,15 +296,52 @@ expression: "(events, outcome)"
             },
         },
         Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Slow job",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                context_used: Some(
+                    19381,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
             key: "msg_011CfxiuBTMqQR49na3cM2mH:1",
             parent: Some(
                 "toolu_01HT1MeY1yu44rbiC6SCH5zc",
             ),
             status: Running,
             kind: AssistantMessage {
-                text: "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011CfxiuBTMqQR49na3cM2mH:1",
+            },
+            text: "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+            append: false,
         },
         Item {
             key: "msg_011CfxiuBTMqQR49na3cM2mH:1",
@@ -213,7 +350,9 @@ expression: "(events, outcome)"
             ),
             status: Done,
             kind: AssistantMessage {
-                text: "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+                text: Inline(
+                    "The command is running in the background, and I'll be notified when it finishes. I have not seen its output yet, so I can't confirm the result. Once the notification arrives, the reply will be FINISHED.",
+                ),
                 phase: Commentary,
             },
         },
@@ -222,16 +361,27 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011CfxiuGbvLcAuCw1QCC5V7:1",
+            },
+            text: "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+            append: false,
         },
         Item {
             key: "msg_011CfxiuGbvLcAuCw1QCC5V7:1",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+                text: Inline(
+                    "The background agent is still waiting on its `sleep 60` command. Its report is interim, so I don't have the FINISHED result yet. I'll let you know when the completion notification arrives.",
+                ),
                 phase: Commentary,
             },
         },
@@ -261,7 +411,9 @@ expression: "(events, outcome)"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 60 && echo finished",
+                    command: Inline(
+                        "sleep 60 && echo finished",
+                    ),
                     cwd: None,
                     background: true,
                 },
@@ -270,13 +422,42 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "Command running in background with ID: bj0xrafr4. Output is being written to: /tmp/claude-1001/-tmp-rec-cap/8d966a0f-b135-4d40-8fd3-a04a54ddab42/tasks/bj0xrafr4.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
                 approval: None,
+            },
+        },
+        Item {
+            key: "toolu_01HT1MeY1yu44rbiC6SCH5zc",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Slow job",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a58a45ec42e0863b4",
+                ),
+                context_used: Some(
+                    19840,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
             },
         },
         Item {
@@ -286,9 +467,18 @@ expression: "(events, outcome)"
             ),
             status: Running,
             kind: AssistantMessage {
-                text: "FINISHED",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfxiyc8mq8Nb8dqvBasGB:0",
+            },
+            text: "FINISHED",
+            append: false,
         },
         Item {
             key: "msg_011Cfxiyc8mq8Nb8dqvBasGB:0",
@@ -297,7 +487,9 @@ expression: "(events, outcome)"
             ),
             status: Done,
             kind: AssistantMessage {
-                text: "FINISHED",
+                text: Inline(
+                    "FINISHED",
+                ),
                 phase: Commentary,
             },
         },
@@ -307,16 +499,28 @@ expression: "(events, outcome)"
             status: Done,
             kind: Agent {
                 name: None,
-                description: "Slow job",
+                description: Inline(
+                    "Slow job",
+                ),
                 prompt: Some(
-                    "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    Inline(
+                        "Use the Bash tool to run the command `sleep 60 && echo finished` with a timeout of 120000 ms. Then reply with only the word FINISHED.",
+                    ),
                 ),
                 agent_id: Some(
                     "a58a45ec42e0863b4",
                 ),
+                context_used: Some(
+                    19840,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
                 background: true,
                 result: Some(
-                    "FINISHED",
+                    Inline(
+                        "FINISHED",
+                    ),
                 ),
                 label: None,
             },
@@ -326,16 +530,27 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfxiyf2uXsZDzs6apBZ8y:0",
+            },
+            text: "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+            append: false,
         },
         Item {
             key: "msg_011Cfxiyf2uXsZDzs6apBZ8y:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+                text: Inline(
+                    "The \"Slow job\" agent has finished. It reported `FINISHED`, after about 64 seconds.",
+                ),
                 phase: Commentary,
             },
         },

@@ -5,6 +5,7 @@
 //! policy controls; and the glass dropdowns those controls open.
 
 use crate::{Composer, Menu};
+use artisan_api::ProjectId;
 use artisan_api::{
     EngineConfig, EngineId, EngineStatus, InstallState, Model, Permissions, SignInState, Speed,
 };
@@ -19,7 +20,8 @@ use editor_ui::picker_motion::{
     HoverRect, MenuEntrance, MenuMotion, MenuPhase, SlidingHoverState, animate_menu,
     sliding_hover_pill, smooth_out,
 };
-use editor_ui::theme::{ArtisanTheme, DesktopTheme, SurfaceStep};
+use editor_ui::theme::{ArtisanTheme, SurfaceStep, WorkspaceColors};
+use gpui::uniform_list;
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, Bounds, Context, ElementId, FontWeight,
     HighlightStyle, ImageSource, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
@@ -27,6 +29,7 @@ use gpui::{
     anchored, canvas, deferred, div, img, point, prelude::FluentBuilder as _, px,
 };
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,9 +55,6 @@ const OPTION_TOOLTIP_GAP_PX: f32 = 8.0;
 const ENGINE_TOOLTIP_WIDTH_PX: f32 = 240.0;
 /// The project menu (`home_project_picker`).
 const PROJECT_MENU_WIDTH_PX: f32 = 320.0;
-const PROJECT_MENU_MAX_HEIGHT_PX: f32 = 360.0;
-/// The window height kept clear around the project menu.
-const PROJECT_MENU_VIEWPORT_INSET_Y_PX: f32 = 32.0;
 /// The hover id of the project menu's "New project" row.
 const NEW_PROJECT_ROW: &str = "new-project";
 const PROJECT_MENU_GAP_PX: f32 = 10.0;
@@ -103,6 +103,9 @@ fn context_label(tokens: u64) -> String {
 
 /// An effort as the selector names it: `medium` reads `Medium`.
 fn humanize(word: &str) -> String {
+    if word == "xhigh" {
+        return "Extra High".to_owned();
+    }
     let mut out = String::with_capacity(word.len());
     for (index, part) in word.split(['_', '-']).enumerate() {
         if index > 0 {
@@ -177,17 +180,35 @@ pub(crate) enum Axis {
     Variant,
     Thinking,
     Speed,
+    Context,
     Permission,
 }
 
 impl Axis {
     /// The controls in the preview, top to bottom (`render_policy_controls`).
-    const ALL: [Self; 4] = [Self::Variant, Self::Thinking, Self::Speed, Self::Permission];
+    const ALL: [Self; 5] = [
+        Self::Variant,
+        Self::Thinking,
+        Self::Speed,
+        Self::Context,
+        Self::Permission,
+    ];
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Variant => "Variants",
+            Self::Thinking => "Efforts",
+            Self::Speed => "Speed",
+            Self::Context => "Context Window",
+            Self::Permission => "Permissions",
+        }
+    }
 
     const fn icon(self) -> AssetId {
         match self {
             Self::Variant | Self::Thinking => AssetId::TABLER_BRAIN,
             Self::Speed => AssetId::TABLER_BOLT_FILLED,
+            Self::Context => AssetId::TABLER_ARROWS_HORIZONTAL,
             Self::Permission => AssetId::TABLER_LOCK,
         }
     }
@@ -196,7 +217,7 @@ impl Axis {
     /// the rest only with a choice to make.
     const fn shown(self, options: usize) -> bool {
         match self {
-            Self::Thinking => options > 0,
+            Self::Thinking | Self::Context => options > 0,
             Self::Variant | Self::Speed | Self::Permission => options > 1,
         }
     }
@@ -205,6 +226,8 @@ impl Axis {
 /// One option of a policy dropdown.
 struct AxisOption {
     label: String,
+    /// Metadata marks modes that belong below the regular efforts.
+    special: bool,
     /// What the option does, shown as its tooltip.
     description: Option<String>,
     /// A caution shown ahead of the description, in the warning colour.
@@ -290,7 +313,10 @@ fn light_left(tab_left: f32, tab_width: f32) -> f32 {
 /// painted (open, or playing their exit), the shared hover pills, the
 /// engine light and the delayed tooltip.
 #[derive(Default)]
-pub(crate) struct PickerMotion {
+pub(crate) struct PickerState {
+    models: Vec<(String, usize)>,
+    projects: Vec<ProjectId>,
+    favorites: HashSet<String>,
     shown: Option<Menu>,
     menu: Rc<RefCell<MenuMotion>>,
     menu_settle: Option<Task<()>>,
@@ -298,7 +324,12 @@ pub(crate) struct PickerMotion {
     pending_axis: Option<Axis>,
     axis: Rc<RefCell<MenuMotion>>,
     axis_settle: Option<Task<()>>,
-    model_hover: Rc<RefCell<SlidingHoverState>>,
+    axis_focus: Option<gpui::FocusHandle>,
+    axis_highlight: Option<usize>,
+    pub(super) model_scroll: gpui::UniformListScrollHandle,
+    pub(super) model_glide: editor_ui::wheel_glide::WheelGlide,
+    model_glide_scheduled: bool,
+    pub(super) model_hover: Rc<RefCell<SlidingHoverState>>,
     model_surface: Rc<RefCell<Option<Bounds<Pixels>>>>,
     axis_hover: Rc<RefCell<SlidingHoverState>>,
     axis_surface: Rc<RefCell<Option<Bounds<Pixels>>>>,
@@ -382,7 +413,7 @@ fn control_gradient() -> gpui::Background {
 }
 
 /// A strong-glass surface of `radius`.
-fn glass_panel(
+pub(super) fn glass_panel(
     id: impl Into<SharedString>,
     theme: &ArtisanTheme,
     radius: f32,
@@ -411,8 +442,14 @@ fn option_row(
     theme: &ArtisanTheme,
 ) -> gpui::Stateful<gpui::Div> {
     let theme = *theme;
+    let label = label.into();
     let mut row = div()
         .id(id)
+        .role(gpui::Role::MenuItem)
+        .aria_label(label.clone())
+        .aria_selected(chosen)
+        .focusable()
+        .tab_index(0)
         .relative()
         .flex()
         .flex_row()
@@ -427,7 +464,7 @@ fn option_row(
         .text_size(px(14.0))
         .line_height(px(20.0))
         .cursor_pointer()
-        .child(div().flex_1().min_w(px(0.0)).truncate().child(label.into()));
+        .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
     if chosen {
         row = row.child(
             div()
@@ -454,16 +491,79 @@ impl Composer {
 
     /// Opens a picker menu: the model menu slides in; the project menu
     /// appears in place.
+    fn reset_model_scroll(&mut self) {
+        self.picker.model_glide.cancel();
+        self.picker.model_hover.borrow_mut().clear();
+        self.picker
+            .model_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(0.0)));
+    }
+
+    fn model_wheel(
+        &mut self,
+        event: &gpui::ScrollWheelEvent,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = self.picker.model_scroll.0.borrow().base_handle.clone();
+        let max = f32::from(handle.max_offset().y).max(0.0);
+        let delta = f32::from(event.delta.pixel_delta(window.line_height()).y);
+        if max <= 0.0 || delta.abs() <= f32::EPSILON {
+            return;
+        }
+        cx.stop_propagation();
+        let offset = handle.offset();
+        let current = f32::from(offset.y);
+        if event.delta.precise() || cx.reduce_motion() {
+            self.picker.model_glide.cancel();
+            handle.set_offset(point(offset.x, px((current + delta).clamp(-max, 0.0))));
+            cx.notify();
+            return;
+        }
+        self.picker.model_glide.push(current, delta, max);
+        self.schedule_model_glide(window, cx);
+    }
+
+    fn schedule_model_glide(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if !self.picker.model_glide.active() || self.picker.model_glide_scheduled {
+            return;
+        }
+        self.picker.model_glide_scheduled = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.picker.model_glide_scheduled = false;
+            if this.menu != Some(Menu::Model) {
+                this.picker.model_glide.cancel();
+                return;
+            }
+            let handle = this.picker.model_scroll.0.borrow().base_handle.clone();
+            let offset = handle.offset();
+            let max = f32::from(handle.max_offset().y).max(0.0);
+            if let Some(next) = this.picker.model_glide.step(f32::from(offset.y), max) {
+                handle.set_offset(point(offset.x, px(next)));
+                cx.notify();
+            }
+            this.schedule_model_glide(window, cx);
+        });
+    }
+
     pub(crate) fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
+        if !self.metadata_ready(cx) || !self.draft_editable(cx) {
+            return;
+        }
         self.close_axis_now();
         self.clear_tooltip();
         self.menu = Some(menu);
         self.picker.shown = Some(menu);
         if menu == Menu::Model {
+            self.reset_model_scroll();
             self.browsing = self.effective_config(cx).map(|config| config.engine);
             let generation = self.picker.menu.borrow_mut().begin_open();
             self.settle_menu(generation, true, cx);
         }
+        self.refresh_picker_catalog(cx);
         cx.notify();
     }
 
@@ -474,6 +574,7 @@ impl Composer {
         };
         self.close_axis_now();
         self.clear_tooltip();
+        self.picker.model_glide.cancel();
         self.picker.model_hover.borrow_mut().clear();
         self.picker.project_hover.borrow_mut().clear();
         if menu == Menu::Model {
@@ -487,11 +588,15 @@ impl Composer {
 
     /// Forgets every picker surface at once (the composer moved on).
     pub(crate) fn reset_picker(&mut self) {
+        self.reset_model_scroll();
         self.menu = None;
         self.axis = None;
         self.picker.shown = None;
         self.picker.menu.borrow_mut().hide();
         self.picker.menu_settle = None;
+        self.picker.models.clear();
+        self.picker.projects.clear();
+        self.picker.favorites.clear();
         self.close_axis_now();
         self.clear_tooltip();
     }
@@ -541,6 +646,10 @@ impl Composer {
     }
 
     fn open_axis(&mut self, axis: Axis, cx: &mut Context<Self>) {
+        self.picker
+            .axis_focus
+            .get_or_insert_with(|| cx.focus_handle());
+        self.picker.axis_highlight = None;
         self.axis = Some(axis);
         self.picker.pending_axis = None;
         self.picker.shown_axis = Some(axis);
@@ -769,9 +878,86 @@ impl Composer {
         self.core.update(cx, |core, cx| {
             core.set_setting(FAVORITES_KEY, serde_json::Value::Object(all), cx);
         });
+        self.refresh_picker_catalog(cx);
         cx.notify();
     }
 
+    /// Only changed host data, an opened picker or an explicit choice rebuilds its ordering.
+    pub(crate) fn refresh_picker_catalog(&mut self, cx: &Context<Self>) {
+        if self.menu.is_none() {
+            return;
+        }
+        let Some(host) = self.host(cx) else {
+            return;
+        };
+        let host = host.read(cx);
+        let current = self.effective_config(cx);
+        let engine = self
+            .browsing
+            .or_else(|| current.as_ref().map(|config| config.engine));
+        self.picker.favorites = engine
+            .map(|engine| self.favorites(engine, cx).into_iter().collect())
+            .unwrap_or_default();
+        self.picker.models = engine
+            .and_then(|engine| host.engines.get(&engine))
+            .map(|status| {
+                let mut models: Vec<_> = status.models.iter().enumerate().collect();
+                let chosen = current.as_ref().and_then(|config| config.model.as_deref());
+                models.sort_by_key(|(index, model)| {
+                    (
+                        !self.picker.favorites.contains(&model.id),
+                        chosen != Some(model.id.as_str()),
+                        *index,
+                    )
+                });
+                models
+                    .into_iter()
+                    .map(|(index, model)| (model.id.clone(), index))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut projects: Vec<_> = host
+            .projects
+            .values()
+            .filter(|project| !project.removed)
+            .collect();
+        projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        self.picker.projects = projects
+            .into_iter()
+            .map(|project| project.id.clone())
+            .collect();
+    }
+    fn choose_model(&mut self, engine: EngineId, id: &str, cx: &mut Context<Self>) {
+        let Some(host) = self.host(cx) else {
+            return;
+        };
+        let Some(model) = host
+            .read(cx)
+            .engines
+            .get(&engine)
+            .and_then(|status| status.models.iter().find(|model| model.id == id))
+        else {
+            return;
+        };
+        let mut config = self
+            .effective_config(cx)
+            .filter(|config| config.engine == engine)
+            .unwrap_or_else(|| EngineConfig::new(engine));
+        config.model = Some(id.to_owned());
+        config.effort = model.default_effort.clone();
+        config.speed = None;
+        config.variant = None;
+        model.normalize_context_window(&mut config);
+        self.choose_config(config, cx);
+    }
+    fn choose_project(&mut self, id: ProjectId, cx: &mut Context<Self>) {
+        if !self.draft_editable(cx) {
+            return;
+        }
+        self.project = Some(id);
+        self.edited(cx);
+        self.close_menu(cx);
+    }
     // Rendering.
 
     /// The model selector's trigger: engine glyph, model name, its muted
@@ -815,7 +1001,10 @@ impl Composer {
                     |model| model.name.clone(),
                 );
                 body = body.child(token().child(name));
-                if let Some(context) = model.as_ref().and_then(|model| model.context_window) {
+                if let Some(context) = model
+                    .as_ref()
+                    .and_then(|model| config.context_window_override().or(model.context_window))
+                {
                     body = body.child(token().text_color(muted).child(context_label(context)));
                 }
                 if let Some(effort) = &config.effort {
@@ -827,6 +1016,11 @@ impl Composer {
         }
         let trigger = div()
             .id("composer-model")
+            .role(gpui::Role::Button)
+            .aria_label("Choose a model")
+            .aria_expanded(self.menu == Some(Menu::Model))
+            .focusable()
+            .tab_index(0)
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -887,7 +1081,7 @@ impl Composer {
     pub(crate) fn render_tab(
         &self,
         theme: &ArtisanTheme,
-        desktop: DesktopTheme,
+        desktop: WorkspaceColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = *theme;
@@ -913,20 +1107,24 @@ impl Composer {
                 let name = project_name(&thread.project_id)?;
                 Some(face(name.into()).into_any_element())
             }
-            crate::ComposerTarget::NewThread {
-                project: Some(project),
-                ..
-            } => Some(face(project_name(project)?.into()).into_any_element()),
-            crate::ComposerTarget::NewThread { project: None, .. } => {
+            // A new thread's project is always a choice; the one it was
+            // opened for is only where it starts (master's
+            // `home_project_picker`).
+            crate::ComposerTarget::NewThread { .. } => {
                 let open = self.menu == Some(Menu::Project);
                 let label: SharedString = self
-                    .project
+                    .project()
                     .as_ref()
                     .and_then(project_name)
                     .map_or_else(|| "Choose a project".into(), Into::into);
                 let foreground = desktop.foreground;
                 let trigger = div()
                     .id("composer-project")
+                    .role(gpui::Role::Button)
+                    .aria_label(label.clone())
+                    .aria_expanded(open)
+                    .focusable()
+                    .tab_index(0)
                     .debug_selector(|| "composer-project".to_owned())
                     .h(px(28.0))
                     .px(px(8.0))
@@ -982,104 +1180,100 @@ impl Composer {
     fn project_menu(
         &self,
         theme: &ArtisanTheme,
-        desktop: DesktopTheme,
+        desktop: WorkspaceColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = *theme;
         let width = PROJECT_MENU_WIDTH_PX.min(self.viewport_width - MENU_VIEWPORT_INSET_X_PX);
-        let projects: Vec<_> = self
-            .host(cx)
-            .map(|host| {
-                host.read(cx)
-                    .projects
-                    .values()
-                    .filter(|project| !project.removed)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ids: Vec<String> = projects
-            .iter()
-            .map(|project| project.id.to_string())
-            .collect();
-        self.picker
-            .project_hover
-            .borrow_mut()
-            .clear_if_missing(&ids);
-        let mut list = div()
-            .id("composer-project-list")
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .max_h(px(PROJECT_MENU_MAX_HEIGHT_PX.min(
-                (self.viewport_height - PROJECT_MENU_VIEWPORT_INSET_Y_PX).max(0.0),
-            )))
-            .p(px(8.0));
-        for project in projects {
-            let chosen = self.project.as_ref() == Some(&project.id);
-            let id = project.id.clone();
-            let hover_id = id.to_string();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("composer-project-{id}")))
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("composer-project-row-{id}")
-                    })
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .gap(px(10.0))
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .rounded(px(PROJECT_CONTROL_RADIUS_PX))
-                    .cursor_pointer()
-                    .on_hover(cx.listener({
-                        let hover_id = hover_id.clone();
-                        move |this, hovered: &bool, _, cx| {
-                            if *hovered {
-                                this.picker
-                                    .project_hover
-                                    .borrow_mut()
-                                    .set_active(hover_id.clone());
-                                cx.notify();
-                            }
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.project = Some(id.clone());
-                        this.close_menu(cx);
-                    }))
-                    .child(row_probe(
-                        hover_id,
-                        &self.picker.project_hover,
-                        &self.picker.project_surface,
-                    ))
-                    .child(
-                        asset_glyph(AssetId::TABLER_FOLDER)
-                            .size(px(16.0))
-                            .text_color(desktop.secondary),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_size(px(14.0))
-                            .text_color(desktop.foreground)
-                            .child(project.name.clone()),
-                    )
-                    .when(chosen, |row| {
-                        row.child(
+        let count = self.picker.projects.len();
+        let project_rows = uniform_list(
+            "composer-project-list",
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                let Some(host) = this.host(cx) else {
+                    return Vec::new();
+                };
+                range
+                    .filter_map(|index| {
+                        let project = host
+                            .read(cx)
+                            .projects
+                            .get(this.picker.projects.get(index)?)?;
+                        let chosen = this.project().as_ref() == Some(&project.id);
+                        let id = project.id.clone();
+                        let hover_id = id.to_string();
+                        Some(
                             div()
-                                .text_size(px(16.0))
-                                .text_color(desktop.secondary)
-                                .child("✓"),
+                                .id(SharedString::from(format!("composer-project-{id}")))
+                                .role(gpui::Role::MenuItem)
+                                .aria_label(project.name.clone())
+                                .aria_selected(chosen)
+                                .focusable()
+                                .tab_index(0)
+                                .debug_selector({
+                                    let id = id.clone();
+                                    move || format!("composer-project-row-{id}")
+                                })
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .w_full()
+                                .gap(px(10.0))
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(PROJECT_CONTROL_RADIUS_PX))
+                                .cursor_pointer()
+                                .on_hover(cx.listener({
+                                    let hover_id = hover_id.clone();
+                                    move |this, hovered: &bool, _, cx| {
+                                        if *hovered {
+                                            this.picker
+                                                .project_hover
+                                                .borrow_mut()
+                                                .set_active(hover_id.clone());
+                                            cx.notify();
+                                        }
+                                    }
+                                }))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.choose_project(id.clone(), cx);
+                                }))
+                                .child(row_probe(
+                                    hover_id,
+                                    &this.picker.project_hover,
+                                    &this.picker.project_surface,
+                                ))
+                                .child(
+                                    asset_glyph(AssetId::TABLER_FOLDER)
+                                        .size(px(16.0))
+                                        .text_color(desktop.secondary),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .text_size(px(14.0))
+                                        .text_color(desktop.foreground)
+                                        .child(project.name.clone()),
+                                )
+                                .when(chosen, |row| {
+                                    row.child(
+                                        div()
+                                            .text_size(px(16.0))
+                                            .text_color(desktop.secondary)
+                                            .child("✓"),
+                                    )
+                                })
+                                .h(px(36.0))
+                                .into_any_element(),
                         )
-                    }),
-            );
-        }
+                    })
+                    .collect()
+            }),
+        )
+        .h(px((count.min(8).max(1) * 36) as f32));
+        let mut list = div().flex().flex_col().p(px(8.0)).child(project_rows);
         // The distinct intake row after a hairline: adding a project.
         list = list.child(
             div()
@@ -1097,6 +1291,10 @@ impl Composer {
                 .child(
                     div()
                         .id("composer-project-new")
+                        .role(gpui::Role::MenuItem)
+                        .aria_label("New project")
+                        .focusable()
+                        .tab_index(0)
                         .debug_selector(|| "composer-project-new".to_owned())
                         .relative()
                         .flex()
@@ -1290,6 +1488,11 @@ impl Composer {
             tabs = tabs.child(
                 div()
                     .id(SharedString::from(format!("composer-engine-{engine}")))
+                    .role(gpui::Role::Button)
+                    .aria_label(engine.display_name())
+                    .aria_selected(active)
+                    .focusable()
+                    .tab_index(0)
                     .relative()
                     .flex()
                     .items_center()
@@ -1301,7 +1504,9 @@ impl Composer {
                     .text_color(theme.colors.foreground.to_paint())
                     .when(gate.is_some(), |tab| tab.opacity(0.35))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reset_model_scroll();
                         this.browsing = Some(engine);
+                        this.refresh_picker_catalog(cx);
                         this.close_axis(cx);
                         cx.notify();
                     }))
@@ -1345,7 +1550,7 @@ impl Composer {
         &self,
         engines: &[EngineStatus],
         browsing: Option<EngineId>,
-        current: Option<&EngineConfig>,
+        _current: Option<&EngineConfig>,
         theme: &ArtisanTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1353,14 +1558,21 @@ impl Composer {
         let muted = theme.colors.muted_foreground.to_paint();
         let mut list = div()
             .id("composer-model-list")
+            .debug_selector(|| "composer-model-viewport".into())
             .relative()
+            .overflow_hidden()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.picker.model_hover.borrow_mut().hide();
+                    cx.notify();
+                }
+            }))
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
             .h(px(MODEL_PANEL_HEIGHT_PX))
             .gap(px(3.0))
-            .overflow_y_scroll()
             .child(surface_probe(&self.picker.model_surface))
             .child(sliding_hover_pill(
                 "composer-model-hover",
@@ -1401,6 +1613,10 @@ impl Composer {
                         .child(
                             div()
                                 .id(SharedString::from(format!("composer-sign-in-{engine}")))
+                                .role(gpui::Role::Button)
+                                .aria_label(action.clone())
+                                .focusable()
+                                .tab_index(0)
                                 .mt(px(8.0))
                                 .cursor_pointer()
                                 .text_color(theme.colors.foreground.to_paint())
@@ -1414,147 +1630,166 @@ impl Composer {
             }
             _ => {}
         }
-        let same_engine = current.filter(|config| config.engine == engine);
-        let chosen_id = same_engine.and_then(|config| config.model.as_ref());
-        let favorites = self.favorites(engine, cx);
-        let mut models: Vec<(usize, &Model)> = status.models.iter().enumerate().collect();
-        models.sort_by_key(|(index, model)| {
-            (
-                !favorites.contains(&model.id),
-                chosen_id != Some(&model.id),
-                *index,
-            )
-        });
-        let ids: Vec<String> = models.iter().map(|(_, model)| model.id.clone()).collect();
-        self.picker.model_hover.borrow_mut().clear_if_missing(&ids);
-        for (_, model) in models {
-            let favorite = favorites.contains(&model.id);
-            let (model_id, effort) = (model.id.clone(), model.default_effort.clone());
-            let speeds: Vec<String> = model.speeds.iter().map(|speed| speed.id.clone()).collect();
-            let hover_id = model.id.clone();
-            let star_id = model.id.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "composer-model-{engine}-{}",
-                        model.id
-                    )))
-                    .debug_selector({
-                        let id = model.id.clone();
-                        move || format!("composer-model-row-{id}")
+        let count = self.picker.models.len();
+        let rows = uniform_list(
+            "composer-model-rows",
+            count,
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                let Some(host) = this.host(cx) else {
+                    return Vec::new();
+                };
+                let Some(status) = host.read(cx).engines.get(&engine) else {
+                    return Vec::new();
+                };
+                range
+                    .filter_map(|index| {
+                        let (id, model_index) = this.picker.models.get(index)?;
+                        let model = status
+                            .models
+                            .get(*model_index)
+                            .filter(|model| &model.id == id)?;
+                        let favorite = this.picker.favorites.contains(&model.id);
+                        let model_id = model.id.clone();
+                        let hover_id = model.id.clone();
+                        let star_id = model.id.clone();
+                        Some(
+                            div()
+                                .pb(px(3.0))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "composer-model-{engine}-{}",
+                                            model.id
+                                        )))
+                                        .role(gpui::Role::MenuItem)
+                                        .aria_label(model.name.clone())
+                                        .focusable()
+                                        .tab_index(0)
+                                        .debug_selector({
+                                            let id = model.id.clone();
+                                            move || format!("composer-model-row-{id}")
+                                        })
+                                        .relative()
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .h(px(MODEL_ROW_HEIGHT_PX))
+                                        .px(px(10.0))
+                                        .rounded(px(14.0))
+                                        .cursor_pointer()
+                                        .on_hover(cx.listener(
+                                            move |this, hovered: &bool, _, cx| {
+                                                if *hovered && this.menu == Some(Menu::Model) {
+                                                    this.picker
+                                                        .model_hover
+                                                        .borrow_mut()
+                                                        .set_active(hover_id.clone());
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.choose_model(engine, &model_id, cx)
+                                        }))
+                                        .child(row_probe(
+                                            model.id.clone(),
+                                            &this.picker.model_hover,
+                                            &this.picker.model_surface,
+                                        ))
+                                        .child(
+                                            asset_glyph(engine_icon(engine))
+                                                .size(px(20.0))
+                                                .text_color(theme.colors.foreground.to_paint())
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .overflow_hidden()
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(14.0))
+                                                        .line_height(px(20.0))
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(model.name.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(12.0))
+                                                        .line_height(px(16.0))
+                                                        .text_color(muted)
+                                                        .child(engine_lab(engine)),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "composer-model-favorite-{engine}-{}",
+                                                    model.id
+                                                )))
+                                                .role(gpui::Role::Button)
+                                                .aria_label(if favorite {
+                                                    "Remove favorite"
+                                                } else {
+                                                    "Add favorite"
+                                                })
+                                                .focusable()
+                                                .tab_index(0)
+                                                .debug_selector({
+                                                    let id = model.id.clone();
+                                                    move || format!("composer-model-favorite-{id}")
+                                                })
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .size(px(28.0))
+                                                .flex_shrink_0()
+                                                .rounded_full()
+                                                .hover(move |style| {
+                                                    style.bg(hover_fill_gradient(theme))
+                                                })
+                                                .text_color(if favorite {
+                                                    theme.colors.favorite.to_paint()
+                                                } else {
+                                                    muted
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.toggle_favorite(engine, &star_id, cx);
+                                                }))
+                                                .child(
+                                                    asset_glyph(if favorite {
+                                                        AssetId::TABLER_STAR_FILLED
+                                                    } else {
+                                                        AssetId::TABLER_STAR
+                                                    })
+                                                    .size(px(16.0)),
+                                                ),
+                                        )
+                                        .into_any_element(),
+                                )
+                                .into_any_element(),
+                        )
                     })
-                    .relative()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(MODEL_ROW_HEIGHT_PX))
-                    .px(px(10.0))
-                    .rounded(px(14.0))
-                    .cursor_pointer()
-                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                        if *hovered && this.menu == Some(Menu::Model) {
-                            this.picker
-                                .model_hover
-                                .borrow_mut()
-                                .set_active(hover_id.clone());
-                            cx.notify();
-                        }
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let base = this.effective_config(cx);
-                        let mut config = match base {
-                            Some(config) if config.engine == engine => config,
-                            Some(config) => EngineConfig {
-                                permissions: config.permissions,
-                                ..EngineConfig::new(engine)
-                            },
-                            None => EngineConfig::new(engine),
-                        };
-                        config.model = Some(model_id.clone());
-                        config.effort.clone_from(&effort);
-                        if config
-                            .speed
-                            .as_ref()
-                            .is_some_and(|speed| !speeds.contains(speed))
-                        {
-                            config.speed = None;
-                        }
-                        config.variant = None;
-                        this.choose_config(config, cx);
-                    }))
-                    .child(row_probe(
-                        model.id.clone(),
-                        &self.picker.model_hover,
-                        &self.picker.model_surface,
-                    ))
-                    .child(
-                        asset_glyph(engine_icon(engine))
-                            .size(px(20.0))
-                            .text_color(theme.colors.foreground.to_paint())
-                            .flex_shrink_0(),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(14.0))
-                                    .line_height(px(20.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(model.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.0))
-                                    .line_height(px(16.0))
-                                    .text_color(muted)
-                                    .child(engine_lab(engine)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "composer-model-favorite-{engine}-{}",
-                                model.id
-                            )))
-                            .debug_selector({
-                                let id = model.id.clone();
-                                move || format!("composer-model-favorite-{id}")
-                            })
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(28.0))
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .hover(move |style| style.bg(hover_fill_gradient(theme)))
-                            .text_color(if favorite {
-                                theme.colors.favorite.to_paint()
-                            } else {
-                                muted
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_favorite(engine, &star_id, cx);
-                            }))
-                            .child(
-                                asset_glyph(if favorite {
-                                    AssetId::TABLER_STAR_FILLED
-                                } else {
-                                    AssetId::TABLER_STAR
-                                })
-                                .size(px(16.0)),
-                            ),
-                    ),
-            );
-        }
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.picker.model_scroll)
+        .h(px(MODEL_PANEL_HEIGHT_PX));
+        // Painted after the native list, matching transcript wheel routing.
+        // This consumes wheel ticks before native scrolling applies them.
+        list = list.child(rows).child(
+            div()
+                .absolute()
+                .inset_0()
+                .on_scroll_wheel(cx.listener(Self::model_wheel)),
+        );
         list
     }
 
@@ -1608,7 +1843,9 @@ impl Composer {
                     config.engine.display_name(),
                     engine_lab(config.engine)
                 )];
-                if let Some(context) = model.and_then(|model| model.context_window) {
+                if let Some(context) = model
+                    .and_then(|model| config.context_window_override().or(model.context_window))
+                {
                     facts.push(format!("{} context", context_label(context)));
                 }
                 if model.is_some_and(|model| model.supports_images) {
@@ -1657,6 +1894,11 @@ impl Composer {
             .unwrap_or_default();
         let trigger = div()
             .id(SharedString::from(format!("composer-axis-{axis:?}")))
+            .role(gpui::Role::Button)
+            .aria_label(format!("{}: {value}", axis.title()))
+            .aria_expanded(self.axis == Some(axis))
+            .focusable()
+            .tab_index(0)
             .debug_selector(move || format!("composer-axis-{axis:?}"))
             .flex()
             .items_center()
@@ -1667,7 +1909,19 @@ impl Composer {
             .bg(control_gradient())
             .shadow(card_shadows(&theme))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.toggle_axis(axis, cx)))
+            .relative()
+            .child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .debug_selector(move || format!("composer-axis-{axis:?}-trigger")),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_axis(axis, cx);
+                if let Some(focus) = &this.picker.axis_focus {
+                    focus.focus(window, cx);
+                }
+            }))
             .child(
                 asset_glyph(axis.icon())
                     .size(px(14.0))
@@ -1716,7 +1970,43 @@ impl Composer {
                     cx.notify();
                 }
             }));
+        let header = |label: &'static str, special: bool| {
+            div()
+                .debug_selector(move || {
+                    if special {
+                        format!("composer-axis-{axis:?}-special-header")
+                    } else {
+                        format!("composer-axis-{axis:?}-header")
+                    }
+                })
+                .px(px(12.0))
+                .py(px(4.0))
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(muted)
+                .child(label)
+        };
+        rows = rows.child(header(axis.title(), false));
+        let keyboard_options: Vec<_> = options.iter().map(|option| option.apply.clone()).collect();
+        let chosen = options
+            .iter()
+            .position(|option| option.selected)
+            .unwrap_or(0);
+        let mut special_shown = false;
         for (index, option) in options.into_iter().enumerate() {
+            if option.special && !special_shown {
+                special_shown = true;
+                rows = rows
+                    .child(
+                        div()
+                            .h(px(1.0))
+                            .mx(px(8.0))
+                            .my(px(4.0))
+                            .bg(theme.workspace.line),
+                    )
+                    .child(header("Special Efforts", true));
+            }
             let config = option.apply;
             let key = format!("axis:{axis:?}:{index}");
             let hover_id = index.to_string();
@@ -1741,6 +2031,7 @@ impl Composer {
                         if this.axis != Some(axis) {
                             return;
                         }
+                        this.picker.axis_highlight = Some(index);
                         this.picker
                             .axis_hover
                             .borrow_mut()
@@ -1768,6 +2059,44 @@ impl Composer {
             );
         }
         let panel = glass_panel(format!("composer-axis-options-{axis:?}"), &theme, 18.0)
+            .when_some(self.picker.axis_focus.as_ref(), |panel, focus| {
+                panel.track_focus(focus)
+            })
+            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
+                if keyboard_options.is_empty() {
+                    return;
+                }
+                let current = this.picker.axis_highlight.unwrap_or(chosen);
+                let next = match event.keystroke.key.as_str() {
+                    "home" => 0,
+                    "end" => keyboard_options.len() - 1,
+                    "up" => current.saturating_sub(1),
+                    "down" => (current + 1).min(keyboard_options.len() - 1),
+                    "enter" | "space" => {
+                        this.choose_config(keyboard_options[current].clone(), cx);
+                        this.close_axis(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                    "escape" => {
+                        if this.axis.is_some() {
+                            this.close_axis(cx);
+                        } else {
+                            this.close_menu(cx);
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
+                    _ => return,
+                };
+                this.picker.axis_highlight = Some(next);
+                this.picker
+                    .axis_hover
+                    .borrow_mut()
+                    .set_active(next.to_string());
+                cx.stop_propagation();
+                cx.notify();
+            }))
             .w(px(MODEL_PREVIEW_WIDTH_PX - 20.0))
             .min_w(px(DROPDOWN_MIN_WIDTH_PX))
             .p(px(4.0))
@@ -2105,6 +2434,7 @@ fn variant_options(config: &EngineConfig, model: Option<&Model>) -> Vec<AxisOpti
         return Vec::new();
     }
     std::iter::once(AxisOption {
+        special: false,
         label: "Default".to_owned(),
         description: None,
         advisory: None,
@@ -2115,6 +2445,7 @@ fn variant_options(config: &EngineConfig, model: Option<&Model>) -> Vec<AxisOpti
         },
     })
     .chain(variants.iter().map(|variant| AxisOption {
+        special: false,
         label: variant.label.clone(),
         description: None,
         advisory: None,
@@ -2134,6 +2465,7 @@ fn speed_options(config: &EngineConfig, model: Option<&Model>) -> Vec<AxisOption
         .unwrap_or_default()
         .iter()
         .map(|speed| AxisOption {
+            special: false,
             label: speed.label.clone(),
             description: speed.description.clone(),
             advisory: None,
@@ -2159,27 +2491,50 @@ fn axis_options(axis: Axis, config: &EngineConfig, model: Option<&Model>) -> Vec
             let Some(model) = model else {
                 return Vec::new();
             };
+            let options = model.efforts.iter().map(|effort| {
+                let note = model
+                    .effort_notes
+                    .iter()
+                    .find(|note| &note.effort == effort);
+                AxisOption {
+                    special: note.is_some_and(|note| note.special),
+                    label: humanize(effort),
+                    description: note.and_then(|note| note.description.clone()),
+                    advisory: note.and_then(|note| note.advisory.clone()),
+                    selected: config.effort.as_ref() == Some(effort),
+                    apply: EngineConfig {
+                        effort: Some(effort.clone()),
+                        ..config.clone()
+                    },
+                }
+            });
+            let (mut regular, special): (Vec<_>, Vec<_>) =
+                options.partition(|option| !option.special);
+            regular.extend(special);
+            regular
+        }
+        Axis::Context => model.map_or_else(Vec::new, |model| {
             model
-                .efforts
+                .context_windows
                 .iter()
-                .map(|effort| {
-                    let note = model
-                        .effort_notes
-                        .iter()
-                        .find(|note| &note.effort == effort);
+                .map(|window| {
+                    let mut apply = config.clone();
+                    if let Some(tokens) = window.override_tokens {
+                        apply.options.insert("context_window".into(), tokens.into());
+                    } else {
+                        apply.options.remove("context_window");
+                    }
                     AxisOption {
-                        label: humanize(effort),
-                        description: note.and_then(|note| note.description.clone()),
-                        advisory: note.and_then(|note| note.advisory.clone()),
-                        selected: config.effort.as_ref() == Some(effort),
-                        apply: EngineConfig {
-                            effort: Some(effort.clone()),
-                            ..config.clone()
-                        },
+                        special: false,
+                        label: context_label(window.tokens),
+                        description: None,
+                        advisory: None,
+                        selected: config.context_window_override() == window.override_tokens,
+                        apply,
                     }
                 })
                 .collect()
-        }
+        }),
         Axis::Speed => speed_options(config, model),
         Axis::Permission => [
             (Permissions::Auto, "Auto"),
@@ -2187,6 +2542,7 @@ fn axis_options(axis: Axis, config: &EngineConfig, model: Option<&Model>) -> Vec
         ]
         .into_iter()
         .map(|(permissions, label)| AxisOption {
+            special: false,
             label: label.to_owned(),
             description: Some(permissions_description(engine, permissions).to_owned()),
             advisory: None,
@@ -2197,5 +2553,76 @@ fn axis_options(axis: Axis, config: &EngineConfig, model: Option<&Model>) -> Vec
             },
         })
         .collect(),
+    }
+}
+
+#[cfg(test)]
+mod effort_presentation_tests {
+    use super::*;
+
+    #[test]
+    fn special_metadata_partitions_efforts_without_changing_canonical_values() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "test-model", "name": "Test model",
+            "efforts": ["custom_mode", "xhigh", "ultra", "low", "another_mode"],
+            "effort_notes": [
+                {"effort": "custom_mode", "special": true, "description": "First mode"},
+                {"effort": "ultra", "special": false},
+                {"effort": "another_mode", "special": true, "advisory": "Additional usage"}
+            ]
+        }))
+        .unwrap();
+        for engine in [EngineId::Claude, EngineId::Codex, EngineId::OpenCode] {
+            let config = EngineConfig {
+                effort: Some("custom_mode".into()),
+                ..EngineConfig::new(engine)
+            };
+            let options = axis_options(Axis::Thinking, &config, Some(&model));
+            let canonical: Vec<_> = options
+                .iter()
+                .map(|option| option.apply.effort.as_deref().unwrap())
+                .collect();
+            assert_eq!(
+                canonical,
+                ["xhigh", "ultra", "low", "custom_mode", "another_mode"]
+            );
+            assert_eq!(
+                options
+                    .iter()
+                    .map(|option| option.special)
+                    .collect::<Vec<_>>(),
+                [false, false, false, true, true]
+            );
+            assert_eq!(options[0].label, "Extra High");
+            assert_eq!(
+                options[1].label, "Ultra",
+                "names alone do not make an effort special"
+            );
+            assert!(options[3].selected);
+            assert_eq!(options[3].description.as_deref(), Some("First mode"));
+            assert_eq!(options[4].advisory.as_deref(), Some("Additional usage"));
+            assert!(options.iter().all(|option| option.apply.engine == engine));
+        }
+    }
+
+    #[test]
+    fn advertised_ultra_mode_keeps_its_submitted_effort_id() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "test-model", "name": "Test model",
+            "efforts": ["low", "medium", "high", "xhigh", "ultra"],
+            "effort_notes": [{"effort": "ultra", "special": true}]
+        }))
+        .unwrap();
+        let config = EngineConfig {
+            effort: Some("ultra".into()),
+            ..EngineConfig::new(EngineId::Codex)
+        };
+        let options = axis_options(Axis::Thinking, &config, Some(&model));
+        let ultra = options.last().unwrap();
+        assert!(ultra.special && ultra.selected);
+        assert_eq!(ultra.label, "Ultra");
+        assert_eq!(ultra.apply.effort.as_deref(), Some("ultra"));
+        assert_eq!(options[3].apply.effort.as_deref(), Some("xhigh"));
+        assert_eq!(options[3].label, "Extra High");
     }
 }

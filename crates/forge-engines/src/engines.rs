@@ -20,11 +20,16 @@ pub(crate) struct Spec {
     pub minimum: Option<&'static str>,
     /// Arguments that start the engine's own sign-in flow.
     pub login: &'static [&'static str],
+    /// Noninteractive paired-client sign-in, distinct from CLI interactive login.
+    pub device_login: Option<&'static [&'static str]>,
+    pub accepts_login_code: bool,
+    pub logout: Option<&'static [&'static str]>,
     pub models: ModelSource,
     /// The engine's config directory inside its home and the variable that
     /// points the engine at it, for engines that read one.
     pub config: Option<(&'static str, &'static str)>,
     /// Directory name under the old `toolchain/`.
+    #[cfg(feature = "legacy-import")]
     pub legacy_dir: &'static str,
 }
 
@@ -74,14 +79,6 @@ pub(crate) enum Archive {
     /// The download is the executable.
     Binary,
     TarGz,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no engine ships a zip we install yet; Cursor's Windows build will"
-        )
-    )]
-    Zip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,8 +204,12 @@ pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
             },
             minimum: Some("2.1.220"),
             login: &["auth", "login"],
+            device_login: Some(&["auth", "login"]),
+            accepts_login_code: true,
+            logout: Some(&["auth", "logout"]),
             models: ModelSource::ClaudeCatalog,
             config: Some((".claude", "CLAUDE_CONFIG_DIR")),
+            #[cfg(feature = "legacy-import")]
             legacy_dir: "claude",
         },
         EngineId::Codex => {
@@ -262,8 +263,12 @@ pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 },
                 minimum: Some("0.142.5"),
                 login: &["login"],
+                device_login: Some(&["login", "--device-auth"]),
+                accepts_login_code: false,
+                logout: Some(&["logout"]),
                 models: ModelSource::CodexAppServer,
                 config: Some((".codex", "CODEX_HOME")),
+                #[cfg(feature = "legacy-import")]
                 legacy_dir: "codex",
             }
         }
@@ -299,8 +304,12 @@ pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 },
                 minimum: Some("0.0.0-beta-17778"),
                 login: &["auth", "login"],
+                device_login: None,
+                accepts_login_code: false,
+                logout: None,
                 models: ModelSource::OpenCodeCli,
                 config: None,
+                #[cfg(feature = "legacy-import")]
                 legacy_dir: "opencode2",
             }
         }
@@ -345,8 +354,12 @@ pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
             },
             minimum: None,
             login: &["login"],
+            device_login: Some(&["login", "--device-auth"]),
+            accepts_login_code: false,
+            logout: Some(&["logout"]),
             models: ModelSource::CliLines(&["--no-auto-update", "models"]),
             config: None,
+            #[cfg(feature = "legacy-import")]
             legacy_dir: "grok",
         },
         EngineId::Cursor => {
@@ -371,8 +384,12 @@ pub(crate) const fn spec(engine: EngineId, platform: Platform) -> Spec {
                 },
                 minimum: None,
                 login: &["login"],
+                device_login: Some(&["login"]),
+                accepts_login_code: false,
+                logout: Some(&["logout"]),
                 models: ModelSource::CliLines(&["models"]),
                 config: None,
+                #[cfg(feature = "legacy-import")]
                 legacy_dir: "cursor",
             }
         }
@@ -384,45 +401,106 @@ pub(crate) fn host_spec(engine: EngineId) -> Spec {
     spec(engine, Platform::current())
 }
 
-/// Compares versions run by run: digit runs numerically, the rest as text.
-/// Good enough for `2.1.296`, `0.0.0-beta-19271` and `2026.10.01-e373342`.
+/// SemVer precedence for providers using SemVer; Cursor releases use an
+/// ISO date followed by a commit hash, ordered by the fixed-width date.
 pub(crate) fn compare_versions(left: &str, right: &str) -> Ordering {
-    let mut left = runs(left);
-    let mut right = runs(right);
-    loop {
-        match (left.next(), right.next()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(a), Some(b)) => {
-                let order = match (a.parse::<u128>(), b.parse::<u128>()) {
-                    (Ok(a), Ok(b)) => a.cmp(&b),
-                    _ => a.cmp(b),
-                };
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
+    let parse = |value: &str| {
+        // OpenCode's beta channel uses a single `beta-N` identifier for its
+        // increasing build counter. Make that counter numeric for precedence.
+        if let Some(build) = value
+            .strip_prefix("0.0.0-beta-")
+            .filter(|build| build.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            semver::Version::parse(&format!("0.0.0-beta.{build}"))
+        } else {
+            semver::Version::parse(value)
         }
+    };
+    match (parse(left), parse(right)) {
+        (Ok(left), Ok(right)) => left.cmp_precedence(&right),
+        _ => left.cmp(right),
     }
-}
-
-fn runs(value: &str) -> impl Iterator<Item = &str> {
-    let mut rest = value;
-    std::iter::from_fn(move || {
-        let first = rest.chars().next()?;
-        let digit = first.is_ascii_digit();
-        let end = rest
-            .find(|c: char| c.is_ascii_digit() != digit)
-            .unwrap_or(rest.len());
-        let (run, tail) = rest.split_at(end);
-        rest = tail;
-        Some(run)
-    })
 }
 
 pub(crate) fn meets_minimum(engine: EngineId, version: &str) -> bool {
     host_spec(engine)
         .minimum
         .is_none_or(|minimum| compare_versions(version, minimum) != Ordering::Less)
+}
+
+/// Managed home and provider tool environment shared by probes, login and runs.
+pub(crate) fn environment(
+    engine: EngineId,
+    binary: Option<&std::path::Path>,
+    home: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut env = vec![("HOME".into(), home.display().to_string())];
+    if cfg!(windows) {
+        env.extend([
+            ("USERPROFILE".into(), home.display().to_string()),
+            (
+                "APPDATA".into(),
+                home.join("AppData/Roaming").display().to_string(),
+            ),
+            (
+                "LOCALAPPDATA".into(),
+                home.join("AppData/Local").display().to_string(),
+            ),
+        ]);
+    }
+    let spec = host_spec(engine);
+    if let Some((directory, variable)) = spec.config {
+        env.push((variable.into(), home.join(directory).display().to_string()));
+    }
+    if engine == EngineId::Claude {
+        env.push(("DISABLE_UPDATES".into(), "1".into()));
+    }
+    if engine == EngineId::OpenCode {
+        env.extend(
+            [
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_DATA_HOME", "data"),
+                ("XDG_CACHE_HOME", "cache"),
+                ("XDG_STATE_HOME", "state"),
+            ]
+            .map(|(key, directory)| (key.into(), home.join(directory).display().to_string())),
+        );
+    }
+    if let (Some(artifact), Some(binary)) = (spec.artifact, binary) {
+        let mut root = binary;
+        for _ in std::path::Path::new(artifact.entry).components() {
+            let Some(parent) = root.parent() else {
+                return env;
+            };
+            root = parent;
+        }
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let directories = artifact
+            .path_dirs
+            .iter()
+            .map(|directory| root.join(directory));
+        if let Ok(path) = std::env::join_paths(directories.chain(std::env::split_paths(&inherited)))
+        {
+            env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+        }
+    }
+    env
+}
+
+#[cfg(test)]
+mod reform_tests {
+    use super::*;
+    #[test]
+    fn published_version_precedence_matches_provider_formats() {
+        assert_eq!(compare_versions("1.0.0", "1.0.0-beta.2"), Ordering::Greater);
+        assert_eq!(compare_versions("1.0.0+one", "1.0.0+two"), Ordering::Equal);
+        assert_eq!(
+            compare_versions("0.0.0-beta-19271", "0.0.0-beta-19270"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("2026.10.01-e373342", "2026.09.30-acde"),
+            Ordering::Greater
+        );
+    }
 }

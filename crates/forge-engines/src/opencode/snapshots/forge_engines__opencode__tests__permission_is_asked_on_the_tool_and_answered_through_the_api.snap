@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 132
 expression: "replay(\"permission\")"
 ---
 [
@@ -15,7 +16,9 @@ expression: "replay(\"permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -33,7 +36,9 @@ expression: "replay(\"permission\")"
             status: AwaitingUser,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -43,7 +48,9 @@ expression: "replay(\"permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: None,
                         },
                         reason: None,
@@ -65,7 +72,9 @@ expression: "replay(\"permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -75,7 +84,9 @@ expression: "replay(\"permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: None,
                         },
                         reason: None,
@@ -109,16 +120,19 @@ expression: "replay(\"permission\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
                 title: None,
                 output: Some(
                     Output {
-                        head: "(no output)\nCommand exited with code 0.",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "(no output)\nCommand exited with code 0.",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -127,7 +141,9 @@ expression: "replay(\"permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: None,
                         },
                         reason: None,
@@ -170,7 +186,9 @@ expression: "replay(\"permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -185,14 +203,12 @@ expression: "replay(\"permission\")"
         },
     ),
     Event(
-        Item {
-            key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
-            parent: None,
-            status: Done,
-            kind: AssistantMessage {
-                text: "0",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_129d63eb7001kh1ctX1lBsF7l1/text-0",
             },
+            text: "0",
+            append: false,
         },
     ),
     Event(
@@ -221,7 +237,9 @@ expression: "replay(\"permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "0",
+                text: Inline(
+                    "0",
+                ),
                 phase: Final,
             },
         },

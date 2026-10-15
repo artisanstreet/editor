@@ -5,6 +5,7 @@
 use crate::Settings;
 use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
+use artisan_api::{McpMutation, McpServer};
 use editor_core::{HostData, HostId, Screen, SettingsPage};
 use editor_ui::button::ButtonVariant;
 use editor_ui::text_editor::TextEditor;
@@ -13,35 +14,20 @@ use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, div, px,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 pub(crate) const MCP_SERVERS_KEY: &str = "mcp_servers";
 /// The Skills section's way to the Marketplace.
 pub(crate) const MANAGE_SKILLS_SELECTOR: &str = "settings-manage-skills";
 
-/// One entry of the `mcp_servers` setting: a stdio server (`command`,
-/// `args`, `env`) or, with `url`, an HTTP one. Mirrors Forge's `McpServer`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct McpServer {
-    pub name: String,
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
-
 pub(crate) struct ExtensionsForm {
     /// The host the form was opened for.
     host: Option<HostId>,
     /// `Some(None)` adds a server, `Some(Some(name))` edits that one.
-    mcp_editing: Option<Option<String>>,
+    mcp_editing: Option<Option<McpServer>>,
+    generation: u64,
     mcp_name: Entity<TextEditor>,
     mcp_command: Entity<TextEditor>,
+    mcp_args: Entity<TextEditor>,
     mcp_url: Entity<TextEditor>,
     mcp_env: Entity<TextEditor>,
     mcp_saving: bool,
@@ -56,10 +42,12 @@ impl ExtensionsForm {
         Self {
             host: None,
             mcp_editing: None,
+            generation: 0,
             mcp_name: line("github", cx),
-            mcp_command: line("npx -y @modelcontextprotocol/server-github", cx),
+            mcp_command: line("npx", cx),
+            mcp_args: line("[\"-y\", \"@modelcontextprotocol/server-github\"]", cx),
             mcp_url: line("https://example.com/mcp", cx),
-            mcp_env: line("GITHUB_TOKEN=… OTHER=…", cx),
+            mcp_env: line("{\"GITHUB_TOKEN\": \"…\"}", cx),
             mcp_saving: false,
             mcp_error: None,
         }
@@ -72,84 +60,65 @@ impl ExtensionsForm {
             return;
         }
         self.host = id;
+        self.generation += 1;
+        self.mcp_saving = false;
         self.mcp_editing = None;
         self.mcp_error = None;
     }
 }
 
-fn mcp_servers(host: &HostData) -> Vec<McpServer> {
+fn mcp_servers(host: &HostData) -> Result<Vec<McpServer>, String> {
     host.setting(MCP_SERVERS_KEY)
-        .and_then(|value| serde_json::from_value(value.clone()).ok())
-        .unwrap_or_default()
+        .map_or(Ok(Vec::new()), |value| {
+            serde_json::from_value(value.clone())
+                .map_err(|error| format!("Couldn't read MCP servers: {error}"))
+        })
 }
 
 impl Settings {
-    fn open_mcp_form(&mut self, server: Option<McpServer>, cx: &mut Context<Self>) {
-        let server = server.map_or((None, McpServer::default()), |server| {
-            (Some(server.name.clone()), server)
-        });
-        let (original, server) = server;
-        let command = join_command(
-            std::iter::once(&server.command)
-                .filter(|c| !c.is_empty())
-                .chain(&server.args),
-        );
-        let env = join_command(
-            server
-                .env
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .iter(),
-        );
-        let form = &self.extensions;
+    fn open_mcp_form(&mut self, previous: Option<McpServer>, cx: &mut Context<Self>) {
+        let server = previous.clone().unwrap_or_default();
+        let args = serde_json::to_string(&server.args).expect("string array serializes");
+        let env = serde_json::to_string(&server.env).expect("string map serializes");
+        let form = &mut self.extensions;
+        form.generation += 1;
+        form.mcp_saving = false;
         for (editor, text) in [
             (&form.mcp_name, server.name.as_str()),
-            (&form.mcp_command, command.as_str()),
+            (&form.mcp_command, server.command.as_str()),
+            (&form.mcp_args, args.as_str()),
             (&form.mcp_url, server.url.as_deref().unwrap_or_default()),
             (&form.mcp_env, env.as_str()),
         ] {
             editor.update(cx, |editor, cx| editor.set_text(text, cx));
         }
-        self.extensions.mcp_editing = Some(original);
-        self.extensions.mcp_error = None;
+        form.mcp_editing = Some(previous);
+        form.mcp_error = None;
         cx.notify();
     }
 
     fn save_mcp_form(&mut self, cx: &mut Context<Self>) {
-        let Some(original) = self.extensions.mcp_editing.clone() else {
+        if self.extensions.mcp_saving {
+            return;
+        }
+        let Some(previous) = self.extensions.mcp_editing.clone() else {
             return;
         };
         let Some(host) = self.selected_host(cx) else {
             return;
         };
         let form = &self.extensions;
-        let read = |editor: &Entity<TextEditor>| editor.read(cx).text().trim().to_owned();
-        let server = parse_server(
+        let read = |editor: &Entity<TextEditor>| editor.read(cx).text().to_owned();
+        match parse_server(
             read(&form.mcp_name),
-            &read(&form.mcp_command),
+            read(&form.mcp_command),
+            &read(&form.mcp_args),
             read(&form.mcp_url),
             &read(&form.mcp_env),
-        );
-        let mut servers = mcp_servers(host.read(cx));
-        let result = server.and_then(|server| {
-            if servers
-                .iter()
-                .any(|known| known.name == server.name && Some(&known.name) != original.as_ref())
-            {
-                return Err(format!("There is already a server called {}.", server.name));
+        ) {
+            Ok(server) => {
+                self.mutate_mcp(&host, McpMutation::Upsert { previous, server }, true, cx)
             }
-            match original
-                .as_ref()
-                .and_then(|name| servers.iter().position(|known| &known.name == name))
-            {
-                Some(index) => servers[index] = server,
-                None => servers.push(server),
-            }
-            Ok(servers)
-        });
-        match result {
-            Ok(servers) => self.store_mcp_servers(&host, servers, true, cx),
             Err(error) => {
                 self.extensions.mcp_error = Some(error);
                 cx.notify();
@@ -157,45 +126,50 @@ impl Settings {
         }
     }
 
-    fn remove_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
+    fn remove_mcp(&mut self, previous: McpServer, cx: &mut Context<Self>) {
+        if self.extensions.mcp_saving {
+            return;
+        }
         let Some(host) = self.selected_host(cx) else {
             return;
         };
-        let mut servers = mcp_servers(host.read(cx));
-        servers.retain(|server| server.name != name);
-        self.store_mcp_servers(&host, servers, false, cx);
+        self.mutate_mcp(&host, McpMutation::Remove { previous }, false, cx);
     }
 
-    fn store_mcp_servers(
+    fn mutate_mcp(
         &mut self,
         host: &Entity<HostData>,
-        servers: Vec<McpServer>,
+        mutation: McpMutation,
         close_form: bool,
         cx: &mut Context<Self>,
     ) {
-        let client = host.read(cx).client.clone();
-        let value = match serde_json::to_value(&servers) {
-            Ok(value) => value,
-            Err(error) => {
-                self.extensions.mcp_error =
-                    Some(format!("Couldn't encode the MCP servers: {error}"));
-                cx.notify();
-                return;
-            }
-        };
-        self.extensions.mcp_saving = true;
-        self.extensions.mcp_error = None;
+        let data = host.read(cx);
+        let (client, host_id) = (data.client.clone(), data.id.clone());
+        let form = &mut self.extensions;
+        form.generation += 1;
+        let generation = form.generation;
+        form.mcp_saving = true;
+        form.mcp_error = None;
         cx.notify();
+        #[cfg(test)]
+        let completion_gate = self.completion_gate.clone();
         cx.spawn(async move |this, cx| {
-            let result = client.set_setting(MCP_SERVERS_KEY, &value).await;
+            let result = client.mutate_mcp(&mutation).await;
+            #[cfg(test)]
+            if let Some(gate) = completion_gate {
+                gate.wait().await;
+            }
             let _ = this.update(cx, |this, cx| {
-                this.extensions.mcp_saving = false;
+                let form = &mut this.extensions;
+                if form.host.as_ref() != Some(&host_id) || form.generation != generation {
+                    return;
+                }
+                form.mcp_saving = false;
                 match result {
-                    Ok(()) if close_form => this.extensions.mcp_editing = None,
-                    Ok(()) => {}
+                    Ok(_) if close_form => form.mcp_editing = None,
+                    Ok(_) => {}
                     Err(error) => {
-                        this.extensions.mcp_error =
-                            Some(format!("Couldn't save the MCP servers: {error:#}"));
+                        form.mcp_error = Some(format!("Couldn't save MCP servers: {error:#}"))
                     }
                 }
                 cx.notify();
@@ -205,70 +179,43 @@ impl Settings {
     }
 }
 
-fn parse_server(name: String, command: &str, url: String, env: &str) -> Result<McpServer, String> {
+fn parse_server(
+    name: String,
+    command: String,
+    args: &str,
+    url: String,
+    env: &str,
+) -> Result<McpServer, String> {
+    let name = name.trim().to_owned();
+    let url = url.trim().to_owned();
     if name.is_empty() {
-        return Err("Give the server a name.".to_owned());
+        return Err("Give the server a name.".into());
     }
-    let mut parts = split_command(command).into_iter();
-    let program = parts.next().unwrap_or_default();
-    if program.is_empty() && url.is_empty() {
-        return Err(format!("{name} needs a command to run or a URL."));
+    if command.is_empty() == url.is_empty() {
+        return Err("Specify either a program or an HTTP URL.".into());
     }
-    if !program.is_empty() && !url.is_empty() {
-        return Err(format!("{name} has both a command and a URL; keep one."));
-    }
-    let mut variables = BTreeMap::new();
-    for pair in split_command(env) {
-        let Some((key, value)) = pair.split_once('=') else {
-            return Err(format!("{pair:?} in the environment isn't KEY=value."));
-        };
-        variables.insert(key.to_owned(), value.to_owned());
+    let args: Vec<String> = if args.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str(args)
+            .map_err(|error| format!("Arguments must be a JSON array of strings: {error}"))?
+    };
+    let env: std::collections::BTreeMap<String, String> = if env.trim().is_empty() {
+        Default::default()
+    } else {
+        serde_json::from_str(env)
+            .map_err(|error| format!("Environment must be a JSON object of strings: {error}"))?
+    };
+    if !url.is_empty() && (!args.is_empty() || !env.is_empty()) {
+        return Err("HTTP servers do not take process arguments or environment variables.".into());
     }
     Ok(McpServer {
         name,
-        command: program,
-        args: parts.collect(),
-        env: variables,
+        command,
+        args,
+        env,
         url: (!url.is_empty()).then_some(url),
     })
-}
-
-/// Splits on whitespace outside double quotes.
-fn split_command(line: &str) -> Vec<String> {
-    let (mut parts, mut current, mut quoted, mut started) =
-        (Vec::new(), String::new(), false, false);
-    for c in line.chars() {
-        match c {
-            '"' => (quoted, started) = (!quoted, true),
-            c if c.is_whitespace() && !quoted => {
-                if started {
-                    parts.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            c => {
-                current.push(c);
-                started = true;
-            }
-        }
-    }
-    if started {
-        parts.push(current);
-    }
-    parts
-}
-
-fn join_command<'a>(parts: impl Iterator<Item = &'a String>) -> String {
-    parts
-        .map(|part| {
-            if part.is_empty() || part.contains(char::is_whitespace) {
-                format!("\"{part}\"")
-            } else {
-                part.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub(crate) fn render(
@@ -325,12 +272,19 @@ fn mcp_section(
     let form = &settings.extensions;
     let servers = mcp_servers(host.read(cx));
     let mut rows: Vec<AnyElement> = Vec::new();
-    for server in servers {
+    if let Err(error) = &servers {
+        rows.push(error_text(theme, error.clone()).into_any_element());
+    }
+    for server in servers.unwrap_or_default() {
         let summary = match &server.url {
             Some(url) => url.clone(),
-            None => join_command(std::iter::once(&server.command).chain(&server.args)),
+            None => format!(
+                "{} {}",
+                server.command,
+                serde_json::to_string(&server.args).expect("string array serializes")
+            ),
         };
-        let (edit, remove) = (server.clone(), server.name.clone());
+        let (edit, remove) = (server.clone(), server.clone());
         let controls = div()
             .flex()
             .flex_row()
@@ -347,7 +301,7 @@ fn mcp_section(
                 "Remove",
                 ButtonVariant::Ghost,
                 form.mcp_saving,
-                cx.listener(move |this, _, _, cx| this.remove_mcp(&remove, cx)),
+                cx.listener(move |this, _, _, cx| this.remove_mcp(remove.clone(), cx)),
             ));
         rows.push(
             row(
@@ -390,18 +344,17 @@ fn mcp_section(
             cx.listener(|this, _, _, cx| this.open_mcp_form(None, cx)),
         )
     });
-    let mut block = section_shell(
+    if let Some(add) = add {
+        body = body.child(div().mt(px(8.0)).child(add));
+    }
+    section_shell(
         theme,
         "mcp",
         "MCP servers",
         Some("Tools every engine on this host can call."),
         None,
         body,
-    );
-    if let Some(add) = add {
-        block = block.child(div().mt(px(8.0)).child(add));
-    }
-    block
+    )
 }
 
 fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> AnyElement {
@@ -436,6 +389,8 @@ fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings
         ButtonVariant::Ghost,
         false,
         cx.listener(|this, _, _, cx| {
+            this.extensions.generation += 1;
+            this.extensions.mcp_saving = false;
             this.extensions.mcp_editing = None;
             this.extensions.mcp_error = None;
             cx.notify();
@@ -448,14 +403,12 @@ fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings
         .py(px(14.0))
         .child(field("Name", &form.mcp_name))
         .child(field(
-            "Command (with arguments; quote ones with spaces)",
+            "Program (literal path or executable name)",
             &form.mcp_command,
         ))
+        .child(field("Arguments (JSON array)", &form.mcp_args))
         .child(field("Or URL (HTTP server)", &form.mcp_url))
-        .child(field(
-            "Environment (KEY=value, space-separated)",
-            &form.mcp_env,
-        ))
+        .child(field("Environment (JSON object)", &form.mcp_env))
         .child(
             div()
                 .flex()
@@ -465,4 +418,75 @@ fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings
                 .child(cancel),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_server;
+    #[test]
+    fn structured_fields_preserve_literal_arguments() {
+        let server = parse_server(
+            "test".into(),
+            r"C:\Program Files\server.exe".into(),
+            r#"["a b","\"quoted\"","", "line\nnext"]"#,
+            String::new(),
+            r#"{"TOKEN":"a=b \"quoted\""}"#,
+        )
+        .unwrap();
+        assert_eq!(server.command, r"C:\Program Files\server.exe");
+        assert_eq!(server.args, ["a b", "\"quoted\"", "", "line\nnext"]);
+        assert_eq!(server.env["TOKEN"], "a=b \"quoted\"");
+    }
+}
+
+#[cfg(test)]
+mod delayed_mutation_tests {
+    use super::*;
+    use crate::tests::{CompletionGate, SettingsFixture, finish_gate, wait_gate};
+    use gpui::TestAppContext;
+    #[gpui::test]
+    fn completed_mcp_save_cannot_close_reopened_form_or_new_host_form(cx: &mut TestAppContext) {
+        let fixture = SettingsFixture::new(cx);
+        let (settings, cx) = fixture.open(cx, SettingsPage::Extensions);
+        for switch_host in [false, true] {
+            let gate = CompletionGate::new();
+            settings.update(cx, |settings, cx| {
+                settings.completion_gate = Some(gate.clone());
+                let host = settings.selected_host(cx).unwrap();
+                settings.mutate_mcp(
+                    &host,
+                    McpMutation::Remove {
+                        previous: McpServer {
+                            name: "nonexistent-test-server".into(),
+                            ..McpServer::default()
+                        },
+                    },
+                    true,
+                    cx,
+                );
+            });
+            wait_gate(cx, &gate);
+            if switch_host {
+                fixture.select(1, SettingsPage::Extensions, cx);
+            }
+            settings.update(cx, |settings, cx| {
+                settings.open_mcp_form(None, cx);
+                settings
+                    .extensions
+                    .mcp_name
+                    .update(cx, |editor, cx| editor.set_text("new form", cx));
+                settings.extensions.mcp_error = Some("new form owns this error".into());
+            });
+            finish_gate(cx, &gate);
+            settings.read_with(cx, |settings, cx| {
+                assert!(settings.extensions.mcp_editing.is_some());
+                assert_eq!(settings.extensions.mcp_name.read(cx).text(), "new form");
+                assert_eq!(
+                    settings.extensions.mcp_error.as_deref(),
+                    Some("new form owns this error")
+                );
+                assert!(!settings.extensions.mcp_saving);
+            });
+        }
+    }
 }

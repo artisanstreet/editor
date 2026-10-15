@@ -4,11 +4,10 @@ use anyhow::{Context, Result, anyhow};
 use artisan_api::{BlobHash, BlobRef};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
@@ -46,47 +45,86 @@ pub(crate) fn path(dir: &Path, hash: &BlobHash) -> Option<PathBuf> {
         .then(|| dir.join(&hash.as_str()[..2]).join(hash.as_str()))
 }
 
+/// Canonical encoded image admission, also used to validate historical pending inputs.
+pub(crate) fn input_images(dir: &Path, hashes: &[BlobHash]) -> Result<(Vec<PathBuf>, u64)> {
+    if hashes.len() > 128 {
+        return Err(
+            crate::SendRejected::Payload("message exceeds 128 image references".into()).into(),
+        );
+    }
+    let mut paths = Vec::with_capacity(hashes.len());
+    let mut bytes = 0u64;
+    for hash in hashes {
+        let file = path(dir, hash).ok_or_else(|| crate::SendRejected::MissingBlob(hash.clone()))?;
+        let metadata = fs::metadata(&file).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::Error::from(crate::SendRejected::MissingBlob(hash.clone()))
+            } else {
+                anyhow::Error::from(error)
+                    .context(format!("read image metadata {}", file.display()))
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(crate::SendRejected::MissingBlob(hash.clone()).into());
+        }
+        if metadata.len() > MAX_BLOB_BYTES as u64 {
+            return Err(crate::SendRejected::Payload("image blob exceeds 32 MiB".into()).into());
+        }
+        bytes = bytes.saturating_add(metadata.len());
+        if bytes > 128 * 1024 * 1024 {
+            return Err(
+                crate::SendRejected::Payload("message images exceed 128 MiB".into()).into(),
+            );
+        }
+        paths.push(file);
+    }
+    Ok((paths, bytes))
+}
+
 pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
     }
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+    if !is_webp(bytes) {
         return Err(BlobRejected::NotWebp.into());
     }
-    let hash = BlobHash(Sha256::digest(bytes).iter().fold(
-        String::with_capacity(64),
-        |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        },
-    ));
+    use image::ImageDecoder as _;
+    let mut decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|_| BlobRejected::NotWebp)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    decoder
+        .set_limits(limits)
+        .map_err(|_| BlobRejected::NotWebp)?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > 16_777_216 {
+        return Err(BlobRejected::NotWebp.into());
+    }
+    let hash = BlobHash(hex::encode(Sha256::digest(bytes)));
     let blob_ref = BlobRef {
         hash,
         bytes: bytes.len() as u64,
     };
     let target = path(dir, &blob_ref.hash).context("hash a blob")?;
     if target.exists() {
+        // Reusing a previously unreferenced blob starts its upload grace period again.
+        fs::File::open(&target)?.set_modified(SystemTime::now())?;
         return Ok(blob_ref);
     }
     let shard = target.parent().context("blob shard directory")?;
     fs::create_dir_all(shard).with_context(|| format!("create {}", shard.display()))?;
 
-    let temp = shard.join(format!(
-        "{}.{}-{}.tmp",
-        blob_ref.hash,
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
-    let written = (|| {
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, &target)
-    })();
-    if let Err(error) = written {
-        let _ = fs::remove_file(&temp);
-        return Err(error).with_context(|| format!("write blob {}", target.display()));
+    let mut temporary = tempfile::NamedTempFile::new_in(shard)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(&target) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("write blob {}", target.display()));
+        }
     }
     Ok(blob_ref)
 }
@@ -119,28 +157,6 @@ pub(crate) fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
     Ok(removed)
 }
 
-/// Every string in `value` that is a blob hash.
-pub(crate) fn collect_hashes(value: &serde_json::Value, hashes: &mut HashSet<String>) {
-    match value {
-        serde_json::Value::String(text) => {
-            if text.len() == 64 && BlobHash(text.clone()).is_valid() {
-                hashes.insert(text.clone());
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_hashes(value, hashes);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for value in map.values() {
-                collect_hashes(value, hashes);
-            }
-        }
-        _ => {}
-    }
-}
-
 pub(crate) fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
 }
@@ -148,10 +164,27 @@ pub(crate) fn is_webp(bytes: &[u8]) -> bool {
 /// WebP stays as it is (re-encoding only adds loss); anything else is
 /// decoded and encoded lossy at quality 85 with sharp YUV.
 pub(crate) fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(BlobRejected::TooLarge { bytes: bytes.len() }.into());
+    }
+    use image::ImageDecoder as _;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let decoder = reader.into_decoder().context("read image dimensions")?;
+    let (width, height) = decoder.dimensions();
+    anyhow::ensure!(
+        u64::from(width) * u64::from(height) <= 16_777_216,
+        "image exceeds 16 megapixels"
+    );
     if is_webp(&bytes) {
+        drop(decoder);
         return Ok(bytes);
     }
-    let image = image::load_from_memory(&bytes).context("decode image")?;
+    let image = image::DynamicImage::from_decoder(decoder).context("decode image")?;
     let (width, height) = (image.width(), image.height());
     let mut config = webp::WebPConfig::new().map_err(|()| anyhow!("init the WebP encoder"))?;
     config.quality = WEBP_QUALITY;

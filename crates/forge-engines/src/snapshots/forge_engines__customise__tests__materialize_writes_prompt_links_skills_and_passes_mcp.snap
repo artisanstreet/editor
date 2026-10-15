@@ -41,12 +41,7 @@ expression: report
                 ],
             ),
         ),
-        [
-            "-c",
-            "mcp_servers.files={command=\"npx\",args=[\"-y\",\"@mcp/files\"],env={\"ROOT\"=\"/srv \\\"x\\\"\"}}",
-            "-c",
-            "mcp_servers.docs_web={url=\"https://mcp.example/docs\"}",
-        ],
+        [],
         [],
         0,
         None,

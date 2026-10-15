@@ -10,7 +10,6 @@ use super::decode::{AcpDecoder, needs_sign_in};
 use crate::EngineEvent;
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::path::Path;
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -30,28 +29,43 @@ fn replay(profile: Profile, case: &str) -> Vec<Step> {
         Profile::Grok => "grok",
         Profile::Cursor => "cursor",
     };
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/{engine}/{case}.jsonl"));
-    let transcript = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let transcript = crate::transcript_tests::read(engine, case);
     let mut decoder = AcpDecoder::new(profile);
     let mut steps = Vec::new();
+    // Older recordings identify the approval by the native Tool target.
+    let mut approval_keys = std::collections::HashMap::new();
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
         let entry: Value =
             serde_json::from_str(line).unwrap_or_else(|error| panic!("{case}: {error}: {line}"));
         let events = match entry["dir"].as_str() {
-            Some("in") => decoder.feed(&entry["line"].to_string()),
+            Some("in") => decoder.feed(&entry["line"].to_string()).unwrap(),
             Some("out") => {
                 decoder.sent(&entry["line"]);
                 Vec::new()
             }
             Some("answer") => {
                 let answer = serde_json::from_value(entry["answer"].clone()).expect("answer");
-                decoder.answer(entry["key"].as_str().expect("key"), &answer)
+                let recorded = entry["key"].as_str().expect("key");
+                let key = approval_keys
+                    .get(recorded)
+                    .map(String::as_str)
+                    .unwrap_or(recorded);
+                decoder.answer(key, &answer)
             }
             Some("cancel") => decoder.cancel_pending(),
             _ => Vec::new(),
         };
+        for event in &events {
+            if let EngineEvent::Approval {
+                key,
+                target: Some(target),
+                status: artisan_api::Status::AwaitingUser,
+                ..
+            } = event
+            {
+                approval_keys.insert(target.clone(), key.clone());
+            }
+        }
         steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
         steps.extend(
             decoder

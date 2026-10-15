@@ -5,22 +5,20 @@
 
 use std::ops::Range;
 
-use crate::text_navigation::{
-    WordBehavior, caret_index_for_position, next_word_position, previous_word_position,
-};
+use crate::text_navigation::{WordBehavior, caret_index_for_position};
 use gpui::{
     App, ClipboardEntry, ClipboardItem, Context, KeyBinding, Pixels, Point, Window, point, px,
 };
 
 use super::text::{
     floor_char_boundary, logical_column, logical_line_end, logical_line_start,
-    logical_vertical_target, next_character_boundary, previous_character_boundary, splice,
-    truncate_to_bytes, utf16_offset_to_utf8, utf16_range_to_utf8, valid_bounds, valid_point,
+    logical_vertical_target, next_character_boundary, previous_character_boundary,
+    utf16_offset_to_utf8, utf16_range_to_utf8, valid_bounds, valid_point,
 };
 use super::{
     Backspace, BackspaceWord, Copy, Cut, Delete, DeleteWord, Dismiss, DocumentEnd, DocumentHome,
-    Down, End, Home, InsertLineBreak, InsertNewline, InsertTab, Left, ListKey, Mode, Paste,
-    PastedFiles, Redo, Right, SelectAll, SelectDocumentEnd, SelectDocumentHome, SelectDown,
+    Down, End, HISTORY_BYTES, Home, InsertLineBreak, InsertNewline, InsertTab, Left, ListKey, Mode,
+    Paste, PastedFiles, Redo, Right, SelectAll, SelectDocumentEnd, SelectDocumentHome, SelectDown,
     SelectEnd, SelectHome, SelectLeft, SelectRight, SelectUp, SelectWordLeft, SelectWordRight,
     Snapshot, TAB_TEXT, TEXT_EDITOR_KEY_CONTEXT, TextEditor, TextEditorEvent, UNDO_LIMIT, Undo, Up,
     WordLeft, WordRight,
@@ -97,9 +95,7 @@ impl TextEditor {
 
     /// Replaces `range` with `replacement` as one user edit.
     ///
-    /// The replacement is truncated at a character boundary so the text
-    /// stays within the byte cap; an edit where nothing fits is
-    /// refused. `marked_selection` (UTF-16, relative to the replacement)
+    /// Reject the whole replacement when it exceeds the shared byte cap. `marked_selection` (UTF-16, relative to the replacement)
     /// marks the inserted text as an IME composition.
     pub(super) fn replace_range(
         &mut self,
@@ -122,15 +118,16 @@ impl TextEditor {
                 replacement
             };
         let retained = self.text.len().saturating_sub(range.len());
-        let fitted = truncate_to_bytes(replacement, self.max_bytes().saturating_sub(retained));
-        if fitted.is_empty() && !replacement.is_empty() {
+        if replacement.len() > self.max_bytes().saturating_sub(retained) {
+            self.limit_notice = true;
+            cx.notify();
             return;
         }
-        // A truncated composition is committed rather than left marked.
-        let marked_selection = marked_selection.filter(|_| fitted.len() == replacement.len());
-        let Some(next) = splice(&self.text, range.clone(), fitted) else {
+        self.limit_notice = false;
+        let fitted = replacement;
+        if range.start > range.end || self.text.get(range.clone()).is_none() {
             return;
-        };
+        }
         let selected_offsets = match marked_selection.clone() {
             Some(selected) if selected.start <= selected.end => {
                 let (Some(start), Some(end)) = (
@@ -144,7 +141,7 @@ impl TextEditor {
             Some(_) => return,
             None => None,
         };
-        let changed = next != self.text;
+        let changed = self.text.get(range.clone()) != Some(fitted);
         let replacement_end = range.start + fitted.len();
         let single_character = {
             let mut characters = fitted.chars();
@@ -162,8 +159,9 @@ impl TextEditor {
             self.redo.clear();
         }
 
-        self.text = next;
+        self.text.replace_range(range.clone(), fitted);
         self.shared_text = None;
+        self.word_boundaries = None;
         self.tokens = None;
         self.layout = None;
         self.painted_bounds = None;
@@ -191,19 +189,38 @@ impl TextEditor {
     }
 
     fn push_undo(&mut self) {
-        if self.undo.len() >= UNDO_LIMIT {
-            self.undo.remove(0);
-        }
         self.undo.push(Snapshot {
             text: self.text.clone(),
             selection: self.selection.clone(),
         });
+        self.bound_history();
+    }
+
+    fn bound_history(&mut self) {
+        let mut bytes = self
+            .undo
+            .iter()
+            .chain(&self.redo)
+            .map(|snapshot| snapshot.text.len())
+            .sum::<usize>();
+        while self.undo.len() + self.redo.len() > UNDO_LIMIT || bytes > HISTORY_BYTES {
+            // Oldest undo, then furthest redo; never evict the next available operation first.
+            let removed = if !self.undo.is_empty() {
+                self.undo.remove(0)
+            } else if !self.redo.is_empty() {
+                self.redo.remove(0)
+            } else {
+                break;
+            };
+            bytes -= removed.text.len();
+        }
     }
 
     fn restore(&mut self, snapshot: Snapshot, cx: &mut Context<Self>) {
         self.text = snapshot.text;
         self.selection = snapshot.selection;
         self.shared_text = None;
+        self.word_boundaries = None;
         self.tokens = None;
         self.selection_reversed = false;
         self.selection_anchor = None;
@@ -226,6 +243,7 @@ impl TextEditor {
                 text: self.text.clone(),
                 selection: self.selection.clone(),
             });
+            self.bound_history();
             self.restore(snapshot, cx);
         }
     }
@@ -239,6 +257,7 @@ impl TextEditor {
                 text: self.text.clone(),
                 selection: self.selection.clone(),
             });
+            self.bound_history();
             self.restore(snapshot, cx);
         }
     }
@@ -468,9 +487,10 @@ impl TextEditor {
         }
         let cursor = self.cursor_offset();
         let target = if forward {
-            next_word_position(&self.text, cursor, WordBehavior::platform())
+            self.word_boundaries()
+                .next(&self.text, cursor, WordBehavior::platform())
         } else {
-            previous_word_position(&self.text, cursor)
+            self.word_boundaries().previous(&self.text, cursor)
         };
         if extend {
             self.extend_to(target, cx);
@@ -533,10 +553,15 @@ impl TextEditor {
                 let range = match (forward, word) {
                     (true, false) => cursor..next_character_boundary(&self.text, cursor),
                     (true, true) => {
-                        cursor..next_word_position(&self.text, cursor, WordBehavior::platform())
+                        cursor
+                            ..self.word_boundaries().next(
+                                &self.text,
+                                cursor,
+                                WordBehavior::platform(),
+                            )
                     }
                     (false, false) => previous_character_boundary(&self.text, cursor)..cursor,
-                    (false, true) => previous_word_position(&self.text, cursor)..cursor,
+                    (false, true) => self.word_boundaries().previous(&self.text, cursor)..cursor,
                 };
                 (!range.is_empty()).then_some(range)
             });
@@ -791,7 +816,12 @@ impl TextEditor {
         if unit == SelectionUnit::Character && shift {
             self.select_to(index);
         } else {
-            self.selection = unit.range_at(&self.text, index);
+            self.selection = if unit == SelectionUnit::Word {
+                self.word_boundaries()
+                    .selection_range(unit, &self.text, index, false)
+            } else {
+                unit.range_at(&self.text, index)
+            };
             self.selection_reversed = false;
             self.selection_anchor = None;
         }
@@ -812,9 +842,16 @@ impl TextEditor {
         if unit == SelectionUnit::Character {
             self.select_to(index);
         } else {
-            let (selection, reversed) = unit.extend(&self.text, &self.drag_origin.1, index);
-            self.selection = selection;
-            self.selection_reversed = reversed;
+            let target = self
+                .word_boundaries()
+                .selection_range(unit, &self.text, index, true);
+            let origin = &self.drag_origin.1;
+            self.selection_reversed = target.start < origin.start;
+            self.selection = if self.selection_reversed {
+                target.start..origin.end
+            } else {
+                origin.start..target.end.max(origin.end)
+            };
             self.selection_anchor = None;
         }
         if before != (self.selection.clone(), self.selection_reversed) {

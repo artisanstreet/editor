@@ -12,8 +12,9 @@ editor-ui = { path = "../editor-ui" }
 editor-composer = { path = "../editor-composer" }
 editor-core = { path = "../editor-core" }
 gpui.workspace = true
+ropey.workspace = true
 serde_json.workspace = true
-statig.workspace = true
+serde.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

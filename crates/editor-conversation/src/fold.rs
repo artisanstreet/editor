@@ -6,23 +6,61 @@ use crate::activity;
 use crate::phase::{self, Phase};
 use crate::thread::ThreadView;
 use artisan_api::{
-    EngineId, Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId,
-    RunStatus, Seq, Status, Timestamp,
+    Item, ItemId, ItemKind, LiveTarget, NoticeKind, Phase as TextPhase, Run, RunId, RunStatus, Seq,
+    Status, Timestamp,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher as _};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Row {
+    /// An original native visual ordinal within one semantic source leaf.
+    /// Only the admitted source window is registered with the native list.
+    Projected {
+        row: Box<Row>,
+        visual: usize,
+    },
     User(ItemId),
-    /// One stretch of a run's work. A steer splits a run's work into
-    /// segments; only the first carries the header.
+    /// One contiguous stretch of work. Explicit transcript rows split stretches;
+    /// steers stay inside their run's work. Only the first stretch carries its header.
     Work {
         run: Option<RunId>,
         segment: usize,
         entries: Vec<ItemId>,
+        /// A directly following checkpoint shares this work section's separator.
+        compaction: Option<ItemId>,
+    },
+    /// One independently mounted entry inside an expanded work section.
+    WorkEntry {
+        id: ItemId,
+        run: Option<RunId>,
+    },
+    /// A consecutive activity group's disclosure, never its descendants.
+    Chain {
+        ids: Vec<ItemId>,
+        run: Option<RunId>,
+    },
+    PlanStep {
+        id: ItemId,
+        step: usize,
+        run: Option<RunId>,
+    },
+    TextBlock {
+        id: ItemId,
+        section: TextSection,
+        block: usize,
+        run: Option<RunId>,
+    },
+    PlainBlock {
+        id: ItemId,
+        section: PlainSection,
+        block: usize,
     },
     Reply(ItemId),
+    ProseBlock {
+        id: ItemId,
+        block: usize,
+    },
     /// An approval or a question.
     Prompt(ItemId),
     Compaction(ItemId),
@@ -43,11 +81,162 @@ pub(crate) enum Row {
     AgentStatus(ItemId, bool),
 }
 
+/// Plain content stays literal while each native row has a bounded text body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PlainSection {
+    User,
+    AgentTask,
+    AgentMessage,
+    Error,
+    ImageCaption,
+}
+impl PlainSection {
+    pub(crate) fn slot(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::AgentTask => "agent-task",
+            Self::AgentMessage => "agent-message",
+            Self::Error => "error",
+            Self::ImageCaption => "caption",
+        }
+    }
+    pub(crate) fn order(self) -> u64 {
+        match self {
+            Self::User => 0,
+            Self::AgentTask => 1,
+            Self::AgentMessage => 2,
+            Self::Error => 3,
+            Self::ImageCaption => 4,
+        }
+    }
+    pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
+        if self == Self::AgentMessage {
+            if let ItemKind::Tool {
+                tool:
+                    artisan_api::ToolKind::AgentMessage {
+                        text: artisan_api::TextContent::Inline(text),
+                        summary: Some(summary),
+                        ..
+                    },
+                ..
+            } = &item.kind
+            {
+                if text.is_empty() {
+                    return Some(summary);
+                }
+            }
+        }
+        self.text(item)?.inline()
+    }
+    pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
+        match (self, &item.kind) {
+            (Self::User, ItemKind::UserMessage { text, .. }) => Some(text),
+            (
+                Self::AgentTask,
+                ItemKind::Agent {
+                    description,
+                    prompt,
+                    ..
+                },
+            ) => Some(prompt.as_ref().unwrap_or(description)),
+            (
+                Self::AgentMessage,
+                ItemKind::Tool {
+                    tool: artisan_api::ToolKind::AgentMessage { text, .. },
+                    ..
+                },
+            ) => Some(text),
+            (Self::Error, ItemKind::Error { message, .. }) => Some(message),
+            (Self::ImageCaption, ItemKind::Image { caption, .. }) => caption.as_ref(),
+            _ => None,
+        }
+    }
+}
+/// Agent task/result metadata shares one Item position, so its scoped presentation
+/// order surrounds child Items. Root transcript ordering remains canonical.
+pub(crate) fn selection_order(agent_scope: bool, position: u64, slot: &str) -> Vec<u64> {
+    if agent_scope {
+        vec![
+            match slot {
+                "agent-task" => 0,
+                "result-view" => 2,
+                _ => 1,
+            },
+            position,
+        ]
+    } else {
+        vec![position]
+    }
+}
+
+/// UTF-8 byte partitions preserve every source byte, including whitespace.
+/// Break at a nearby word/newline where possible; never measure arbitrary-length text.
+pub(crate) fn plain_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    const ROW_BYTES: usize = 1024;
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = text.floor_char_boundary((start + ROW_BYTES).min(text.len()));
+        if end < text.len() {
+            let prefix = &text[start..end];
+            if let Some(index) = prefix
+                .rfind(char::is_whitespace)
+                .filter(|index| *index >= ROW_BYTES / 2)
+            {
+                end = start + index + prefix[index..].chars().next().unwrap().len_utf8();
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    if ranges.is_empty() {
+        ranges.push(0..0);
+    }
+    ranges
+}
+
+/// Each independently prepared text body has its own cache and native row keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TextSection {
+    Proposal,
+    AgentResult,
+    Message,
+}
+impl TextSection {
+    pub(crate) fn slot(self) -> &'static str {
+        match self {
+            Self::Proposal => "plan-proposal",
+            Self::AgentResult => "result-view",
+            Self::Message => "message",
+        }
+    }
+    pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
+        match (self, &item.kind) {
+            (Self::Proposal, ItemKind::Plan { proposal, .. }) => proposal.as_ref(),
+            (Self::AgentResult, ItemKind::Agent { result, .. }) => result.as_ref(),
+            (
+                Self::Message,
+                ItemKind::Tool {
+                    tool: artisan_api::ToolKind::AgentMessage { text, .. },
+                    ..
+                },
+            ) => Some(text),
+            _ => None,
+        }
+    }
+}
+
 /// A row's identity across folds: a work section keeps its key as items
 /// join it, so its view (and its measured height) survive.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RowKey {
+    Projected(Box<RowKey>, usize),
     Item(ItemId),
+    ProseBlock(ItemId, usize),
+    PlainBlock(ItemId, PlainSection, usize),
+    Chain(ItemId),
+    PlanStep(ItemId, usize),
+    TextBlock(ItemId, TextSection, usize),
     Work(RunId, usize),
     /// Work without a run, keyed by its first item.
     Loose(ItemId),
@@ -59,11 +248,29 @@ pub(crate) enum RowKey {
 }
 
 impl Row {
+    pub(crate) fn semantic(&self) -> &Self {
+        match self {
+            Self::Projected { row, .. } => row,
+            _ => self,
+        }
+    }
+    pub(crate) fn visual(&self) -> Option<usize> {
+        match self {
+            Self::Projected { visual, .. } => Some(*visual),
+            _ => None,
+        }
+    }
     /// The item that anchors this row in the thread.
     pub(crate) fn anchor(&self) -> Option<&ItemId> {
         match self {
-            Self::User(id)
+            Self::Projected { row, .. } => row.anchor(),
+            Self::PlainBlock { id, .. }
+            | Self::WorkEntry { id, .. }
+            | Self::PlanStep { id, .. }
+            | Self::TextBlock { id, .. }
+            | Self::User(id)
             | Self::Reply(id)
+            | Self::ProseBlock { id, .. }
             | Self::Prompt(id)
             | Self::Compaction(id)
             | Self::Error(id)
@@ -72,12 +279,38 @@ impl Row {
             | Self::AgentResult(id)
             | Self::AgentMessage(id) => Some(id),
             Self::Work { entries, .. } => entries.first(),
+            Self::Chain { ids, .. } => ids.first(),
             Self::Gap | Self::Status(_) | Self::AgentStatus(..) => None,
         }
     }
 
     pub(crate) fn key(&self) -> RowKey {
         match self {
+            Self::Projected { row, visual } => RowKey::Projected(Box::new(row.key()), *visual),
+            Self::PlainBlock {
+                id,
+                section: PlainSection::AgentTask,
+                block: 0,
+            } => RowKey::AgentTask(id.clone()),
+            Self::PlainBlock {
+                id,
+                section: PlainSection::User | PlainSection::AgentMessage | PlainSection::Error,
+                block: 0,
+            } => RowKey::Item(id.clone()),
+            Self::PlainBlock { id, section, block } => {
+                RowKey::PlainBlock(id.clone(), *section, *block)
+            }
+            Self::Chain { ids, .. } => RowKey::Chain(ids.first().cloned().unwrap_or_default()),
+            Self::PlanStep { id, step, .. } => RowKey::PlanStep(id.clone(), *step),
+            Self::TextBlock {
+                id,
+                section: TextSection::AgentResult,
+                block: 0,
+                ..
+            } => RowKey::AgentResult(id.clone()),
+            Self::TextBlock {
+                id, section, block, ..
+            } => RowKey::TextBlock(id.clone(), *section, *block),
             Self::Work {
                 run: Some(run),
                 segment,
@@ -86,6 +319,8 @@ impl Row {
             Self::Work {
                 run: None, entries, ..
             } => RowKey::Loose(entries.first().cloned().unwrap_or_default()),
+            Self::ProseBlock { id, block: 0 } => RowKey::Item(id.clone()),
+            Self::ProseBlock { id, block } => RowKey::ProseBlock(id.clone(), *block),
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
             Self::AgentTask(id) => RowKey::AgentTask(id.clone()),
@@ -98,7 +333,12 @@ impl Row {
     /// The run this row reports on (work sections and the status line).
     pub(crate) fn run(&self) -> Option<&RunId> {
         match self {
-            Self::Work { run, .. } => run.as_ref(),
+            Self::Projected { row, .. } => row.run(),
+            Self::Work { run, .. }
+            | Self::WorkEntry { run, .. }
+            | Self::Chain { run, .. }
+            | Self::PlanStep { run, .. }
+            | Self::TextBlock { run, .. } => run.as_ref(),
             Self::Status(run) => Some(run),
             _ => None,
         }
@@ -109,14 +349,11 @@ impl Row {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RunSummary {
     pub phase: Phase,
-    pub started_at: Timestamp,
+    pub started_at: Option<Timestamp>,
     /// `None` while the run is live: the elapsed time counts to now.
     pub ended_at: Option<Timestamp>,
     /// The section is open (derived default, or the user's toggle).
     pub open: bool,
-    /// The engine, known for the thread's latest run: it picks how the
-    /// reasoning summary reduces to the status line.
-    pub engine: Option<EngineId>,
     /// The run used a tool or an agent (its header says "Working", not
     /// "Thinking").
     pub worked: bool,
@@ -124,7 +361,7 @@ pub(crate) struct RunSummary {
 
 impl RunSummary {
     pub(crate) fn live(&self) -> bool {
-        !matches!(self.phase, Phase::Settled(_))
+        !matches!(self.phase, Phase::Unknown | Phase::Settled(_))
     }
 }
 
@@ -163,16 +400,6 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
     let mut rows: Vec<Row> = Vec::new();
     let mut work: Option<(Option<RunId>, Vec<ItemId>)> = None;
     let mut segments: HashMap<Option<RunId>, usize> = HashMap::new();
-    // Where each run's last top-level item sits: text the engine called
-    // final but that more of the run followed (a turn woken again by a
-    // background notification, say) was commentary after all.
-    let mut run_ends: HashMap<&RunId, Seq> = HashMap::new();
-    for item in &shown {
-        if let (Some(run), None) = (&item.run_id, &item.parent_id) {
-            let end = run_ends.entry(run).or_default();
-            *end = (*end).max(item.position);
-        }
-    }
     // Where each run's own turn begins: the message that started it.
     let mut run_starts: HashMap<&RunId, Seq> = HashMap::new();
     for item in &shown {
@@ -188,6 +415,7 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
                 run,
                 segment: *next,
                 entries,
+                compaction: None,
             });
             *next += 1;
         }
@@ -203,9 +431,14 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
         }) {
             continue;
         }
-        // A goal notice without a goal (Codex cleared one it never set).
-        if matches!(&item.kind, ItemKind::Notice { kind: NoticeKind::Goal { .. }, text } if text.trim().is_empty())
-        {
+        // Goal lifecycle is shown once in the composer's thread-scoped strip.
+        if matches!(
+            &item.kind,
+            ItemKind::Notice {
+                kind: NoticeKind::Goal { .. },
+                ..
+            }
+        ) {
             continue;
         }
         if scope.is_some() && to_scope(item) {
@@ -221,17 +454,9 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
-            } if scope.is_none()
-                && item
-                    .run_id
-                    .as_ref()
-                    .and_then(|run| run_ends.get(run))
-                    .is_none_or(|end| *end <= item.position) =>
-            {
-                Some(Row::Reply(item.id.clone()))
-            }
+            } if scope.is_none() => Some(Row::Reply(item.id.clone())),
             ItemKind::Question { .. } => Some(Row::Prompt(item.id.clone())),
-            ItemKind::Tool { .. } | ItemKind::Plan { .. }
+            ItemKind::Tool { .. } | ItemKind::Plan { .. } | ItemKind::Approval { .. }
                 if item.status == Status::AwaitingUser =>
             {
                 Some(Row::Prompt(item.id.clone()))
@@ -243,6 +468,22 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
         };
         if let Some(row) = own_row {
             flush(&mut work, &mut rows);
+            if let Row::Compaction(id) = &row {
+                if let Some(Row::Work {
+                    run: Some(run),
+                    segment: 0,
+                    compaction,
+                    ..
+                }) = rows.last_mut()
+                {
+                    if compaction.is_none() && item.run_id.as_ref().is_none_or(|owner| owner == run)
+                    {
+                        *compaction = Some(id.clone());
+                        context.clone_from(&item.run_id);
+                        continue;
+                    }
+                }
+            }
             rows.push(row);
             context.clone_from(&item.run_id);
             continue;
@@ -304,16 +545,166 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
     Folded { rows, runs }
 }
 
-/// What a subagent reported back. A result that only repeats its
-/// description is no report (stopped agents stored before Forge stopped
-/// taking Claude's summary for one).
-pub(crate) fn agent_report(item: &Item) -> Option<&str> {
+/// Expand disclosures into native list rows. No row builds an expanded work tree.
+/// This separate presentation pass keeps the canonical fold independent of renderer readiness.
+pub(crate) fn expanded(
+    view: &ThreadView,
+    rows: Vec<(Row, u64)>,
+    runs: &HashMap<RunId, RunSummary>,
+) -> Vec<(Row, u64)> {
+    let children = children(&view.shown().collect::<Vec<_>>());
+    let mut expanded = Vec::new();
+    let mut emit = |row: Row| {
+        let revision = version(view, &row, &children, runs);
+        expanded.push((row, revision));
+    };
+    for (row, revision) in rows {
+        match row {
+            Row::Work {
+                run,
+                segment,
+                entries,
+                compaction,
+            } => {
+                let open = run
+                    .as_ref()
+                    .and_then(|id| runs.get(id))
+                    .is_none_or(|summary| summary.open);
+                // Continuations have no header. Closed sections have no descendant rows.
+                if segment == 0 {
+                    emit(Row::Work {
+                        run: run.clone(),
+                        segment,
+                        entries: entries.clone(),
+                        compaction,
+                    });
+                }
+                if !open {
+                    continue;
+                }
+                let mut index = 0;
+                while index < entries.len() {
+                    let count = entries[index..]
+                        .iter()
+                        .take_while(|id| {
+                            view.item(id)
+                                .is_some_and(|item| activity::category(item).is_some())
+                        })
+                        .count();
+                    if count > 0 {
+                        let ids = entries[index..index + count].to_vec();
+                        let chain_open = view
+                            .ui
+                            .get(&ids[0])
+                            .and_then(|ui| ui.chain_open)
+                            .unwrap_or(false);
+                        emit(Row::Chain {
+                            ids: ids.clone(),
+                            run: run.clone(),
+                        });
+                        if chain_open {
+                            for id in ids {
+                                emit(Row::WorkEntry {
+                                    id: id.clone(),
+                                    run: run.clone(),
+                                });
+                                if view.ui.get(&id).and_then(|ui| ui.expanded).unwrap_or(false) {
+                                    if view.item(&id).is_some_and(|item| {
+                                        matches!(
+                                            item.kind,
+                                            ItemKind::Tool {
+                                                tool: artisan_api::ToolKind::AgentMessage { .. },
+                                                ..
+                                            }
+                                        )
+                                    }) {
+                                        emit(Row::TextBlock {
+                                            id,
+                                            section: TextSection::Message,
+                                            block: 0,
+                                            run: run.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        index += count;
+                    } else {
+                        let id = entries[index].clone();
+                        index += 1;
+                        match view.item(&id).map(|item| &item.kind) {
+                            Some(ItemKind::AssistantMessage { .. }) => emit(Row::Reply(id)),
+                            Some(ItemKind::Plan {
+                                steps, proposal, ..
+                            }) => {
+                                if let artisan_api::Collection::Inline(steps) = steps {
+                                    for step in 0..steps.len() {
+                                        emit(Row::PlanStep {
+                                            id: id.clone(),
+                                            step,
+                                            run: run.clone(),
+                                        });
+                                    }
+                                }
+                                if proposal.is_some() {
+                                    emit(Row::TextBlock {
+                                        id: id.clone(),
+                                        section: TextSection::Proposal,
+                                        block: 0,
+                                        run: run.clone(),
+                                    });
+                                }
+                                emit(Row::WorkEntry {
+                                    id,
+                                    run: run.clone(),
+                                });
+                            }
+                            _ => emit(Row::WorkEntry {
+                                id,
+                                run: run.clone(),
+                            }),
+                        }
+                    }
+                }
+            }
+            Row::AgentResult(id) => emit(Row::TextBlock {
+                id,
+                section: TextSection::AgentResult,
+                block: 0,
+                run: None,
+            }),
+            Row::Prompt(id)
+                if view.item(&id).is_some_and(|item| {
+                    matches!(
+                        item.kind,
+                        ItemKind::Plan {
+                            proposal: Some(_),
+                            ..
+                        }
+                    )
+                }) =>
+            {
+                emit(Row::TextBlock {
+                    id: id.clone(),
+                    section: TextSection::Proposal,
+                    block: 0,
+                    run: None,
+                });
+                emit(Row::Prompt(id));
+            }
+            other => {
+                let _ = revision;
+                emit(other);
+            }
+        }
+    }
+    expanded
+}
+
+/// Canonical result copy is prepared by the adapter; rendering does not reinterpret it.
+pub(crate) fn agent_report(item: &Item) -> Option<&artisan_api::TextContent> {
     match &item.kind {
-        ItemKind::Agent {
-            result: Some(result),
-            description,
-            ..
-        } if result.trim() != description.trim() => Some(result),
+        ItemKind::Agent { result, .. } => result.as_ref(),
         _ => None,
     }
 }
@@ -342,8 +733,7 @@ pub(crate) fn children<'a>(items: &[&'a Item]) -> HashMap<ItemId, Vec<&'a Item>>
     children
 }
 
-/// Phase, timing and fold state of every run in the window. Only each
-/// thread's latest `Run` is known; earlier runs are judged by their items.
+/// Phase, timing and fold state from canonical runs supplied with window pages.
 fn summaries(
     view: &ThreadView,
     shown: &[&Item],
@@ -361,32 +751,22 @@ fn summaries(
     by_run
         .into_iter()
         .map(|(run_id, items)| {
-            let latest = latest.filter(|run| &run.id == run_id);
+            let latest = latest
+                .filter(|run| &run.id == run_id)
+                .or_else(|| view.runs.get(run_id));
             let (phase, started_at, ended_at) = if let Some(run) = latest {
                 (
                     phase::turn_phase(run, &items, &view.live),
-                    run.started_at,
+                    Some(run.started_at),
                     run.ended_at,
                 )
             } else {
-                let start = items.iter().map(|item| item.created_at).min().unwrap_or(0);
-                let end = items
-                    .iter()
-                    .map(|item| item.updated_at)
-                    .max()
-                    .unwrap_or(start);
-                (
-                    Phase::Settled(phase::settled_from_items(&items)),
-                    start,
-                    Some(end),
-                )
+                (Phase::Unknown, None, None)
             };
-            let live = !matches!(phase, Phase::Settled(_));
-            // A live section stays open: text streams as commentary inside
-            // it (it turns final, and leaves for its own row, only when the
-            // run ends), so folding on `Replying` hid the streaming text. A
-            // settled one keeps the user's choice, closed by default once
-            // the run succeeded.
+            let live = !matches!(phase, Phase::Unknown | Phase::Settled(_));
+            // Keep live work open. Canonical Final messages have their own rows
+            // independently of run completion. Settled work keeps the user's
+            // disclosure choice and defaults closed after success.
             let open = if live {
                 true
             } else {
@@ -402,7 +782,6 @@ fn summaries(
                     started_at,
                     ended_at: if live { None } else { ended_at },
                     open,
-                    engine: latest.map(|run| run.engine),
                     worked: items.iter().any(|item| {
                         matches!(
                             item.kind,
@@ -428,12 +807,16 @@ const STATUS_AFTER_WORK: f32 = 12.0;
 /// The live line elsewhere: 24 px plus its own 8 px.
 const STATUS_GAP: f32 = 32.0;
 
-/// The space above each row: the old transcript's rhythm of turns (each a
+/// The space above native rows preserves the rhythm of turns (each a
 /// user message and what the run did about it) and the blocks inside them.
 pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
     let run_of = |row: &Row| -> Option<RunId> {
         match row {
-            Row::Work { run, .. } => run.clone(),
+            Row::Work { run, .. }
+            | Row::WorkEntry { run, .. }
+            | Row::Chain { run, .. }
+            | Row::PlanStep { run, .. }
+            | Row::TextBlock { run, .. } => run.clone(),
             Row::Status(run) => Some(run.clone()),
             other => other
                 .anchor()
@@ -447,9 +830,64 @@ pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
             let Some((previous, _)) = index.checked_sub(1).and_then(|index| rows.get(index)) else {
                 return PAD_TOP;
             };
+            if row.visual().is_some_and(|visual| visual > 0) {
+                return 0.0;
+            }
+            let (row, previous) = (row.semantic(), previous.semantic());
             let (run, previous_run) = (run_of(row), run_of(previous));
             match (previous, row) {
-                (Row::Work { .. }, Row::Reply(_)) => REPLY_SEAM,
+                (Row::Chain { .. }, Row::WorkEntry { id, .. })
+                    if view
+                        .item(id)
+                        .is_some_and(|item| activity::category(item).is_some()) =>
+                {
+                    0.0
+                }
+                (Row::WorkEntry { id: previous, .. }, Row::WorkEntry { id, .. })
+                    if run == previous_run
+                        && view
+                            .item(previous)
+                            .is_some_and(|item| activity::category(item).is_some())
+                        && view
+                            .item(id)
+                            .is_some_and(|item| activity::category(item).is_some()) =>
+                {
+                    4.0
+                }
+                (Row::PlanStep { id: previous, .. }, Row::PlanStep { id, .. })
+                    if id == previous =>
+                {
+                    2.0
+                }
+                (
+                    Row::WorkEntry { id: previous, .. },
+                    Row::TextBlock {
+                        id,
+                        section: TextSection::Message,
+                        block: 0,
+                        ..
+                    },
+                ) if id == previous => 4.0,
+                // A prepared body or expanded work entry is already one list row.
+                (
+                    _,
+                    Row::ProseBlock { block: 1.., .. }
+                    | Row::TextBlock { block: 1.., .. }
+                    | Row::PlainBlock { block: 1.., .. },
+                ) => 0.0,
+                (
+                    Row::Work { .. }
+                    | Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::PlanStep { .. }
+                    | Row::TextBlock { .. },
+                    Row::WorkEntry { .. }
+                    | Row::Chain { .. }
+                    | Row::PlanStep { .. }
+                    | Row::TextBlock { .. }
+                    | Row::ProseBlock { .. },
+                ) if run == previous_run => 8.0,
+                (Row::Work { .. }, Row::Reply(_) | Row::ProseBlock { .. }) => REPLY_SEAM,
                 (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
                 (_, Row::Status(_)) => STATUS_GAP,
                 // A steer stays inside its run's turn.
@@ -473,17 +911,20 @@ fn version(
     row.hash(&mut hasher);
     row.run().and_then(|run| runs.get(run)).hash(&mut hasher);
     let mut stack: Vec<&ItemId> = match row {
-        Row::Work { entries, .. } => entries.iter().collect(),
+        Row::Work { compaction, .. } => compaction.iter().collect(),
+        Row::Chain { ids, .. } => ids.iter().collect(),
         Row::Status(run) => {
             view.live
                 .get(&LiveTarget::Reasoning {
                     run_id: run.clone(),
                 })
+                .map(|text| std::sync::Arc::as_ptr(text))
                 .hash(&mut hasher);
             view.live
                 .get(&LiveTarget::Status {
                     run_id: run.clone(),
                 })
+                .map(|text| std::sync::Arc::as_ptr(text))
                 .hash(&mut hasher);
             Vec::new()
         }
@@ -509,11 +950,102 @@ fn version(
                 item_id: id.clone(),
             },
         ] {
-            view.live.get(&target).hash(&mut hasher);
+            view.live
+                .get(&target)
+                .map(|text| std::sync::Arc::as_ptr(text))
+                .hash(&mut hasher);
         }
-        if let Some(nested) = children.get(id) {
-            stack.extend(nested.iter().map(|item| &item.id));
+        if !matches!(
+            row,
+            Row::Chain { .. }
+                | Row::WorkEntry { .. }
+                | Row::PlanStep { .. }
+                | Row::TextBlock { .. }
+        ) {
+            if let Some(nested) = children.get(id) {
+                stack.extend(nested.iter().map(|item| &item.id));
+            }
         }
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod run_metadata_tests {
+    use super::*;
+    use crate::viewport::Fetch;
+    use artisan_api::{EngineId, ItemsPage, Usage};
+
+    #[test]
+    fn historical_run_summary_uses_canonical_metadata_across_partial_pages() {
+        let thread = artisan_api::ThreadId::from("history");
+        let run = Run {
+            id: RunId::from("historical"),
+            thread_id: thread.clone(),
+            engine: EngineId::Claude,
+            model: None,
+            input_cutoff: 0,
+            status: RunStatus::Cancelled,
+            usage: Usage::default(),
+            session_id: None,
+            error: None,
+            seq: 20,
+            started_at: 100,
+            ended_at: Some(1000),
+        };
+        for status in [Status::Done, Status::Cancelled] {
+            let item = Item {
+                id: ItemId::new(),
+                thread_id: thread.clone(),
+                position: 5,
+                seq: 5,
+                run_id: Some(run.id.clone()),
+                parent_id: None,
+                native_id: None,
+                status,
+                created_at: 400,
+                updated_at: 600,
+                kind: ItemKind::Error {
+                    kind: artisan_api::ErrorKind::Execution,
+                    message: "an item is not the run outcome".into(),
+                    retryable: false,
+                },
+            };
+            let (mut view, _) = ThreadView::open(thread.clone());
+            view.apply_page(
+                Fetch::Tail,
+                ItemsPage {
+                    items: vec![item.clone()],
+                    runs: vec![run.clone()],
+                    more: true,
+                },
+            );
+            let folded = fold(&view, None, None);
+            let summary = &folded.runs[&run.id];
+            assert_eq!(summary.phase, Phase::Settled(RunStatus::Cancelled));
+            assert_eq!(summary.started_at, Some(100));
+            assert_eq!(summary.ended_at, Some(1000));
+            assert!(!summary.live());
+
+            let (mut missing, _) = ThreadView::open(thread.clone());
+            missing.apply_page(
+                Fetch::Tail,
+                ItemsPage {
+                    items: vec![item],
+                    runs: vec![],
+                    more: true,
+                },
+            );
+            let unknown = fold(&missing, None, None);
+            let summary = &unknown.runs[&run.id];
+            assert_eq!(summary.phase, Phase::Unknown);
+            assert_eq!(summary.started_at, None);
+            assert_eq!(summary.ended_at, None);
+            assert!(!summary.live());
+            assert!(
+                summary.open,
+                "unknown history remains accessible without a fabricated outcome"
+            );
+        }
+    }
 }

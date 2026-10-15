@@ -118,12 +118,13 @@ pub(super) fn vrule(x: f32, color: Hsla, dash: bool) -> Shape {
 
 /// A canvas filling its parent that paints `shapes` clipped to itself and
 /// records its bounds in `probe`.
-pub(super) fn plot_canvas(shapes: Vec<Shape>, probe: Probe) -> impl IntoElement {
+pub(super) fn plot_canvas(shapes: impl Into<Rc<[Shape]>>, probe: Probe) -> impl IntoElement {
+    let shapes = shapes.into();
     canvas(
         move |bounds, _, _| probe.set(Some(bounds)),
         move |bounds, (), window, _| {
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                for shape in &shapes {
+                for shape in shapes.iter() {
                     paint(bounds, shape, window);
                 }
             });

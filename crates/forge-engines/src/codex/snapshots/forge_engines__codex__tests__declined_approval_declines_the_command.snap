@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 155
 expression: "replay(\"decline\")"
 ---
 [
@@ -28,8 +29,15 @@ expression: "replay(\"decline\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Planning precise shell command usage**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Planning precise shell command usage",
+            append: false,
         },
     ),
     Event(
@@ -38,7 +46,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -58,7 +68,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I’m requesting permission to run the exact command `touch b.txt`.",
+                text: Inline(
+                    "I’m requesting permission to run the exact command `touch b.txt`.",
+                ),
                 phase: Commentary,
             },
         },
@@ -70,7 +82,9 @@ expression: "replay(\"decline\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -84,81 +98,67 @@ expression: "replay(\"decline\")"
         },
     ),
     Event(
-        Item {
-            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+        Approval {
+            key: "approval-request:0",
             parent: None,
+            target: Some(
+                "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            ),
             status: AwaitingUser,
-            kind: Tool {
-                tool: Shell {
-                    command: "touch b.txt",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
-                    background: false,
                 },
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch b.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: None,
-                    },
+                reason: Some(
+                    Inline(
+                        "May I run the exact requested command `touch b.txt`?",
+                    ),
                 ),
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                    Cancelled,
+                ],
+                decision: None,
             },
         },
     ),
     Event(
-        Item {
-            key: "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+        Approval {
+            key: "approval-request:0",
             parent: None,
+            target: Some(
+                "exec-76879e33-b360-471c-ae2c-13a814f3b99d",
+            ),
             status: Declined,
-            kind: Tool {
-                tool: Shell {
-                    command: "touch b.txt",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
-                    background: false,
                 },
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch b.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: Some(
-                            DenyOnce,
-                        ),
-                    },
+                reason: Some(
+                    Inline(
+                        "May I run the exact requested command `touch b.txt`?",
+                    ),
+                ),
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                    Cancelled,
+                ],
+                decision: Some(
+                    DenyOnce,
                 ),
             },
         },
@@ -178,7 +178,9 @@ expression: "replay(\"decline\")"
             status: Declined,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -187,28 +189,7 @@ expression: "replay(\"decline\")"
                 title: None,
                 output: None,
                 exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch b.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: Some(
-                            DenyOnce,
-                        ),
-                    },
-                ),
+                approval: None,
             },
         },
     ),
@@ -238,7 +219,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -258,7 +241,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "declined",
+                text: Inline(
+                    "declined",
+                ),
                 phase: Final,
             },
         },

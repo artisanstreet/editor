@@ -1,13 +1,20 @@
-//! The titlebar's context-window ring and the card it opens on hover.
-//! Ported from the previous Editor's `native_context_usage.rs`: the ring is
-//! drawn as a track and an arc on one circle, blue while the window is
-//! roomy, then warning and danger as it nears compaction.
+//! The titlebar context ring changes tone as usage approaches compaction.
+//! Its tooltip shows the measured token count and model capacity.
 
 use editor_ui::hover_card::{glass_hover_card, hover_card_text, hover_card_title};
-use editor_ui::progress::{ProgressFraction, ProgressStyle, progress};
+use editor_ui::motion::MotionDuration;
+use editor_ui::picker_motion::{MenuEntrance, MenuMotion, animate_menu};
+use editor_ui::progress::Progress;
 use editor_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::prelude::{InteractiveElement as _, ParentElement as _, Styled as _};
-use gpui::{Bounds, Div, Hsla, Path, PathBuilder, Pixels, Stateful, canvas, div, point, px};
+use gpui::{
+    App, Bounds, Div, Hsla, IntoElement, Path, PathBuilder, Pixels, RenderOnce, Stateful,
+    StatefulInteractiveElement as _, Window, canvas, div, point, px,
+};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 pub const CONTEXT_METER_SELECTOR: &str = "artisan-native-context-meter";
 const RING_EDGE_PX: f32 = 16.0;
@@ -95,9 +102,116 @@ pub fn compact_tokens(count: u64) -> String {
     format!("{text}{suffix}")
 }
 
+/// The titlebar owns placement; this control owns geometry, semantics and tooltip.
+#[derive(IntoElement)]
+pub struct ContextMeter {
+    reading: ContextReading,
+    theme: ArtisanTheme,
+}
+impl ContextMeter {
+    pub fn new(reading: ContextReading, theme: ArtisanTheme) -> Self {
+        Self { reading, theme }
+    }
+}
+struct MeterHover {
+    open: bool,
+    motion: Rc<RefCell<MenuMotion>>,
+    bounds: Rc<Cell<Bounds<Pixels>>>,
+    settle: Option<gpui::Task<()>>,
+}
+impl MeterHover {
+    fn set_open(&mut self, open: bool, cx: &mut gpui::Context<Self>) {
+        if self.open == open {
+            return;
+        }
+        self.open = open;
+        let generation = if open {
+            self.motion.borrow_mut().begin_open()
+        } else {
+            self.motion.borrow_mut().begin_close()
+        };
+        let settle = move |this: &mut Self| {
+            if open {
+                this.motion.borrow_mut().finish_open(generation)
+            } else {
+                this.motion.borrow_mut().finish_close(generation)
+            }
+        };
+        if cx.reduce_motion() {
+            settle(self);
+            self.settle = None;
+        } else {
+            let duration = if open {
+                MotionDuration::Fast
+            } else {
+                MotionDuration::Quick
+            }
+            .as_duration();
+            self.settle = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                let _ = this.update(cx, |this, cx| {
+                    if settle(this) {
+                        this.settle = None;
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        cx.notify();
+    }
+}
+impl RenderOnce for ContextMeter {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self { reading, theme } = self;
+        let hover = window.use_keyed_state("context-meter-hover", cx, |_, _| MeterHover {
+            open: false,
+            motion: Default::default(),
+            bounds: Default::default(),
+            settle: None,
+        });
+        let state = hover.read(cx);
+        let bounds = state.bounds.clone();
+        let motion = state.motion.clone();
+        let painted = motion.borrow().painted();
+        div()
+            .child(context_ring(&reading, &theme).on_hover(move |over, _, cx| {
+                hover.update(cx, |state, cx| state.set_open(*over, cx));
+            }))
+            .on_children_prepainted({
+                let bounds = bounds.clone();
+                move |children, _, _| {
+                    if let Some(first) = children.first() {
+                        bounds.set(*first);
+                    }
+                }
+            })
+            .children(painted.then(|| {
+                let ring = bounds.get();
+                gpui::deferred(
+                    gpui::anchored()
+                        .anchor(gpui::Anchor::TopRight)
+                        .position(ring.bottom_right() + point(px(0.0), px(8.0)))
+                        .child(animate_menu(
+                            div()
+                                .id("artisan-context-card")
+                                .child(context_card(&reading, &theme)),
+                            &motion,
+                            "context",
+                            MenuEntrance::Scale {
+                                origin: point(1.0, 0.0),
+                            },
+                            MotionDuration::Fast.as_duration(),
+                            MotionDuration::Quick.as_duration(),
+                        )),
+                )
+                .with_priority(1)
+            }))
+    }
+}
+
 /// The ring gauge, the hover trigger of [`context_card`].
 #[must_use]
-pub fn context_ring(reading: &ContextReading, theme: &ArtisanTheme) -> Stateful<Div> {
+fn context_ring(reading: &ContextReading, theme: &ArtisanTheme) -> Stateful<Div> {
     let ring_color = reading.color(theme);
     let track_color = theme.colors.foreground.with_alpha(0.16).to_paint();
     #[expect(clippy::cast_possible_truncation, reason = "a clamped 0..=1 share")]
@@ -119,6 +233,15 @@ pub fn context_ring(reading: &ContextReading, theme: &ArtisanTheme) -> Stateful<
     .inset_0();
     div()
         .id(CONTEXT_METER_SELECTOR)
+        .role(gpui::Role::ProgressIndicator)
+        .aria_label("Context window usage")
+        .aria_value(format!(
+            "{:.0}%: {} of {} tokens for {}",
+            reading.percent(),
+            reading.context_tokens,
+            reading.window_tokens,
+            reading.model_name
+        ))
         .debug_selector(|| CONTEXT_METER_SELECTOR.to_owned())
         .size(px(24.0))
         .flex()
@@ -139,7 +262,7 @@ pub fn context_ring(reading: &ContextReading, theme: &ArtisanTheme) -> Stateful<
 /// The card shown while the ring is hovered: the model, how full its window
 /// is and how large, then a progress bar.
 #[must_use]
-pub fn context_card(reading: &ContextReading, theme: &ArtisanTheme) -> Div {
+fn context_card(reading: &ContextReading, theme: &ArtisanTheme) -> Div {
     let model = reading.model_name.as_str();
     let sentence = |text: String, size: Option<String>| {
         let model_range = text
@@ -161,7 +284,7 @@ pub fn context_card(reading: &ContextReading, theme: &ArtisanTheme) -> Div {
         hover_card_text(theme, text, &facts)
     };
     #[expect(clippy::cast_possible_truncation, reason = "a clamped 0..=1 share")]
-    let fill = ProgressFraction::new((reading.percent() / 100.0) as f32);
+    let fill = (reading.percent() / 100.0) as f32;
     let content = div()
         .flex()
         .flex_col()
@@ -179,10 +302,11 @@ pub fn context_card(reading: &ContextReading, theme: &ArtisanTheme) -> Div {
                     Some(compact_tokens(reading.window_tokens)),
                 )),
         )
-        .child(progress(ProgressStyle::resolve(*theme), fill));
-    glass_hover_card(theme, content)
+        .child(Progress::new("context-progress", *theme, fill));
+    div()
         .debug_selector(|| format!("{CONTEXT_METER_SELECTOR}-card"))
         .w(px(280.0))
+        .child(glass_hover_card(theme, content))
 }
 
 /// The byte range of the first `N%` token in `text`, if any.
@@ -241,5 +365,57 @@ mod tests {
         assert_eq!(compact_tokens(1_000_000), "1M");
         assert_eq!(compact_tokens(400_000), "400K");
         assert!(ContextReading::new("x".into(), 1, 0).is_none());
+    }
+}
+
+#[cfg(all(test, feature = "capture"))]
+mod native_tests {
+    use super::*;
+    use gpui::{Context, Render, TestAppContext};
+    struct ReadingView {
+        tokens: u64,
+    }
+    impl Render for ReadingView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().p(px(40.0)).child(ContextMeter::new(
+                ContextReading::new("Model".into(), self.tokens, 200_000).unwrap(),
+                ArtisanTheme::default(),
+            ))
+        }
+    }
+    #[gpui::test]
+    fn usage_updates_do_not_change_titlebar_geometry(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| ReadingView { tokens: 0 });
+        let before = cx.debug_bounds(CONTEXT_METER_SELECTOR).unwrap();
+        assert_eq!(before.size, gpui::size(px(24.0), px(24.0)));
+        view.update(cx, |view, cx| {
+            view.tokens = u64::MAX;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds(CONTEXT_METER_SELECTOR).unwrap(), before);
+    }
+
+    #[gpui::test]
+    fn context_card_opens_on_hover_without_a_tooltip_delay(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| ReadingView { tokens: 90_000 });
+        let ring = cx.debug_bounds(CONTEXT_METER_SELECTOR).unwrap();
+        assert!(
+            cx.debug_bounds("artisan-native-context-meter-card")
+                .is_none()
+        );
+        cx.simulate_event(gpui::MouseMoveEvent {
+            position: ring.center(),
+            ..Default::default()
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+        let card = cx
+            .debug_bounds("artisan-native-context-meter-card")
+            .expect("the original card opens immediately on hover");
+        assert_eq!(card.size.width, px(280.0));
+        assert!(card.top() >= ring.bottom(), "card={card:?}, ring={ring:?}");
+        assert_eq!(cx.debug_bounds(CONTEXT_METER_SELECTOR).unwrap(), ring);
     }
 }

@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 124
 expression: "replay(Profile::Grok, \"tool-permission\")"
 ---
 [
@@ -28,7 +29,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -48,7 +51,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I'll list the files.",
+                text: Inline(
+                    "I'll list the files.",
+                ),
                 phase: Commentary,
             },
         },
@@ -60,7 +65,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -76,79 +83,57 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
         },
     ),
     Event(
-        Item {
-            key: "call_1",
+        Approval {
+            key: "permission-request:0",
             parent: None,
+            target: Some(
+                "call_1",
+            ),
             status: AwaitingUser,
-            kind: Tool {
-                tool: Shell {
-                    command: "ls",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
-                    background: false,
                 },
-                title: Some(
-                    "ls",
-                ),
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "ls",
-                            cwd: Some(
-                                "/tmp/scratch",
-                            ),
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: None,
-                    },
-                ),
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: None,
             },
         },
     ),
     Event(
-        Item {
-            key: "call_1",
+        Approval {
+            key: "permission-request:0",
             parent: None,
-            status: Running,
-            kind: Tool {
-                tool: Shell {
-                    command: "ls",
+            target: Some(
+                "call_1",
+            ),
+            status: Done,
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
-                    background: false,
                 },
-                title: Some(
-                    "ls",
-                ),
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "ls",
-                            cwd: Some(
-                                "/tmp/scratch",
-                            ),
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            AllowOnce,
-                        ),
-                    },
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: Some(
+                    AllowOnce,
                 ),
             },
         },
@@ -163,7 +148,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -174,33 +161,16 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 ),
                 output: Some(
                     Output {
-                        head: "a.txt\nb.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "a.txt\nb.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
                     0,
                 ),
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "ls",
-                            cwd: Some(
-                                "/tmp/scratch",
-                            ),
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            AllowOnce,
-                        ),
-                    },
-                ),
+                approval: None,
             },
         },
     ),
@@ -210,7 +180,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -233,7 +205,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 kind: Goal {
                     state: "complete",
                 },
-                text: "List the files\nListed 2 files",
+                text: Inline(
+                    "List the files\nListed 2 files",
+                ),
             },
         },
     ),
@@ -243,7 +217,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Two files: a.txt and b.txt.",
+                text: Inline(
+                    "Two files: a.txt and b.txt.",
+                ),
                 phase: Final,
             },
         },

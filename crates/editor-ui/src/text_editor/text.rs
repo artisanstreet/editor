@@ -46,23 +46,6 @@ pub(super) fn truncate_to_bytes(text: &str, max_bytes: usize) -> &str {
     &text[..floor_char_boundary(text, max_bytes)]
 }
 
-/// Replaces `range` in `text`, or `None` when the range is not a valid
-/// character-aligned range of `text`.
-pub(super) fn splice(text: &str, range: Range<usize>, replacement: &str) -> Option<String> {
-    if range.start > range.end
-        || range.end > text.len()
-        || !text.is_char_boundary(range.start)
-        || !text.is_char_boundary(range.end)
-    {
-        return None;
-    }
-    let mut next = String::with_capacity(text.len() - range.len() + replacement.len());
-    next.push_str(&text[..range.start]);
-    next.push_str(replacement);
-    next.push_str(&text[range.end..]);
-    Some(next)
-}
-
 pub(super) fn utf16_range_to_utf8(text: &str, range: Range<usize>) -> Option<Range<usize>> {
     if range.start > range.end {
         return None;
@@ -104,28 +87,27 @@ pub(super) fn utf8_offset_to_utf16(text: &str, byte_offset: usize) -> Option<usi
 
 /// The nearest character boundary at or before `offset`.
 pub(super) fn floor_char_boundary(text: &str, offset: usize) -> usize {
-    let mut offset = offset.min(text.len());
-    while offset > 0 && !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
+    text.floor_char_boundary(offset.min(text.len()))
 }
 
-/// The start of the character before `offset`.
+/// The preceding user-perceived character boundary, including joined emoji.
 pub(super) fn previous_character_boundary(text: &str, offset: usize) -> usize {
-    text[..floor_char_boundary(text, offset)]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
+    let offset = floor_char_boundary(text, offset);
+    unicode_segmentation::GraphemeCursor::new(offset, text.len(), true)
+        .prev_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
-/// The end of the character at `offset`.
+/// The following user-perceived character boundary.
 pub(super) fn next_character_boundary(text: &str, offset: usize) -> usize {
     let offset = floor_char_boundary(text, offset);
-    text[offset..]
-        .chars()
-        .next()
-        .map_or(text.len(), |character| offset + character.len_utf8())
+    unicode_segmentation::GraphemeCursor::new(offset, text.len(), true)
+        .next_boundary(text, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(text.len())
 }
 
 pub(super) fn logical_line_start(text: &str, offset: usize) -> usize {
@@ -186,4 +168,16 @@ pub(super) fn logical_vertical_target(
         target_offset = byte_offset + character.len_utf8();
     }
     target_start + target_offset
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn movement_preserves_graphemes() {
+        for text in ["e\u{301}", "👍🏽", "👩‍💻", "🇳🇴"] {
+            assert_eq!(next_character_boundary(text, 0), text.len());
+            assert_eq!(previous_character_boundary(text, text.len()), 0);
+        }
+    }
 }

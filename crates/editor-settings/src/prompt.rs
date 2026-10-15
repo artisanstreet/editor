@@ -1,7 +1,4 @@
-//! Global prompt (master's `render/global_prompt.rs`): the setup choice when
-//! the engines held different prompts, the editor with its version, Revert
-//! and Save, and every engine's file with what to do about one edited
-//! outside Artisan. Forge keeps the versions and writes the engines' files.
+//! Global prompt drafts and optimistic save/resolve forms. Canonical metadata belongs to HostData.
 
 use crate::Settings;
 use crate::chrome::{card, header, section_shell};
@@ -11,29 +8,26 @@ use artisan_api::{
     SavePrompt,
 };
 use editor_core::{HostData, HostId, SettingsPage};
-use editor_ui::AssetId;
-use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::ButtonVariant;
-use editor_ui::status_chip::{ChipTone, EngineChip, chips_row, tone_color};
+use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, Styled as _, Subscription, div, px,
 };
-use serde_json::Value;
 
+#[cfg(test)]
 pub(crate) const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 
 /// Lines of a candidate or edited text shown before it is cut.
-const PREVIEW_LINES: usize = 8;
 
 pub(crate) struct PromptForm {
     pub(crate) editor: Entity<TextEditor>,
     /// The host the page was loaded from.
     host: Option<HostId>,
     /// What Forge last said: the prompt, its version, and each engine.
-    prompt: Option<GlobalPrompt>,
+    loaded: bool,
     /// The text the editor was loaded from; the editor is dirty while its
     /// text differs.
     saved: String,
@@ -41,11 +35,11 @@ pub(crate) struct PromptForm {
     base_version: u64,
     /// A newer version was saved elsewhere while the user was editing.
     newer: bool,
-    /// A read is in flight.
-    fetching: bool,
     /// A save or resolution is in flight.
     pending: bool,
     error: Option<String>,
+    generation: u64,
+    edit_revision: u64,
     _changes: Subscription,
 }
 
@@ -53,17 +47,23 @@ impl PromptForm {
     pub(crate) fn new(cx: &mut Context<Settings>) -> Self {
         let editor = cx.new(|cx| TextEditor::new("", "", cx));
         // Typing changes whether the prompt has unsaved changes.
-        let changes = cx.subscribe(&editor, |_, _, _: &TextEditorEvent, cx| cx.notify());
+        let changes = cx.subscribe(&editor, |settings, _, event: &TextEditorEvent, cx| {
+            if *event == TextEditorEvent::Changed {
+                settings.prompt.edit_revision = settings.prompt.edit_revision.wrapping_add(1);
+            }
+            cx.notify();
+        });
         Self {
             editor,
             host: None,
-            prompt: None,
+            loaded: false,
             saved: String::new(),
             base_version: 0,
             newer: false,
-            fetching: false,
             pending: false,
             error: None,
+            generation: 0,
+            edit_revision: 0,
             _changes: changes,
         }
     }
@@ -73,74 +73,48 @@ impl PromptForm {
     pub(crate) fn sync(&mut self, host: Option<&Entity<HostData>>, cx: &mut Context<Settings>) {
         let Some(host) = host else {
             self.host = None;
-            self.prompt = None;
+            self.loaded = false;
+            self.generation = self.generation.wrapping_add(1);
+            self.pending = false;
             return;
         };
-        let (id, stored) = {
-            let data = host.read(cx);
-            let stored = data
-                .setting(GLOBAL_PROMPT_KEY)
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            (data.id.clone(), stored)
-        };
+        let id = host.read(cx).id.clone();
         let switched = self.host.as_ref() != Some(&id);
         if switched {
+            self.generation = self.generation.wrapping_add(1);
+            self.pending = false;
             self.host = Some(id);
-            self.prompt = None;
+            self.loaded = false;
             self.newer = false;
             self.error = None;
             self.base_version = 0;
             self.saved.clear();
             self.editor.update(cx, |editor, cx| editor.set_text("", cx));
         }
-        let moved = self
-            .prompt
-            .as_ref()
-            .is_some_and(|prompt| stored.is_some_and(|stored| stored != prompt.text));
-        if (switched || moved) && !self.fetching && !self.pending {
-            self.fetch(host, cx);
+        if let Some(prompt) = host.read(cx).global_prompt.clone() {
+            self.load(&prompt, false, cx);
+        } else if !self.pending {
+            host.update(cx, |host, cx| host.load_prompt(false, cx));
         }
-    }
-
-    fn fetch(&mut self, host: &Entity<HostData>, cx: &mut Context<Settings>) {
-        let data = host.read(cx);
-        let (id, client) = (data.id.clone(), data.client.clone());
-        self.fetching = true;
-        cx.spawn(async move |this, cx| {
-            let result = client.global_prompt().await;
-            let _ = this.update(cx, |settings, cx| {
-                let form = &mut settings.prompt;
-                form.fetching = false;
-                if form.host.as_ref() != Some(&id) {
-                    return;
-                }
-                match result {
-                    Ok(prompt) => form.load(prompt, false, cx),
-                    Err(error) => {
-                        form.error = Some(format!("Couldn't read the global prompt: {error:#}"));
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     /// Shows what Forge answered; the editor follows it unless the user has
     /// unsaved changes (then a newer version is only announced).
-    fn load(&mut self, prompt: GlobalPrompt, replace: bool, cx: &mut Context<Settings>) {
+    fn load(&mut self, prompt: &GlobalPrompt, replace: bool, cx: &mut Context<Settings>) {
         if replace || !self.dirty(cx) {
-            let text = prompt.text.clone();
-            self.editor
-                .update(cx, |editor, cx| editor.set_text(&text, cx));
-            self.saved = text;
+            if self.editor.read(cx).text() != prompt.text {
+                self.editor
+                    .update(cx, |editor, cx| editor.set_text(&prompt.text, cx));
+            }
+            if self.saved != prompt.text {
+                self.saved.clone_from(&prompt.text);
+            }
             self.base_version = prompt.version;
             self.newer = false;
         } else if prompt.version != self.base_version {
             self.newer = true;
         }
-        self.prompt = Some(prompt);
+        self.loaded = true;
     }
 
     fn dirty(&self, cx: &gpui::App) -> bool {
@@ -153,10 +127,14 @@ impl Settings {
         let Some(host) = self.selected_host(cx) else {
             return;
         };
-        if self.prompt.prompt.is_none() {
+        if !self.prompt.loaded || self.prompt.pending {
             return;
         }
         let client = host.read(cx).client.clone();
+        let host_id = host.read(cx).id.clone();
+        let revision = self.prompt.edit_revision;
+        self.prompt.generation = self.prompt.generation.wrapping_add(1);
+        let generation = self.prompt.generation;
         let save = SavePrompt {
             base_version: self.prompt.base_version,
             text: self.prompt.editor.read(cx).text().to_owned(),
@@ -164,13 +142,39 @@ impl Settings {
         self.prompt.pending = true;
         self.prompt.error = None;
         cx.notify();
+        #[cfg(test)]
+        let completion_gate = self.completion_gate.clone();
         cx.spawn(async move |this, cx| {
             let result = client.save_global_prompt(&save).await;
+            #[cfg(test)]
+            if let Some(gate) = completion_gate {
+                gate.wait().await;
+            }
             let _ = this.update(cx, |this, cx| {
                 let form = &mut this.prompt;
+                if form.host.as_ref() != Some(&host_id) || form.generation != generation {
+                    return;
+                }
                 form.pending = false;
                 match result {
-                    Ok(prompt) => form.load(prompt, true, cx),
+                    Ok(prompt) => {
+                        let saved_version = prompt.version;
+                        host.update(cx, |host, cx| host.remember_prompt(prompt, cx));
+                        let Some(prompt) = host.read(cx).global_prompt.clone() else {
+                            form.newer = true;
+                            return;
+                        };
+                        if prompt.version != saved_version {
+                            form.load(&prompt, false, cx);
+                        } else if form.edit_revision == revision {
+                            form.load(&prompt, true, cx);
+                        } else {
+                            form.saved = prompt.text.clone();
+                            form.base_version = prompt.version;
+                            form.newer = false;
+                            form.loaded = true;
+                        }
+                    }
                     Err(error) => {
                         form.error = Some(format!("Couldn't save the global prompt: {error:#}"));
                     }
@@ -191,8 +195,11 @@ impl Settings {
     }
 
     fn load_latest_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some(prompt) = self.prompt.prompt.clone() {
-            self.prompt.load(prompt, true, cx);
+        if let Some(prompt) = self
+            .selected_host(cx)
+            .and_then(|host| host.read(cx).global_prompt.clone())
+        {
+            self.prompt.load(&prompt, true, cx);
             cx.notify();
         }
     }
@@ -201,7 +208,13 @@ impl Settings {
         let Some(host) = self.selected_host(cx) else {
             return;
         };
+        if self.prompt.pending {
+            return;
+        }
         let client = host.read(cx).client.clone();
+        let host_id = host.read(cx).id.clone();
+        self.prompt.generation = self.prompt.generation.wrapping_add(1);
+        let generation = self.prompt.generation;
         self.prompt.pending = true;
         self.prompt.error = None;
         cx.notify();
@@ -209,11 +222,17 @@ impl Settings {
             let result = client.resolve_global_prompt(&resolution).await;
             let _ = this.update(cx, |this, cx| {
                 let form = &mut this.prompt;
+                if form.host.as_ref() != Some(&host_id) || form.generation != generation {
+                    return;
+                }
                 form.pending = false;
                 match result {
                     Ok(prompt) => {
-                        let replace = !form.dirty(cx);
-                        form.load(prompt, replace, cx);
+                        host.update(cx, |host, cx| host.remember_prompt(prompt, cx));
+                        if let Some(prompt) = host.read(cx).global_prompt.clone() {
+                            let replace = !form.dirty(cx);
+                            form.load(&prompt, replace, cx);
+                        }
                     }
                     Err(error) => form.error = Some(format!("{error:#}")),
                 }
@@ -257,16 +276,37 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
         page::label(SettingsPage::GlobalPrompt),
         page::description(SettingsPage::GlobalPrompt),
     ));
-    if let Some(error) = &form.error {
-        page = page.child(notice(theme, error));
+    let host = settings.selected_host(cx);
+    let load_error = host
+        .as_ref()
+        .and_then(|host| host.read(cx).prompt_load().error.clone());
+    let fetching = host
+        .as_ref()
+        .is_some_and(|host| host.read(cx).prompt_load().loading);
+    if let Some(error) = form.error.as_deref().or(load_error.as_deref()) {
+        page = page.child(notice(theme, error)).child(settings.button(
+            "prompt-retry",
+            "Retry",
+            ButtonVariant::Outline,
+            form.pending || fetching,
+            cx.listener(|this, _, _, cx| {
+                if let Some(host) = this.selected_host(cx) {
+                    this.prompt.error = None;
+                    host.update(cx, |host, cx| host.load_prompt(true, cx));
+                }
+            }),
+        ));
     }
-    if let Some(prompt) = &form.prompt
+    let projected = settings
+        .selected_host(cx)
+        .and_then(|host| host.read(cx).global_prompt.clone());
+    if let Some(prompt) = &projected
         && !prompt.candidates.is_empty()
     {
         page = page.child(choice_section(settings, theme, &prompt.candidates, cx));
     }
     page = page.child(editor_section(settings, theme, cx));
-    if let Some(prompt) = &form.prompt {
+    if let Some(prompt) = &projected {
         page = page.child(engines_section(settings, theme, &prompt.engines, cx));
     }
     page
@@ -317,7 +357,7 @@ fn choice_section(
                         )
                         .child(action),
                 )
-                .child(preview(theme, &candidate.text))
+                .child(editor_ui::page::text_preview(theme, &candidate.text))
                 .into_any_element()
         })
         .collect();
@@ -338,7 +378,7 @@ impl Settings {
     pub(crate) fn prompt_status(&self, cx: &gpui::App) -> String {
         let form = &self.prompt;
         let dirty = form.dirty(cx);
-        if form.prompt.is_none() {
+        if !form.loaded {
             "Reading the global prompt\u{2026}".to_owned()
         } else if form.pending {
             "Saving to every engine\u{2026}".to_owned()
@@ -356,7 +396,7 @@ impl Settings {
 
 fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
     let form = &settings.prompt;
-    let loaded = form.prompt.is_some();
+    let loaded = form.loaded;
     let dirty = form.dirty(cx);
     let status = settings.prompt_status(cx);
     let mut actions = div().flex().flex_row().gap(px(8.0)).flex_shrink_0();
@@ -488,7 +528,7 @@ fn engine_row(
                 )
                 .child(chips_row(
                     theme,
-                    std::slice::from_ref(&prompt_chip(engine)),
+                    std::slice::from_ref(&editor_ui::status_chip::prompt_status(engine)),
                     "global-prompt-engine",
                 )),
         );
@@ -506,7 +546,7 @@ fn engine_row(
                     })
                     .child(format!("{name} was edited outside Artisan. It now says:")),
             )
-            .child(preview(theme, external))
+            .child(editor_ui::page::text_preview(theme, external))
             .child(drift_actions(settings, engine.engine, cx));
     }
     row
@@ -536,89 +576,141 @@ fn drift_actions(settings: &Settings, engine: EngineId, cx: &mut Context<Setting
         ))
 }
 
-fn prompt_chip(state: &PromptEngineState) -> EngineChip {
-    let (label, tone, icon) = match state.status {
-        PromptEngineStatus::Synced => ("Synced", ChipTone::Success, AssetId::TABLER_CHECK),
-        PromptEngineStatus::Drifted => {
-            ("Edited", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE)
-        }
-        PromptEngineStatus::AwaitingChoice => {
-            ("Waiting", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE)
-        }
-        PromptEngineStatus::EngineAbsent => {
-            ("Not installed", ChipTone::Muted, AssetId::TABLER_MINUS)
-        }
-        PromptEngineStatus::Unavailable => ("Unavailable", ChipTone::Muted, AssetId::TABLER_MINUS),
-        PromptEngineStatus::Failed => ("Failed", ChipTone::Danger, AssetId::TABLER_X),
-    };
-    let name = page::engine_label(state.engine);
-    let reason = state.reason.clone().or_else(|| {
-        state
-            .file
-            .as_ref()
-            .filter(|_| state.status == PromptEngineStatus::Synced)
-            .map(|file| format!("{name}: {file}"))
-    });
-    EngineChip::new(
-        state.engine.as_str(),
-        name,
-        label,
-        tone,
-        icon,
-        reason.as_deref(),
-    )
+fn notice(theme: &ArtisanTheme, text: &str) -> editor_ui::page::Notice {
+    editor_ui::page::notice(theme, text.to_owned()).debug_selector("settings-global-prompt-notice")
 }
 
-/// The first lines of a prompt, in a quiet well.
-fn preview(theme: &ArtisanTheme, text: &str) -> Div {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut shown = lines
-        .iter()
-        .take(PREVIEW_LINES)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
-    if lines.len() > PREVIEW_LINES {
-        shown.push_str("\n\u{2026}");
+#[cfg(test)]
+mod reform_tests {
+    use super::*;
+    use editor_core::{Core, EditorFiles};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn prompt_refresh_preserves_dirty_draft_and_reports_new_version(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = cx.new(|cx| {
+            Core::new(
+                EditorFiles {
+                    dir: dir.path().join("client"),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        let (settings, cx) = cx.add_window_view(|window, cx| {
+            Settings::new(core.clone(), crate::BuildInfo::default(), window, cx)
+        });
+        settings.update(cx, |settings, cx| {
+            let mut prompt = GlobalPrompt {
+                version: 1,
+                text: "saved".into(),
+                candidates: vec![],
+                engines: vec![],
+            };
+            settings.prompt.load(&prompt, true, cx);
+            settings
+                .prompt
+                .editor
+                .update(cx, |editor, cx| editor.replace(0..5, "draft", cx));
+            prompt.version = 2;
+            prompt.text = "saved elsewhere".into();
+            settings.prompt.load(&prompt, false, cx);
+            assert_eq!(settings.prompt.editor.read(cx).text(), "draft");
+            assert_eq!(settings.prompt.base_version, 1);
+            assert!(settings.prompt.newer);
+            settings.prompt.load(&prompt, true, cx);
+            assert_eq!(settings.prompt.editor.read(cx).text(), "saved elsewhere");
+            assert_eq!(settings.prompt.base_version, 2);
+            assert!(!settings.prompt.newer);
+        });
     }
-    if shown.trim().is_empty() {
-        "(empty)".clone_into(&mut shown);
-    }
-    div()
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(8.0))
-        .bg(theme.colors.foreground.with_alpha(0.04).to_paint())
-        .text_xs()
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .whitespace_normal()
-        .children(
-            shown
-                .lines()
-                .map(|line| div().min_h(px(16.0)).child(line.to_owned()))
-                .collect::<Vec<_>>(),
-        )
 }
 
-fn notice(theme: &ArtisanTheme, text: &str) -> Div {
-    let tone = tone_color(theme, ChipTone::Danger);
-    div()
-        .mt(px(24.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .rounded(px(10.0))
-        .bg(tone.with_alpha(0.10).to_paint())
-        .text_sm()
-        .text_color(tone.to_paint())
-        .debug_selector(|| "settings-global-prompt-notice".to_owned())
-        .child(
-            asset_glyph(AssetId::TABLER_ALERT_TRIANGLE)
-                .size(px(14.0))
-                .text_color(tone.with_alpha(0.8).to_paint()),
-        )
-        .child(text.to_owned())
+#[cfg(test)]
+mod delayed_save_tests {
+    use crate::tests::{CompletionGate, SettingsFixture, finish_gate, wait_for, wait_gate};
+    use gpui::{Focusable as _, TestAppContext};
+
+    #[gpui::test]
+    fn typing_during_prompt_save_preserves_newer_draft_and_undo(cx: &mut TestAppContext) {
+        let fixture = SettingsFixture::new(cx);
+        let (settings, cx) = fixture.open(cx, editor_core::SettingsPage::GlobalPrompt);
+        wait_for(cx, "initial prompt", |cx| {
+            settings.read(cx).prompt.loaded.then_some(())
+        });
+        let gate = CompletionGate::new();
+        settings.update(cx, |settings, cx| {
+            settings.completion_gate = Some(gate.clone());
+            settings.prompt.editor.update(cx, |editor, cx| {
+                editor.replace(0..editor.text().len(), "first saved", cx)
+            });
+            settings.save_prompt(cx);
+        });
+        wait_gate(cx, &gate);
+        let editor = settings.read_with(cx, |settings, _| settings.prompt.editor.clone());
+        editor.update(cx, |editor, cx| {
+            editor.replace(editor.text().len()..editor.text().len(), " second edit", cx)
+        });
+        cx.run_until_parked();
+        finish_gate(cx, &gate);
+        settings.read_with(cx, |settings, cx| {
+            assert_eq!(
+                settings.prompt.editor.read(cx).text(),
+                "first saved second edit"
+            );
+            assert_eq!(settings.prompt.saved, "first saved");
+            assert!(settings.prompt.dirty(cx));
+            assert!(!settings.prompt.pending);
+            assert!(settings.prompt.base_version > 0);
+        });
+        cx.update(|window, cx| {
+            window.focus(&editor.read(cx).focus_handle(cx), cx);
+            window.dispatch_action(Box::new(editor_ui::text_editor::Undo), cx);
+        });
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| assert_eq!(editor.text(), "first saved"));
+    }
+
+    #[gpui::test]
+    fn delayed_prompt_save_cannot_mutate_new_host(cx: &mut TestAppContext) {
+        let fixture = SettingsFixture::new(cx);
+        let (settings, cx) = fixture.open(cx, editor_core::SettingsPage::GlobalPrompt);
+        wait_for(cx, "initial prompt", |cx| {
+            settings.read(cx).prompt.loaded.then_some(())
+        });
+        let gate = CompletionGate::new();
+        settings.update(cx, |settings, cx| {
+            settings.completion_gate = Some(gate.clone());
+            settings.prompt.editor.update(cx, |editor, cx| {
+                editor.replace(0..editor.text().len(), "host A saved", cx)
+            });
+            settings.save_prompt(cx);
+        });
+        wait_gate(cx, &gate);
+        fixture.select(1, editor_core::SettingsPage::GlobalPrompt, cx);
+        wait_for(cx, "host B prompt", |cx| {
+            settings.read(cx).prompt.loaded.then_some(())
+        });
+        settings.update(cx, |settings, cx| {
+            settings.prompt.editor.update(cx, |editor, cx| {
+                editor.replace(0..editor.text().len(), "host B draft", cx)
+            });
+            settings.prompt.error = Some("B owns this notice".into());
+        });
+        let baseline = settings.read_with(cx, |settings, _| {
+            (settings.prompt.saved.clone(), settings.prompt.base_version)
+        });
+        finish_gate(cx, &gate);
+        settings.read_with(cx, |settings, cx| {
+            assert_eq!(settings.prompt.host.as_ref(), Some(&fixture.hosts[1]));
+            assert_eq!(settings.prompt.editor.read(cx).text(), "host B draft");
+            assert_eq!(
+                (&settings.prompt.saved, settings.prompt.base_version),
+                (&baseline.0, baseline.1)
+            );
+            assert_eq!(settings.prompt.error.as_deref(), Some("B owns this notice"));
+            assert!(!settings.prompt.pending);
+        });
+    }
 }

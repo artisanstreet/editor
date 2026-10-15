@@ -44,16 +44,15 @@ fn bad_json_unknown_kinds_and_bad_fields_name_the_problem() {
 }
 
 #[test]
-fn the_envelope_frames_the_markdown_rendition() {
+fn the_envelope_keeps_authored_metadata() {
     let prepared = ready(
         "callout",
         r#"{"kind": "risk", "title": "Breaking", "body": "One.\n\nTwo.", "caption": "From the PR"}"#,
     );
-    let markdown = prepared.markdown();
+    assert_eq!(prepared.title.as_deref(), Some("Breaking"));
+    assert_eq!(prepared.caption.as_deref(), Some("From the PR"));
+    assert!(prepared.block.owns_title());
     // The callout draws its own title, so the envelope does not repeat it.
-    assert!(markdown.starts_with("> **Risk:** Breaking"), "{markdown}");
-    assert!(markdown.contains("> One."), "{markdown}");
-    assert!(markdown.ends_with("_From the PR_"), "{markdown}");
 }
 
 #[test]
@@ -84,7 +83,7 @@ fn numbers_read_compactly() {
 /// The `artisan-editor` skill teaches agents the catalog by example; every
 /// example in it must draw, or the skill teaches a block that fails.
 #[test]
-fn every_skill_catalog_example_draws() {
+fn every_skill_catalog_example_prepares() {
     let catalog = include_str!("../../../../../skills/artisan-editor/references/blocks.md");
     let mut examples = 0;
     let mut failures = Vec::new();

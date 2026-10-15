@@ -1,37 +1,22 @@
-//! Appearance (`appearance.svelte`), as the previous Editor painted it:
-//! the app icon, typography, performance (live: the FPS limit and the
-//! overlay, kept in this device's `settings.json`), formatting, glass and
-//! reading. Everything but performance is not yet configurable.
-
-use crate::Settings;
+//! Device appearance preferences and the live frame-rate controls.
 use crate::chrome::{card, footnote, header, row, section_shell};
-use crate::frame_rate::{self, FrameRateLimit};
-use crate::page;
-use editor_core::SettingsPage;
-use editor_ui::button::ButtonVariant;
-use editor_ui::select::{Select, SelectEntry, SelectState};
-use editor_ui::theme::ArtisanTheme;
-use editor_ui::toggle_group::{ToggleGroup, ToggleGroupVariant};
-use gpui::{
-    AnyElement, Context, Div, FontWeight, IntoElement, ParentElement as _, ScrollHandle,
-    SharedString, Styled as _, Window, div, px,
+use crate::{
+    Settings,
+    frame_rate::{self, FrameRateLimit},
 };
-use std::cell::RefCell;
-use std::rc::Rc;
-
+use editor_ui::button::ButtonVariant;
+use editor_ui::{
+    select::{Select, SelectEntry},
+    theme::ArtisanTheme,
+};
+use gpui::{
+    AnyElement, Context, Div, FontWeight, IntoElement, ParentElement as _, Styled as _, Window,
+    div, px,
+};
 const DEFAULT_TEXT_FONT: &str = "Spline Sans";
 const DEFAULT_CODE_FONT: &str = "Spline Sans Mono";
 const APP_ICON_DEFAULT_LABEL: &str = "Plastic + jaw shading";
 const APP_ICON_ALTERNATE_LABEL: &str = "Foreground plastic + gradient symbol";
-
-/// The FPS select's open state, keyboard state and list scroll.
-#[derive(Default)]
-pub(crate) struct PerformanceControl {
-    open: bool,
-    interaction: Rc<RefCell<SelectState>>,
-    scroll: ScrollHandle,
-}
-
 pub(crate) fn render(
     settings: &Settings,
     theme: &ArtisanTheme,
@@ -43,14 +28,13 @@ pub(crate) fn render(
         .flex_col()
         .child(header(
             theme,
-            page::label(SettingsPage::Appearance),
-            page::description(SettingsPage::Appearance),
+            "Appearance",
+            "How Artisan's surfaces are drawn.",
         ))
         .child(render_top(settings, theme))
         .child(render_frame_rate(settings, theme, window, cx))
         .child(render_bottom(settings, theme))
 }
-
 /// The app-icon and typography sections.
 fn render_top(settings: &Settings, theme: &ArtisanTheme) -> Div {
     let app_icon = card(
@@ -206,18 +190,12 @@ fn render_frame_rate(
     let core = settings.core.read(cx);
     let current = frame_rate::current(core);
     let overlay_visible = frame_rate::overlay_visible(core);
-    let on_open = cx.listener(|settings, open: &bool, _, cx| {
-        settings.performance.open = *open;
-        cx.notify();
-    });
     let on_change = cx.listener(|settings, limit: &FrameRateLimit, window, cx| {
         frame_rate::apply(&settings.core, *limit, window, cx);
-        settings.performance.open = false;
         cx.notify();
     });
     let select = Select::new(
         "settings-frame-rate-limit",
-        settings.control_focus.clone(),
         *theme,
         Some(current),
         FrameRateLimit::OPTIONS
@@ -225,11 +203,8 @@ fn render_frame_rate(
             .map(|limit| SelectEntry::item(*limit, limit.label()))
             .collect(),
     )
-    .open(settings.performance.open)
-    .with_interaction_state(settings.performance.interaction.clone())
-    .with_scroll_handle(settings.performance.scroll.clone())
+    .label("FPS limit")
     .debug_selector("settings-frame-rate-limit")
-    .on_open_change(move |open, window, cx| on_open(&open, window, cx))
     .on_change(move |limit, _, window, cx| on_change(&limit, window, cx));
     let core = settings.core.clone();
     let overlay = settings.switch(
@@ -281,18 +256,24 @@ fn segmented(
     options: &[(&'static str, &'static str)],
     selected: &str,
 ) -> AnyElement {
-    let mut group = ToggleGroup::single(id, *theme, Some(SharedString::from(selected.to_owned())))
-        .variant(ToggleGroupVariant::Outline)
-        .disabled(true)
-        .debug_selector(id);
-    for (value, label) in options {
-        group = group.item(
-            SharedString::from(*value),
-            *label,
-            settings.control_focus.clone(),
-        );
-    }
-    group.into_any_element()
+    let _ = settings;
+    let Some((first, label)) = options.first() else {
+        return div().into_any_element();
+    };
+    editor_ui::segmented_control::SegmentedControl::new(
+        id,
+        *theme,
+        id,
+        selected.to_owned(),
+        editor_ui::segmented_control::Segment::new((*first).to_owned(), *label),
+    )
+    .options(options.iter().skip(1).map(|(value, label)| {
+        editor_ui::segmented_control::Segment::new((*value).to_owned(), *label)
+    }))
+    .outline()
+    .disabled(true)
+    .debug_selector(id)
+    .into_any_element()
 }
 
 /// The formatting, glass and reading sections.

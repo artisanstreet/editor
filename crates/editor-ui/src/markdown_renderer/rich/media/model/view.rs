@@ -30,10 +30,13 @@ use serde::Deserialize;
 use super::super::super::actions::{CopyEntry, show_copy_menu};
 use super::super::super::kit;
 use super::super::picture::{MAX_FRAME_HEIGHT, SizeHint, placeholder};
+use super::super::source::MediaSource;
 use super::formats::{Format, Model};
 use super::load::{self, Loaded};
 use super::mesh::{Up, Vec3};
 use super::raster::{self, Camera, Look};
+use crate::button::{Button, ButtonVariant};
+use crate::segmented_control::{Segment, SegmentedControl};
 use crate::theme::{ArtisanTheme, ThemeMode};
 use editor_assets::AssetId;
 
@@ -83,9 +86,11 @@ impl Shading {
 
 #[derive(IntoElement)]
 pub(super) struct ModelView {
+    pub(super) media: Option<super::super::source::MediaFetcher>,
     pub(super) id: SharedString,
     pub(super) theme: ArtisanTheme,
-    pub(super) src: SharedString,
+    pub(super) src: MediaSource,
+    pub(super) name: SharedString,
     pub(super) format: Option<Format>,
     pub(super) up: Option<Up>,
     pub(super) color: Option<Vec3>,
@@ -281,23 +286,36 @@ impl RenderOnce for ModelView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = self.theme;
         let (aspect, max_width) = self.frame();
-        let model = match load::load(window, cx, &self.id, &self.src, self.format, self.up) {
+        let model = match load::load(
+            window,
+            cx,
+            &self.id,
+            &self.src,
+            self.format,
+            self.up,
+            self.media.as_ref(),
+        ) {
             Loaded::Ready(model) => model,
-            Loaded::Failed(reason) => return unavailable(&theme, &self.src, &reason),
+            Loaded::Failed(reason) => {
+                return div()
+                    .w_full()
+                    .max_w(max_width)
+                    .child(crate::media_frame::MediaFrame::new(
+                        theme,
+                        aspect,
+                        placeholder(&theme, Some(AssetId::TABLER_FILE_OFF), reason),
+                    ))
+                    .into_any_element();
+            }
             Loaded::Loading => {
                 return div()
                     .w_full()
                     .max_w(max_width)
-                    .child(
-                        div()
-                            .w_full()
-                            .aspect_ratio(aspect)
-                            .rounded(kit::inner_radius())
-                            .overflow_hidden()
-                            .border_1()
-                            .border_color(kit::hairline(&theme))
-                            .child(placeholder(&theme, None, "Loading model…")),
-                    )
+                    .child(crate::media_frame::MediaFrame::new(
+                        theme,
+                        aspect,
+                        placeholder(&theme, None, "Loading model…"),
+                    ))
                     .into_any_element();
             }
         };
@@ -359,17 +377,13 @@ impl ModelView {
             let entries = vec![CopyEntry::primary("Copy Model Path", path.clone())];
             show_copy_menu(event.position, entries, window, cx);
         };
-        div()
+        let content = div()
+            .relative()
+            .size_full()
             .id(self.part("frame"))
+            .aria_label(self.name.clone())
             .group(group.clone())
             .track_focus(&focus)
-            .relative()
-            .w_full()
-            .aspect_ratio(aspect)
-            .rounded(kit::inner_radius())
-            .overflow_hidden()
-            .border_1()
-            .border_color(kit::hairline(&theme))
             .cursor(if dragging {
                 CursorStyle::ClosedHand
             } else {
@@ -381,8 +395,8 @@ impl ModelView {
             .on_scroll_wheel(on_wheel(state))
             .on_key_down(on_key(state))
             .child(drawing)
-            .child(hint(&theme, &group, dragging))
-            .into_any_element()
+            .child(hint(&theme, &group, dragging));
+        crate::media_frame::MediaFrame::new(theme, aspect, content).into_any_element()
     }
 
     /// The mode row, a reset while the view has moved, and the facts.
@@ -394,33 +408,39 @@ impl ModelView {
         moved: bool,
     ) -> Div {
         let theme = self.theme;
-        let entries = Shading::ALL.iter().map(|shading| {
-            let shading = *shading;
-            let state = state.clone();
-            let id = self.part(format_args!("shading-{}", shading.label()));
-            kit::mode_entry(&theme, id, shading.label(), shading == chosen).on_click(
-                move |_, _, cx| {
-                    state.update(cx, |state, cx| {
-                        if state.shading != shading {
-                            state.shading = shading;
-                            cx.notify();
-                        }
-                    });
-                },
-            )
+        let shading_state = state.clone();
+        let entries = SegmentedControl::new(
+            self.part("shading"),
+            theme,
+            "Model shading",
+            chosen,
+            Segment::new(Shading::ALL[0], Shading::ALL[0].label()),
+        )
+        .options(
+            Shading::ALL[1..]
+                .iter()
+                .map(|shading| Segment::new(*shading, shading.label())),
+        )
+        .on_change(move |shading, _, cx| {
+            shading_state.update(cx, |state, cx| {
+                if state.shading != shading {
+                    state.shading = shading;
+                    cx.notify();
+                }
+            });
         });
         let reset = moved.then(|| {
             let state = state.clone();
-            kit::mode_entry(&theme, self.part("reset"), "Reset view", false).on_click(
-                move |_, _, cx| {
+            Button::text(self.part("reset"), theme, "Reset view")
+                .variant(ButtonVariant::Ghost)
+                .on_activate(move |_, _, cx| {
                     state.update(cx, |state, cx| {
                         state.reset();
                         cx.notify();
                     });
-                },
-            )
+                })
         });
-        let triangles = model.mesh.triangles();
+        let triangles = model.triangles;
         #[expect(clippy::cast_precision_loss, reason = "a displayed count")]
         let count = kit::format_number(triangles as f64);
         let noun = if triangles == 1 {
@@ -439,7 +459,7 @@ impl ModelView {
                     .flex()
                     .items_center()
                     .gap(px(2.0))
-                    .children(entries)
+                    .child(entries)
                     .children(reset),
             )
             .child(
@@ -593,8 +613,11 @@ fn paint_on_gpu(
     look: Look,
 ) -> impl FnOnce(gpui::Bounds<Pixels>, (), &mut Window, &mut App) + 'static {
     let state = state.clone();
-    let mesh = Arc::clone(&model.gpu);
+    let mesh = model.gpu.clone();
     move |bounds, (), window, cx| {
+        let Some(mesh) = mesh else {
+            return;
+        };
         let camera = state.read(cx).camera;
         let base = look.base;
         let style = gpui::MeshStyle {
@@ -663,21 +686,4 @@ fn hint(theme: &ArtisanTheme, group: &SharedString, dragging: bool) -> Div {
             )
             .text_size(px(12.0)),
         )
-}
-
-/// One quiet line saying the model could not load, and why.
-fn unavailable(theme: &ArtisanTheme, src: &str, reason: &str) -> AnyElement {
-    let muted = theme.colors.muted_foreground.to_paint();
-    div()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(kit::glyph(AssetId::TABLER_FILE_OFF, 14.0, muted))
-        .child(
-            kit::muted(theme, format!("Couldn't load {}: {reason}", src.trim()))
-                .min_w_0()
-                .truncate(),
-        )
-        .into_any_element()
 }

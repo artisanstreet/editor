@@ -6,14 +6,12 @@
 
 use editor_assets::AssetId;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Div, ElementId, Entity, FontWeight, Hsla, IntoElement, ParentElement as _,
+    SharedString, Styled as _, Window, div, px,
 };
 use serde::Deserialize;
 
 use crate::asset_seam::asset_glyph;
-use crate::hover_card::hover_fill_style;
 use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, ThemeMode};
 
 // ---------------------------------------------------------------------------
@@ -169,32 +167,6 @@ pub(super) fn hairline(theme: &ArtisanTheme) -> Hsla {
 }
 
 /// A small pill: status, kind, or tag.
-pub(super) fn chip(theme: &ArtisanTheme, text: impl Into<SharedString>, tone: Tone) -> Div {
-    let color = tone.color(theme);
-    let (fg, bg) = if tone == Tone::Neutral {
-        (
-            theme.colors.foreground.to_paint(),
-            theme.colors.foreground.with_alpha(0.06).to_paint(),
-        )
-    } else {
-        (color.to_paint(), color.with_alpha(0.12).to_paint())
-    };
-    div()
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap(px(4.0))
-        .h(px(20.0))
-        .px(px(8.0))
-        .rounded(px(10.0))
-        .bg(bg)
-        .text_size(px(12.0))
-        .line_height(px(16.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(fg)
-        .whitespace_nowrap()
-        .child(text.into())
-}
 
 /// A tinted glyph at `size` in `color`.
 pub(super) fn glyph(id: AssetId, size: f32, color: Hsla) -> AnyElement {
@@ -216,35 +188,6 @@ pub(super) fn keyed<T: 'static>(
     init: impl FnOnce() -> T,
 ) -> Entity<T> {
     window.use_keyed_state(id.into(), cx, |_, _| init())
-}
-
-/// One entry of the mode row under a block: the chosen mode in the
-/// foreground and semibold, the rest muted, every entry with the app's
-/// hover fill. The caller adds the click.
-pub(super) fn mode_entry(
-    theme: &ArtisanTheme,
-    id: ElementId,
-    label: impl Into<SharedString>,
-    selected: bool,
-) -> gpui::Stateful<Div> {
-    let theme = *theme;
-    div()
-        .id(id)
-        .px(px(8.0))
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .text_size(px(12.0))
-        .text_color(if selected {
-            theme.colors.foreground.to_paint()
-        } else {
-            theme.colors.muted_foreground.to_paint()
-        })
-        .when(selected, |entry| entry.font_weight(FontWeight::SEMIBOLD))
-        .hover(move |style| hover_fill_style(style, &theme, px(6.0)))
-        .child(label.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,44 +335,12 @@ pub(super) fn with_unit(value: &str, unit: Option<&str>) -> String {
     }
 }
 
-/// Escapes a Markdown table cell.
-pub(super) fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
-}
-
-/// A Markdown table from a header and rows.
-pub(super) fn markdown_table(header: &[String], rows: &[Vec<String>]) -> String {
-    let mut out = String::new();
-    let line = |cells: &[String]| {
-        format!(
-            "| {} |\n",
-            cells
-                .iter()
-                .map(|text| cell(text))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        )
-    };
-    out.push_str(&line(header));
-    out.push('|');
-    out.push_str(&" --- |".repeat(header.len().max(1)));
-    out.push('\n');
-    for row in rows {
-        out.push_str(&line(row));
-    }
-    out
-}
-
-/// Deserializes a list into a shared slice, so frames clone it cheaply.
-pub(super) fn shared<'de, D, T>(deserializer: D) -> Result<std::rc::Rc<[T]>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Vec::<T>::deserialize(deserializer).map(std::rc::Rc::from)
-}
-
 /// The element id of one part of a view keyed under `id`.
 pub(super) fn part(id: &SharedString, part: impl std::fmt::Display) -> gpui::ElementId {
-    gpui::ElementId::Name(SharedString::from(format!("{id}-{part}")))
+    gpui::ElementId::Name(part_key(id, part))
+}
+
+/// String identity for loaders and controls requiring SharedString.
+pub(super) fn part_key(id: &SharedString, part: impl std::fmt::Display) -> SharedString {
+    SharedString::from(format!("{id}-{part}"))
 }

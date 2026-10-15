@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 150
 expression: "replay(\"approval\")"
 ---
 [
@@ -31,7 +32,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -51,7 +54,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I’ll run the two requested shell calls separately, requesting escalation for each.",
+                text: Inline(
+                    "I’ll run the two requested shell calls separately, requesting escalation for each.",
+                ),
                 phase: Commentary,
             },
         },
@@ -63,7 +68,9 @@ expression: "replay(\"approval\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -77,81 +84,67 @@ expression: "replay(\"approval\")"
         },
     ),
     Event(
-        Item {
-            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+        Approval {
+            key: "approval-request:0",
             parent: None,
+            target: Some(
+                "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            ),
             status: AwaitingUser,
-            kind: Tool {
-                tool: Shell {
-                    command: "touch a.txt",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
-                    background: false,
                 },
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch a.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I create a.txt in the workspace as requested?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: None,
-                    },
+                reason: Some(
+                    Inline(
+                        "May I create a.txt in the workspace as requested?",
+                    ),
                 ),
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                    Cancelled,
+                ],
+                decision: None,
             },
         },
     ),
     Event(
-        Item {
-            key: "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+        Approval {
+            key: "approval-request:0",
             parent: None,
-            status: Running,
-            kind: Tool {
-                tool: Shell {
-                    command: "touch a.txt",
+            target: Some(
+                "exec-b4033401-a5d0-4d33-b2c7-805d01aba6e3",
+            ),
+            status: Done,
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
-                    background: false,
                 },
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch a.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I create a.txt in the workspace as requested?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: Some(
-                            AllowAlways,
-                        ),
-                    },
+                reason: Some(
+                    Inline(
+                        "May I create a.txt in the workspace as requested?",
+                    ),
+                ),
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                    Cancelled,
+                ],
+                decision: Some(
+                    AllowAlways,
                 ),
             },
         },
@@ -171,7 +164,9 @@ expression: "replay(\"approval\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -182,28 +177,7 @@ expression: "replay(\"approval\")"
                 exit_code: Some(
                     0,
                 ),
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "touch a.txt",
-                            cwd: Some(
-                                "/work",
-                            ),
-                        },
-                        reason: Some(
-                            "May I create a.txt in the workspace as requested?",
-                        ),
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                            Cancelled,
-                        ],
-                        decision: Some(
-                            AllowAlways,
-                        ),
-                    },
-                ),
+                approval: None,
             },
         },
     ),
@@ -234,7 +208,9 @@ expression: "replay(\"approval\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -254,7 +230,9 @@ expression: "replay(\"approval\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -295,7 +273,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -315,7 +295,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "done",
+                text: Inline(
+                    "done",
+                ),
                 phase: Final,
             },
         },

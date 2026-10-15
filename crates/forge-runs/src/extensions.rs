@@ -95,8 +95,7 @@ impl Hub {
         .context("engine home task")
     }
 
-    /// Every skill, after linking the enabled ones into each installed
-    /// engine.
+    /// Read-only skill catalog; ownership changes reconcile explicitly.
     pub async fn skill_catalog(&self) -> Result<Vec<CatalogSkill>> {
         let customisation = self.skill_customisation().await?;
         let homes = self.engine_homes();
@@ -122,15 +121,10 @@ impl Hub {
         if !known {
             return Err(refused("Artisan doesn't manage that skill."));
         }
-        let mut disabled = self.disabled_skills().await?;
-        if enabled {
-            disabled.remove(id);
-        } else {
-            disabled.insert(id.to_owned());
-        }
         self.store()
-            .set_setting(DISABLED_SKILLS_KEY.to_owned(), serde_json::json!(disabled))
+            .set_skill_enabled(id.to_owned(), enabled)
             .await?;
+        self.reconcile_skills().await?;
         self.skill_catalog().await
     }
 
@@ -147,7 +141,16 @@ impl Hub {
             // The customise layer phrases its refusals for the user.
             return Err(refused(format!("{error:#}")));
         }
+        self.reconcile_skills().await?;
+        self.store().bump_revision("skills_revision".into()).await?;
         self.skill_catalog().await
+    }
+
+    pub async fn reconcile_skills(&self) -> Result<()> {
+        let customisation = self.skill_customisation().await?;
+        let homes = self.engine_homes();
+        self.on_homes(move || forge_engines::reconcile_skills(&homes, &customisation))
+            .await?
     }
 
     /// The prompt engines get at launch; `None` while the user must still
@@ -156,7 +159,7 @@ impl Hub {
         if let Some(text) = self.stored_prompt().await? {
             return Ok(Some(text));
         }
-        let prompt = self.global_prompt().await?;
+        let prompt = self.reconcile_global_prompt().await?;
         Ok(prompt.candidates.is_empty().then_some(prompt.text))
     }
 
@@ -168,20 +171,31 @@ impl Hub {
             .and_then(|value| value.as_str().map(str::to_owned)))
     }
 
-    /// The global prompt and where it stands in each engine, after bringing
-    /// every engine not edited outside Artisan in line.
+    /// Read-only view of the global prompt and each engine file.
     pub async fn global_prompt(&self) -> Result<GlobalPrompt> {
+        self.prompt_projection(false, None).await
+    }
+
+    pub async fn reconcile_global_prompt(&self) -> Result<GlobalPrompt> {
         self.reconcile_prompt(None).await
     }
 
     async fn reconcile_prompt(&self, force: Option<EngineId>) -> Result<GlobalPrompt> {
+        self.prompt_projection(true, force).await
+    }
+
+    async fn prompt_projection(
+        &self,
+        reconcile: bool,
+        force: Option<EngineId>,
+    ) -> Result<GlobalPrompt> {
         let homes = self.engine_homes();
         if self.stored_prompt().await?.is_none() {
             // Before Forge first writes, it takes what the engines have: one
             // shared text silently, differing ones as a choice for the user.
             let found = homes.clone();
             let mut candidates = self.on_homes(move || candidates(&found)).await?;
-            if candidates.len() > 1 {
+            if !reconcile || candidates.len() > 1 {
                 return Ok(GlobalPrompt {
                     version: 0,
                     text: String::new(),
@@ -206,7 +220,9 @@ impl Hub {
             .on_homes(move || {
                 homes
                     .iter()
-                    .map(|(engine, home)| prompt_state(*engine, home.as_ref(), &canonical, force))
+                    .map(|(engine, home)| {
+                        prompt_state(*engine, home.as_ref(), &canonical, reconcile, force)
+                    })
                     .collect()
             })
             .await?;
@@ -234,11 +250,17 @@ impl Hub {
                 "The global prompt changed since you started editing. Review the current version and save again.",
             ));
         }
-        self.global_prompt().await
+        self.reconcile_prompt(None).await
     }
 
     /// Settles the setup choice or an engine edited outside Artisan.
     pub async fn resolve_global_prompt(&self, resolution: ResolvePrompt) -> Result<GlobalPrompt> {
+        let prompt = self.resolve_prompt_inner(resolution).await?;
+        self.store().bump_revision("prompt_revision".into()).await?;
+        Ok(prompt)
+    }
+
+    async fn resolve_prompt_inner(&self, resolution: ResolvePrompt) -> Result<GlobalPrompt> {
         let current = self.global_prompt().await?;
         let drifted = |engine: EngineId| {
             current
@@ -270,7 +292,7 @@ impl Hub {
                     .save_prompt_version(current.version, candidate.text.clone())
                     .await?
                     .map_err(|_| refused("The global prompt was set up meanwhile."))?;
-                self.global_prompt().await
+                self.reconcile_prompt(None).await
             }
             ResolvePrompt::UseEngine { engine } => {
                 let text = drifted(engine)?;
@@ -280,7 +302,7 @@ impl Hub {
                     .map_err(|_| {
                         refused("The global prompt changed meanwhile. Review it and try again.")
                     })?;
-                self.global_prompt().await
+                self.reconcile_prompt(None).await
             }
             ResolvePrompt::RestoreEngine { engine } => {
                 drifted(engine)?;
@@ -356,6 +378,7 @@ fn prompt_state(
     engine: EngineId,
     home: Option<&PathBuf>,
     canonical: &str,
+    reconcile: bool,
     force: Option<EngineId>,
 ) -> PromptEngineState {
     let probe = home.cloned().unwrap_or_default();
@@ -372,7 +395,12 @@ fn prompt_state(
     let Some(home) = home else {
         return state(PromptEngineStatus::EngineAbsent, None, None);
     };
-    match forge_engines::apply_prompt(engine, home, canonical, force == Some(engine)) {
+    let applied = if reconcile {
+        forge_engines::apply_prompt(engine, home, canonical, force == Some(engine))
+    } else {
+        forge_engines::inspect_prompt(engine, home, canonical)
+    };
+    match applied {
         Some(PromptApplied::Synced) | None => state(PromptEngineStatus::Synced, None, None),
         Some(PromptApplied::Drifted(text)) => state(PromptEngineStatus::Drifted, Some(text), None),
         Some(PromptApplied::Failed(reason)) => {

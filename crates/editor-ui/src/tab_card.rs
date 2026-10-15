@@ -12,13 +12,13 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Background, Bounds, BoxShadow, ContentMask, Corners, Div, Filter, Hsla,
-    IntoElement, ParentElement as _, PathBuilder, Pixels, Styled as _, Window, canvas, div,
-    linear_color_stop, linear_gradient, point, px, relative, size,
+    AnyElement, App, Bounds, BoxShadow, ContentMask, Corners, Div, ElementId, Filter, IntoElement,
+    ParentElement as _, Path, PathBuilder, Pixels, Point, RenderOnce, Size, Styled as _, Window,
+    canvas, div, point, px, relative, size,
 };
 
-use crate::glass::{GlassStrength, card_shadows, glass_blur_radius};
-use crate::theme::{ArtisanTheme, Oklch, SurfaceStep, ThemeMode};
+use crate::glass::TabCardMaterial;
+use crate::theme::ArtisanTheme;
 
 /// Padding between the shell edge and the wrapped card.
 pub const TAB_CARD_PADDING_PX: f32 = 4.0;
@@ -31,13 +31,36 @@ const FILLET_RADIUS_PX: f32 = 12.0;
 /// Horizontal room the tab leaves around its content.
 const TAB_PADDING_X_PX: f32 = 4.0;
 
-/// Wraps `body` in the darker glass shell with `tab` on its top-left edge.
-///
-/// `inner_radius` is the wrapped card's corner radius; the shell's outer
-/// corners add the padding so both stay concentric.
-#[must_use]
-pub fn tab_card(tab: impl IntoElement, body: impl IntoElement, inner_radius: Pixels) -> Div {
-    tab_card_with_strip(tab, None, body, inner_radius)
+/// A measured tab and body sharing one glass shell and geometry cache.
+#[derive(IntoElement)]
+pub struct TabCard {
+    id: ElementId,
+    theme: ArtisanTheme,
+    tab: AnyElement,
+    body: AnyElement,
+    strip: Option<TabCardStrip>,
+}
+
+impl TabCard {
+    pub fn new(
+        id: impl Into<ElementId>,
+        theme: ArtisanTheme,
+        tab: impl IntoElement,
+        body: impl IntoElement,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            theme,
+            tab: tab.into_any_element(),
+            body: body.into_any_element(),
+            strip: None,
+        }
+    }
+    #[must_use]
+    pub fn strip(mut self, strip: Option<TabCardStrip>) -> Self {
+        self.strip = strip;
+        self
+    }
 }
 
 /// A lighter strip filling the empty space beside the tab.
@@ -58,30 +81,33 @@ pub struct TabCardStrip {
     pub content: AnyElement,
 }
 
-/// [`tab_card`] with an optional [`TabCardStrip`] beside the tab.
-#[must_use]
-pub fn tab_card_with_strip(
-    tab: impl IntoElement,
-    strip: Option<TabCardStrip>,
-    body: impl IntoElement,
-    inner_radius: Pixels,
-) -> Div {
-    let radius = inner_radius + px(TAB_CARD_PADDING_PX);
-    let reveal = strip
-        .as_ref()
-        .map_or(0.0, |strip| strip.reveal.clamp(0.0, 1.0));
+impl RenderOnce for TabCard {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let Self {
+            id,
+            theme,
+            tab,
+            body,
+            strip,
+        } = self;
+        let geometry = window.use_keyed_state(id, cx, |_, _| GeometryCache::default());
+        let radius = px(crate::glass::COMPOSER_RADIUS + TAB_CARD_PADDING_PX);
+        let reveal = strip
+            .as_ref()
+            .map_or(0.0, |strip| strip.reveal.clamp(0.0, 1.0));
 
-    let blur = glass_blur_radius(GlassStrength::Strong);
-    let card_edge = card_shadows(&ArtisanTheme::for_mode(ThemeMode::Dark));
-    let shell_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
-    let shell_probe = Rc::clone(&shell_bounds);
+        let material = TabCardMaterial::new(&theme);
+        let blur = material.blur;
+        let shadow = material.shadow.clone();
+        let shell_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let shell_probe = Rc::clone(&shell_bounds);
 
-    // Paint order is the whole trick. Backdrop blur samples whatever is
-    // already painted, so the blur layers paint first, then the silhouette,
-    // then the content. Blurring after the silhouette smears its rim, which
-    // is why the strip's blur paints with the silhouette rather than as a
-    // layer of its own.
-    let tab = div()
+        // Paint order is the whole trick. Backdrop blur samples whatever is
+        // already painted, so the blur layers paint first, then the silhouette,
+        // then the content. Blurring after the silhouette smears its rim, which
+        // is why the strip's blur paints with the silhouette rather than as a
+        // layer of its own.
+        let tab = div()
         .relative()
         .h(px(TAB_CARD_TAB_HEIGHT_PX))
         .px(px(TAB_PADDING_X_PX))
@@ -100,12 +126,17 @@ pub fn tab_card_with_strip(
         // whole silhouette from the shell bounds probed above.
         .child(
             canvas(
-                |bounds, _, _| bounds.size.width,
-                move |_, tab_width, window, _| {
-                    if let Some(bounds) = shell_bounds.get() {
-                        paint_silhouette(
-                            bounds, tab_width, radius, reveal, blur, &card_edge, window,
-                        );
+                move |bounds, _, cx| {
+                    shell_bounds.get().map(|shell| {
+                        let tab_width = bounds.size.width;
+                        let key = GeometryKey { size: shell.size, tab_width, radius, reveal };
+                        let paths = geometry.update(cx, |cache, _| cache.get(key));
+                        (shell, tab_width, paths)
+                    })
+                },
+                move |_, prepared, window, _| {
+                    if let Some((bounds, tab_width, paths)) = prepared {
+                        paint_silhouette(bounds, tab_width, radius, reveal, &material, &paths, window);
                     }
                 },
             )
@@ -114,7 +145,7 @@ pub fn tab_card_with_strip(
         )
         .child(tab);
 
-    div()
+        div()
         .relative()
         .w_full()
         .flex()
@@ -135,7 +166,7 @@ pub fn tab_card_with_strip(
                 .bottom_0()
                 .rounded_tr(radius)
                 .rounded_b(radius)
-                .shadow(shell_shadow()),
+                .shadow(shadow),
         )
         // A grown strip fills the gap outside the body's top-right corner,
         // and the strip's own blur stops at the body's top edge, so the
@@ -166,6 +197,7 @@ pub fn tab_card_with_strip(
                 .p(px(TAB_CARD_PADDING_PX))
                 .child(body.into_any_element()),
         )
+    }
 }
 
 /// The strip's content, laid out to the right of the tab over the strip's
@@ -187,71 +219,6 @@ fn strip_layer(strip: TabCardStrip) -> Div {
                 .overflow_hidden()
                 .child(strip.content),
         )
-}
-
-/// The composer's diagonal glass recipe, two steps down the surface ramp and
-/// denser, so the shell reads darker than the card it frames.
-fn shell_material() -> Background {
-    linear_gradient(
-        145.0,
-        linear_color_stop(SurfaceStep::S800.oklch().with_alpha(0.62).to_paint(), 0.0),
-        linear_color_stop(SurfaceStep::S900.oklch().with_alpha(0.62).to_paint(), 1.0),
-    )
-}
-
-/// The strip's glass: two steps lighter than the shell at the same density,
-/// so it reads as a raised second tab rather than a different material.
-fn strip_material() -> Background {
-    linear_gradient(
-        145.0,
-        linear_color_stop(SurfaceStep::S700.oklch().with_alpha(0.62).to_paint(), 0.0),
-        linear_color_stop(SurfaceStep::S800.oklch().with_alpha(0.62).to_paint(), 1.0),
-    )
-}
-
-fn shell_highlight() -> Background {
-    let white = Oklch::new(1.0, 0.0, 0.0);
-    linear_gradient(
-        180.0,
-        linear_color_stop(white.with_alpha(0.035).to_paint(), 0.0),
-        linear_color_stop(white.with_alpha(0.0).to_paint(), 0.35),
-    )
-}
-
-/// Backing under the wrapped card (`#0e0e0e`); raise it to lift the card.
-fn card_well() -> Hsla {
-    // Oklab lightness of sRGB #0e0e0e.
-    Oklch::new(0.164, 0.0, 0.0).to_paint()
-}
-
-/// Strength of the `@utility card` edge layers relative to the token (8%).
-/// Halved: the wrapped card already carries the strong glass edge.
-const RIM_ALPHA: f32 = 0.04;
-
-/// The `card` hairline ring: dark mode's `--highlight` (`surface-50`).
-fn shell_ring() -> Hsla {
-    SurfaceStep::S50.oklch().with_alpha(RIM_ALPHA).to_paint()
-}
-
-/// The `card` top light: white on the upward-facing edges, fading out by the
-/// body's top edge so the sides and bottom carry only the ring.
-fn shell_top_light() -> Background {
-    let white = Oklch::new(1.0, 0.0, 0.0);
-    linear_gradient(
-        180.0,
-        linear_color_stop(white.with_alpha(RIM_ALPHA).to_paint(), 0.0),
-        linear_color_stop(white.with_alpha(0.0).to_paint(), 0.4),
-    )
-}
-
-fn shell_shadow() -> Vec<BoxShadow> {
-    vec![BoxShadow {
-        color: Oklch::new(0.0, 0.0, 0.0).with_alpha(0.6).to_paint(),
-        offset: point(px(0.0), px(18.0)),
-        blur_radius: px(48.0),
-        spread_radius: px(-18.0),
-        inset: false,
-    }]
 }
 
 /// Traces the tab and body outline clockwise from the tab's top-left corner.
@@ -551,78 +518,121 @@ fn paint_strip_card_edge(
     });
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct GeometryKey {
+    size: Size<Pixels>,
+    tab_width: Pixels,
+    radius: Pixels,
+    reveal: f32,
+}
+#[derive(Default)]
+struct GeometryCache {
+    key: Option<GeometryKey>,
+    paths: Rc<Geometry>,
+}
+#[derive(Default)]
+struct Geometry {
+    strip: Option<Path<Pixels>>,
+    well: Option<Path<Pixels>>,
+    shell: Option<Path<Pixels>>,
+    edge: Option<Path<Pixels>>,
+}
+impl GeometryCache {
+    fn get(&mut self, key: GeometryKey) -> Rc<Geometry> {
+        if self.key != Some(key) {
+            self.paths = Rc::new(Geometry::new(key));
+            self.key = Some(key);
+        }
+        self.paths.clone()
+    }
+}
+impl Geometry {
+    fn new(key: GeometryKey) -> Self {
+        let GeometryKey {
+            size,
+            tab_width,
+            radius,
+            reveal,
+        } = key;
+        let bounds = Bounds::new(Point::default(), size);
+        let strip = strip_right(bounds, tab_width, reveal).and_then(|right| {
+            let mut path = PathBuilder::fill();
+            trace_strip(bounds, tab_width, radius, right, &mut path);
+            path.build().ok()
+        });
+        let mut well = PathBuilder::fill();
+        trace_card_hole(bounds, radius, &mut well);
+        let mut shell = PathBuilder::fill();
+        trace_silhouette(bounds, tab_width, radius, &mut shell);
+        trace_card_hole(bounds, radius, &mut shell);
+        let mut edge = PathBuilder::stroke(px(0.5));
+        trace_silhouette(
+            Bounds::new(
+                point(px(0.5), px(0.5)),
+                gpui::size(size.width - px(1.0), size.height - px(1.0)),
+            ),
+            tab_width - px(1.0),
+            radius - px(0.5),
+            &mut edge,
+        );
+        Self {
+            strip,
+            well: well.build().ok(),
+            shell: shell.build().ok(),
+            edge: edge.build().ok(),
+        }
+    }
+}
+
+fn translated(path: &Path<Pixels>, origin: Point<Pixels>) -> Path<Pixels> {
+    let mut path = path.clone();
+    path.bounds.origin += origin;
+    for vertex in &mut path.vertices {
+        vertex.xy_position += origin;
+    }
+    path
+}
+
 fn paint_silhouette(
     bounds: Bounds<Pixels>,
     tab_width: Pixels,
     radius: Pixels,
     reveal: f32,
-    blur: Pixels,
-    card_edge: &[BoxShadow],
+    material: &TabCardMaterial,
+    paths: &Geometry,
     window: &mut Window,
 ) {
     if tab_width <= Pixels::ZERO {
         return;
     }
-    // The strip fills the space around the shell and paints first: where
-    // their edges meet, the shell's fill and ring land on top. Its blur
-    // paints before its fill, so it blurs what lies behind the strip and
-    // not the strip itself.
     let strip = strip_right(bounds, tab_width, reveal);
     if let Some(right) = strip {
-        paint_strip_blur(bounds, tab_width, radius, right, blur, window);
-        let mut fill = PathBuilder::fill();
-        trace_strip(bounds, tab_width, radius, right, &mut fill);
-        if let Ok(path) = fill.build() {
-            window.paint_path(path, strip_material());
-        }
-        let mut highlight = PathBuilder::fill();
-        trace_strip(bounds, tab_width, radius, right, &mut highlight);
-        if let Ok(path) = highlight.build() {
-            window.paint_path(path, shell_highlight());
+        paint_strip_blur(bounds, tab_width, radius, right, material.blur, window);
+        if let Some(path) = &paths.strip {
+            window.paint_path(translated(path, bounds.origin), material.strip.clone());
+            window.paint_path(translated(path, bounds.origin), material.highlight.clone());
         }
     }
-    // The wrapped card is translucent glass. Over pure black it reads too
-    // dark to separate from the page, and over the shell material it reads
-    // washed out, so it gets its own near-black well.
-    let mut well = PathBuilder::fill();
-    trace_card_hole(bounds, radius, &mut well);
-    if let Ok(path) = well.build() {
-        window.paint_path(path, card_well());
+    if let Some(path) = &paths.well {
+        window.paint_path(translated(path, bounds.origin), material.well);
     }
-    let mut fill = PathBuilder::fill();
-    trace_silhouette(bounds, tab_width, radius, &mut fill);
-    trace_card_hole(bounds, radius, &mut fill);
-    if let Ok(path) = fill.build() {
-        window.paint_path(path, shell_material());
+    if let Some(path) = &paths.shell {
+        window.paint_path(translated(path, bounds.origin), material.shell.clone());
+        window.paint_path(translated(path, bounds.origin), material.highlight.clone());
     }
-    let mut highlight = PathBuilder::fill();
-    trace_silhouette(bounds, tab_width, radius, &mut highlight);
-    trace_card_hole(bounds, radius, &mut highlight);
-    if let Ok(path) = highlight.build() {
-        window.paint_path(path, shell_highlight());
-    }
-    // Inset by half a pixel so the hairlines stay inside the fill.
-    let inset = Bounds {
-        origin: bounds.origin + point(px(0.5), px(0.5)),
-        size: size(bounds.size.width - px(1.0), bounds.size.height - px(1.0)),
-    };
-    // The `@utility card` edge, traced along the silhouette: a 0.5 px ring
-    // plus a 0.5 px top light, both at reduced strength.
-    let shell_edge = |builder: &mut PathBuilder| {
-        trace_silhouette(inset, tab_width - px(1.0), radius - px(0.5), builder);
-    };
-    let mut ring = PathBuilder::stroke(px(0.5));
-    shell_edge(&mut ring);
-    if let Ok(path) = ring.build() {
-        window.paint_path(path, shell_ring());
-    }
-    let mut top_light = PathBuilder::stroke(px(0.5));
-    shell_edge(&mut top_light);
-    if let Ok(path) = top_light.build() {
-        window.paint_path(path, shell_top_light());
+    if let Some(path) = &paths.edge {
+        window.paint_path(translated(path, bounds.origin), material.ring);
+        window.paint_path(translated(path, bounds.origin), material.top_light.clone());
     }
     if let Some(right) = strip {
-        paint_strip_card_edge(bounds, tab_width, radius, right, card_edge, window);
+        paint_strip_card_edge(
+            bounds,
+            tab_width,
+            radius,
+            right,
+            &material.card_edge,
+            window,
+        );
     }
 }
 
@@ -635,6 +645,22 @@ mod tests {
             origin: point(px(0.0), px(0.0)),
             size: size(px(800.0), px(200.0)),
         }
+    }
+
+    #[test]
+    fn geometry_reuses_paths_until_shape_changes() {
+        let mut cache = GeometryCache::default();
+        let mut key = GeometryKey {
+            size: shell().size,
+            tab_width: px(120.0),
+            radius: px(24.0),
+            reveal: 0.5,
+        };
+        let first = cache.get(key);
+        assert!(Rc::ptr_eq(&first, &cache.get(key)));
+        key.reveal = 0.6;
+        assert!(!Rc::ptr_eq(&first, &cache.get(key)));
+        assert!(first.shell.is_some() && first.strip.is_some() && first.edge.is_some());
     }
 
     #[test]

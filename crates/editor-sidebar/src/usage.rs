@@ -1,644 +1,744 @@
-//! The profile menu's Usage section, ported from the previous Editor's
-//! `desktop_profile_usage` (`sidebar-engine-usage.svelte`): per engine its
-//! mark and name with a "last checked" reading that turns into Refresh on
-//! hover, one group per cadence with 72×8 accent meters, and the sentence
-//! saying when the group's limit resets.
-
-use crate::Sidebar;
-use artisan_api::{EngineId, EngineStatus, Timestamp, UsageLimits, UsageWindow};
-use editor_ui::AssetId;
-use editor_ui::glass::{
-    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-    glass_highlight_layer, glass_material_layer,
-};
-use editor_ui::icon::{IconSize, IconStyle, IconTint, icon};
-use editor_ui::picker_motion::HoverRect;
-use editor_ui::theme::{ArtisanTheme, DesktopTheme, RadiusStep, RadiusTokens};
+//! Account controls own their request state and one minute clock, only while open.
+use crate::{avatar, hover::HoverSurface, usage_visual};
+use artisan_api::{EngineId, UsageLimits};
+#[cfg(test)]
+use artisan_api::{Timestamp, UsageCadence, UsageWindow};
+use editor_core::{ConnectionStatus, Core, HostData, HostEvent, Screen, SettingsPage};
+use editor_ui::asset_seam::asset_glyph;
+use editor_ui::{AssetId, theme::ArtisanTheme};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, Context, Div, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, StyledText, canvas, div, px,
+    AnyElement, Bounds, Context, Entity, FontWeight, Image, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, anchored, deferred, div, point, px,
 };
-use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::rc::Rc;
-
-/// Ticks in a meter, as the previous Editor quantized it.
-const METER_SEGMENTS: usize = 14;
-/// One tick: fourteen 72 px pitches less their 2 px gap.
-#[allow(clippy::cast_precision_loss)]
-const METER_TICK: f32 = 72.0 / METER_SEGMENTS as f32 - 2.0;
-/// The engine title sits a little further from its first group.
-const TITLE_GAP: f32 = 4.0;
-/// The tooltip's width cap and its distance from the meter row.
-const TOOLTIP_WIDTH: f32 = 224.0;
-const TOOLTIP_OFFSET: f32 = 8.0;
-
-/// The provider-disclosed cadence a window belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Cadence {
-    Session,
-    Weekly,
-    Monthly,
-    Unknown,
+use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{collections::HashMap, time::Duration};
+pub(crate) struct Account {
+    core: Entity<Core>,
+    host: Option<Entity<HostData>>,
+    pub(crate) refreshing: HashMap<EngineId, Task<()>>,
+    pub(crate) ui: usage_visual::UsageUi,
+    hover: HoverSurface,
+    machines_hover: HoverSurface,
+    machines_open: bool,
+    host_origin: Rc<Cell<Bounds<Pixels>>>,
+    submenu_bounds: Rc<Cell<Bounds<Pixels>>>,
+    avatars: HashMap<String, Arc<Image>>,
+    close: Option<Rc<dyn Fn(&mut gpui::App)>>,
+    usage_height: Pixels,
+    error: Option<String>,
+    #[cfg(test)]
+    refresh_completion_gate: Option<(
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+        tokio::sync::oneshot::Receiver<bool>,
+    )>,
+    _events: Option<Subscription>,
+    _clock: Task<()>,
 }
-
-impl Cadence {
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Session => "Session",
-            Self::Weekly => "Weekly",
-            Self::Monthly => "Monthly",
-            Self::Unknown => "Usage",
-        }
-    }
-
-    fn of(word: &str) -> Option<Self> {
-        match word.trim().to_lowercase().as_str() {
-            "session" | "5 hours" => Some(Self::Session),
-            "week" | "weekly" | "7 days" => Some(Self::Weekly),
-            "month" | "monthly" => Some(Self::Monthly),
-            _ => None,
-        }
-    }
-}
-
-/// A window as the menu shows it: its cadence and the scope it covers
-/// (`None` reads "All models").
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Meter {
-    pub(crate) index: usize,
-    pub(crate) cadence: Cadence,
-    pub(crate) scope: Option<String>,
-    pub(crate) used_percent: f64,
-    pub(crate) resets_at: Option<Timestamp>,
-}
-
-/// Reads Forge's window label: `Session`, `Week`, `Week (Opus)`,
-/// `GPT-5 (Session)`, or a scope with no cadence (`Cursor models`).
-pub(crate) fn meter(index: usize, window: &UsageWindow) -> Meter {
-    let (cadence, scope) = match window.label.rsplit_once(" (") {
-        Some((head, tail)) => {
-            let tail = tail.trim_end_matches(')');
-            match (Cadence::of(tail), Cadence::of(head)) {
-                (Some(cadence), _) => (cadence, Some(head.to_owned())),
-                (None, Some(cadence)) => (cadence, Some(tail.to_owned())),
-                (None, None) => (Cadence::Unknown, Some(window.label.clone())),
-            }
-        }
-        None => match Cadence::of(&window.label) {
-            Some(cadence) => (cadence, None),
-            None => (Cadence::Unknown, Some(window.label.clone())),
-        },
-    };
-    Meter {
-        index,
-        cadence,
-        scope,
-        used_percent: window.used_percent,
-        resets_at: window.resets_at,
-    }
-}
-
-/// Groups in cadence order; account-wide windows before scoped ones.
-pub(crate) fn groups(usage: &UsageLimits) -> Vec<(Cadence, Vec<Meter>)> {
-    let mut meters: Vec<Meter> = usage
-        .windows
-        .iter()
-        .enumerate()
-        .filter(|(_, window)| (0.0..=100.0).contains(&window.used_percent))
-        .map(|(index, window)| meter(index, window))
-        .collect();
-    meters.sort_by_key(|meter| (meter.cadence, meter.scope.is_some(), meter.index));
-    let mut groups: Vec<(Cadence, Vec<Meter>)> = Vec::new();
-    for meter in meters {
-        match groups.last_mut() {
-            Some((cadence, list)) if *cadence == meter.cadence => list.push(meter),
-            _ => groups.push((meter.cadence, vec![meter])),
-        }
-    }
-    groups
-}
-
-/// "3 hours", once every window of a group has a future reset; the latest
-/// one counts.
-pub(crate) fn reset_duration(meters: &[Meter], now: Timestamp) -> Option<String> {
-    const MINUTE: i64 = 60_000;
-    let mut latest: Option<Timestamp> = None;
-    for meter in meters {
-        let at = meter.resets_at.filter(|at| *at > now)?;
-        latest = Some(latest.map_or(at, |latest| latest.max(at)));
-    }
-    let minutes = ((latest? - now) + MINUTE - 1) / MINUTE;
-    let minutes = minutes.max(1);
-    let (amount, unit) = if minutes < 60 {
-        (minutes, "minute")
-    } else if minutes < 24 * 60 {
-        ((minutes + 59) / 60, "hour")
-    } else {
-        ((minutes + 24 * 60 - 1) / (24 * 60), "day")
-    };
-    Some(if amount == 1 {
-        format!("1 {unit}")
-    } else {
-        format!("{amount} {unit}s")
-    })
-}
-
-/// The reading beside an engine's name.
-pub(crate) fn checked_label(read_at: Timestamp, now: Timestamp) -> String {
-    let minutes = ((now - read_at) / 60_000).max(0);
-    if minutes < 1 {
-        return "last checked now".to_owned();
-    }
-    if minutes < 60 {
-        return format!("last checked {minutes} min ago");
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format!("last checked {hours} hr ago");
-    }
-    format!("last checked {} d ago", hours / 24)
-}
-
-/// Lit ticks: the used share rounded up to a whole tick.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-pub(crate) fn lit_ticks(used_percent: f64) -> usize {
-    (used_percent.clamp(0.0, 100.0) / 100.0 * METER_SEGMENTS as f64).ceil() as usize
-}
-
-/// What the tooltip says is left.
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) fn remaining_percent(used_percent: f64) -> i64 {
-    (100.0 - used_percent.round()).clamp(0.0, 100.0) as i64
-}
-
-pub(crate) fn engine_asset(engine: EngineId) -> AssetId {
-    match engine {
-        EngineId::Claude => AssetId::SVGL_CLAUDE_AI,
-        EngineId::Codex => AssetId::SVGL_OPENAI,
-        EngineId::OpenCode => AssetId::BRANDS_OPENCODE,
-        EngineId::Grok => AssetId::SVGL_GROK,
-        EngineId::Cursor => AssetId::SVGL_CURSOR,
-    }
-}
-
-/// The meter accent (`lib/engine/presentation.ts`).
-fn engine_accent(engine: EngineId) -> Hsla {
-    let hex = match engine {
-        EngineId::Claude => 0x00d9_7757,
-        EngineId::Codex => 0x0010_a37f,
-        EngineId::Cursor | EngineId::Grok | EngineId::OpenCode => 0x006b_7280,
-    };
-    gpui::rgb_to_hsla(gpui::rgb(hex))
-}
-
-/// The product name the menu titles a block with.
-pub(crate) const fn engine_name(engine: EngineId) -> &'static str {
-    engine.display_name()
-}
-
-/// One meter: its engine and its window's place in the report.
-type MeterKey = (EngineId, usize);
-/// The hovered meter and its row's place in the menu.
-type TipAnchor = Rc<RefCell<Option<(MeterKey, HoverRect)>>>;
-
-/// The Usage section's pointer state.
-#[derive(Default)]
-pub(crate) struct UsageUi {
-    /// Engines whose refresh is in flight.
-    pub(crate) refreshing: BTreeSet<EngineId>,
-    /// The engine whose reading the pointer is on.
-    pub(crate) refresh_hover: Option<EngineId>,
-    /// The hovered meter and its row's place in the menu.
-    pub(crate) meter_hover: Option<MeterKey>,
-    pub(crate) tip_anchor: TipAnchor,
-    pub(crate) menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
-}
-
-impl UsageUi {
-    pub(crate) fn clear(&mut self) {
-        self.refresh_hover = None;
-        self.meter_hover = None;
-        self.tip_anchor.borrow_mut().take();
-    }
-
-    /// Records the menu panel's bounds, for the tooltip's place.
-    pub(crate) fn menu_probe(&self) -> impl IntoElement {
-        let bounds = Rc::clone(&self.menu_bounds);
-        canvas(
-            |_, _, _| {},
-            move |measured, (), window, cx| {
-                if bounds.borrow_mut().replace(measured) != Some(measured) {
-                    window.defer(cx, |window, _| window.refresh());
+impl Account {
+    pub(crate) fn new(core: Entity<Core>, cx: &mut Context<Self>) -> Self {
+        let host = core.read(cx).active_host().cloned();
+        let events = host.as_ref().map(|host| {
+            cx.subscribe(host, |_, _, event: &HostEvent, cx| {
+                if matches!(event, HostEvent::Changed | HostEvent::Reset) {
+                    cx.notify();
                 }
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
+            })
+        });
+        let clock = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(60))
+                    .await;
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            core,
+            host,
+            refreshing: HashMap::new(),
+            ui: usage_visual::UsageUi::default(),
+            hover: HoverSurface::default(),
+            machines_hover: HoverSurface::default(),
+            machines_open: false,
+            host_origin: Rc::default(),
+            submenu_bounds: Rc::default(),
+            avatars: HashMap::new(),
+            close: None,
+            usage_height: px(0.0),
+            error: None,
+            #[cfg(test)]
+            refresh_completion_gate: None,
+            _events: events,
+            _clock: clock,
+        }
     }
-}
-
-/// Engines with something to show, in the host's order.
-pub(crate) fn shown<'a>(
-    engines: impl Iterator<Item = &'a EngineStatus>,
-) -> Vec<(EngineId, UsageLimits)> {
-    engines
-        .filter_map(|status| {
-            let usage = status.usage.clone()?;
-            (!groups(&usage).is_empty()).then_some((status.engine, usage))
-        })
-        .collect()
-}
-
-/// The whole section: engine blocks separated by hairlines.
-pub(crate) fn section(
-    sidebar: &Sidebar,
-    engines: &[(EngineId, UsageLimits)],
-    theme: &ArtisanTheme,
-    desktop: DesktopTheme,
-    separator: Hsla,
-    cx: &mut Context<Sidebar>,
-) -> Stateful<Div> {
-    let now = artisan_api::now();
-    let mut section = div()
-        .id("artisan-profile-usage")
-        .debug_selector(|| "artisan-profile-usage".to_owned())
-        .flex()
-        .flex_col()
-        .px(px(4.0))
-        .py(px(4.0));
-    for (index, (engine, usage)) in engines.iter().enumerate() {
-        if index > 0 {
-            section = section.child(div().h(px(1.0)).bg(separator).my(px(4.0)));
+    pub(crate) fn refresh(&mut self, engine: EngineId, cx: &mut Context<Self>) {
+        if self.refreshing.contains_key(&engine) {
+            return;
         }
-        section = section.child(engine_block(
-            sidebar, *engine, usage, now, theme, desktop, cx,
-        ));
-    }
-    section
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn engine_block(
-    sidebar: &Sidebar,
-    engine: EngineId,
-    usage: &UsageLimits,
-    now: Timestamp,
-    theme: &ArtisanTheme,
-    desktop: DesktopTheme,
-    cx: &mut Context<Sidebar>,
-) -> Div {
-    let accent = engine_accent(engine);
-    let dim = theme.colors.foreground.with_alpha(0.11).to_paint();
-    let refreshing = sidebar.usage.refreshing.contains(&engine);
-    let block_selector = format!("artisan-profile-usage-engine-{engine}");
-    let title = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(8.0))
-        .mb(px(TITLE_GAP))
-        .child(
-            div()
-                .flex()
-                .min_w(px(0.0))
-                .items_center()
-                .gap(px(8.0))
-                .text_color(desktop.foreground)
-                .child(
-                    icon(IconStyle::resolve(
-                        *theme,
-                        engine_asset(engine),
-                        IconSize::Default,
-                        IconTint::Inherit,
-                    ))
-                    .size(px(16.0))
-                    .flex_shrink_0(),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(12.0))
-                        .line_height(px(16.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(desktop.foreground)
-                        .child(engine_name(engine)),
-                ),
-        )
-        .child(refresh_control(
-            sidebar,
-            engine,
-            &checked_label(usage.read_at, now),
-            refreshing,
-            theme,
-            desktop,
-            cx,
-        ));
-    let mut block = div()
-        .debug_selector(move || block_selector.clone())
-        .flex()
-        .flex_col()
-        .gap(px(6.0))
-        .px(px(8.0))
-        .py(px(4.0))
-        .child(title);
-    for (group_index, (cadence, meters)) in groups(usage).into_iter().enumerate() {
-        let mut group = div().flex().flex_col().gap(px(6.0));
-        if group_index > 0 {
-            group = group.mt(px(8.0));
-        }
-        group = group.child(
-            div()
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(desktop.foreground)
-                .child(cadence.title()),
-        );
-        for meter in &meters {
-            group = group.child(meter_row(sidebar, engine, meter, accent, dim, desktop, cx));
-        }
-        if let Some(duration) = reset_duration(&meters, now) {
-            let sentence = format!(
-                "Your {} limit resets in {duration}.",
-                cadence.title().to_lowercase()
-            );
-            let body = match sentence.find(duration.as_str()) {
-                Some(start) => StyledText::new(SharedString::from(sentence.clone()))
-                    .with_highlights([(
-                        start..start + duration.len(),
-                        HighlightStyle {
-                            color: Some(desktop.foreground),
-                            ..Default::default()
-                        },
-                    )]),
-                None => StyledText::new(SharedString::from(sentence)),
+        let Some(host) = &self.host else {
+            return;
+        };
+        let client = host.read(cx).client.clone();
+        #[cfg(test)]
+        let completion_gate = self.refresh_completion_gate.take();
+        let task = cx.spawn(async move |this, cx| {
+            let result = client
+                .engine_action(engine, &artisan_api::EngineCommand::Refresh {})
+                .await;
+            #[cfg(test)]
+            let result = if let Some((arrived, release)) = completion_gate {
+                arrived.store(true, std::sync::atomic::Ordering::Release);
+                if release.await.unwrap_or(false) {
+                    Err(anyhow::anyhow!("injected account refresh failure"))
+                } else {
+                    result
+                }
+            } else {
+                result
             };
-            group = group.child(
-                div()
-                    .mt(px(8.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .text_color(desktop.secondary)
-                    .child(body),
-            );
-        }
-        block = block.child(group);
+            let _ = this.update(cx, |this, cx| {
+                this.refreshing.remove(&engine);
+                this.error = result
+                    .err()
+                    .map(|error| format!("Couldn't refresh {}: {error:#}", engine.display_name()));
+                cx.notify();
+            });
+        });
+        self.refreshing.insert(engine, task);
+        cx.notify();
     }
-    block
 }
-
-/// The reading beside the name: "last checked …" at rest, Refresh under
-/// the pointer, "Checking…" while the refresh runs. All three share one
-/// cell sized to the widest, so the swap never moves the row.
-fn refresh_control(
-    sidebar: &Sidebar,
-    engine: EngineId,
-    checked: &str,
-    refreshing: bool,
-    _theme: &ArtisanTheme,
-    desktop: DesktopTheme,
-    cx: &mut Context<Sidebar>,
-) -> Stateful<Div> {
-    let selector = format!("artisan-profile-usage-refresh-{engine}");
-    let hovered = sidebar.usage.refresh_hover == Some(engine);
-    let shown = if refreshing {
-        2
-    } else if hovered {
-        1
+#[cfg(test)]
+fn title(window: &UsageWindow) -> &str {
+    match window.cadence {
+        UsageCadence::Session => "Session",
+        UsageCadence::Week => "Week",
+        UsageCadence::Other => &window.label,
+    }
+}
+#[cfg(test)]
+fn checked_label(read_at: Timestamp, now: Timestamp) -> String {
+    let minutes = now.saturating_sub(read_at).max(0) / 60_000;
+    match minutes {
+        0 => "Checked now".into(),
+        1..=59 => format!("Checked {minutes} min ago"),
+        60..=1439 => format!("Checked {} hr ago", minutes / 60),
+        _ => format!("Checked {} d ago", minutes / 1440),
+    }
+}
+#[cfg(test)]
+fn reset_label(at: Timestamp, now: Timestamp) -> String {
+    let remaining = at.saturating_sub(now);
+    if remaining <= 0 {
+        return "Reset time reached".into();
+    }
+    let minutes = remaining.saturating_add(59_999) / 60_000;
+    if minutes < 60 {
+        format!("Resets in {minutes} min")
+    } else if minutes < 1440 {
+        format!("Resets in {} hr", minutes.saturating_add(59) / 60)
     } else {
-        0
-    };
-    let layer = |index: usize, text: String, color: Hsla| {
+        format!("Resets in {} d", minutes.saturating_add(1439) / 1440)
+    }
+}
+impl Account {
+    pub(crate) fn with_close(mut self, close: impl Fn(&mut gpui::App) + 'static) -> Self {
+        self.close = Some(Rc::new(close));
+        self
+    }
+    pub(crate) fn set_usage_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.usage_height != height {
+            self.usage_height = height;
+            cx.notify();
+        }
+    }
+    pub(crate) fn clear_interaction(&mut self, cx: &mut Context<Self>) {
+        self.machines_open = false;
+        self.hover.clear();
+        self.machines_hover.clear();
+        self.ui.clear();
+        cx.notify();
+    }
+    pub(crate) fn contains_popup(&self, position: &gpui::Point<Pixels>) -> bool {
+        self.machines_open && self.submenu_bounds.get().contains(position)
+    }
+    fn action(
+        &self,
+        id: &'static str,
+        asset: AssetId,
+        label: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = ArtisanTheme::default();
+        let hover = self.hover.clone();
         div()
-            .col_start(1)
-            .row_start(1)
+            .id(id)
+            .role(gpui::Role::MenuItem)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .debug_selector(move || id.to_owned())
+            .relative()
+            .px(px(12.0))
+            .py(px(8.0))
             .flex()
             .items_center()
-            .justify_end()
-            .whitespace_nowrap()
-            .text_color(color)
-            .opacity(if index == shown { 1.0 } else { 0.0 })
-            .child(text)
-    };
-    let mut control = div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
-        .grid()
-        .flex_shrink_0()
-        .text_size(px(12.0))
-        .line_height(px(16.0))
-        .child(layer(0, checked.to_owned(), desktop.secondary))
-        .child(layer(1, "Refresh".to_owned(), desktop.foreground))
-        .child(layer(2, "Checking\u{2026}".to_owned(), desktop.secondary))
-        .on_hover(cx.listener(move |sidebar, hovered: &bool, _, cx| {
-            if *hovered {
-                sidebar.usage.refresh_hover = Some(engine);
-            } else if sidebar.usage.refresh_hover == Some(engine) {
-                sidebar.usage.refresh_hover = None;
-            }
-            cx.notify();
-        }));
-    if !refreshing {
-        control = control
+            .gap(px(8.0))
+            .rounded(px(12.0))
             .cursor_pointer()
-            .on_click(cx.listener(move |sidebar, _, _, cx| {
-                cx.stop_propagation();
-                sidebar.refresh_usage(engine, cx);
-            }));
-    }
-    control
-}
-
-/// One meter row: the scope, then fourteen ticks lit by the used share.
-/// Hovering shows what is left in the glass tooltip.
-#[allow(clippy::too_many_arguments)]
-fn meter_row(
-    sidebar: &Sidebar,
-    engine: EngineId,
-    meter: &Meter,
-    accent: Hsla,
-    dim: Hsla,
-    desktop: DesktopTheme,
-    cx: &mut Context<Sidebar>,
-) -> Stateful<Div> {
-    let lit = lit_ticks(meter.used_percent);
-    let key = (engine, meter.index);
-    let selector = format!("artisan-profile-usage-meter-{engine}-{}", meter.index);
-    let mut bar = div().w(px(72.0)).h(px(8.0)).flex_shrink_0().flex();
-    for index in 0..METER_SEGMENTS {
-        bar = bar.child(
-            div()
-                .w(px(METER_TICK))
-                .mr(px(2.0))
-                .h_full()
-                .bg(if index < lit { accent } else { dim }),
-        );
-    }
-    let probe = {
-        let (anchor, surface) = (
-            Rc::clone(&sidebar.usage.tip_anchor),
-            Rc::clone(&sidebar.usage.menu_bounds),
-        );
-        let hovered = sidebar.usage.meter_hover == Some(key);
-        canvas(
-            |_, _, _| {},
-            move |bounds, (), window, cx| {
-                if !hovered {
-                    return;
-                }
-                let Some(surface) = *surface.borrow() else {
-                    return;
-                };
-                let rect = HoverRect::within(bounds, surface);
-                let mut anchor = anchor.borrow_mut();
-                if anchor.as_ref() == Some(&(key, rect)) {
-                    return;
-                }
-                *anchor = Some((key, rect));
-                window.defer(cx, |window, _| window.refresh());
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    };
-    div()
-        .id(SharedString::from(selector.clone()))
-        .debug_selector(move || selector.clone())
-        .relative()
-        .flex()
-        .items_center()
-        .gap(px(16.0))
-        .child(probe)
-        .child(
-            div()
-                .min_w(px(0.0))
-                .flex_1()
-                .truncate()
-                .pl(px(8.0))
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(desktop.secondary)
-                .child(
-                    meter
-                        .scope
-                        .clone()
-                        .unwrap_or_else(|| "All models".to_owned()),
-                ),
-        )
-        .child(bar)
-        .on_hover(cx.listener(move |sidebar, hovered: &bool, _, cx| {
-            if *hovered {
-                sidebar.usage.meter_hover = Some(key);
-            } else if sidebar.usage.meter_hover == Some(key) {
-                sidebar.usage.meter_hover = None;
-                sidebar.usage.tip_anchor.borrow_mut().take();
-            }
-            cx.notify();
-        }))
-}
-
-/// The glass tooltip beside the hovered meter: "You have N% left."
-pub(crate) fn tooltip(
-    sidebar: &Sidebar,
-    engines: &[(EngineId, UsageLimits)],
-    theme: &ArtisanTheme,
-    desktop: DesktopTheme,
-) -> Option<Stateful<Div>> {
-    let key = sidebar.usage.meter_hover?;
-    let (anchor_key, anchor) = (*sidebar.usage.tip_anchor.borrow())?;
-    if anchor_key != key {
-        return None;
-    }
-    let window = engines
-        .iter()
-        .find(|(engine, _)| *engine == key.0)?
-        .1
-        .windows
-        .get(key.1)?;
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    Some(
-        div()
-            .id("artisan-profile-usage-tooltip")
-            .debug_selector(|| "artisan-profile-usage-tooltip".to_owned())
-            .absolute()
-            .left(px(anchor.left + anchor.width + TOOLTIP_OFFSET))
-            .top(px(anchor.top))
-            .max_w(px(TOOLTIP_WIDTH))
-            .rounded(radius)
-            .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
-            .bg(glass_foreground_base(theme))
-            .border_1()
-            .border_color(desktop.line)
-            .shadow(glass_card_shadows())
-            .child(glass_material_layer(GlassStrength::Quiet, radius))
-            .child(glass_highlight_layer(GlassStrength::Quiet, radius))
+            .child(self.hover.row_probe(id))
+            .child(
+                asset_glyph(asset)
+                    .size(px(15.0))
+                    .text_color(theme.workspace.secondary),
+            )
             .child(
                 div()
-                    .px(px(12.0))
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(14.0))
+                    .line_height(px(20.0))
+                    .text_color(theme.workspace.foreground)
+                    .child(label),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.machines_open = false;
+                    hover.hovered(id, true);
+                    cx.notify();
+                }
+            }))
+    }
+    fn host_menu(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = ArtisanTheme::default();
+        let current = self.host.as_ref().map(|host| host.read(cx).id.clone());
+        let hosts: Vec<_> = self
+            .core
+            .read(cx)
+            .hosts()
+            .map(|(config, host)| (config.clone(), host.read(cx).status.clone()))
+            .collect();
+        let mut rows = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(self.machines_hover.surface_probe())
+            .child(
+                self.machines_hover
+                    .pill("machines", &theme, px(12.0), cx.reduce_motion()),
+            );
+        for (config, status) in hosts {
+            let id = config.id.clone();
+            let image = self
+                .avatars
+                .entry(config.fingerprint.clone())
+                .or_insert_with(|| avatar::avatar_image(&config.fingerprint))
+                .clone();
+            let secondary = match status {
+                ConnectionStatus::Live => config.address.clone(),
+                ConnectionStatus::Connecting => "Connecting…".into(),
+                ConnectionStatus::Offline { reason, .. } => format!("Offline: {reason}"),
+            };
+            let hover = self.machines_hover.clone();
+            let hover_id = format!("host-{id}");
+            let active = current.as_ref() == Some(&id);
+            let core = self.core.clone();
+            let close = self.close.clone();
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("machine-option-{id}")))
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(config.name.clone())
+                    .aria_selected(active)
+                    .focusable()
+                    .tab_index(0)
+                    .relative()
+                    .px(px(8.0))
                     .py(px(8.0))
                     .flex()
-                    .flex_row()
                     .items_center()
-                    .whitespace_nowrap()
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .text_color(desktop.foreground)
-                    .child(format!(
-                        "You have {}% left.",
-                        remaining_percent(window.used_percent)
-                    )),
-            ),
-    )
+                    .gap(px(10.0))
+                    .rounded(px(12.0))
+                    .cursor_pointer()
+                    .child(self.machines_hover.row_probe(hover_id.clone()))
+                    .on_hover(cx.listener(move |_, hovered: &bool, _, cx| {
+                        hover.hovered(&hover_id, *hovered);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .size(px(32.0))
+                            .flex_none()
+                            .rounded(px(8.0))
+                            .overflow_hidden()
+                            .child(avatar::avatar(image)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(14.0))
+                                    .line_height(px(20.0))
+                                    .child(config.name),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.0))
+                                    .line_height(px(16.0))
+                                    .text_color(theme.workspace.secondary)
+                                    .child(secondary),
+                            ),
+                    )
+                    .when(active, |row| {
+                        row.child(asset_glyph(AssetId::TABLER_CHECK).size(px(15.0)))
+                    })
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(close) = &close {
+                            close(cx);
+                        }
+                        core.update(cx, |core, cx| {
+                            core.navigate(
+                                Screen::NewThread {
+                                    host: id.clone(),
+                                    project: None,
+                                },
+                                cx,
+                            )
+                        });
+                    }),
+            );
+        }
+        let core = self.core.clone();
+        let close = self.close.clone();
+        rows = rows
+            .child(
+                div()
+                    .h(px(1.0))
+                    .my(px(4.0))
+                    .bg(theme.colors.foreground.with_alpha(0.2).to_paint()),
+            )
+            .child(
+                self.action(
+                    "sidebar-manage-hosts",
+                    AssetId::TABLER_SETTINGS,
+                    "Manage hosts…",
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    if let Some(close) = &close {
+                        close(cx);
+                    }
+                    core.update(cx, |core, cx| {
+                        core.navigate(Screen::Settings(SettingsPage::Hosts), cx)
+                    })
+                }),
+            );
+        let bounds = self.host_origin.get();
+        let width = px(300.0).min((window.viewport_size().width - px(16.0)).max(px(0.0)));
+        let right = bounds.right() + px(6.0);
+        let left = if right + width <= window.viewport_size().width - px(8.0) {
+            right
+        } else {
+            (bounds.left() - width - px(6.0)).max(px(8.0))
+        };
+        let submenu_bounds = self.submenu_bounds.clone();
+        deferred(
+            anchored()
+                .position(point(left, bounds.top()))
+                .snap_to_window_with_margin(px(8.0))
+                .child(editor_ui::hover_card::glass_hover_card(
+                    &theme,
+                    div()
+                        .id("machine-dropdown")
+                        .relative()
+                        .child(
+                            gpui::canvas(
+                                |_, _, _| {},
+                                move |bounds, (), _, _| submenu_bounds.set(bounds),
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                        .debug_selector(|| "machine-dropdown".into())
+                        .w(width)
+                        .max_h(px(400.0))
+                        .overflow_y_scroll()
+                        .p(px(4.0))
+                        .child(rows),
+                )),
+        )
+        .with_priority(2)
+        .into_any_element()
+    }
+}
+impl Render for Account {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = ArtisanTheme::default();
+        let (seed, user, name, status) = self
+            .host
+            .as_ref()
+            .map(|host| {
+                let host = host.read(cx);
+                let seed = self
+                    .core
+                    .read(cx)
+                    .hosts()
+                    .find(|(config, _)| config.id == host.id)
+                    .map_or_else(
+                        || host.id.0.clone(),
+                        |(config, _)| config.fingerprint.clone(),
+                    );
+                let status = match &host.status {
+                    ConnectionStatus::Live => host.name.clone(),
+                    ConnectionStatus::Connecting => "Connecting…".into(),
+                    ConnectionStatus::Offline { reason, .. } => format!("Offline: {reason}"),
+                };
+                (
+                    seed,
+                    host.account
+                        .as_ref()
+                        .map_or_else(|| host.name.clone(), |account| account.user.clone()),
+                    host.name.clone(),
+                    status,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "no-host".into(),
+                    "Artisan".into(),
+                    "No host".into(),
+                    "No host".into(),
+                )
+            });
+        let image = self
+            .avatars
+            .entry(seed.clone())
+            .or_insert_with(|| avatar::avatar_image(&seed))
+            .clone();
+        let _ = name;
+        let origin = self.host_origin.clone();
+        let host_hover = self.hover.clone();
+        let host_row = div()
+            .id("artisan-desktop-profile-machine")
+            .role(gpui::Role::Button)
+            .aria_label("Choose Forge")
+            .aria_expanded(self.machines_open)
+            .focusable()
+            .tab_index(0)
+            .debug_selector(|| "artisan-desktop-profile-machine".into())
+            .relative()
+            .p(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .rounded(px(12.0))
+            .cursor_pointer()
+            .child(self.hover.row_probe("profile-host"))
+            .child(
+                gpui::canvas(|_, _, _| {}, move |bounds, (), _, _| origin.set(bounds))
+                    .absolute()
+                    .size_full(),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.machines_open = true;
+                    host_hover.hovered("profile-host", true);
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.machines_open = !this.machines_open;
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .size(px(32.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .overflow_hidden()
+                    .child(avatar::avatar(image)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(14.0))
+                            .line_height(px(20.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(user),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .line_height(px(16.0))
+                            .text_color(theme.workspace.secondary)
+                            .child(status),
+                    ),
+            )
+            .child(
+                asset_glyph(AssetId::TABLER_CHEVRON_RIGHT)
+                    .size(px(15.0))
+                    .text_color(theme.workspace.secondary),
+            );
+        let reports: Vec<(EngineId, UsageLimits)> = self
+            .host
+            .as_ref()
+            .map(|host| {
+                host.read(cx)
+                    .engines
+                    .values()
+                    .filter_map(|status| {
+                        status
+                            .usage
+                            .as_ref()
+                            .map(|usage| (status.engine, usage.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let separator = theme
+            .colors
+            .border
+            .with_alpha(theme.colors.border.a * 0.5)
+            .to_paint();
+        let mut body = div()
+            .id("artisan-profile-content")
+            .relative()
+            .flex()
+            .flex_col()
+            .child(self.ui.menu_probe())
+            .child(self.hover.surface_probe())
+            .child(
+                self.hover
+                    .pill("profile", &theme, px(12.0), cx.reduce_motion()),
+            )
+            .child(div().p(px(4.0)).child(host_row))
+            .child(div().h(px(1.0)).my(px(4.0)).bg(separator));
+        if !reports.is_empty() {
+            body = body
+                .child(
+                    div()
+                        .id("artisan-profile-usage-scroll")
+                        .debug_selector(|| "artisan-profile-usage-scroll".into())
+                        .min_h_0()
+                        .max_h(self.usage_height)
+                        .overflow_y_scroll()
+                        .child(usage_visual::section(
+                            self,
+                            &reports,
+                            &theme,
+                            theme.workspace,
+                            separator,
+                            cx,
+                        )),
+                )
+                .child(div().h(px(1.0)).my(px(4.0)).bg(separator));
+        }
+        let core = self.core.clone();
+        let close = self.close.clone();
+        let mut actions = div()
+            .id("artisan-desktop-profile-actions-hover-surface")
+            .debug_selector(|| "artisan-desktop-profile-actions-hover-surface".into())
+            .w_full()
+            .flex()
+            .flex_col()
+            .p(px(4.0))
+            .child(
+                self.action(
+                    "artisan-desktop-profile-action-0",
+                    AssetId::TABLER_SETTINGS,
+                    "Settings",
+                    cx,
+                )
+                .on_click(move |_, _, cx| {
+                    if let Some(close) = &close {
+                        close(cx);
+                    }
+                    core.update(cx, |core, cx| {
+                        core.navigate(Screen::Settings(SettingsPage::Models), cx)
+                    })
+                }),
+            );
+        if !reports.is_empty() {
+            let engines: Vec<_> = reports.iter().map(|(engine, _)| *engine).collect();
+            actions = actions.child(
+                self.action(
+                    "artisan-desktop-profile-action-1",
+                    AssetId::TABLER_LIST_DETAILS,
+                    "Usage",
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    for engine in &engines {
+                        this.refresh(*engine, cx);
+                    }
+                })),
+            );
+        }
+        body = body.child(actions);
+        if let Some(tooltip) = usage_visual::tooltip(self, &reports, &theme, theme.workspace) {
+            body = body.child(tooltip);
+        }
+        let submenu = self.machines_open.then(|| self.host_menu(window, cx));
+        body.children(self.error.clone().map(|error| {
+            div()
+                .text_color(theme.colors.destructive.to_paint())
+                .child(error)
+        }))
+        .children(submenu)
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if !*hovered {
+                this.hover.clear();
+                this.ui.clear();
+                cx.notify();
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn window(label: &str, used: f64, resets_at: Option<Timestamp>) -> UsageWindow {
-        UsageWindow {
-            label: label.to_owned(),
-            used_percent: used,
-            resets_at,
-        }
-    }
-
     #[test]
-    fn claude_and_codex_windows_group_like_the_previous_menu() {
-        let hour = 3_600_000;
-        let usage = UsageLimits {
-            windows: vec![
-                window("Week (Opus)", 40.0, Some(5 * 24 * hour)),
-                window("Session", 3.0, Some(2 * hour + 1)),
-                window("Week", 12.0, Some(5 * 24 * hour)),
-                window("Cursor models", 50.0, None),
-            ],
-            read_at: 0,
+    fn cadence_is_data_not_label_grammar() {
+        let window = UsageWindow {
+            label: "Any translated label".into(),
+            cadence: UsageCadence::Week,
+            scope: Some("model:x".into()),
+            used_percent: 42.0,
+            resets_at: None,
         };
-        let groups = groups(&usage);
-        let titles: Vec<_> = groups.iter().map(|(cadence, _)| cadence.title()).collect();
-        assert_eq!(titles, ["Session", "Weekly", "Usage"]);
-        let weekly: Vec<_> = groups[1]
-            .1
-            .iter()
-            .map(|meter| meter.scope.clone().unwrap_or_else(|| "All models".into()))
-            .collect();
-        assert_eq!(weekly, ["All models", "Opus"]);
-        assert_eq!(reset_duration(&groups[0].1, 0).as_deref(), Some("3 hours"));
-        assert_eq!(reset_duration(&groups[1].1, 0).as_deref(), Some("5 days"));
-        assert_eq!(reset_duration(&groups[2].1, 0), None);
-        assert_eq!(lit_ticks(3.0), 1);
-        assert_eq!(remaining_percent(12.4), 88);
-        assert_eq!(checked_label(0, 61 * 60_000), "last checked 1 hr ago");
+        assert_eq!(title(&window), "Week");
+    }
+    #[test]
+    fn times_never_overflow() {
+        assert_eq!(checked_label(i64::MAX, i64::MIN), "Checked now");
+        assert_eq!(reset_label(i64::MIN, i64::MAX), "Reset time reached");
+        assert!(reset_label(i64::MAX, i64::MIN).starts_with("Resets in "));
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use crate::tests::Setup;
+    use gpui::TestAppContext;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[gpui::test]
+    fn switching_hosts_drops_pending_account_refresh_and_preserves_the_new_account(
+        cx: &mut TestAppContext,
+    ) {
+        let setup = Setup::new(cx);
+        setup.wait(cx, "paired host", |setup, cx| {
+            setup.core.read_with(cx, |core, cx| {
+                core.active_host()
+                    .is_some_and(|host| host.read(cx).is_live())
+            })
+        });
+        setup
+            .window
+            .update(cx, |sidebar, _, cx| sidebar.show_profile(cx))
+            .unwrap();
+        let old_account = setup
+            .window
+            .read_with(cx, |sidebar, _| sidebar.profile.clone().unwrap())
+            .unwrap();
+        let old_weak = old_account.downgrade();
+        let arrived = Arc::new(AtomicBool::new(false));
+        let (release, receive) = tokio::sync::oneshot::channel();
+        old_account.update(cx, |account, cx| {
+            account.refresh_completion_gate = Some((arrived.clone(), receive));
+            account.refresh(EngineId::Claude, cx);
+        });
+        setup.wait(cx, "account RPC response held", |_, _| {
+            arrived.load(Ordering::Acquire)
+        });
+        let server = setup
+            .forge
+            .block_on(forge_http::start(forge_http::ServeConfig {
+                data_dir: setup._dir.path().join("second-forge"),
+                listen: "127.0.0.1:0".parse().unwrap(),
+            }))
+            .unwrap();
+        let address = server.local_addr().unwrap().to_string();
+        let store = server.store().clone();
+        setup.forge.spawn(server.run());
+        let (_, host) = super::super::tests::forge_fixture::pair(
+            &store,
+            &setup.forge,
+            &address,
+            &setup._dir.path().join("editor"),
+        );
+        setup
+            .core
+            .update(cx, |core, cx| core.add_host(host.clone(), cx).unwrap());
+        setup.wait(cx, "new host clears old account", |setup, cx| {
+            setup
+                .window
+                .read_with(cx, |sidebar, cx| {
+                    sidebar.profile.is_none()
+                        && sidebar
+                            .host
+                            .as_ref()
+                            .is_some_and(|data| data.read(cx).id == host.id)
+                })
+                .unwrap()
+        });
+        drop(old_account);
+        cx.run_until_parked();
+        assert!(
+            old_weak.upgrade().is_none(),
+            "account and its owned request must release on host switch"
+        );
+        setup.wait(
+            cx,
+            "cancelled account request releases its future",
+            |_, _| release.is_closed(),
+        );
+        setup
+            .window
+            .update(cx, |sidebar, _, cx| sidebar.show_profile(cx))
+            .unwrap();
+        let new_account = setup
+            .window
+            .read_with(cx, |sidebar, _| sidebar.profile.clone().unwrap())
+            .unwrap();
+        new_account.update(cx, |account, _| {
+            account.error = Some("new account error".into())
+        });
+        assert!(
+            release.send(true).is_err(),
+            "dropping account cancels its pending request"
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            new_account.read_with(cx, |account, _| account.error.clone()),
+            Some("new account error".into())
+        );
+        assert!(new_account.read_with(cx, |account, _| account.refreshing.is_empty()));
     }
 }

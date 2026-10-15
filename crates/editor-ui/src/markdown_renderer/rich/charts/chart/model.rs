@@ -16,7 +16,7 @@ pub(crate) enum XScale {
 }
 
 /// One series as `(x, y)` points sorted by x; a `None` y breaks the line.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Series {
     pub(crate) name: String,
     pub(crate) points: Vec<(f64, Option<f64>)>,
@@ -26,7 +26,7 @@ pub(crate) struct Series {
 pub(crate) type Track = Vec<(f64, Option<(f64, f64)>)>;
 
 /// The resolved chart data.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Model {
     pub(crate) x: XScale,
     /// Every x any series has, sorted and distinct; every category index
@@ -253,12 +253,25 @@ impl Model {
 
     /// The index into `xs` nearest `x` among those inside `view`.
     pub(crate) fn nearest(&self, x: f64, view: Domain) -> Option<usize> {
-        self.xs
-            .iter()
-            .enumerate()
-            .filter(|(_, at)| view.contains(**at))
-            .min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs()))
-            .map(|(index, _)| index)
+        let lo = self.xs.partition_point(|value| *value < view.lo);
+        let hi = self.xs.partition_point(|value| *value <= view.hi);
+        if lo >= hi {
+            return None;
+        }
+        let after = lo + self.xs[lo..hi].partition_point(|value| *value < x);
+        match (
+            after.checked_sub(1).filter(|index| *index >= lo),
+            (after < hi).then_some(after),
+        ) {
+            (Some(before), Some(after)) => Some(
+                if (self.xs[before] - x).abs() <= (self.xs[after] - x).abs() {
+                    before
+                } else {
+                    after
+                },
+            ),
+            (before, after) => before.or(after),
+        }
     }
 
     /// Each series' extents. Hidden series get empty tracks. Unstacked
@@ -297,11 +310,20 @@ impl Model {
             })
             .collect();
         for (column, x) in self.xs.iter().enumerate() {
-            let total: f64 = (0..self.series.len())
+            let scale = (0..self.series.len())
                 .filter(|index| shown(*index))
                 .filter_map(|index| aligned[index][column])
                 .map(f64::abs)
-                .sum();
+                .fold(0.0, f64::max);
+            let total: f64 = if normalize && scale > 0.0 {
+                (0..self.series.len())
+                    .filter(|index| shown(*index))
+                    .filter_map(|index| aligned[index][column])
+                    .map(|value| value.abs() / scale)
+                    .sum()
+            } else {
+                0.0
+            };
             let (mut up, mut down) = (0.0, 0.0);
             for (index, track) in tracks.iter_mut().enumerate() {
                 if !shown(index) {
@@ -309,7 +331,7 @@ impl Model {
                 }
                 let extent = aligned[index][column].map(|value| {
                     let value = if normalize && total > 0.0 {
-                        value / total * 100.0
+                        (value / scale) / total * 100.0
                     } else {
                         value
                     };

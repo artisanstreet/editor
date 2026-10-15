@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 145
 expression: "replay(\"command\")"
 ---
 [
@@ -28,8 +29,15 @@ expression: "replay(\"command\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Planning single ls execution**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Planning single ls execution",
+            append: false,
         },
     ),
     Event(
@@ -39,7 +47,9 @@ expression: "replay(\"command\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -59,7 +69,9 @@ expression: "replay(\"command\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -68,9 +80,10 @@ expression: "replay(\"command\")"
                 title: None,
                 output: Some(
                     Output {
-                        head: "notes.txt\nsrc\n",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "notes.txt\nsrc\n",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -106,7 +119,9 @@ expression: "replay(\"command\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -126,7 +141,9 @@ expression: "replay(\"command\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "2",
+                text: Inline(
+                    "2",
+                ),
                 phase: Final,
             },
         },

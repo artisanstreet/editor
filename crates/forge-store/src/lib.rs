@@ -7,30 +7,37 @@
 
 pub mod admin;
 mod blobs;
+mod collection;
+mod content;
+#[cfg(any(feature = "legacy-import", test))]
+mod import_writes;
+#[cfg(feature = "legacy-import")]
 pub mod legacy;
 mod read;
 mod schema;
+mod source_index;
 mod writer;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use artisan_api::{
-    BlobHash, BlobRef, CreateProject, CreateThread, DeviceId, Envelope, Event, Item, ItemId,
-    ItemKind, ItemsPage, ItemsQuery, Project, ProjectId, Run, RunId, Seq, Status, Thread, ThreadId,
-    Timestamp, UpdateThread, now,
+    BlobHash, BlobRef, CreateProject, CreateThread, DeviceId, EngineId, Envelope, Event, Item,
+    ItemId, ItemKind, ItemsPage, ItemsQuery, Project, ProjectId, Run, RunId, RunStatus,
+    SendMessage, Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{broadcast, oneshot};
-use writer::{Job, Stamp, Tx, Writer};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
+use writer::{Job, Tx, Writer};
 
 pub use blobs::{BlobRejected, MAX_BLOB_BYTES};
 
 const EVENT_CAPACITY: usize = 8192;
 const READERS_KEPT: usize = 4;
+const WRITE_QUEUE_CAPACITY: usize = 256;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An item as an engine adapter or the HTTP layer reports it; the store
@@ -46,6 +53,24 @@ pub struct NewItem {
     pub kind: ItemKind,
 }
 
+/// A requested project does not exist. HTTP can map this canonical rejection
+/// without reading the same project before submitting the operation.
+#[derive(Debug, thiserror::Error)]
+#[error("project {0} not found")]
+pub struct ProjectNotFound(pub ProjectId);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SendRejected {
+    #[error("thread {0} not found")]
+    ThreadNotFound(ThreadId),
+    #[error("message id {0} was already used with different content or thread")]
+    IdConflict(ItemId),
+    #[error("{0}")]
+    Payload(String),
+    #[error("image blob {0} is missing or invalid")]
+    MissingBlob(BlobHash),
+}
+
 /// Everything stored that a client needs on connect, besides item windows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
@@ -54,6 +79,7 @@ pub struct Snapshot {
     /// Projects not removed.
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
+    pub threads_next: Option<artisan_api::ThreadCursor>,
     /// Live runs plus the latest run of every thread.
     pub runs: Vec<Run>,
     pub settings: serde_json::Map<String, serde_json::Value>,
@@ -77,84 +103,45 @@ pub struct Store {
 struct Inner {
     jobs: mpsc::Sender<Job>,
     events: broadcast::Sender<Envelope>,
+    revocations: broadcast::Sender<DeviceId>,
     head: Arc<AtomicU64>,
+    live_revision: AtomicU64,
     readers: Mutex<Vec<Connection>>,
-    database: Database,
+    read_slots: Arc<Semaphore>,
+    source_index_slot: Arc<Semaphore>,
+    database: PathBuf,
     blob_dir: PathBuf,
+    blob_lock: Mutex<()>,
+    inspector_cache:
+        Mutex<std::collections::HashMap<ThreadId, (artisan_api::InspectorSummary, usize)>>,
 }
 
-enum Database {
-    File(PathBuf),
-    /// A shared-cache URI, so every connection sees the same database.
-    Memory(String),
+fn open_database(path: &Path) -> Result<Connection> {
+    let conn =
+        Connection::open(path).with_context(|| format!("open database {}", path.display()))?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    Ok(conn)
 }
 
-impl Database {
-    fn connect(&self) -> Result<Connection> {
-        let conn = match self {
-            Self::File(path) => Connection::open(path)
-                .with_context(|| format!("open database {}", path.display()))?,
-            Self::Memory(uri) => Connection::open_with_flags(
-                uri,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_URI
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .with_context(|| format!("open in-memory database {uri}"))?,
-        };
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        Ok(conn)
-    }
-
-    fn reader(&self) -> Result<Connection> {
-        let conn = self.connect()?;
-        if matches!(self, Self::Memory(_)) {
-            // Shared-cache tables lock against a writing connection
-            // (SQLITE_LOCKED, which busy_timeout does not wait out).
-            // In-memory stores are for tests, so dirty reads are fine there.
-            conn.pragma_update(None, "read_uncommitted", true)?;
-        }
-        Ok(conn)
-    }
+/// A bounded delivery batch; cutoff is the newest pending input observed in the same snapshot.
+pub struct PendingInputs {
+    pub items: Vec<Item>,
+    pub cutoff: Seq,
 }
 
 impl Store {
     /// Opens (or creates) `forge.sqlite3` and `blobs/` in `dir`, recovers
-    /// runs left live by a previous process and collects unreferenced blobs
-    /// in the background.
+    /// runs left live by a previous process. The server owns maintenance.
     pub fn open(dir: &Path) -> Result<Self> {
         let blob_dir = dir.join("blobs");
         std::fs::create_dir_all(&blob_dir)
             .with_context(|| format!("create {}", blob_dir.display()))?;
-        let store = Self::start(Database::File(dir.join("forge.sqlite3")), blob_dir)?;
-        let inner = store.inner.clone();
-        std::thread::Builder::new()
-            .name("forge-blob-gc".into())
-            .spawn(move || match inner.gc_blobs() {
-                Ok(removed) => tracing::debug!(removed, "collected unreferenced blobs"),
-                Err(error) => {
-                    tracing::warn!(error = format!("{error:#}"), "collect unreferenced blobs");
-                }
-            })
-            .context("spawn the blob collector")?;
-        Ok(store)
+        Self::start(dir.join("forge.sqlite3"), blob_dir)
     }
 
-    /// A private in-memory database (for tests) with blobs in `blob_dir`.
-    pub fn open_in_memory(blob_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(blob_dir)
-            .with_context(|| format!("create {}", blob_dir.display()))?;
-        let uri = format!(
-            "file:forge-{}?mode=memory&cache=shared",
-            uuid::Uuid::now_v7()
-        );
-        Self::start(Database::Memory(uri), blob_dir.to_owned())
-    }
-
-    fn start(database: Database, blob_dir: PathBuf) -> Result<Self> {
-        let mut conn = database.connect()?;
-        if matches!(database, Database::File(_)) {
+    fn start(database: PathBuf, blob_dir: PathBuf) -> Result<Self> {
+        let mut conn = open_database(&database)?;
+        {
             let mode: String = conn
                 .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
                 .context("enable WAL")?;
@@ -175,22 +162,28 @@ impl Store {
             .transact(|tx| tx.recover())
             .context("recover live runs")?;
 
-        let (jobs, queue) = mpsc::channel::<Job>();
+        let (jobs, queue) = mpsc::channel::<Job>(WRITE_QUEUE_CAPACITY);
         std::thread::Builder::new()
             .name("forge-store-writer".into())
-            .spawn(move || writer.run(&queue))
+            .spawn(move || writer.run(queue))
             .context("spawn the store writer")?;
 
-        // Keeps a shared-cache memory database alive and warms the pool.
-        let first_reader = database.reader()?;
+        // Warm the bounded read pool.
+        let first_reader = open_database(&database)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 jobs,
                 events,
+                revocations: broadcast::channel(64).0,
                 head,
+                live_revision: AtomicU64::new(0),
                 readers: Mutex::new(vec![first_reader]),
+                read_slots: Arc::new(Semaphore::new(READERS_KEPT)),
+                source_index_slot: Arc::new(Semaphore::new(1)),
                 database,
                 blob_dir,
+                blob_lock: Mutex::new(()),
+                inspector_cache: Mutex::new(std::collections::HashMap::new()),
             }),
         })
     }
@@ -203,7 +196,17 @@ impl Store {
 
     /// Fans out a memory-only event (streaming text, shell output).
     pub fn publish_live(&self, event: Event) {
-        let _ = self.inner.events.send(Envelope { seq: None, event });
+        let live_revision = self.inner.live_revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.inner.events.send(Envelope {
+            seq: None,
+            live_revision,
+            event,
+        });
+    }
+
+    #[must_use]
+    pub fn live_revision(&self) -> u64 {
+        self.inner.live_revision.load(Ordering::Acquire)
     }
 
     /// The last committed seq.
@@ -217,20 +220,13 @@ impl Store {
         R: Send + 'static,
         F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
     {
-        self.write_at(None, job).await
-    }
-
-    async fn write_at<R, F>(&self, stamp: Option<Stamp>, job: F) -> Result<R>
-    where
-        R: Send + 'static,
-        F: FnOnce(&mut Tx<'_>) -> Result<R> + Send + 'static,
-    {
         let (reply, result) = oneshot::channel();
         self.inner
             .jobs
             .send(Box::new(move |writer: &mut Writer| {
-                let _ = reply.send(writer.transact_at(stamp, job));
+                let _ = reply.send(writer.transact(job));
             }))
+            .await
             .map_err(|_| anyhow!("the store writer stopped"))?;
         result.await.context("the store writer dropped a write")?
     }
@@ -241,40 +237,23 @@ impl Store {
         F: FnOnce(&Connection) -> Result<R> + Send + 'static,
     {
         let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || inner.with_reader(query))
-            .await
-            .context("store read task")?
+        let slot = inner.read_slots.clone().acquire_owned().await?;
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            inner.with_reader(query)
+        })
+        .await
+        .context("store read task")?
     }
 
     // Writes.
 
     /// Creating an existing id returns the stored project unchanged.
     pub async fn create_project(&self, request: CreateProject) -> Result<Project> {
-        self.create_project_at(request, None).await
-    }
-
-    pub(crate) async fn create_project_at(
-        &self,
-        request: CreateProject,
-        stamp: Option<Stamp>,
-    ) -> Result<Project> {
         let id = request.id.clone();
-        self.write_at(stamp, move |tx| {
-            if let Some(existing) = read::project(tx, &request.id)? {
-                return Ok(existing);
-            }
-            let name = request.name.unwrap_or_else(|| project_name(&request.path));
-            tx.save_project(Project {
-                id: request.id,
-                path: request.path,
-                name,
-                seq: 0,
-                created_at: tx.created_at(),
-                removed: false,
-            })
-        })
-        .await
-        .with_context(|| format!("create project {id}"))
+        self.write(move |tx| tx.create_project(request))
+            .await
+            .with_context(|| format!("create project {id}"))
     }
 
     /// Marks the project removed. `None` if it does not exist.
@@ -295,41 +274,10 @@ impl Store {
 
     /// Creating an existing id returns the stored thread unchanged.
     pub async fn create_thread(&self, request: CreateThread) -> Result<Thread> {
-        self.create_thread_at(request, None).await
-    }
-
-    pub(crate) async fn create_thread_at(
-        &self,
-        request: CreateThread,
-        stamp: Option<Stamp>,
-    ) -> Result<Thread> {
         let id = request.id.clone();
-        self.write_at(stamp, move |tx| {
-            if let Some(existing) = read::thread(tx, &request.id)? {
-                return Ok(existing);
-            }
-            ensure!(
-                read::project(tx, &request.project_id)?.is_some(),
-                "project {} not found",
-                request.project_id
-            );
-            let created_at = tx.created_at();
-            tx.save_thread(Thread {
-                id: request.id,
-                project_id: request.project_id,
-                title: request.title,
-                config: request.config,
-                activity_seq: 0,
-                read_seq: 0,
-                seq: 0,
-                created_at,
-                updated_at: created_at,
-                archived: false,
-                parent_thread_id: request.parent_thread_id,
-            })
-        })
-        .await
-        .with_context(|| format!("create thread {id}"))
+        self.write(move |tx| tx.create_thread(request))
+            .await
+            .with_context(|| format!("create thread {id}"))
     }
 
     /// `None` if the thread does not exist.
@@ -338,32 +286,80 @@ impl Store {
         id: &ThreadId,
         update: UpdateThread,
     ) -> Result<Option<Thread>> {
-        self.update_thread_at(id, update, None).await
+        let id = id.clone();
+        self.write(move |tx| tx.update_thread(id, update)).await
     }
 
-    pub(crate) async fn update_thread_at(
+    pub async fn threads_page(
         &self,
-        id: &ThreadId,
-        update: UpdateThread,
-        stamp: Option<Stamp>,
-    ) -> Result<Option<Thread>> {
+        query: artisan_api::ThreadsQuery,
+    ) -> Result<artisan_api::ThreadsPage> {
+        self.read(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let page = read::threads_page(&tx, &query)?;
+            tx.commit()?;
+            Ok(page)
+        })
+        .await
+    }
+
+    pub async fn inspector(&self, thread: &ThreadId) -> Result<artisan_api::InspectorSummary> {
+        let thread = thread.clone();
+        let inner = self.inner.clone();
+        self.read(move |conn| read::inspector(conn, &thread, &inner.inspector_cache))
+            .await
+    }
+
+    pub async fn mark_unread(&self, id: &ThreadId) -> Result<Option<Thread>> {
         let id = id.clone();
-        self.write_at(stamp, move |tx| {
+        self.write(move |tx| {
             let Some(mut thread) = read::thread(tx, &id)? else {
                 return Ok(None);
             };
-            if let Some(title) = update.title {
-                thread.title = Some(title);
+            thread.marked_unread = true;
+            tx.save_thread(thread).map(Some)
+        })
+        .await
+    }
+
+    pub async fn cancel_pending_inputs(&self, thread: ThreadId, through: Seq) -> Result<()> {
+        self.write(move |tx| {
+            let inputs: Vec<Item> = read::items(
+                tx,
+                "SELECT body,native_id FROM items WHERE thread_id=?1 AND position<=?2 AND status='running'
+                    AND json_extract(body,'$.kind.type')='user_message'",
+                params![thread.as_str(), through],
+            )?;
+            let mut activity = None;
+            for mut input in inputs {
+                input.status = Status::Cancelled;
+                activity = Some(tx.save_item(input, false)?.seq);
             }
-            if let Some(archived) = update.archived {
-                thread.archived = archived;
+            if let Some(seq) = activity {
+                tx.mark_activity(&thread, seq)?;
             }
-            if let Some(config) = update.config {
-                thread.config = config;
-            }
-            if let Some(read_seq) = update.read_seq {
-                thread.read_seq = read_seq;
-            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub fn subscribe_revocations(&self) -> broadcast::Receiver<DeviceId> {
+        self.inner.revocations.subscribe()
+    }
+
+    pub async fn settle_thread(
+        &self,
+        id: &ThreadId,
+        observed_seq: artisan_api::Seq,
+    ) -> Result<Option<Thread>> {
+        let id = id.clone();
+        self.write(move |tx| {
+            let Some(mut thread) = read::thread(tx, &id)? else {
+                return Ok(None);
+            };
+            thread.settled_seq = thread
+                .settled_seq
+                .max(observed_seq.min(thread.activity_seq));
             tx.save_thread(thread).map(Some)
         })
         .await
@@ -372,12 +368,8 @@ impl Store {
     /// Inserts the item or updates it by id. Position and creation time never
     /// change, and a terminal status never reopens.
     pub async fn upsert_item(&self, new: NewItem) -> Result<Item> {
-        self.upsert_item_at(new, None).await
-    }
-
-    pub(crate) async fn upsert_item_at(&self, new: NewItem, stamp: Option<Stamp>) -> Result<Item> {
         let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
-        self.write_at(stamp, move |tx| {
+        self.write(move |tx| {
             if let Some(old) = read::item(tx, &new.id)? {
                 ensure!(
                     old.thread_id == new.thread_id,
@@ -393,26 +385,37 @@ impl Store {
                         label,
                         prompt,
                         agent_id,
+                        context_used,
+                        model,
                         ..
                     },
                     ItemKind::Agent {
                         label: old_label,
                         prompt: old_prompt,
                         agent_id: old_agent_id,
+                        context_used: old_context,
+                        model: old_model,
                         ..
                     },
                 ) = (&mut kind, &old.kind)
                 {
                     for (slot, old) in [
                         (label, old_label),
-                        (prompt, old_prompt),
                         (agent_id, old_agent_id),
+                        (model, old_model),
                     ] {
                         if slot.is_none() {
                             slot.clone_from(old);
                         }
                     }
+                    if prompt.is_none() {
+                        prompt.clone_from(old_prompt);
+                    }
+                    if context_used.is_none() {
+                        *context_used = *old_context;
+                    }
                 }
+                let status = old.next_status(new.status);
                 let item = Item {
                     // An item stays in the run that made it: a resumed agent
                     // reports from a later run, but its row stays where it
@@ -420,7 +423,7 @@ impl Store {
                     run_id: old.run_id.or(new.run_id),
                     parent_id: new.parent_id.or(old.parent_id),
                     native_id: new.native_id.or(old.native_id),
-                    status: old.status.advance(new.status),
+                    status,
                     kind,
                     ..old
                 };
@@ -471,28 +474,383 @@ impl Store {
         .with_context(|| format!("reopen agent {what}"))
     }
 
-    /// Inserts a client-sent message unless its id is already stored (a
-    /// retried send). Returns the stored item and whether it was created.
+    /// Inserts accepted input once and records its thread activity in the same commit.
     pub async fn insert_user_message(&self, new: NewItem) -> Result<(Item, bool)> {
-        let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
+        let blob_dir = self.inner.blob_dir.clone();
         self.write(move |tx| {
-            if let Some(existing) = read::item(tx, &new.id)? {
-                Ok((existing, false))
-            } else {
-                let created_at = tx.created_at();
-                tx.save_item(fresh_item(new, created_at), true)
-                    .map(|item| (item, true))
+            let (item, created) = tx.insert_input(new, &blob_dir)?;
+            if created {
+                tx.mark_activity(&item.thread_id, item.seq)?;
             }
+            Ok((item, created))
         })
         .await
-        .with_context(|| format!("insert user message {id} in thread {thread_id}"))
+    }
+
+    /// Accepts one idempotent command, including config/title/activity changes.
+    pub async fn send_message(
+        &self,
+        thread_id: ThreadId,
+        message: SendMessage,
+        steer: bool,
+    ) -> Result<(Item, bool, EngineId)> {
+        let blob_dir = self.inner.blob_dir.clone();
+        self.write(move |tx| {
+            let mut thread = read::thread(tx, &thread_id)?
+                .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
+            let engine = thread.config.engine;
+            let (item, created) = tx.insert_input(NewItem {
+                id: message.id, thread_id, run_id: None, parent_id: None, native_id: None,
+                status: Status::Running,
+                kind: ItemKind::UserMessage { text: message.text.clone().into(), images: message.images, steer },
+            }, &blob_dir)?;
+            // A replay has no config, title, activity or delivery side effect.
+            if created {
+                if let Some(config) = message.config { thread.config = config; }
+                if thread.title.is_none() {
+                    let title: String = message.text.lines().next().unwrap_or_default().trim().chars().take(80).collect();
+                    if !title.is_empty() { thread.title = Some(title); }
+                }
+                thread.activity_seq = item.seq;
+                tx.save_setting("default_engine_config".into(), serde_json::to_value(&thread.config)?)?;
+                tx.save_thread(thread)?;
+                if let Some(draft) = message.draft {
+                    // Keep the tombstone/revision so an older request cannot resurrect the draft.
+                    tx.execute("UPDATE drafts SET body='null', revision=revision+1 WHERE scope=?1 AND revision=?2",
+                        params![draft.scope, draft.revision])?;
+                }
+            }
+            Ok((item, created, engine))
+        }).await
+    }
+
+    /// Accepts a local thread setting once, without creating pending model input.
+    pub async fn thread_option_command(
+        &self,
+        thread_id: ThreadId,
+        message: SendMessage,
+        option: String,
+        label: String,
+        enabled: Option<bool>,
+        live: bool,
+    ) -> Result<Item> {
+        self.write(move |tx| {
+            let mut thread = read::thread(tx, &thread_id)?
+                .ok_or_else(|| SendRejected::ThreadNotFound(thread_id.clone()))?;
+            anyhow::ensure!(message.images.is_empty(), SendRejected::Payload(format!("{label} setting commands cannot include attachments")));
+            let prefix = format!("{}\n\n{label} ", message.text);
+            if let Some(existing) = read::item(tx, &message.id)? {
+                let same = existing.thread_id == thread_id && matches!(&existing.kind,
+                    ItemKind::Notice { kind: artisan_api::NoticeKind::Info, text }
+                    if text.inline().is_some_and(|text| text.starts_with(&prefix)));
+                anyhow::ensure!(same, SendRejected::IdConflict(message.id));
+                return Ok(existing);
+            }
+            if let Some(config) = message.config { thread.config = config; }
+            let current = thread.config.session_options.get(&option).and_then(serde_json::Value::as_bool).unwrap_or(false);
+            let enabled = enabled.unwrap_or(!current);
+            thread.config.session_options.insert(option, serde_json::json!(enabled));
+            let state = if enabled { "requested on" } else { "requested off" };
+            let when = if live { "Applies to the next run; the current run is unchanged." } else { "Applies to the next message." };
+            let text = format!("{}{}. {} Effort is unchanged.", prefix, state, when);
+            let new = NewItem { id: message.id, thread_id, run_id: None, parent_id: None,
+                native_id: None, status: Status::Done,
+                kind: ItemKind::Notice { kind: artisan_api::NoticeKind::Info, text: text.into() }, };
+            let item = tx.save_item(fresh_item(new, tx.created_at()), true)?;
+            thread.activity_seq = item.seq;
+            tx.save_setting("default_engine_config".into(), serde_json::to_value(&thread.config)?)?;
+            tx.save_thread(thread)?;
+            if let Some(draft) = message.draft {
+                tx.execute("UPDATE drafts SET body='null', revision=revision+1 WHERE scope=?1 AND revision=?2",
+                    params![draft.scope, draft.revision])?;
+            }
+            Ok(item)
+        }).await
     }
 
     pub async fn upsert_run(&self, run: Run) -> Result<Run> {
         let (id, thread_id) = (run.id.clone(), run.thread_id.clone());
-        self.write(move |tx| tx.save_run(run))
+        self.write(move |tx| tx.upsert_run(run))
             .await
             .with_context(|| format!("save run {id} of thread {thread_id}"))
+    }
+
+    /// Delivery acknowledgment is atomic for the entire initial batch or one steer.
+    pub async fn accept_inputs(
+        &self,
+        thread: ThreadId,
+        run: RunId,
+        ids: Vec<ItemId>,
+    ) -> Result<()> {
+        self.write(move |tx| {
+            for id in ids {
+                if let Some(mut item) = read::item(tx, &id)? {
+                    ensure!(
+                        item.thread_id == thread
+                            && matches!(item.kind, ItemKind::UserMessage { .. }),
+                        "input {id} does not belong to thread {thread}"
+                    );
+                    if item.status == Status::Running {
+                        item.run_id = Some(run.clone());
+                        item.status = Status::Done;
+                        tx.save_item(item, false)?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Status changes read the durable kind, instead of retaining another full copy in a run.
+    pub async fn set_item_status(&self, id: ItemId, status: Status) -> Result<Option<Item>> {
+        self.write(move |tx| {
+            let Some(mut item) = read::item(tx, &id)? else {
+                return Ok(None);
+            };
+            item.status = item.next_status(status);
+            tx.save_item(item, false).map(Some)
+        })
+        .await
+    }
+
+    /// All remaining outputs and the final run commit together; activity changes once.
+    pub async fn settle_run(&self, run: Run, open: Vec<ItemId>) -> Result<Run> {
+        self.write(move |tx| {
+            let status = if run.status == RunStatus::Done {
+                Status::Done
+            } else {
+                Status::Cancelled
+            };
+            for id in open {
+                if let Some(mut item) = read::item(tx, &id)?
+                    && !item.status.is_terminal()
+                {
+                    ensure!(
+                        item.thread_id == run.thread_id,
+                        "output belongs to another thread"
+                    );
+                    if run.status != RunStatus::Cancelled
+                        && item.status == Status::AwaitingUser
+                        && matches!(
+                            item.kind,
+                            ItemKind::Question {
+                                blocking: false,
+                                ..
+                            }
+                        )
+                    {
+                        continue;
+                    }
+                    // A process exit closes any unanswered blocking interaction;
+                    // completion of the run does not imply a callback was answered.
+                    item.status = if item.status == Status::AwaitingUser {
+                        Status::Cancelled
+                    } else {
+                        status
+                    };
+                    tx.save_item(item, false)?;
+                }
+            }
+            let run = tx.save_run(run)?;
+            tx.mark_activity(&run.thread_id, run.seq)?;
+            Ok(run)
+        })
+        .await
+    }
+
+    /// Answers an asynchronous question after its process exits, as a durable next-turn input.
+    pub async fn answer_question(
+        &self,
+        id: ItemId,
+        answers: Vec<Option<artisan_api::QuestionAnswer>>,
+    ) -> Result<Item> {
+        let blob_dir = self.inner.blob_dir.clone();
+        self.write(move |tx| {
+            let mut item =
+                read::item(tx, &id)?.with_context(|| format!("question {id} not found"))?;
+            let ItemKind::Question {
+                blocking: false,
+                questions,
+                answers: saved,
+                ..
+            } = &mut item.kind
+            else {
+                anyhow::bail!("question requires its live engine");
+            };
+            collection::validate_answers(tx, questions, &answers)?;
+            let input_id = ItemId(format!("answer-{id}"));
+            if item.status.is_terminal() {
+                ensure!(
+                    collection::answers_equal(tx, saved, &answers)?,
+                    "question was already answered differently"
+                );
+                return read::item(tx, &input_id)?.context("question answer input is missing");
+            }
+            ensure!(
+                item.status == Status::AwaitingUser,
+                "question is not waiting for an answer"
+            );
+            let mut text = String::from("Answers to the agent's questions:\n");
+            collection::visit_questions(tx, questions, |index, question| {
+                text.push_str(&content::resolve(tx, &question.text)?);
+                text.push_str("\nAnswer: ");
+                match &answers[index] {
+                    Some(answer) => text.push_str(&collection::answer_text(tx, question, answer)?),
+                    None => text.push_str("Skipped"),
+                }
+                text.push_str("\n\n");
+                Ok(())
+            })?;
+            *saved = Some(answers.into());
+            item.status = Status::Done;
+            tx.save_item(item.clone(), false)?;
+            let (input, _) = tx.insert_input(
+                NewItem {
+                    id: input_id,
+                    thread_id: item.thread_id,
+                    run_id: None,
+                    parent_id: None,
+                    native_id: None,
+                    status: Status::Running,
+                    kind: ItemKind::UserMessage {
+                        text: text.into(),
+                        images: Vec::new(),
+                        steer: false,
+                    },
+                },
+                &blob_dir,
+            )?;
+            tx.mark_activity(&input.thread_id, input.seq)?;
+            Ok(input)
+        })
+        .await
+    }
+
+    /// Compare and change one MCP entry inside the canonical setting transaction.
+    pub async fn mutate_mcp(
+        &self,
+        mutation: artisan_api::McpMutation,
+    ) -> Result<Vec<artisan_api::McpServer>> {
+        self.write(move |tx| {
+            use artisan_api::McpMutation;
+            let mut servers: Vec<artisan_api::McpServer> = read::setting(tx, "mcp_servers")?
+                .map(serde_json::from_value)
+                .transpose()?
+                .unwrap_or_default();
+            let previous = match &mutation {
+                McpMutation::Upsert { previous, .. } => previous.as_ref(),
+                McpMutation::Remove { previous } => Some(previous),
+            };
+            if let Some(previous) = previous {
+                ensure!(
+                    servers.iter().find(|server| server.name == previous.name) == Some(previous),
+                    "MCP entry changed; reload before saving"
+                );
+            }
+            if let McpMutation::Upsert { server, .. } = &mutation {
+                ensure!(!server.name.trim().is_empty(), "MCP server needs a name");
+                ensure!(
+                    !server.command.trim().is_empty()
+                        || server
+                            .url
+                            .as_ref()
+                            .is_some_and(|url| !url.trim().is_empty()),
+                    "MCP server needs a command or URL"
+                );
+                ensure!(
+                    !servers.iter().any(|other| other.name == server.name
+                        && previous.is_none_or(|old| old.name != other.name)),
+                    "MCP name already exists"
+                );
+            }
+            if let Some(previous) = previous {
+                servers.retain(|server| server.name != previous.name);
+            }
+            if let McpMutation::Upsert { server, .. } = mutation {
+                servers.push(server);
+            }
+            servers.sort_by(|a, b| a.name.cmp(&b.name));
+            tx.save_setting("mcp_servers".into(), serde_json::to_value(&servers)?)?;
+            Ok(servers)
+        })
+        .await
+    }
+
+    /// Changes the model against the latest config instead of a client's stale full snapshot.
+    pub async fn set_default_model(
+        &self,
+        engine: EngineId,
+        model: artisan_api::Model,
+    ) -> Result<artisan_api::EngineConfig> {
+        self.write(move |tx| {
+            let mut config = read::setting(tx, "default_engine_config")?
+                .map(serde_json::from_value::<artisan_api::EngineConfig>)
+                .transpose()?
+                .filter(|config| config.engine == engine)
+                .unwrap_or_else(|| artisan_api::EngineConfig::new(engine));
+            model.normalize_context_window(&mut config);
+            config.session_options.clear();
+            config.model = Some(model.id);
+            if config
+                .effort
+                .as_ref()
+                .is_some_and(|effort| !model.efforts.contains(effort))
+            {
+                config.effort = None;
+            }
+            if config
+                .speed
+                .as_ref()
+                .is_some_and(|speed| !model.speeds.iter().any(|option| &option.id == speed))
+            {
+                config.speed = None;
+            }
+            if config
+                .variant
+                .as_ref()
+                .is_some_and(|variant| !model.variants.iter().any(|option| &option.id == variant))
+            {
+                config.variant = None;
+            }
+            tx.save_setting(
+                "default_engine_config".into(),
+                serde_json::to_value(&config)?,
+            )?;
+            Ok(config)
+        })
+        .await
+    }
+
+    pub async fn set_skill_enabled(&self, id: String, enabled: bool) -> Result<()> {
+        self.write(move |tx| {
+            let mut disabled: std::collections::BTreeSet<String> =
+                read::setting(tx, "disabled_skills")?
+                    .map(serde_json::from_value)
+                    .transpose()?
+                    .unwrap_or_default();
+            if enabled {
+                disabled.remove(&id);
+            } else {
+                disabled.insert(id);
+            }
+            tx.save_setting("disabled_skills".into(), serde_json::to_value(disabled)?)
+        })
+        .await
+    }
+
+    /// Metadata invalidation is small and durable, independent of a text value changing.
+    pub async fn bump_revision(&self, key: String) -> Result<u64> {
+        self.write(move |tx| {
+            let revision = read::setting(tx, &key)?
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+                .checked_add(1)
+                .context("revision overflow")?;
+            tx.save_setting(key, serde_json::json!(revision))?;
+            Ok(revision)
+        })
+        .await
     }
 
     pub async fn set_setting(&self, key: String, value: serde_json::Value) -> Result<()> {
@@ -522,38 +880,11 @@ impl Store {
                 ],
             )?;
             tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
+            tx.save_setting("global_prompt_version".into(), serde_json::json!(version))?;
             Ok(Ok(version))
         })
         .await
         .context("save the global prompt")
-    }
-
-    /// Takes over an old Forge's global prompt: every saved version, then
-    /// `current` as the `global_prompt` setting. Leaves a prompt this Forge
-    /// already has alone; returns whether it imported.
-    pub(crate) async fn import_prompt(
-        &self,
-        versions: Vec<(u64, String, artisan_api::Timestamp)>,
-        current: Option<String>,
-    ) -> Result<bool> {
-        self.write(move |tx| {
-            if read::prompt_version(tx)? > 0 || read::setting(tx, "global_prompt")?.is_some() {
-                return Ok(false);
-            }
-            for (version, text, saved_at) in versions {
-                tx.execute(
-                    "INSERT INTO prompt_versions (version, text, saved_at) VALUES (?1, ?2, ?3)",
-                    params![i64::try_from(version).unwrap_or(i64::MAX), text, saved_at],
-                )
-                .with_context(|| format!("save global prompt version {version}"))?;
-            }
-            if let Some(text) = current {
-                tx.save_setting("global_prompt".to_owned(), serde_json::Value::String(text))?;
-            }
-            Ok(true)
-        })
-        .await
-        .context("import the old global prompt")
     }
 
     /// Sets a setting unless it exists; returns whether it was set.
@@ -599,20 +930,93 @@ impl Store {
         .context("save secret")
     }
 
-    /// Drafts are private to the client that writes them: no seq, no event.
-    /// `null` deletes the draft.
-    pub async fn set_draft(&self, scope: String, value: serde_json::Value) -> Result<()> {
+    pub async fn secret(&self, key: &str) -> Result<Option<String>> {
+        let key = key.to_owned();
+        self.read(move |conn| {
+            Ok(conn
+                .query_row("SELECT value FROM secrets WHERE key = ?1", [&key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
+        })
+        .await
+    }
+
+    /// Consuming the invitation and authorizing its device are one decision.
+    pub async fn pair_device(
+        &self,
+        code: String,
+        name: String,
+        certificate: String,
+    ) -> Result<Option<DeviceId>> {
         self.write(move |tx| {
-            if value.is_null() {
-                tx.execute("DELETE FROM drafts WHERE scope = ?1", [&scope])?;
-            } else {
-                tx.execute(
-                    "INSERT INTO drafts (scope, body) VALUES (?1, ?2)
-                     ON CONFLICT (scope) DO UPDATE SET body = excluded.body",
-                    params![scope, read::to_body(&value)?],
-                )?;
+            if tx.execute(
+                "DELETE FROM pair_codes WHERE code_sha256 = ?1 AND expires_at > ?2",
+                params![code, now()],
+            )? == 0
+            {
+                return Ok(None);
             }
-            Ok(())
+            let id: String = tx.query_row(
+                "INSERT INTO authorized_keys (id, name, public_key, created_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(public_key) DO UPDATE SET name = excluded.name RETURNING id",
+                params![DeviceId::new().as_str(), name, certificate, now()],
+                |row| row.get(0),
+            )?;
+            Ok(Some(DeviceId(id)))
+        })
+        .await
+        .context("pair device")
+    }
+
+    /// At most `limit` eligible threads; the pending Item index is the queue.
+    pub async fn pending_threads(
+        &self,
+        limit: usize,
+        excluded: Vec<ThreadId>,
+    ) -> Result<Vec<ThreadId>> {
+        let limit = limit.min(8);
+        self.read(move |conn| read::pending_threads(conn, limit, &excluded))
+            .await
+    }
+
+    /// Compare-and-swap prevents delayed writes and clears from overwriting newer input.
+    pub async fn set_draft(
+        &self,
+        scope: String,
+        request: artisan_api::WriteDraft,
+    ) -> Result<artisan_api::DraftWriteResult> {
+        self.write(move |tx| {
+            let current = read::draft(tx, &scope)?;
+            if current.revision != request.expected_revision {
+                return Ok(artisan_api::DraftWriteResult {
+                    saved: false,
+                    current,
+                });
+            }
+            if current.body == request.body {
+                return Ok(artisan_api::DraftWriteResult {
+                    saved: true,
+                    current,
+                });
+            }
+            let current = artisan_api::DraftSnapshot {
+                revision: current
+                    .revision
+                    .checked_add(1)
+                    .context("draft revision exhausted")?,
+                body: request.body,
+            };
+            tx.execute(
+                "INSERT INTO drafts (scope, body, revision) VALUES (?1, ?2, ?3)
+                ON CONFLICT (scope) DO UPDATE SET body=excluded.body, revision=excluded.revision",
+                params![scope, read::to_body(&current.body)?, current.revision],
+            )?;
+            Ok(artisan_api::DraftWriteResult {
+                saved: true,
+                current,
+            })
         })
         .await
         .context("save draft")
@@ -637,18 +1041,24 @@ impl Store {
 
     /// Whether a device was revoked.
     pub async fn revoke_device(&self, id: &DeviceId) -> Result<bool> {
-        let id = id.clone();
-        self.write(move |tx| {
-            Ok(tx.execute("DELETE FROM authorized_keys WHERE id = ?1", [id.as_str()])? > 0)
-        })
-        .await
+        let key = id.clone();
+        let revoked = self
+            .write(move |tx| {
+                Ok(tx.execute("DELETE FROM authorized_keys WHERE id = ?1", [key.as_str()])? > 0)
+            })
+            .await?;
+        if revoked {
+            let _ = self.inner.revocations.send(id.clone());
+        }
+        Ok(revoked)
     }
 
     pub async fn touch_device(&self, id: &DeviceId) -> Result<()> {
         let id = id.clone();
         self.write(move |tx| {
             tx.execute(
-                "UPDATE authorized_keys SET last_seen = ?2 WHERE id = ?1",
+                "UPDATE authorized_keys SET last_seen = ?2 WHERE id = ?1
+                 AND (last_seen IS NULL OR last_seen < ?2 - 60000)",
                 params![id.as_str(), now()],
             )?;
             Ok(())
@@ -690,14 +1100,34 @@ impl Store {
             let tx = conn.unchecked_transaction()?;
             let projects: Vec<Project> =
                 read::many(&tx, "SELECT body FROM projects ORDER BY rowid", [])?;
-            let threads = read::many(&tx, "SELECT body FROM threads ORDER BY rowid", [])?;
-            let runs = read::many(
+            let page = read::threads_page(
                 &tx,
-                "SELECT body FROM runs WHERE status = 'running'
-                    OR rowid IN (SELECT max(rowid) FROM runs GROUP BY thread_id)
-                 ORDER BY rowid",
-                [],
+                &artisan_api::ThreadsQuery {
+                    limit: Some(200),
+                    ..Default::default()
+                },
             )?;
+            let mut threads = page.threads;
+            let ids = serde_json::to_string(
+                &threads.iter().map(|thread| &thread.id).collect::<Vec<_>>(),
+            )?;
+            let pinned: Vec<Thread> = read::many(
+                &tx,
+                "SELECT body FROM threads WHERE id IN (
+                    SELECT thread_id FROM runs WHERE status='running'
+                    UNION SELECT thread_id FROM items WHERE status='awaiting_user')
+                  AND id NOT IN (SELECT value FROM json_each(?1))",
+                [ids],
+            )?;
+            threads.extend(pinned);
+            let mut runs = page.runs;
+            let live: Vec<Run> =
+                read::many(&tx, "SELECT body FROM runs WHERE status='running'", [])?;
+            for run in live {
+                if !runs.iter().any(|known| known.id == run.id) {
+                    runs.push(run);
+                }
+            }
             let mut settings = serde_json::Map::new();
             let mut statement = tx.prepare("SELECT key, value FROM kv")?;
             let mut rows = statement.query([])?;
@@ -715,6 +1145,7 @@ impl Store {
                     .filter(|project| !project.removed)
                     .collect(),
                 threads,
+                threads_next: page.next,
                 runs,
                 settings,
             })
@@ -735,14 +1166,39 @@ impl Store {
         .await
     }
 
+    /// A bounded root transcript or one agent's direct children, never the
+    /// other agent transcripts that happen to share this thread's positions.
+    pub async fn transcript_page(
+        &self,
+        thread_id: &ThreadId,
+        parent: Option<&ItemId>,
+        query: ItemsQuery,
+    ) -> Result<ItemsPage> {
+        let thread = thread_id.clone();
+        let parent = parent.cloned();
+        self.read(move |conn| read::scoped_items_page(conn, &thread, &query, Some(parent.as_ref())))
+            .await
+    }
+
     /// Every stored entity changed after `since`, in seq order, or `None` when
     /// there are more than `limit` (the client should refetch the state).
     pub async fn changes_since(&self, since: Seq, limit: usize) -> Result<Option<Vec<Envelope>>> {
         self.read(move |conn| {
-            read::changes_since(conn, since, limit)
+            read::changes_since(conn, since, limit, false, None)
                 .with_context(|| format!("read changes since {since}"))
         })
         .await
+    }
+
+    pub async fn changes_since_scoped(
+        &self,
+        since: Seq,
+        limit: usize,
+        summary: bool,
+        observed: Option<ThreadId>,
+    ) -> Result<Option<Vec<Envelope>>> {
+        self.read(move |conn| read::changes_since(conn, since, limit, summary, observed.as_ref()))
+            .await
     }
 
     pub async fn project(&self, id: &ProjectId) -> Result<Option<Project>> {
@@ -757,6 +1213,134 @@ impl Store {
         let id = id.clone();
         self.read(move |conn| read::thread(conn, &id).with_context(|| format!("read thread {id}")))
             .await
+    }
+
+    /// Bounded immutable source range; does not load or parse an Item body.
+    pub async fn content_range(
+        &self,
+        id: &artisan_api::ContentId,
+        query: artisan_api::ContentQuery,
+    ) -> Result<Option<artisan_api::ContentRange>> {
+        let id = id.clone();
+        self.read(move |conn| content::range(conn, &id, query))
+            .await
+    }
+
+    /// Pure immutable Markdown topology. Only this bounded range enters the wire.
+    pub async fn source_index(
+        &self,
+        id: &artisan_api::ContentId,
+        query: artisan_api::SourceIndexQuery,
+    ) -> Result<Option<artisan_api::SourceIndexRange>> {
+        ensure!(id.is_valid(), "invalid source identity");
+        ensure!(
+            query
+                .limit
+                .is_none_or(|n| (1..=artisan_api::SOURCE_INDEX_PAGE_LEAVES).contains(&n)),
+            "invalid source index page limit"
+        );
+        let read_id = id.clone();
+        let read_query = query.clone();
+        if let Some(range) = self
+            .read(move |conn| source_index::range(conn, &read_id, read_query))
+            .await?
+        {
+            return Ok(Some(range));
+        }
+        // Permit survives cancellation inside the blocking worker and queued writer.
+        let permit = Arc::new(self.inner.source_index_slot.clone().acquire_owned().await?);
+        let read_id = id.clone();
+        let read_query = query.clone();
+        if let Some(range) = self
+            .read(move |conn| source_index::range(conn, &read_id, read_query))
+            .await?
+        {
+            return Ok(Some(range));
+        }
+        let read_id = id.clone();
+        let worker_permit = permit.clone();
+        let format = query.format;
+        let prepared = self
+            .read(move |conn| {
+                let _permit = worker_permit;
+                source_index::prepare(conn, &read_id, format)
+            })
+            .await?;
+        let Some(prepared) = prepared else {
+            return Ok(None);
+        };
+        self.write(move |tx| {
+            let _permit = permit;
+            source_index::persist(tx, prepared)
+        })
+        .await?;
+        let id = id.clone();
+        self.read(move |conn| source_index::range(conn, &id, query))
+            .await
+    }
+
+    /// Indexed canonical collection records. Transcript reads never hydrate the
+    /// complete collection, and each page has count and encoded-byte limits.
+    pub async fn collection_range<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        id: &artisan_api::ContentId,
+        query: artisan_api::CollectionQuery,
+    ) -> Result<Option<artisan_api::CollectionRange<T>>> {
+        let id = id.clone();
+        self.read(move |conn| collection::range(conn, &id, query))
+            .await
+    }
+
+    /// Validate selected opaque IDs through the immutable record-key index.
+    /// A native callback never needs to load every question option.
+    pub async fn validate_question_answers(
+        &self,
+        id: &ItemId,
+        answers: &[Option<artisan_api::QuestionAnswer>],
+    ) -> Result<()> {
+        let id = id.clone();
+        let answers = answers.to_vec();
+        self.read(move |conn| {
+            let item = read::item(conn, &id)?.context("question item is missing")?;
+            let ItemKind::Question { questions, .. } = item.kind else {
+                anyhow::bail!("item is not a question")
+            };
+            collection::validate_answers(conn, &questions, &answers)
+        })
+        .await
+    }
+
+    /// Native callbacks use complete admitted canonical records. Rendering and
+    /// state/bootstrap endpoints must use collection_range instead.
+    pub async fn resolve_item_collections(&self, mut item: Item) -> Result<Item> {
+        self.read(move |conn| {
+            collection::hydrate_item(conn, &mut item.kind)?;
+            Ok(item)
+        })
+        .await
+    }
+
+    /// Resolve only an already-admitted input or explicit execution/history read.
+    /// Transcript pages, events and bootstrap never call this method.
+    pub async fn resolve_text(&self, text: &artisan_api::TextContent) -> Result<String> {
+        let text = text.clone();
+        self.read(move |conn| content::resolve(conn, &text)).await
+    }
+
+    pub async fn resolve_item_text(&self, mut item: Item) -> Result<Item> {
+        self.read(move |conn| {
+            collection::hydrate_item(conn, &mut item.kind)?;
+            item.kind.try_visit_texts_mut(|text| {
+                *text = content::resolve(conn, text)?.into();
+                Ok::<_, anyhow::Error>(())
+            })?;
+            Ok(item)
+        })
+        .await
+    }
+
+    pub async fn gc_content(&self) -> Result<usize> {
+        self.write(|tx| content::collect(tx, now())).await
     }
 
     pub async fn item(&self, id: &ItemId) -> Result<Option<Item>> {
@@ -781,8 +1365,16 @@ impl Store {
     }
 
     /// Approvals and questions waiting on the user, across threads.
-    pub async fn items_awaiting_user(&self) -> Result<Vec<Item>> {
+    pub async fn items_awaiting_user(&self) -> Result<Vec<artisan_api::PendingItem>> {
         self.read(|conn| read::items_awaiting_user(conn).context("read items awaiting the user"))
+            .await
+    }
+
+    /// Reads a bounded initial batch and all observed pending input's sequence boundary in one snapshot.
+    pub async fn pending_inputs(&self, thread_id: &ThreadId) -> Result<PendingInputs> {
+        let thread = thread_id.clone();
+        let blob_dir = self.inner.blob_dir.clone();
+        self.read(move |conn| read::pending_inputs(conn, &thread, &blob_dir))
             .await
     }
 
@@ -819,7 +1411,7 @@ impl Store {
         .await
     }
 
-    pub async fn draft(&self, scope: &str) -> Result<Option<serde_json::Value>> {
+    pub async fn draft(&self, scope: &str) -> Result<artisan_api::DraftSnapshot> {
         let scope = scope.to_owned();
         self.read(move |conn| {
             read::draft(conn, &scope).with_context(|| format!("read draft {scope}"))
@@ -872,17 +1464,39 @@ impl Store {
     /// [`BlobRejected`] inside the error.
     pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
         let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || blobs::put(&inner.blob_dir, &bytes))
-            .await
-            .context("blob write task")?
+        tokio::task::spawn_blocking(move || {
+            let _guard = inner
+                .blob_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            blobs::put(&inner.blob_dir, &bytes)
+        })
+        .await
+        .context("blob write task")?
     }
 
     /// Stores any common image format, converted to WebP first.
     pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef> {
         let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || blobs::put(&inner.blob_dir, &blobs::to_webp(bytes)?))
-            .await
-            .context("image write task")?
+        tokio::task::spawn_blocking(move || {
+            let bytes = blobs::to_webp(bytes)?;
+            let _guard = inner
+                .blob_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            blobs::put(&inner.blob_dir, &bytes)
+        })
+        .await
+        .context("image write task")?
+    }
+
+    pub async fn input_image_paths(&self, images: Vec<BlobHash>) -> Result<Vec<PathBuf>> {
+        let dir = self.inner.blob_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            blobs::input_images(&dir, &images).map(|(paths, _)| paths)
+        })
+        .await
+        .context("read input image metadata task")?
     }
 
     /// Where a stored blob lives; `None` if the hash is malformed or unknown.
@@ -909,7 +1523,7 @@ impl Inner {
             .pop();
         let conn = match pooled {
             Some(conn) => conn,
-            None => self.database.reader()?,
+            None => open_database(&self.database)?,
         };
         let result = query(&conn);
         let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
@@ -920,21 +1534,38 @@ impl Inner {
     }
 
     fn gc_blobs(&self) -> Result<usize> {
-        let referenced = self.with_reader(|conn| {
-            let mut hashes = HashSet::new();
-            let bodies: Vec<serde_json::Value> = read::many(
+        let _guard = self
+            .blob_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.with_reader(|conn| {
+            // Hold SQLite's standard write exclusion through reference discovery and deletion.
+            let tx = rusqlite::Transaction::new_unchecked(
                 conn,
-                "SELECT body FROM items
-                    WHERE json_extract(body, '$.kind.type') IN ('user_message', 'image')
-                 UNION ALL SELECT body FROM drafts",
-                [],
+                rusqlite::TransactionBehavior::Immediate,
             )?;
-            for body in &bodies {
-                blobs::collect_hashes(body, &mut hashes);
+            let mut hashes = HashSet::new();
+            // Only typed image ownership fields; prose and arbitrary 64-hex strings
+            // are never decoded or mistaken for references.
+            let mut statement = conn.prepare_cached(
+                "SELECT image.value FROM items i, json_each(i.body, '$.kind.images') image
+                    WHERE json_extract(i.body, '$.kind.type') = 'user_message'
+                 UNION SELECT json_extract(body, '$.kind.blob') FROM items
+                    WHERE json_extract(body, '$.kind.type') = 'image'
+                 UNION SELECT image.value FROM drafts d, json_each(d.body, '$.images') image",
+            )?;
+            for hash in statement.query_map([], |row| row.get::<_, Option<String>>(0))? {
+                if let Some(hash) = hash?
+                    && BlobHash(hash.clone()).is_valid()
+                {
+                    hashes.insert(hash);
+                }
             }
-            Ok(hashes)
-        })?;
-        blobs::gc(&self.blob_dir, &referenced)
+            drop(statement);
+            let removed = blobs::gc(&self.blob_dir, &hashes)?;
+            tx.commit()?;
+            Ok(removed)
+        })
     }
 }
 
@@ -959,4 +1590,403 @@ fn project_name(path: &str) -> String {
         || path.to_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+#[cfg(test)]
+mod activity_time_tests {
+    use super::*;
+    use crate::writer::Stamp;
+    use artisan_api::{EngineConfig, Usage};
+
+    #[tokio::test]
+    async fn only_accepted_activity_changes_thread_recency() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let project = store
+            .create_project(CreateProject {
+                id: ProjectId::new(),
+                path: "/activity-test".into(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        let thread = store
+            .create_thread_at(
+                CreateThread {
+                    id: ThreadId::new(),
+                    project_id: project.id,
+                    title: None,
+                    config: EngineConfig::new(EngineId::Codex),
+                    parent_thread_id: None,
+                },
+                Stamp {
+                    created_at: 10,
+                    updated_at: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(thread.activity_at, 10);
+        assert!(!thread.is_unread());
+        let run = store
+            .upsert_run_at(
+                Run {
+                    id: RunId::new(),
+                    thread_id: thread.id.clone(),
+                    engine: EngineId::Codex,
+                    model: None,
+                    input_cutoff: thread.activity_seq,
+                    status: RunStatus::Running,
+                    usage: Usage::default(),
+                    session_id: None,
+                    error: None,
+                    seq: 0,
+                    started_at: 20,
+                    ended_at: None,
+                },
+                Stamp {
+                    created_at: 20,
+                    updated_at: 20,
+                },
+            )
+            .await
+            .unwrap();
+        let running = store.thread(&thread.id).await.unwrap().unwrap();
+        assert_eq!((running.activity_seq, running.activity_at), (run.seq, 20));
+        let mut usage = run.clone();
+        usage.usage.input = 100;
+        store
+            .upsert_run_at(
+                usage.clone(),
+                Stamp {
+                    created_at: 20,
+                    updated_at: 25,
+                },
+            )
+            .await
+            .unwrap();
+        let unchanged = store.thread(&thread.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.activity_at, 20, "usage alone is not activity");
+        usage.status = RunStatus::Done;
+        usage.ended_at = Some(30);
+        let done = store
+            .upsert_run_at(
+                usage,
+                Stamp {
+                    created_at: 20,
+                    updated_at: 30,
+                },
+            )
+            .await
+            .unwrap();
+        let finished = store.thread(&thread.id).await.unwrap().unwrap();
+        assert_eq!(
+            (finished.activity_seq, finished.activity_at),
+            (done.seq, 30)
+        );
+        let edited = store
+            .update_thread_at(
+                &thread.id,
+                UpdateThread {
+                    title: Some("Renamed".into()),
+                    archived: Some(true),
+                    config: Some(EngineConfig::new(EngineId::Claude)),
+                    read_seq: Some(done.seq),
+                },
+                Stamp {
+                    created_at: 10,
+                    updated_at: 80,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(edited.updated_at, 80);
+        assert_eq!((edited.activity_seq, edited.activity_at), (done.seq, 30));
+        assert!(!edited.is_unread());
+        let unread = store.mark_unread(&thread.id).await.unwrap().unwrap();
+        assert!(unread.is_unread());
+        assert_eq!(unread.activity_at, 30);
+        let settled = store
+            .settle_thread(&thread.id, done.seq)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.activity_at, 30);
+        let input = SendMessage {
+            id: ItemId::new(),
+            text: "Next".into(),
+            images: Vec::new(),
+            config: None,
+            draft: None,
+        };
+        let (item, accepted, _) = store
+            .send_message(thread.id.clone(), input.clone(), false)
+            .await
+            .unwrap();
+        assert!(accepted);
+        let accepted_thread = store.thread(&thread.id).await.unwrap().unwrap();
+        assert_eq!(accepted_thread.activity_seq, item.seq);
+        assert_eq!(accepted_thread.activity_at, accepted_thread.updated_at);
+        assert!(accepted_thread.activity_at > 30);
+        assert!(
+            !store
+                .send_message(thread.id.clone(), input, false)
+                .await
+                .unwrap()
+                .1
+        );
+        let replayed = store.thread(&thread.id).await.unwrap().unwrap();
+        assert_eq!(
+            replayed, accepted_thread,
+            "replayed command does not reorder the thread"
+        );
+    }
+}
+
+#[cfg(test)]
+mod blob_gc_race_tests {
+    use super::*;
+    use artisan_api::{EngineConfig, EngineId, ItemKind};
+
+    fn image_bytes() -> Vec<u8> {
+        webp::Encoder::from_rgb(&[21, 72, 131], 1, 1)
+            .encode_lossless()
+            .to_vec()
+    }
+    fn age(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_hours(2))
+            .unwrap();
+    }
+    async fn thread(store: &Store) -> ThreadId {
+        let project = store
+            .create_project(CreateProject {
+                id: ProjectId::new(),
+                path: "/temporary-blob-race".into(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create_thread(CreateThread {
+                id: ThreadId::new(),
+                project_id: project.id,
+                config: EngineConfig::new(EngineId::Claude),
+                title: None,
+                parent_thread_id: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn reusing_an_old_blob_refreshes_grace_until_the_new_reference_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let thread = thread(&store).await;
+        let bytes = image_bytes();
+        let blob = store.put_blob(bytes.clone()).await.unwrap();
+        let path = store.blob_path(&blob.hash).unwrap();
+        age(&path);
+        assert_eq!(store.put_blob(bytes).await.unwrap(), blob);
+        assert_eq!(
+            store.gc_blobs().await.unwrap(),
+            0,
+            "reuse must protect an old blob before its new Item is persisted"
+        );
+        store
+            .upsert_item(NewItem {
+                id: ItemId::new(),
+                thread_id: thread,
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Done,
+                kind: ItemKind::Image {
+                    blob: blob.hash.clone(),
+                    caption: None,
+                },
+            })
+            .await
+            .unwrap();
+        age(&path);
+        assert_eq!(
+            store.gc_blobs().await.unwrap(),
+            0,
+            "committed typed reference protects the blob after grace ends"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), image_bytes());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gc_waits_for_a_concurrent_sqlite_reference_transaction_before_discovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let thread = thread(&store).await;
+        let blob = store.put_blob(image_bytes()).await.unwrap();
+        let path = store.blob_path(&blob.hash).unwrap();
+        age(&path);
+        // Another writer already owns SQLite's normal write transaction. GC
+        // must wait and discover its committed reference, rather than scan an
+        // old snapshot while the new reference is still being attached.
+        let mut connection = open_database(&store.inner.database).unwrap();
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let gc_store = store.clone();
+        let gc = tokio::spawn(async move { gc_store.gc_blobs().await });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let waiting = match store.inner.blob_lock.try_lock() {
+                Ok(guard) => {
+                    drop(guard);
+                    false
+                }
+                Err(std::sync::TryLockError::WouldBlock) => true,
+                Err(error) => panic!("blob GC lock failed: {error}"),
+            };
+            if waiting {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "GC did not reach its SQLite write exclusion"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(!gc.is_finished());
+        let item = fresh_item(
+            NewItem {
+                id: ItemId::new(),
+                thread_id: thread,
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Done,
+                kind: ItemKind::Image {
+                    blob: blob.hash.clone(),
+                    caption: None,
+                },
+            },
+            artisan_api::now(),
+        );
+        tx.execute(
+            "INSERT INTO items(id,thread_id,position,seq,status,body) VALUES(?1,?2,1,1,'done',?3)",
+            rusqlite::params![
+                item.id.0,
+                item.thread_id.0,
+                serde_json::to_string(&item).unwrap()
+            ],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            gc.await.unwrap().unwrap(),
+            0,
+            "reference committed while GC waited must be discovered before deletion"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), image_bytes());
+    }
+}
+
+#[cfg(test)]
+mod context_window_tests {
+    use super::*;
+    use artisan_api::{ContextWindow, EngineConfig, Model};
+
+    #[tokio::test]
+    async fn saved_context_choice_survives_roundtrip_and_clears_on_incompatible_model() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let mut config = EngineConfig::new(EngineId::Codex);
+        config
+            .options
+            .insert("context_window".to_owned(), serde_json::json!(1_000_000));
+        store
+            .set_setting(
+                "default_engine_config".into(),
+                serde_json::to_value(config).unwrap(),
+            )
+            .await
+            .unwrap();
+        let extended = Model {
+            id: "extended".to_owned(),
+            context_windows: vec![
+                ContextWindow {
+                    tokens: 272_000,
+                    override_tokens: None,
+                },
+                ContextWindow {
+                    tokens: 1_000_000,
+                    override_tokens: Some(1_000_000),
+                },
+            ],
+            ..Model::default()
+        };
+        let saved = store
+            .set_default_model(EngineId::Codex, extended)
+            .await
+            .unwrap();
+        assert_eq!(saved.context_window_override(), Some(1_000_000));
+        let reread: EngineConfig = serde_json::from_value(
+            store
+                .setting("default_engine_config")
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reread, saved);
+        let standard = Model {
+            id: "standard".to_owned(),
+            context_windows: vec![ContextWindow {
+                tokens: 400_000,
+                override_tokens: None,
+            }],
+            ..Model::default()
+        };
+        let saved = store
+            .set_default_model(EngineId::Codex, standard)
+            .await
+            .unwrap();
+        assert!(!saved.options.contains_key("context_window"));
+    }
+
+    #[tokio::test]
+    async fn invalid_context_config_is_rejected_before_thread_is_saved() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let project = store
+            .create_project(CreateProject {
+                id: ProjectId::new(),
+                path: "/context-validation".into(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        for (engine, value) in [
+            (EngineId::Codex, serde_json::json!(0)),
+            (EngineId::Claude, serde_json::json!(100_000_001_u64)),
+            (EngineId::Codex, serde_json::json!("1000000")),
+            (EngineId::OpenCode, serde_json::json!(1_000_000)),
+        ] {
+            let mut config = EngineConfig::new(engine);
+            config.options.insert("context_window".to_owned(), value);
+            let result = store
+                .create_thread(CreateThread {
+                    id: ThreadId::new(),
+                    project_id: project.id.clone(),
+                    title: None,
+                    config,
+                    parent_thread_id: None,
+                })
+                .await;
+            assert!(result.is_err());
+        }
+    }
 }

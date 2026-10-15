@@ -6,16 +6,19 @@
 
 mod context_meter;
 mod home;
+mod logging;
 mod notifications;
 mod palette;
+mod repository_context;
+mod resource_preview;
 #[cfg(feature = "capture")]
 mod script;
 mod workspace;
 
 use editor_core::Screen;
 use gpui::{
-    App, AppContext as _, Bounds, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px,
-    size,
+    App, AppContext as _, Bounds, KeyBinding, Pixels, Size, TitlebarOptions, WindowBounds,
+    WindowOptions, px, size,
 };
 use workspace::Workspace;
 
@@ -35,28 +38,30 @@ gpui::actions!(
     ]
 );
 
-/// The log rolls over to `editor.log.1` past this size, at start.
-const LOG_ROLL_BYTES: u64 = 8 * 1024 * 1024;
+/// The window's opening height.
+const LAUNCH_WINDOW_HEIGHT: f32 = 900.0;
+/// The narrowest window: the chat alone at its floor, both columns hidden.
+const MIN_WINDOW_WIDTH: f32 = 480.0;
+const MIN_WINDOW_HEIGHT: f32 = 420.0;
 
-/// The Editor's log: `editor.log` in its data folder, as well as stderr,
-/// which nobody sees when it is started from Explorer.
-fn log_file() -> Option<std::fs::File> {
-    let dir = editor_core::hosts::EditorFiles::default_location().dir;
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("editor.log");
-    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > LOG_ROLL_BYTES) {
-        let _ = std::fs::rename(&path, dir.join("editor.log.1"));
+/// Fits the chat and both columns to the display, subject to the minimum size.
+fn launch_window_geometry(cx: &App) -> (Bounds<Pixels>, Size<Pixels>) {
+    let min_size = size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT));
+    let mut launch = size(
+        px(workspace::CHAT_MIN_WIDTH + 2.0 * workspace::COLUMN_WIDTH),
+        px(LAUNCH_WINDOW_HEIGHT),
+    );
+    if let Some(display) = cx.primary_display() {
+        let visible = display.visible_bounds().size;
+        launch.width = launch.width.min(visible.width).max(min_size.width);
+        launch.height = launch.height.min(visible.height).max(min_size.height);
     }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
+    (Bounds::centered(None, launch, cx), min_size)
 }
 
 fn main() {
     use tracing_subscriber::fmt::writer::MakeWriterExt as _;
-    let file = log_file().map(std::sync::Mutex::new);
+    let file = logging::file().map(std::sync::Mutex::new);
     let filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info,gpui=warn".into())
@@ -81,6 +86,7 @@ fn main() {
     gpui_platform::application()
         .with_assets(editor_ui::asset_seam::CatalogAssetSource)
         .run(move |cx: &mut App| {
+            cx.set_http_client(editor_core::media_http::client());
             if let Err(error) = editor_ui::fonts::register_bundled_fonts(cx) {
                 tracing::warn!("using system fonts; the bundled ones didn't load: {error}");
             }
@@ -117,18 +123,11 @@ fn main() {
                 cx.activate(true);
             });
 
-            let launch = size(px(1440.0), px(900.0));
-            let launch = cx.primary_display().map_or(launch, |display| {
-                let visible = display.visible_bounds().size;
-                size(
-                    launch.width.min(visible.width),
-                    launch.height.min(visible.height),
-                )
-            });
+            let (launch, min_size) = launch_window_geometry(cx);
             #[allow(unused_mut)]
             let mut options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, launch, cx))),
-                window_min_size: Some(size(px(720.0), px(480.0))),
+                window_bounds: Some(WindowBounds::Windowed(launch)),
+                window_min_size: Some(min_size),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Artisan".into()),
                     appears_transparent: true,
@@ -168,6 +167,7 @@ fn main() {
 }
 
 fn bind_keys(cx: &mut App) {
+    editor_ui::focus_navigation::bind_actions(cx);
     editor_ui::text_editor::TextEditor::bind_actions(cx);
     let context = Some(workspace::KEY_CONTEXT);
     cx.bind_keys([

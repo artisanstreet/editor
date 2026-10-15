@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 144
 expression: "replay(Profile::Cursor, \"tool-permission\")"
 ---
 [
@@ -34,7 +35,9 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "rm -rf build",
+                    command: Inline(
+                        "rm -rf build",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -48,71 +51,53 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
         },
     ),
     Event(
-        Item {
-            key: "tool_c",
+        Approval {
+            key: "permission-request:1",
             parent: None,
+            target: Some(
+                "tool_c",
+            ),
             status: AwaitingUser,
-            kind: Tool {
-                tool: Shell {
-                    command: "rm -rf build",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "rm -rf build",
+                    ),
                     cwd: None,
-                    background: false,
                 },
-                title: Some(
-                    "`rm -rf build`",
-                ),
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "rm -rf build",
-                            cwd: None,
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: None,
-                    },
-                ),
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: None,
             },
         },
     ),
     Event(
-        Item {
-            key: "tool_c",
+        Approval {
+            key: "permission-request:1",
             parent: None,
+            target: Some(
+                "tool_c",
+            ),
             status: Declined,
-            kind: Tool {
-                tool: Shell {
-                    command: "rm -rf build",
+            approval: Approval {
+                request: Command {
+                    command: Inline(
+                        "rm -rf build",
+                    ),
                     cwd: None,
-                    background: false,
                 },
-                title: Some(
-                    "`rm -rf build`",
-                ),
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "rm -rf build",
-                            cwd: None,
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            DenyOnce,
-                        ),
-                    },
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: Some(
+                    DenyOnce,
                 ),
             },
         },
@@ -124,10 +109,12 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
         Item {
             key: "tool_c",
             parent: None,
-            status: Declined,
+            status: Failed,
             kind: Tool {
                 tool: Shell {
-                    command: "rm -rf build",
+                    command: Inline(
+                        "rm -rf build",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -136,31 +123,16 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
                 ),
                 output: Some(
                     Output {
-                        head: "User rejected",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "User rejected",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
                     1,
                 ),
-                approval: Some(
-                    Approval {
-                        request: Command {
-                            command: "rm -rf build",
-                            cwd: None,
-                        },
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            DenyOnce,
-                        ),
-                    },
-                ),
+                approval: None,
             },
         },
     ),
@@ -171,13 +143,15 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Modify,
-                            diff: None,
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Modify,
+                                diff: None,
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Edit `notes.txt`",
@@ -192,74 +166,70 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
         Item {
             key: "tool_d",
             parent: None,
-            status: AwaitingUser,
+            status: Running,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Modify,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -1 +1,2 @@\n a\n+build kept\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Modify,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -1 +1,2 @@\n a\n+build kept\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Edit `notes.txt`",
                 ),
                 output: None,
                 exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: FileChange,
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: None,
-                    },
-                ),
+                approval: None,
             },
         },
     ),
     Event(
-        Item {
-            key: "tool_d",
+        Approval {
+            key: "permission-request:2",
             parent: None,
-            status: Running,
-            kind: Tool {
-                tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Modify,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -1 +1,2 @@\n a\n+build kept\n",
-                            ),
-                        },
-                    ],
-                },
-                title: Some(
-                    "Edit `notes.txt`",
-                ),
-                output: None,
-                exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: FileChange,
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            AllowAlways,
-                        ),
-                    },
+            target: Some(
+                "tool_d",
+            ),
+            status: AwaitingUser,
+            approval: Approval {
+                request: FileChange,
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: None,
+            },
+        },
+    ),
+    Event(
+        Approval {
+            key: "permission-request:2",
+            parent: None,
+            target: Some(
+                "tool_d",
+            ),
+            status: Done,
+            approval: Approval {
+                request: FileChange,
+                reason: None,
+                options: [
+                    AllowOnce,
+                    AllowAlways,
+                    DenyOnce,
+                ],
+                decision: Some(
+                    AllowAlways,
                 ),
             },
         },
@@ -274,35 +244,26 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             status: Done,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Modify,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -1 +1,2 @@\n a\n+build kept\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Modify,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -1 +1,2 @@\n a\n+build kept\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Edit `notes.txt`",
                 ),
                 output: None,
                 exit_code: None,
-                approval: Some(
-                    Approval {
-                        request: FileChange,
-                        reason: None,
-                        options: [
-                            AllowOnce,
-                            AllowAlways,
-                            DenyOnce,
-                        ],
-                        decision: Some(
-                            AllowAlways,
-                        ),
-                    },
-                ),
+                approval: None,
             },
         },
     ),
@@ -313,7 +274,9 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "echo done",
+                    command: Inline(
+                        "echo done",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -333,7 +296,9 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "echo done",
+                    command: Inline(
+                        "echo done",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -342,9 +307,10 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
                 ),
                 output: Some(
                     Output {
-                        head: "done\n",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "done\n",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -360,7 +326,9 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -380,7 +348,9 @@ expression: "replay(Profile::Cursor, \"tool-permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "You declined the cleanup, so I only updated notes.txt.",
+                text: Inline(
+                    "You declined the cleanup, so I only updated notes.txt.",
+                ),
                 phase: Final,
             },
         },

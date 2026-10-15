@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -15,7 +16,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -26,21 +29,21 @@ expression: "(events, outcome)"
             text: "ok",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "ok",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
             },
+            text: "ok",
+            append: false,
         },
         Item {
             key: "msg_011Cfv38wtGFMtQZKTa1zPuP:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "ok",
+                text: Inline(
+                    "ok",
+                ),
                 phase: Final,
             },
         },
@@ -78,7 +81,7 @@ expression: "(events, outcome)"
                 ),
             },
         ),
-        SteerAccepted {
+        InputAccepted {
             id: ItemId(
                 "steer-2",
             ),
@@ -88,7 +91,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -99,21 +104,21 @@ expression: "(events, outcome)"
             text: "two",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "two",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
             },
+            text: "two",
+            append: false,
         },
         Item {
             key: "msg_011Cfv391kRh7sb9YtEPHGxM:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "two",
+                text: Inline(
+                    "two",
+                ),
                 phase: Final,
             },
         },

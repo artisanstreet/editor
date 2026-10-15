@@ -1,59 +1,41 @@
-//! Narrow streaming-Markdown engine seam.
-//!
-//! Third-party crates own grammar correctness: [`pulldown_cmark`] parses
-//! `CommonMark` into offset-tagged events, and [`syntect`] classifies fenced
-//! source through its bundled syntax grammars. This module converts both into
-//! small owned values ([`MarkdownDocument`], [`CodeToken`]) that a later
-//! native renderer can lay out without re-parsing or touching either crate
-//! directly.
-//!
-//! Deliberate Phase 1 limits, as promoted for list parity:
-//!
-//! - Raw HTML is recognized only so it can be carried as inert source text.
-//!   It is never interpreted, rewritten, sanitized into markup, or rendered.
-//! - Only `CommonMark` core constructs are modeled, plus task-list markers
-//!   and GFM tables: other GFM extensions such as strikethrough remain
-//!   disabled until the renderer phase selects them deliberately. Task
-//!   markers need [`Options::ENABLE_TASKLISTS`], which only affects
-//!   list-item marker scanning, because `pulldown-cmark` never emits
-//!   `TaskListMarker` otherwise; tables need [`Options::ENABLE_TABLES`] and
-//!   arrive as owned [`Table`] blocks of inline-only cells.
-//! - Ordered, unordered, nested, tight, loose, and task lists are preserved
-//!   through the shared `pulldown-cmark` event stream; no parallel parser is
-//!   introduced. Tight item text becomes paragraph blocks so loose and tight
-//!   lists share one renderer path with no dropped or duplicated text.
-//! - Inline emphasis, strong, and link labels plus verbatim destinations are
-//!   preserved. Images continue to flatten into their alt text; the renderer
-//!   decides link safety (mirroring the Svelte anchor guard) and never
-//!   executes a destination.
-//! - Highlight output is scope-classified [`CodeToken`] data over byte
-//!   ranges, never HTML and never theme-resolved colors. Mapping kinds onto
-//!   Artisan theme tokens remains first-party renderer work.
+//! Markdown syntax through maintained pulldown-cmark and syntect parsers.
+//! Owned blocks retain authored source order, ranges, task markers, and tables.
+//! Raw HTML remains inert; images retain alt text. The renderer owns theme and
+//! interaction, while adapters own provider normalization.
 
-// The `Markdown*` prefix is deliberate: these types are the crate's public
-// Markdown vocabulary and read better fully qualified at call sites.
 #![allow(clippy::module_name_repetitions)]
+
+/// Shared source budget for parsed/rendered Markdown previews.
+pub(crate) const MAX_MARKDOWN_SOURCE_BYTES: usize = 256 * 1024;
 
 use std::ops::Range;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use syntect::highlighting::ScopeSelectors;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use thiserror::Error;
 
+mod source_index;
 mod table;
+pub use source_index::{
+    BlockShape, IndexedLeaf, IndexedLeafContent, LeafContext, LeafSpacing, ListLevel,
+    MarkdownIndex, MarkdownIndexError, normalize_record,
+};
 
 use table::TableBuilder;
 pub use table::{Table, TableAlignment, TableCell};
 
 /// Failure crossing the Markdown engine boundary.
 ///
-/// Parsing itself is total: malformed input degrades to plain text instead of
-/// failing. These variants only cover syntax-definition machinery failing
-/// below the seam.
+/// Malformed syntax degrades to plain text. Excessive preview work is rejected
+/// before constructing deeply nested trees or highlighting oversized input.
 #[derive(Debug, Error)]
 pub enum MarkdownError {
+    /// The preview exceeds the parser's source, work or nesting ceiling.
+    #[error("Markdown preview exceeds {0}; open the full source")]
+    PreviewLimit(&'static str),
     /// `syntect` failed to parse a highlighted line against its grammar set.
     #[error("syntax highlighting failed while parsing a line")]
     LineParse(#[from] syntect::parsing::ParsingError),
@@ -101,6 +83,14 @@ pub struct CodeToken {
     pub range: Range<usize>,
 }
 
+/// Worker-prepared SVG bytes and dimensions, independent of GPUI state.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct DiagramSvg {
+    pub source: String,
+    pub width_bits: u32,
+    pub height_bits: u32,
+}
+
 /// An owned fenced or indented code block.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CodeFence {
@@ -116,7 +106,9 @@ pub struct CodeFence {
     pub source: String,
     /// Classified byte ranges over `source`, ordered and non-overlapping;
     /// `None` while the fence is open or the language is unrecognized.
-    pub tokens: Option<Vec<CodeToken>>,
+    pub tokens: Option<Arc<[CodeToken]>>,
+    /// Light and dark Mermaid renditions prepared off the UI thread.
+    pub diagrams: Option<Arc<[DiagramSvg; 2]>>,
 }
 
 /// One flattened inline run.
@@ -255,10 +247,77 @@ impl ListItem {
 /// Owned parse result: an ordered list of blocks.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct MarkdownDocument {
-    blocks: Vec<Block>,
+    pub(crate) blocks: Vec<Block>,
 }
 
 impl MarkdownDocument {
+    /// Heap allocations retained by the owned syntax tree (shared tokens
+    /// are conservatively charged to each document referencing them).
+    pub(crate) fn resident_bytes(&self) -> usize {
+        fn spans_bytes(spans: &Vec<Span>) -> usize {
+            spans.capacity() * std::mem::size_of::<Span>()
+                + spans
+                    .iter()
+                    .map(|span| match span {
+                        Span::Text(text) | Span::Code(text) | Span::Html(text) => text.capacity(),
+                        Span::Emphasis(inner) | Span::Strong(inner) => spans_bytes(inner),
+                        Span::Link { label, destination } => {
+                            spans_bytes(label) + destination.capacity()
+                        }
+                    })
+                    .sum::<usize>()
+        }
+        fn blocks_bytes(blocks: &Vec<Block>) -> usize {
+            blocks.capacity() * std::mem::size_of::<Block>()
+                + blocks
+                    .iter()
+                    .map(|block| match block {
+                        Block::Heading { spans, .. } | Block::Paragraph { spans, .. } => {
+                            spans_bytes(spans)
+                        }
+                        Block::Code(fence) => {
+                            fence.diagrams.as_ref().map_or(0, |diagrams| {
+                                diagrams
+                                    .iter()
+                                    .map(|svg| svg.source.capacity())
+                                    .sum::<usize>()
+                            }) + fence.source.capacity()
+                                + fence.language.as_ref().map_or(0, String::capacity)
+                                + fence
+                                    .tokens
+                                    .as_ref()
+                                    .map_or(0, |tokens| std::mem::size_of_val(tokens.as_ref()))
+                        }
+                        Block::Html { source } => source.capacity(),
+                        Block::List { items, .. } => {
+                            items.capacity() * std::mem::size_of::<ListItem>()
+                                + items
+                                    .iter()
+                                    .map(|item| blocks_bytes(&item.blocks))
+                                    .sum::<usize>()
+                        }
+                        Block::Table(table) => {
+                            table.alignments.capacity() * std::mem::size_of::<TableAlignment>()
+                                + table.header.capacity() * std::mem::size_of::<TableCell>()
+                                + table.rows.capacity() * std::mem::size_of::<Vec<TableCell>>()
+                                + table
+                                    .rows
+                                    .iter()
+                                    .map(|row| row.capacity() * std::mem::size_of::<TableCell>())
+                                    .sum::<usize>()
+                                + table
+                                    .header
+                                    .iter()
+                                    .chain(table.rows.iter().flatten())
+                                    .map(|cell| spans_bytes(&cell.spans))
+                                    .sum::<usize>()
+                        }
+                    })
+                    .sum::<usize>()
+        }
+        std::mem::size_of::<Self>() + blocks_bytes(&self.blocks)
+    }
+
     /// Returns the parsed blocks in source order.
     #[must_use]
     pub fn blocks(&self) -> &[Block] {
@@ -333,7 +392,10 @@ impl MarkdownEngine {
         source: &str,
         memo: &mut dyn FenceTokenMemo,
     ) -> Result<MarkdownDocument, MarkdownError> {
-        let mut document = DocumentBuilder::default().build(source);
+        if source.len() > MAX_MARKDOWN_SOURCE_BYTES {
+            return Err(MarkdownError::PreviewLimit("256 KiB of source"));
+        }
+        let mut document = DocumentBuilder::default().build(source)?;
         self.highlight_blocks(&mut document.blocks, memo)?;
         Ok(document)
     }
@@ -347,7 +409,11 @@ impl MarkdownEngine {
     ) -> Result<(), MarkdownError> {
         for block in blocks {
             match block {
-                Block::Code(fence) if fence.closed => self.highlight_fence(fence, memo)?,
+                Block::Code(fence) if fence.closed => {
+                    if self.highlight_fence(fence, memo).is_err() {
+                        fence.tokens = None;
+                    }
+                }
                 Block::List { items, .. } => {
                     for item in items {
                         self.highlight_blocks(&mut item.blocks, memo)?;
@@ -398,8 +464,9 @@ impl MarkdownEngine {
             merged.push(CodeToken { kind, range });
         }
 
-        memo.remember(language, &fence.source, &merged);
-        fence.tokens = Some(merged);
+        let tokens: Arc<[CodeToken]> = merged.into();
+        memo.remember(language, &fence.source, tokens.clone());
+        fence.tokens = Some(tokens);
         Ok(())
     }
 
@@ -482,15 +549,15 @@ impl MarkdownEngine {
 ///
 /// Tokens are a pure function of the fence language and source bytes, so a
 /// memo may serve any earlier classification of the same pair. Only
-/// successful classifications are remembered; a `syntect` failure fails the
-/// parse and is never cached.
+/// successful classifications are remembered; a `syntect` failure leaves
+/// that fence uncolored and is not cached.
 pub(crate) trait FenceTokenMemo {
     /// Returns previously classified tokens for this exact language and
     /// source, if the memo holds them.
-    fn cached(&mut self, language: &str, source: &str) -> Option<Vec<CodeToken>>;
+    fn cached(&mut self, language: &str, source: &str) -> Option<Arc<[CodeToken]>>;
 
     /// Records the tokens just classified for this language and source.
-    fn remember(&mut self, language: &str, source: &str, tokens: &[CodeToken]);
+    fn remember(&mut self, language: &str, source: &str, tokens: Arc<[CodeToken]>);
 }
 
 /// The memo behind the uncached [`MarkdownEngine::parse_document`]: every
@@ -498,11 +565,11 @@ pub(crate) trait FenceTokenMemo {
 struct NoFenceTokenMemo;
 
 impl FenceTokenMemo for NoFenceTokenMemo {
-    fn cached(&mut self, _language: &str, _source: &str) -> Option<Vec<CodeToken>> {
+    fn cached(&mut self, _language: &str, _source: &str) -> Option<Arc<[CodeToken]>> {
         None
     }
 
-    fn remember(&mut self, _language: &str, _source: &str, _tokens: &[CodeToken]) {}
+    fn remember(&mut self, _language: &str, _source: &str, _tokens: Arc<[CodeToken]>) {}
 }
 
 /// Yields each physical line together with its starting byte offset.
@@ -657,15 +724,7 @@ fn fence_is_closed(region: &str) -> bool {
 #[derive(Default)]
 struct DocumentBuilder {
     blocks: Vec<Block>,
-    /// Spans of the paragraph, heading, or tight item text being assembled
-    /// at document level (used only when no list item is open).
-    inline: Vec<Span>,
-    /// Byte offset where the current document-level inline run began.
-    inline_start: usize,
-    /// Depth of the heading being assembled, if any.
-    heading_depth: Option<u8>,
-    /// True while a paragraph is open at document level or inside an item.
-    paragraph_open: bool,
+    inline: InlineScope,
     /// Accumulation state for the code block being assembled, if any.
     code: Option<FenceBuilder>,
     /// Raw text of the HTML block being assembled, if any.
@@ -695,12 +754,17 @@ struct ActiveList {
     range_start: usize,
 }
 
-struct ActiveItem {
-    blocks: Vec<Block>,
-    inline: Vec<Span>,
-    inline_start: usize,
+#[derive(Default)]
+struct InlineScope {
+    spans: Vec<Span>,
+    start: usize,
     heading_depth: Option<u8>,
     paragraph_open: bool,
+}
+
+struct ActiveItem {
+    blocks: Vec<Block>,
+    inline: InlineScope,
     task: Option<bool>,
     /// Value of `lists.len()` when this item opened: the item belongs to
     /// the list at that depth, so a closing list only settles items it
@@ -738,14 +802,41 @@ impl FormatFrame {
 
 /// Parser options for the shared engine: `CommonMark` core plus task-list
 /// markers (`- [ ]` / `- [x]`), which `pulldown-cmark` only scans when
-/// [`Options::ENABLE_TASKLISTS`] is set, and GFM tables. No other GFM
+/// [`pulldown_cmark::Options::ENABLE_TASKLISTS`] is set, and GFM tables. No other GFM
 /// extension is enabled.
-pub(crate) const PARSE_OPTIONS: Options = Options::ENABLE_TASKLISTS.union(Options::ENABLE_TABLES);
+pub(crate) use artisan_markdown_index::PARSE_OPTIONS;
 
 impl DocumentBuilder {
     /// Walks every offset-tagged event of `source` into blocks.
-    fn build(mut self, source: &str) -> MarkdownDocument {
-        for (event, range) in Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter() {
+    fn build(self, source: &str) -> Result<MarkdownDocument, MarkdownError> {
+        self.build_events(
+            source,
+            Parser::new_ext(source, PARSE_OPTIONS).into_offset_iter(),
+        )
+    }
+
+    /// Indexed leaves replay the exact original parser events against only
+    /// their admitted source range. No fragment is parsed as a new document.
+    fn build_events<'a>(
+        mut self,
+        source: &str,
+        events: impl IntoIterator<Item = (Event<'a>, Range<usize>)>,
+    ) -> Result<MarkdownDocument, MarkdownError> {
+        let mut depth = 0usize;
+        for (count, (event, range)) in events.into_iter().enumerate() {
+            if count >= 32_768 {
+                return Err(MarkdownError::PreviewLimit("32768 parser events"));
+            }
+            match &event {
+                Event::Start(_) => {
+                    depth += 1;
+                    if depth > 96 {
+                        return Err(MarkdownError::PreviewLimit("96 nested tags"));
+                    }
+                }
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
             match event {
                 Event::Start(tag) => self.start_tag(tag, range.start),
                 Event::End(tag_end) => self.end_tag(tag_end, range, source),
@@ -791,9 +882,9 @@ impl DocumentBuilder {
             }
         }
         self.finish_invariant();
-        MarkdownDocument {
+        Ok(MarkdownDocument {
             blocks: std::mem::take(&mut self.blocks),
-        }
+        })
     }
 
     /// Documents the parser's balanced-events contract: every opened
@@ -865,10 +956,10 @@ impl DocumentBuilder {
             Tag::Item => {
                 self.items.push(ActiveItem {
                     blocks: Vec::new(),
-                    inline: Vec::new(),
-                    inline_start: start,
-                    heading_depth: None,
-                    paragraph_open: false,
+                    inline: InlineScope {
+                        start,
+                        ..Default::default()
+                    },
                     task: None,
                     list_depth: self.lists.len(),
                 });
@@ -936,6 +1027,7 @@ impl DocumentBuilder {
                         closed,
                         source: fence.source,
                         tokens: None,
+                        diagrams: None,
                     }));
                 }
             }
@@ -1013,13 +1105,13 @@ impl DocumentBuilder {
         let needs_flush = self
             .items
             .last()
-            .is_some_and(|item| !item.paragraph_open && !item.inline.is_empty());
+            .is_some_and(|item| !item.inline.paragraph_open && !item.inline.spans.is_empty());
         if !needs_flush {
             return;
         }
         if let Some(item) = self.items.last_mut() {
-            let spans = std::mem::take(&mut item.inline);
-            let start = item.inline_start;
+            let spans = std::mem::take(&mut item.inline.spans);
+            let start = item.inline.start;
             // End is unknown until the item closes; reuse the start so the
             // range stays honest rather than invented.
             item.blocks.push(Block::Paragraph {
@@ -1036,21 +1128,24 @@ impl DocumentBuilder {
         let Some(mut item) = self.items.pop() else {
             return;
         };
-        if !item.inline.is_empty() || item.paragraph_open || item.heading_depth.is_some() {
-            let spans = std::mem::take(&mut item.inline);
-            if let Some(level) = item.heading_depth.take() {
+        if !item.inline.spans.is_empty()
+            || item.inline.paragraph_open
+            || item.inline.heading_depth.is_some()
+        {
+            let spans = std::mem::take(&mut item.inline.spans);
+            if let Some(level) = item.inline.heading_depth.take() {
                 item.blocks.push(Block::Heading {
                     level,
                     spans,
-                    range: item.inline_start..end,
+                    range: item.inline.start..end,
                 });
             } else {
                 item.blocks.push(Block::Paragraph {
                     spans,
-                    range: item.inline_start..end,
+                    range: item.inline.start..end,
                 });
             }
-            item.paragraph_open = false;
+            item.inline.paragraph_open = false;
         }
         let list_item = ListItem {
             blocks: item.blocks,
@@ -1080,62 +1175,39 @@ impl DocumentBuilder {
             push_span_merge(frame.spans_mut(), span);
             return;
         }
-        if let Some(item) = self.items.last_mut() {
-            // A heading inside an item assembles in the item's buffer.
-            push_span_merge(&mut item.inline, span);
-        } else {
-            push_span_merge(&mut self.inline, span);
-        }
+        push_span_merge(&mut self.inline_scope().spans, span);
+    }
+
+    fn inline_scope(&mut self) -> &mut InlineScope {
+        self.items
+            .last_mut()
+            .map_or(&mut self.inline, |item| &mut item.inline)
     }
 
     fn clear_inline(&mut self, start: usize) {
-        if let Some(item) = self.items.last_mut() {
-            item.inline.clear();
-            item.inline_start = start;
-        } else {
-            self.inline.clear();
-            self.inline_start = start;
-        }
+        let scope = self.inline_scope();
+        scope.spans.clear();
+        scope.start = start;
     }
 
     fn take_inline(&mut self) -> Vec<Span> {
-        if let Some(item) = self.items.last_mut() {
-            std::mem::take(&mut item.inline)
-        } else {
-            std::mem::take(&mut self.inline)
-        }
+        std::mem::take(&mut self.inline_scope().spans)
     }
 
     fn take_inline_start(&mut self, fallback: usize) -> usize {
-        if let Some(item) = self.items.last_mut() {
-            std::mem::replace(&mut item.inline_start, fallback)
-        } else {
-            std::mem::replace(&mut self.inline_start, fallback)
-        }
+        std::mem::replace(&mut self.inline_scope().start, fallback)
     }
 
     fn set_paragraph_open(&mut self, open: bool) {
-        if let Some(item) = self.items.last_mut() {
-            item.paragraph_open = open;
-        } else {
-            self.paragraph_open = open;
-        }
+        self.inline_scope().paragraph_open = open;
     }
 
     fn set_heading_depth(&mut self, depth: Option<u8>) {
-        if let Some(item) = self.items.last_mut() {
-            item.heading_depth = depth;
-        } else {
-            self.heading_depth = depth;
-        }
+        self.inline_scope().heading_depth = depth;
     }
 
     fn take_heading_depth(&mut self) -> Option<u8> {
-        if let Some(item) = self.items.last_mut() {
-            item.heading_depth.take()
-        } else {
-            self.heading_depth.take()
-        }
+        self.inline_scope().heading_depth.take()
     }
 }
 
@@ -1143,5 +1215,27 @@ fn push_span_merge(target: &mut Vec<Span>, span: Span) {
     match (target.last_mut(), &span) {
         (Some(Span::Text(existing)), Span::Text(text)) => existing.push_str(text),
         _ => target.push(span),
+    }
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::*;
+    #[test]
+    fn deeply_nested_inline_source_returns_a_preview_error() {
+        let source = format!("{}text{}", "*".repeat(200), "*".repeat(200));
+        let engine = MarkdownEngine::new().unwrap();
+        assert!(matches!(
+            engine.parse_document(&source),
+            Err(MarkdownError::PreviewLimit(_))
+        ));
+    }
+    #[test]
+    fn many_short_paragraphs_are_bounded_before_tree_preparation() {
+        let engine = MarkdownEngine::new().unwrap();
+        assert!(matches!(
+            engine.parse_document(&"a\n\n".repeat(12_000)),
+            Err(MarkdownError::PreviewLimit(_))
+        ));
     }
 }

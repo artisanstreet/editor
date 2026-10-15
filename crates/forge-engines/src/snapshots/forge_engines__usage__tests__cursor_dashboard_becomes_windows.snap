@@ -6,6 +6,8 @@ expression: "[split, single,\ndisplay].iter().map(|r| parse_cursor_usage(r).unwr
     [
         UsageWindow {
             label: "Cursor models",
+            cadence: Other,
+            scope: None,
             used_percent: 40.0,
             resets_at: Some(
                 1792000000000,
@@ -13,6 +15,8 @@ expression: "[split, single,\ndisplay].iter().map(|r| parse_cursor_usage(r).unwr
         },
         UsageWindow {
             label: "Other models",
+            cadence: Other,
+            scope: None,
             used_percent: 10.0,
             resets_at: Some(
                 1792000000000,
@@ -22,11 +26,15 @@ expression: "[split, single,\ndisplay].iter().map(|r| parse_cursor_usage(r).unwr
     [
         UsageWindow {
             label: "Included usage",
+            cadence: Other,
+            scope: None,
             used_percent: 50.0,
             resets_at: None,
         },
         UsageWindow {
             label: "On-demand",
+            cadence: Other,
+            scope: None,
             used_percent: 25.0,
             resets_at: None,
         },
@@ -34,6 +42,8 @@ expression: "[split, single,\ndisplay].iter().map(|r| parse_cursor_usage(r).unwr
     [
         UsageWindow {
             label: "Included usage",
+            cadence: Other,
+            scope: None,
             used_percent: 73.0,
             resets_at: None,
         },

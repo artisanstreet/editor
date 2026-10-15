@@ -5,6 +5,8 @@ expression: "parse_claude_usage(result, NOW)"
 [
     UsageWindow {
         label: "Session",
+        cadence: Session,
+        scope: None,
         used_percent: 3.0,
         resets_at: Some(
             1791719340000,
@@ -12,6 +14,8 @@ expression: "parse_claude_usage(result, NOW)"
     },
     UsageWindow {
         label: "Week",
+        cadence: Week,
+        scope: None,
         used_percent: 34.0,
         resets_at: Some(
             1791928740000,
@@ -19,6 +23,10 @@ expression: "parse_claude_usage(result, NOW)"
     },
     UsageWindow {
         label: "Week (Fable)",
+        cadence: Week,
+        scope: Some(
+            "Fable",
+        ),
         used_percent: 0.0,
         resets_at: Some(
             1791928800000,
