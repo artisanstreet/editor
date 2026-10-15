@@ -63,12 +63,6 @@ use gpui::{
 mod full_color_svg;
 use self::full_color_svg::FullColorSvg;
 
-// White-box unit tests for this module's private tinted-route helper live
-// externally in `tests/ui/tinted_svg.rs`; they are compiled as a child
-// module of `asset_seam` only under `cfg(test)` (see the
-// `tinted_svg_unit_test` target), which is what grants them access to the
-// private items they exercise. No test implementation lives here.
-
 /// Which GPUI pipeline presents a cataloged asset.
 ///
 /// The typed policy itself lives in the sealed catalog
@@ -134,25 +128,6 @@ struct TintedSvg {
     asset_id: AssetId,
 }
 
-/// Parses catalog `viewBox` metadata (`"min-x min-y width height"`) into
-/// intrinsic dimensions. Returns `None` for absent, malformed, non-finite,
-/// or non-positive values so callers fall back to the laid-out bounds
-/// unchanged.
-fn view_box_dims(view_box: Option<&str>) -> Option<(f32, f32)> {
-    let mut parts = view_box?.split_whitespace();
-    let _min_x: f32 = parts.next()?.parse().ok()?;
-    let _min_y: f32 = parts.next()?.parse().ok()?;
-    let width: f32 = parts.next()?.parse().ok()?;
-    let height: f32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    Some((width, height))
-}
-
 /// Contains the intrinsic catalog aspect inside `outer` and centers it,
 /// preserving the laid-out box, hitbox, and origin symmetry.
 ///
@@ -165,8 +140,11 @@ fn view_box_dims(view_box: Option<&str>) -> Option<(f32, f32)> {
 /// final sprite can exceed this rect by at most one device pixel
 /// (~0.5 logical px at 1x) while staying centered — far below the ~2.24 px
 /// tall overflow this replaces for a 16 px Cursor box.
-fn contained_tinted_bounds(outer: Bounds<Pixels>, view_box: Option<&str>) -> Bounds<Pixels> {
-    let Some((intrinsic_width, intrinsic_height)) = view_box_dims(view_box) else {
+fn contained_tinted_bounds(
+    outer: Bounds<Pixels>,
+    dimensions: Option<(f32, f32)>,
+) -> Bounds<Pixels> {
+    let Some((intrinsic_width, intrinsic_height)) = dimensions else {
         return outer;
     };
     let outer_width = f32::from(outer.size.width);
@@ -215,10 +193,6 @@ fn contained_tinted_bounds(outer: Bounds<Pixels>, view_box: Option<&str>) -> Bou
 ///    properties with its color back at [`None`], and a resolved ambient
 ///    value never becomes a frozen authored override on subsequent reuse.
 ///
-/// The white-box suite in `tests/ui/tinted_svg.rs` (linked under
-/// `cfg(test)`) inspects the actual inner refinement inside this exact
-/// closure, so breaking the mutation, the precedence, or the restoration
-/// fails executable assertions there.
 fn with_scoped_tint_delegation<R>(
     svg: &mut Svg,
     window: &mut Window,
@@ -309,7 +283,10 @@ impl Element for TintedSvg {
         // Layout, prepaint, and hitboxes keep the original square `bounds`;
         // only the delegated inner paint is contained to the intrinsic
         // catalog aspect so a tall viewBox cannot overflow its box.
-        let inner = contained_tinted_bounds(bounds, editor_assets::get(self.asset_id).view_box);
+        let inner = contained_tinted_bounds(
+            bounds,
+            editor_assets::get(self.asset_id).intrinsic_dimensions(),
+        );
         with_scoped_tint_delegation(&mut self.svg, window, cx, |svg, window, cx| {
             svg.paint(
                 global_id,

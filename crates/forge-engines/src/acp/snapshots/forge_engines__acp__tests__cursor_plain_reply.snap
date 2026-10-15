@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 139
 expression: "replay(Profile::Cursor, \"plain-reply\")"
 ---
 [
@@ -30,8 +31,8 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
     Event(
         Live {
             target: Reasoning,
-            text: "Read the README first.",
-            append: true,
+            text: "Read the README first",
+            append: false,
         },
     ),
     Event(
@@ -40,7 +41,9 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -69,7 +72,9 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Let me look.",
+                text: Inline(
+                    "Let me look.",
+                ),
                 phase: Commentary,
             },
         },
@@ -108,9 +113,10 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
                 ),
                 output: Some(
                     Output {
-                        head: "# Scratch\nA test directory.\n",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "# Scratch\nA test directory.\n",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -168,7 +174,9 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -193,7 +201,9 @@ expression: "replay(Profile::Cursor, \"plain-reply\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "It says this is a test directory.",
+                text: Inline(
+                    "It says this is a test directory.",
+                ),
                 phase: Final,
             },
         },

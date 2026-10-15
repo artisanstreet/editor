@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 119
 expression: "replay(Profile::Grok, \"tool-permission\")"
 ---
 [
@@ -28,7 +29,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -48,7 +51,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I'll list the files.",
+                text: Inline(
+                    "I'll list the files.",
+                ),
                 phase: Commentary,
             },
         },
@@ -60,7 +65,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -82,7 +89,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: AwaitingUser,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -96,7 +105,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: Some(
                                 "/tmp/scratch",
                             ),
@@ -120,7 +131,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -134,7 +147,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: Some(
                                 "/tmp/scratch",
                             ),
@@ -163,7 +178,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
@@ -174,9 +191,10 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 ),
                 output: Some(
                     Output {
-                        head: "a.txt\nb.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "a.txt\nb.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -185,7 +203,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "ls",
+                            command: Inline(
+                                "ls",
+                            ),
                             cwd: Some(
                                 "/tmp/scratch",
                             ),
@@ -210,7 +230,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -233,7 +255,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 kind: Goal {
                     state: "complete",
                 },
-                text: "List the files\nListed 2 files",
+                text: Inline(
+                    "List the files\nListed 2 files",
+                ),
             },
         },
     ),
@@ -243,7 +267,9 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Two files: a.txt and b.txt.",
+                text: Inline(
+                    "Two files: a.txt and b.txt.",
+                ),
                 phase: Final,
             },
         },

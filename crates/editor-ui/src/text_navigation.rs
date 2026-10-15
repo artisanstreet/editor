@@ -8,7 +8,7 @@
 //!   Blink gets from ICU, with Chromium's own rule patch applied
 //!   (`chromium/deps/icu` `source/data/brkitr/rules/word.txt`): `.` joins
 //!   digits (`32.3`) but never letters (`abc.def`), and `:` never joins.
-//! - [`next_word_position`] and [`previous_word_position`] port
+//! - [`WordBoundaries::next`] and [`WordBoundaries::previous`] port
 //!   `NextWordPositionInternal` / `PreviousWordPositionInternal` from
 //!   `third_party/blink/renderer/core/editing/position_units_word.cc`,
 //!   including punctuation runs and the Windows rule that moving right skips
@@ -126,17 +126,21 @@ fn word_breaks(text: &str) -> Vec<usize> {
         }
         breaks.push(start + segment.len());
     }
-    breaks.sort_unstable();
     breaks.dedup();
     breaks
 }
 
 fn following(breaks: &[usize], offset: usize) -> Option<usize> {
-    breaks.iter().copied().find(|&value| value > offset)
+    breaks
+        .get(breaks.partition_point(|value| *value <= offset))
+        .copied()
 }
 
 fn preceding(breaks: &[usize], offset: usize) -> Option<usize> {
-    breaks.iter().rev().copied().find(|&value| value < offset)
+    breaks
+        .partition_point(|value| *value < offset)
+        .checked_sub(1)
+        .map(|index| breaks[index])
 }
 
 /// Windows skips the spaces after a word stop, but never a line break.
@@ -150,17 +154,53 @@ fn skip_whitespace(text: &str, offset: usize, behavior: WordBehavior) -> usize {
         .map_or(text.len(), |(index, _)| offset + index)
 }
 
-/// Where `ctrl`+Right (`alt`+Right on macOS) moves the caret from `offset`.
-#[must_use]
-pub fn next_word_position(text: &str, offset: usize, behavior: WordBehavior) -> usize {
+/// A word index retained for one text revision. Offsets stay in UTF-8 bytes.
+pub struct WordBoundaries(Vec<usize>);
+impl WordBoundaries {
+    pub fn range_at(&self, text: &str, offset: usize) -> Range<usize> {
+        word_range_with_breaks(text, offset, &self.0)
+    }
+    pub fn selection_range(
+        &self,
+        unit: SelectionUnit,
+        text: &str,
+        offset: usize,
+        dragging: bool,
+    ) -> Range<usize> {
+        if unit != SelectionUnit::Word {
+            return if dragging {
+                unit.drag_range_at(text, offset)
+            } else {
+                unit.range_at(text, offset)
+            };
+        }
+        let word = self.range_at(text, offset);
+        if dragging || word.is_empty() {
+            word
+        } else {
+            word.start..skip_whitespace(text, word.end, WordBehavior::platform())
+        }
+    }
+
+    pub fn new(text: &str) -> Self {
+        Self(word_breaks(text))
+    }
+    pub fn next(&self, text: &str, offset: usize, behavior: WordBehavior) -> usize {
+        next_with_breaks(text, offset, behavior, &self.0)
+    }
+    pub fn previous(&self, text: &str, offset: usize) -> usize {
+        previous_with_breaks(text, offset, &self.0)
+    }
+}
+
+fn next_with_breaks(text: &str, offset: usize, behavior: WordBehavior, breaks: &[usize]) -> usize {
     let offset = floor_char_boundary(text, offset);
     if offset >= text.len() {
         return text.len();
     }
-    let breaks = word_breaks(text);
     let skips = behavior == WordBehavior::SkipSpaces;
     let mut punctuation: Option<usize> = None;
-    let mut runner = following(&breaks, offset);
+    let mut runner = following(breaks, offset);
     while let Some(at) = runner {
         let next = char_at(text, at);
         let previous = char_before(text, at);
@@ -177,7 +217,7 @@ pub fn next_word_position(text: &str, offset: usize, behavior: WordBehavior) -> 
             if skips && punctuation.is_none() && previous.is_some_and(is_blink_whitespace) {
                 punctuation = Some(at);
             }
-            runner = following(&breaks, at);
+            runner = following(breaks, at);
             continue;
         }
         if let Some(pending) = pending {
@@ -192,21 +232,18 @@ pub fn next_word_position(text: &str, offset: usize, behavior: WordBehavior) -> 
                 return skip_whitespace(text, at, behavior);
             }
         }
-        runner = following(&breaks, at);
+        runner = following(breaks, at);
     }
     text.len()
 }
 
-/// Where `ctrl`+Left (`alt`+Left on macOS) moves the caret from `offset`.
-#[must_use]
-pub fn previous_word_position(text: &str, offset: usize) -> usize {
+fn previous_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> usize {
     let offset = floor_char_boundary(text, offset);
     if offset == 0 {
         return 0;
     }
-    let breaks = word_breaks(text);
     let mut punctuation: Option<usize> = None;
-    let mut runner = preceding(&breaks, offset);
+    let mut runner = preceding(breaks, offset);
     while let Some(at) = runner {
         let next = char_at(text, at);
         if let Some(next) = next
@@ -216,7 +253,7 @@ pub fn previous_word_position(text: &str, offset: usize) -> usize {
                 return at;
             }
             punctuation = Some(at);
-            runner = preceding(&breaks, at);
+            runner = preceding(breaks, at);
             continue;
         }
         if let Some(punctuation) = punctuation {
@@ -225,7 +262,7 @@ pub fn previous_word_position(text: &str, offset: usize) -> usize {
         if next.is_some_and(is_word_break) {
             return at;
         }
-        runner = preceding(&breaks, at);
+        runner = preceding(breaks, at);
     }
     0
 }
@@ -235,11 +272,14 @@ pub fn previous_word_position(text: &str, offset: usize) -> usize {
 /// before it at the end of a line or of the text.
 #[must_use]
 pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
+    WordBoundaries::new(text).range_at(text, offset)
+}
+
+fn word_range_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> Range<usize> {
     let offset = floor_char_boundary(text, offset);
-    let breaks = word_breaks(text);
     let at_line_end = char_at(text, offset).is_none_or(is_line_break);
     if at_line_end {
-        let start = preceding(&breaks, offset).unwrap_or(offset);
+        let start = preceding(breaks, offset).unwrap_or(offset);
         // A line break is never a word of its own.
         if char_at(text, start).is_some_and(is_line_break) {
             return offset..offset;
@@ -247,12 +287,10 @@ pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
         return start..offset;
     }
     let start = breaks
-        .iter()
-        .rev()
-        .copied()
-        .find(|&value| value <= offset)
-        .unwrap_or(0);
-    let end = following(&breaks, offset).unwrap_or(text.len());
+        .partition_point(|value| *value <= offset)
+        .checked_sub(1)
+        .map_or(0, |index| breaks[index]);
+    let end = following(breaks, offset).unwrap_or(text.len());
     start..end
 }
 
@@ -338,29 +376,12 @@ impl SelectionUnit {
             Self::Character | Self::Paragraph => self.range_at(text, offset),
         }
     }
-
-    /// The selection a drag to `offset` makes when the press selected
-    /// `origin`: the union of `origin` and the unit at `offset`, and
-    /// whether it runs backwards (the pointer is before `origin`).
-    #[must_use]
-    pub fn extend(self, text: &str, origin: &Range<usize>, offset: usize) -> (Range<usize>, bool) {
-        let target = self.drag_range_at(text, offset);
-        if target.start < origin.start {
-            (target.start..origin.end, true)
-        } else {
-            (origin.start..target.end.max(origin.end), false)
-        }
-    }
 }
 
 /// The nearest character boundary at or before `offset`.
 #[must_use]
 pub fn floor_char_boundary(text: &str, offset: usize) -> usize {
-    let mut offset = offset.min(text.len());
-    while offset > 0 && !text.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
+    text.floor_char_boundary(offset.min(text.len()))
 }
 
 /// The caret offset nearest to `position` in a painted text layout.
@@ -403,8 +424,8 @@ pub fn caret_index_for_position(layout: &TextLayout, position: Point<Pixels>) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        SelectionUnit, WordBehavior, double_click_range, next_word_position, paragraph_range_at,
-        previous_word_position, word_range_at,
+        SelectionUnit, WordBehavior, WordBoundaries, double_click_range, paragraph_range_at,
+        word_range_at,
     };
 
     /// Runs `step` on the `|` caret of `marked` and returns the text with
@@ -418,18 +439,20 @@ mod tests {
 
     fn next(marked: &str) -> String {
         run(marked, |text, offset| {
-            next_word_position(text, offset, WordBehavior::StopAtWordEnd)
+            WordBoundaries::new(text).next(text, offset, WordBehavior::StopAtWordEnd)
         })
     }
 
     fn next_skipping(marked: &str) -> String {
         run(marked, |text, offset| {
-            next_word_position(text, offset, WordBehavior::SkipSpaces)
+            WordBoundaries::new(text).next(text, offset, WordBehavior::SkipSpaces)
         })
     }
 
     fn previous(marked: &str) -> String {
-        run(marked, previous_word_position)
+        run(marked, |text, offset| {
+            WordBoundaries::new(text).previous(text, offset)
+        })
     }
 
     #[test]
@@ -540,41 +563,5 @@ mod tests {
         assert_eq!(SelectionUnit::from_click_count(2), SelectionUnit::Word);
         assert_eq!(SelectionUnit::from_click_count(3), SelectionUnit::Paragraph);
         assert_eq!(SelectionUnit::from_click_count(4), SelectionUnit::Paragraph);
-    }
-
-    #[test]
-    fn word_drag_grows_by_whole_words_in_both_directions() {
-        let text = "alpha beta gamma";
-        let origin = SelectionUnit::Word.range_at(text, 7);
-        assert_eq!(origin.start, 6);
-        // Forward: from "beta" into "gamma" covers all of "gamma".
-        let (forward, reversed) = SelectionUnit::Word.extend(text, &origin, 12);
-        assert_eq!(forward, 6..16);
-        assert!(!reversed);
-        // Backward: into "alpha" keeps "beta" whole and takes all of "alpha".
-        let (backward, reversed) = SelectionUnit::Word.extend(text, &origin, 2);
-        assert_eq!(backward.start, 0);
-        assert_eq!(backward.end, origin.end);
-        assert!(reversed);
-        // Inside the original word the selection stays that word.
-        assert_eq!(
-            SelectionUnit::Word.extend(text, &origin, 8),
-            (origin.clone(), false)
-        );
-    }
-
-    #[test]
-    fn paragraph_drag_grows_by_whole_lines() {
-        let text = "one\ntwo\nthree";
-        let origin = SelectionUnit::Paragraph.range_at(text, 5);
-        assert_eq!(origin, 4..8);
-        assert_eq!(
-            SelectionUnit::Paragraph.extend(text, &origin, 10),
-            (4..13, false)
-        );
-        assert_eq!(
-            SelectionUnit::Paragraph.extend(text, &origin, 1),
-            (0..8, true)
-        );
     }
 }

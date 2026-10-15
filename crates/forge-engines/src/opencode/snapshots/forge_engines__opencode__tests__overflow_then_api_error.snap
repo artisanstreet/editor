@@ -1,0 +1,41 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 154
+expression: "replay(\"session-error\")"
+---
+[
+    Event(
+        Item {
+            key: "error:evt_018",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "context full",
+                ),
+                retryable: true,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error:evt_019",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "denied",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+    RunError(
+        "denied",
+    ),
+]

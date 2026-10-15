@@ -7,8 +7,8 @@
 //!
 //! A fence parses once, when its message body enters the parse cache
 //! ([`prepare`]); frames reuse the parsed block. Every kind implements
-//! [`RichBlock`]: it renders from a [`BlockContext`] and renders itself as
-//! Markdown for the copy action. Interaction state lives in the window,
+//! [`RichBlock`]: it renders from a [`BlockContext`] and exposes optional
+//! source for its copy action. Interaction state lives in the window,
 //! keyed under the block's stable element id, so the renderer stays
 //! synchronous and stateless.
 //!
@@ -19,10 +19,9 @@
 //! Each family of kinds owns one submodule and one `parse` entry point that
 //! claims its kinds; [`parse_block`] asks each family in turn.
 
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::fmt::Debug;
-#[cfg(test)]
-use std::fmt::Write as _;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, ElementId, IntoElement, ParentElement as _, SharedString, Styled as _, div, px,
@@ -30,9 +29,8 @@ use gpui::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::theme::ArtisanTheme;
-
 mod actions;
+pub(super) use super::budget;
 mod charts;
 mod code;
 mod data;
@@ -41,25 +39,23 @@ mod media;
 mod narrative;
 
 pub(super) use actions::show_copy_menu;
-pub use actions::{CopyEntry, CopyKind, OpenReference, ShowCopyMenu};
-pub use media::{ImageShowcase, MediaFetch, MediaFetcher, MediaRequest, MediaRoot};
+pub use actions::{CopyEntry, CopyKind, OpenReference, ResourceScope, ShowCopyMenu};
+pub use media::{MediaFetch, MediaFetcher, MediaRequest, decode_image_bytes, image_resident_bytes};
 pub(super) use media::{color_copy_entries, color_paint, color_ranges};
 
 /// Info-string prefix that marks a fence as a rich block.
 const LANGUAGE_PREFIX: &str = "artisan-";
 
 /// Largest fence body parsed as a block; anything longer stays code.
-const MAX_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_SOURCE_BYTES: usize = crate::markdown::MAX_MARKDOWN_SOURCE_BYTES;
 
 /// One parsed kind, ready to draw.
-pub(super) trait RichBlock: Debug {
+pub(super) trait RichBlock: Debug + Send + Sync {
+    /// Retained payload and container capacity charged to the source cache.
+    fn resident_bytes(&self) -> usize;
+
     /// The block's own content, without the envelope's title and caption.
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement;
-
-    /// The block as Markdown: its plain-text rendition, which the tests
-    /// read the parsed spec through.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the tests"))]
-    fn markdown(&self) -> String;
 
     /// What the card's copy action puts on the clipboard; `None` draws no
     /// copy action. Only code is worth copying.
@@ -96,6 +92,7 @@ pub(super) enum Chrome {
 /// What a block renders from: the theme and its stable element id.
 pub(super) struct BlockContext<'a> {
     pub(super) theme: &'a ArtisanTheme,
+    pub(super) media: Option<&'a MediaFetcher>,
     /// Unique per block in the message and stable across frames; every
     /// interactive part keys its window state under it.
     pub(super) id: SharedString,
@@ -109,7 +106,7 @@ impl BlockContext<'_> {
 
     /// The string form of [`Self::id`], for ids that must be `SharedString`.
     pub(super) fn key(&self, part: impl std::fmt::Display) -> SharedString {
-        SharedString::from(format!("{}-{part}", self.id))
+        kit::part_key(&self.id, part)
     }
 }
 
@@ -127,7 +124,7 @@ pub(super) enum RichFence {
 /// A parsed block with its envelope.
 #[derive(Debug)]
 pub(super) struct Prepared {
-    block: Rc<dyn RichBlock>,
+    block: Arc<dyn RichBlock>,
     title: Option<SharedString>,
     /// One muted line under the title for scope and units.
     subtitle: Option<SharedString>,
@@ -137,26 +134,16 @@ pub(super) struct Prepared {
 }
 
 impl Prepared {
+    pub(super) fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.block.resident_bytes()
+            + self.title.as_ref().map_or(0, |text| text.len())
+            + self.subtitle.as_ref().map_or(0, |text| text.len())
+            + self.caption.as_ref().map_or(0, |text| text.len())
+            + self.copy.as_ref().map_or(0, |text| text.len())
+    }
     pub(super) fn chrome(&self) -> Chrome {
         self.block.chrome()
-    }
-
-    /// The block as Markdown under its envelope's title and subtitle and
-    /// over its caption.
-    #[cfg(test)]
-    pub(super) fn markdown(&self) -> SharedString {
-        let mut markdown = String::new();
-        if let Some(title) = self.title.as_ref().filter(|_| !self.block.owns_title()) {
-            let _ = write!(markdown, "**{title}**\n\n");
-        }
-        if let Some(subtitle) = &self.subtitle {
-            let _ = write!(markdown, "{subtitle}\n\n");
-        }
-        markdown.push_str(self.block.markdown().trim_end());
-        if let Some(caption) = &self.caption {
-            let _ = write!(markdown, "\n\n_{caption}_");
-        }
-        SharedString::from(markdown)
     }
 
     pub(super) fn copy(&self) -> Option<SharedString> {
@@ -197,6 +184,7 @@ fn prepare_value(kind: &str, value: &Value) -> Result<Prepared, String> {
     if !value.is_object() {
         return Err("the spec must be a JSON object".to_owned());
     }
+    validate_value_budget(value)?;
     let block = parse_block(kind, value)?;
     let text = |field: &str| {
         value
@@ -219,11 +207,40 @@ fn prepare_value(kind: &str, value: &Value) -> Result<Prepared, String> {
     })
 }
 
+fn validate_value_budget(root: &Value) -> Result<(), String> {
+    const VALUES: usize = 32768;
+    const DEPTH: usize = 32;
+    let mut pending = vec![(root, 0usize)];
+    let mut visited = 0;
+    while let Some((value, depth)) = pending.pop() {
+        visited += 1;
+        if visited > VALUES || depth > DEPTH {
+            return Err("rich preview exceeds 32768 JSON values or 32 nesting levels".into());
+        }
+        let count = match value {
+            Value::Array(values) => values.len(),
+            Value::Object(values) => values.len(),
+            _ => 0,
+        };
+        if pending.len().saturating_add(count) > VALUES - visited {
+            return Err("rich preview exceeds 32768 JSON values".into());
+        }
+        match value {
+            Value::Array(values) => pending.extend(values.iter().map(|value| (value, depth + 1))),
+            Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, depth + 1)))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// One family's `parse`: claims its kinds, `None` for every other kind.
-type FamilyParse = fn(&str, &Value) -> Option<Result<Rc<dyn RichBlock>, String>>;
+type FamilyParse = fn(&str, &Value) -> Option<Result<Arc<dyn RichBlock>, String>>;
 
 /// Asks each family of kinds to claim `kind`.
-fn parse_block(kind: &str, value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+fn parse_block(kind: &str, value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let families: [FamilyParse; 5] = [
         narrative::parse,
         code::parse,
@@ -245,8 +262,8 @@ pub(super) fn spec<T: DeserializeOwned>(value: &Value) -> Result<T, String> {
 /// Boxes a parsed spec as a block; the shape every family's `parse` returns.
 pub(super) fn block<T: RichBlock + DeserializeOwned + 'static>(
     value: &Value,
-) -> Result<Rc<dyn RichBlock>, String> {
-    spec::<T>(value).map(|block| Rc::new(block) as Rc<dyn RichBlock>)
+) -> Result<Arc<dyn RichBlock>, String> {
+    spec::<T>(value).map(|block| Arc::new(block) as Arc<dyn RichBlock>)
 }
 
 /// The block's content under its title and subtitle and over its caption.
@@ -264,7 +281,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
             .gap(px(2.0))
             .children(title.map(|title| {
                 div()
-                    .text_size(px(15.0))
+                    .text_size(TypographyTokens::size(TextStep::SmMid))
                     .line_height(px(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.colors.foreground.to_paint())
@@ -272,7 +289,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
             }))
             .children(prepared.subtitle.clone().map(|subtitle| {
                 div()
-                    .text_size(px(13.0))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
                     .text_color(theme.colors.muted_foreground.to_paint())
                     .child(subtitle)
@@ -288,7 +305,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
         .child(prepared.block.render(cx))
         .children(prepared.caption.clone().map(|caption| {
             div()
-                .text_size(px(13.0))
+                .text_size(TypographyTokens::size(TextStep::XsMid))
                 .line_height(px(20.0))
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(caption)
@@ -299,7 +316,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
 /// The quiet placeholder of a fence still streaming.
 pub(super) fn render_pending(kind: &SharedString, theme: &ArtisanTheme) -> AnyElement {
     div()
-        .text_size(px(14.0))
+        .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(22.0))
         .text_color(theme.colors.muted_foreground.to_paint())
         .child(SharedString::from(format!("Drawing {kind}…")))
@@ -308,3 +325,19 @@ pub(super) fn render_pending(kind: &SharedString, theme: &ArtisanTheme) -> AnyEl
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn ignored_fields_cannot_hide_unbounded_spec_work() {
+        let value = serde_json::json!({"unused":vec![0;32768]});
+        assert!(validate_value_budget(&value).is_err());
+        let mut value = Value::Null;
+        for _ in 0..33 {
+            value = Value::Array(vec![value]);
+        }
+        assert!(validate_value_budget(&value).is_err());
+        assert!(validate_value_budget(&serde_json::json!({"value": [1,2,3]})).is_ok());
+    }
+}

@@ -14,10 +14,13 @@ current shape.
 ```
 shared
   artisan-api          wire types: ids, Item, Thread, Run, Event, requests, TLS helpers
+  artisan-mentions     the `$skill`/`@connector` mention grammar (composer and Forge)
+  artisan-markdown-index  Markdown leaf index Forge stores and the Editor reads
 
 forge
-  forge-store          rusqlite schema, single writer thread, blobs, legacy import  → api
-  forge-engines        Harness contract, adapters, installs, sign-in, usage, skills → api
+  forge-content        which texts and collections become stored sources       → api
+  forge-store          rusqlite schema, single writer thread, blobs, legacy import  → api, content
+  forge-engines        Harness contract, adapters, installs, sign-in, usage, skills → api, content
   forge-runs           live runs: send, steer, answer, cancel                       → store, engines
   forge-http           axum routes, mutual-TLS auth, SSE event stream, pairing      → runs, store
   ae (bin)             CLI, installer, `ae forge serve`                             → http, engines, store
@@ -25,10 +28,11 @@ forge
 editor
   editor-ui            theme, components, text editor, markdown  → editor-assets, editor-audio
   editor-core          Forge client per host, connection, HostData, Screen         → api
+  editor-sources       viewers for stored sources (raw text, collections)          → core, editor-ui
   editor-sidebar       projects, thread inbox, history, host switcher               → core, editor-ui
-  editor-composer      draft, WebP attachments, model picker, send/steer            → core, editor-ui
-  editor-conversation  the open thread: item window, viewport, pure render         → core, editor-ui, composer
-  editor-inspector     shells, agents, changed files, context/usage                 → core, editor-ui, conversation
+  editor-composer      draft, WebP attachments, model picker, send/steer            → core, sources, editor-ui
+  editor-conversation  the open thread: item window, viewport, pure render         → core, sources, editor-ui, composer
+  editor-inspector     shells, agents, changed files, context/usage                 → core, sources, editor-ui, conversation
   editor-settings      preferences, engines, skills/MCP/prompt, hosts & devices     → core, editor-ui
   editor (bin)         window, titlebar, layout, palette, notices, first pairing    → all
 ```
@@ -68,8 +72,8 @@ takes the next seq in the writer thread and is published in commit order.
   gets `Reset` and refetches `/state`.
 - `GET /threads/:id/items?before|after|limit` → pages of a thread.
 
-The Editor's connection (`editor-core/src/connection.rs`) is a statig
-machine: disconnected → connecting → live → backoff → retrying, resuming from
+The Editor's connection (`editor-core/src/connection.rs`) is a plain state
+enum: disconnected → connecting → live → backoff → retrying, resuming from
 its last seq after any drop. `HostData` holds what that Forge sent;
 sections read it and subscribe to `HostEvent`.
 
@@ -100,11 +104,17 @@ Each adapter is a pure decoder (lines in, events out) plus a thin driver:
 | OpenCode | `opencode serve` HTTP + global `/api/event` SSE |
 | Grok, Cursor | ACP JSON-RPC over stdio |
 
+An approval rides on the item it gates (`Tool`/`Plan`, `AwaitingUser`), keyed
+like that item, so an answer reaches the engine by the item's native id.
+Decoders keep their own copy of each item they may still change; once it
+settles they keep only its stored-source descriptors (`retained.rs`), which is
+what bounds their memory.
+
 Adapters are tested with recorded transcripts
 (`forge-engines/transcripts/<engine>/*.jsonl`) and insta snapshots.
 
 Engines install into `<data>/engines/<engine>/versions/<v>` with `current`
-and `previous` (statig `Install` machine); each runs with its own `HOME`
+and `previous` (an `Install` state enum); each runs with its own `HOME`
 under `<data>/engines/<engine>/home`. Skills (`<data>/extensions/skills`),
 MCP servers and the global prompt (settings `mcp_servers`, `global_prompt`)
 are materialised into each engine's own config format at launch.
@@ -132,16 +142,19 @@ No central command enum; the binary only lays sections out.
 
 The conversation keeps one copy of the open thread: a window of items keyed
 by position, upserted from events; live text from `HostData`; UI state per
-item. The **Viewport** statig machine (Following ⇄ Reading → Jumping) decides
-which range stays loaded and fetches pages at the edges. Render is a pure
-function of those three. Run phase and disclosure are computed, not stored.
+item. The **Viewport** (Following ⇄ Reading → Jumping; inputs in, effects
+out) decides which range stays loaded and fetches pages at the edges. Body
+text is prepared by `Bodies`, which the conversation owns; rows draw a
+prepared `Body` set on them and are cached views. Render is a pure function
+of those. Run phase and disclosure are computed, not stored.
 
 ## State machines
 
-statig, only for real lifecycles with transitions that matter:
-Forge connection (editor-core), engine Install (forge-engines), Viewport
-(conversation), Attachment and Send (composer). Everything else is data plus
-derived functions.
+Plain `enum State` plus a transition function, only for real lifecycles with
+transitions that matter: Forge connection (editor-core), engine Install
+(forge-engines), Viewport (conversation), Attachment (composer). No state
+machine library. Everything else is data plus derived functions; stale async
+work is cancelled by dropping its task, not fenced with generation counters.
 
 ## Files
 
@@ -164,7 +177,8 @@ reasoning are not carried over.
 `nix run .#dev` builds `ae` and the Editor with Cargo, runs a dev Forge from
 `~/.local/share/artisan-dev` on port 47901, and launches the Editor (in WSL,
 the Windows build). `nix run .#dev -- import` imports the old dev Forge.
-See `nix/dev.nix`. Releases: `nix build .#release`, signed by
+`nix run .#release` is the same loop built with Cargo's release profile.
+See `nix/dev.nix`. Release archives: `nix build .#release`, signed by
 `scripts/release`.
 
 ## Tests

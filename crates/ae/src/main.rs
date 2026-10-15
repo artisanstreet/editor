@@ -116,6 +116,8 @@ enum ForgeCommand {
         #[arg(long)]
         from: Option<PathBuf>,
     },
+    /// Normalize retired agent-message records in an offline Forge database.
+    Normalize,
     /// List paired devices, or revoke one.
     Devices {
         #[command(subcommand)]
@@ -183,6 +185,7 @@ fn run(cli: Cli) -> Result<()> {
                 ForgeCommand::Serve { listen } => forge::serve(data_dir, listen),
                 ForgeCommand::Pair { json, listen } => forge::pair(&data_dir, listen, json),
                 ForgeCommand::Import { from } => forge::import(&data_dir, from),
+                ForgeCommand::Normalize => forge::normalize(&data_dir, dry_run),
                 ForgeCommand::Devices { command: None } => forge::devices(&data_dir),
                 ForgeCommand::Devices {
                     command: Some(DevicesCommand::Revoke { id }),

@@ -1,11 +1,10 @@
-//! Engine status chips (master's `engine_status_chips`): one small tinted
-//! pill per engine with an icon, the engine's name, its status, and the
-//! Forge's reason on hover. Shared by the Marketplace and Settings.
+//! Shared engine status chips for Marketplace and Settings.
+//! Each chip shows the engine name and status, with the Forge reason on hover.
 
 use crate::AssetId;
 use crate::asset_seam::asset_glyph;
 use crate::hover_card::{glass_hover_card, hover_card_text};
-use crate::theme::{ArtisanTheme, Oklch};
+use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
 use gpui::prelude::*;
 use gpui::{Context, Div, SharedString, Window, div, px};
 
@@ -84,7 +83,7 @@ fn engine_chip(theme: &ArtisanTheme, chip: &EngineChip, row_key: &str) -> impl I
         .gap(px(4.0))
         .h(px(20.0))
         .px(px(7.0))
-        .rounded(px(10.0))
+        .rounded(RadiusTokens::value(RadiusStep::Lg))
         .bg(tone.with_alpha(0.10).to_paint())
         .text_xs()
         .text_color(tone.to_paint())
@@ -112,15 +111,14 @@ struct ChipTooltip {
 
 impl Render for ChipTooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        glass_hover_card(
+        div().max_w(px(280.0)).child(glass_hover_card(
             &self.theme,
             div().px(px(12.0)).py(px(8.0)).child(hover_card_text(
                 &self.theme,
                 self.text.clone(),
                 &[],
             )),
-        )
-        .max_w(px(280.0))
+        ))
     }
 }
 
@@ -135,4 +133,33 @@ pub const fn tone_color(theme: &ArtisanTheme, tone: ChipTone) -> Oklch {
         ChipTone::Danger => theme.colors.destructive,
         ChipTone::Muted => theme.colors.muted_foreground,
     }
+}
+
+/// One presentation of Forge's prompt status, shared by Settings and Marketplace.
+pub fn prompt_status(state: &artisan_api::PromptEngineState) -> EngineChip {
+    use artisan_api::PromptEngineStatus as Status;
+    let (label, tone, icon) = match state.status {
+        Status::Synced => ("Synced", ChipTone::Success, AssetId::TABLER_CHECK),
+        Status::Drifted => ("Edited", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE),
+        Status::AwaitingChoice => ("Waiting", ChipTone::Warning, AssetId::TABLER_ALERT_TRIANGLE),
+        Status::EngineAbsent => ("Not installed", ChipTone::Muted, AssetId::TABLER_MINUS),
+        Status::Unavailable => ("Unavailable", ChipTone::Muted, AssetId::TABLER_MINUS),
+        Status::Failed => ("Failed", ChipTone::Danger, AssetId::TABLER_X),
+    };
+    let name = state.engine.display_name();
+    let reason = state.reason.clone().or_else(|| {
+        state
+            .file
+            .as_ref()
+            .filter(|_| state.status == Status::Synced)
+            .map(|file| format!("{name}: {file}"))
+    });
+    EngineChip::new(
+        state.engine.as_str(),
+        name,
+        label,
+        tone,
+        icon,
+        reason.as_deref(),
+    )
 }

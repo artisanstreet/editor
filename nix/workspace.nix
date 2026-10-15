@@ -20,6 +20,7 @@ let
   # The crates plus what they embed (skills/) and Cargo's configuration.
   roots = [
     "crates"
+    "vendor/highlighting"
     "skills"
     ".cargo"
     ".config"
@@ -36,7 +37,11 @@ let
       path: type:
       let
         relative = lib.removePrefix (toString ../. + "/") (toString path);
-        under = root: relative == root || lib.hasPrefix "${root}/" relative;
+        under =
+          root:
+          relative == root
+          || lib.hasPrefix "${root}/" relative
+          || (type == "directory" && lib.hasPrefix "${relative}/" root);
         parts = lib.splitString "/" relative;
       in
       (builtins.elem relative topFiles || builtins.any under roots)
@@ -74,18 +79,20 @@ let
     cmake
     perl
   ];
-  # A build script that copies a file out of the read-only vendor directory
-  # leaves a read-only file behind and cannot run a second time (a clock
-  # stepping backwards makes Cargo rerun it), so the target directory is made
-  # writable before every Cargo build.
+  # Vendor build scripts can copy immutable inputs into their OUT_DIR.
+  # Limit permission repair to build-script outputs; never scan object files,
+  # incremental caches or the rest of the restored Cargo target artifacts.
   writableTarget = ''
-    if [ -d "''${CARGO_TARGET_DIR:-target}" ]; then
-      chmod -R u+w "''${CARGO_TARGET_DIR:-target}"
-    fi
+    reform_target="''${CARGO_TARGET_DIR:-target}"
+    for reform_output in "$reform_target"/*/build/*/out "$reform_target"/*/*/build/*/out; do
+      if [ -d "$reform_output" ]; then
+        find "$reform_output" -type f ! -perm -u=w -exec chmod u+w {} +
+      fi
+    done
   '';
   rerunnableBuild = {
     preBuild = writableTarget;
-    cargoBuildCommand = "${writableTarget} cargoWithProfile build";
+    cargoBuildCommand = "cargoWithProfile build";
   };
 
   # Commit for `ae --version` (the sandbox has no .git).
@@ -141,7 +148,8 @@ let
         in
         {
           depsBuildBuild = [ pkgs.stdenv.cc ];
-          nativeBuildInputs = nativeTools;
+          # Compile the native D3D11 HLSL on the Linux build host.
+          nativeBuildInputs = nativeTools ++ [ pkgs.vkd3d ];
           CARGO_BUILD_TARGET = target;
           buildInputs = [
             windowsPkgs.windows.pthreads
@@ -155,23 +163,12 @@ let
           HOST_CC = "${pkgs.stdenv.cc}/bin/cc";
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };
-      # LLVM's lld in MinGW mode for the dev loop: GCC finds it as its `ld`
-      # in a directory of its own (`-B`), so the other LLVM binutils don't
-      # shadow the GNU tools build scripts expect. MinGW GCC asks for `-pie`,
-      # which only GNU ld understands; lld's PE output is relocatable anyway.
-      lld = pkgs.runCommand "x86_64-w64-mingw32-lld" { } ''
-        mkdir -p "$out/bin"
-        ln -s ${windowsPkgs.buildPackages.llvmPackages.bintools}/bin/${windowsPkgs.stdenv.cc.targetPrefix}ld.lld "$out/bin/ld"
-      '';
-      fastLinker = environment // {
-        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = lib.concatStringsSep " " (
-          rustflags
-          ++ [
-            "-C link-arg=-B${lld}/bin/"
-            "-C link-arg=-no-pie"
-          ]
-        );
-      };
+      # Keep the release GNU linker in the development shell too. With the
+      # two windows-targets import-library versions in this dependency graph,
+      # lld places some ntdll imports after their descriptor's terminator.
+      # Linking succeeds, but Windows leaves those call targets unbound and
+      # the Editor crashes before main. The same inputs link correctly here.
+      fastLinker = environment;
     };
   };
 
@@ -353,6 +350,12 @@ let
     );
   };
   dev = import ./dev.nix { inherit pkgs graphicsLibraryPath; };
+  # `nix run .#release`: the dev loop with Cargo's release profile. The
+  # signed release archives stay `nix build .#release` (packages, not apps).
+  devRelease = import ./dev.nix {
+    inherit pkgs graphicsLibraryPath;
+    profile = "release";
+  };
 in
 {
   inherit checks;
@@ -390,5 +393,6 @@ in
   apps = {
     default = dev;
     inherit dev;
+    release = devRelease;
   };
 }

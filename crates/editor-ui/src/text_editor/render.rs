@@ -3,13 +3,15 @@
 
 #![forbid(unsafe_code)]
 
+use crate::theme::ActiveTheme as _;
+use gpui::prelude::FluentBuilder as _;
 use std::{ops::Range, panic};
 
 use crate::{
     asset_seam::asset_glyph,
     text_runs::{TextRunOverride, compile_text_runs},
     textarea::TextareaStyle,
-    theme::{ArtisanTheme, DesktopTheme, ProseTypography, ThemeMode},
+    theme::{ColorTokens, ProseTypography},
 };
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Element, ElementId,
@@ -161,7 +163,7 @@ impl TextEditor {
 
     /// Token styles under the selection wash or the IME underline. A
     /// selected token keeps its own colour.
-    fn highlights(&mut self, theme: DesktopTheme) -> Vec<(Range<usize>, HighlightStyle)> {
+    fn highlights(&mut self, theme: &ColorTokens) -> Vec<(Range<usize>, HighlightStyle)> {
         let tokens = self.tokens();
         let mut overlay = self.overlay_highlights(theme);
         if tokens.is_empty() {
@@ -178,14 +180,14 @@ impl TextEditor {
     }
 
     /// Selection highlight, or the underline of an IME composition.
-    fn overlay_highlights(&self, theme: DesktopTheme) -> Vec<(Range<usize>, HighlightStyle)> {
+    fn overlay_highlights(&self, theme: &ColorTokens) -> Vec<(Range<usize>, HighlightStyle)> {
         if let Some(marked) = self.marked_range.clone().filter(|range| !range.is_empty()) {
             return vec![(
                 marked,
                 HighlightStyle {
                     underline: Some(UnderlineStyle {
                         thickness: px(1.0),
-                        color: Some(theme.foreground),
+                        color: Some(theme.workspace_foreground.to_paint()),
                         wavy: false,
                     }),
                     ..HighlightStyle::default()
@@ -198,8 +200,8 @@ impl TextEditor {
         vec![(
             self.selection.clone(),
             HighlightStyle {
-                color: Some(theme.foreground),
-                background_color: Some(theme.selected),
+                color: Some(theme.workspace_foreground.to_paint()),
+                background_color: Some(theme.selected.to_paint()),
                 ..HighlightStyle::default()
             },
         )]
@@ -208,13 +210,16 @@ impl TextEditor {
 
 impl TextEditor {
     /// The sigil range, sigil, icon and icon colour of each glyph token.
-    fn glyphs(&mut self, desktop: DesktopTheme) -> Vec<Glyph> {
+    fn glyphs(&mut self, desktop: &ColorTokens) -> Vec<Glyph> {
         self.tokens()
             .iter()
             .filter_map(|token| {
                 let glyph = token.glyph?;
                 let sigil = self.text[token.range.clone()].chars().next()?;
-                let mut color = token.style.color.unwrap_or(desktop.foreground);
+                let mut color = token
+                    .style
+                    .color
+                    .unwrap_or(desktop.workspace_foreground.to_paint());
                 color.alpha *= 0.85;
                 Some((
                     token.range.start..token.range.start + sigil.len_utf8(),
@@ -232,12 +237,12 @@ type Glyph = (Range<usize>, char, crate::AssetId, gpui::Hsla);
 
 impl Render for TextEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
-        let style = TextareaStyle::resolve(theme, false);
-        let desktop = DesktopTheme::neutral_dark();
+        let theme = *cx.theme();
+        let style = TextareaStyle::resolve(theme);
+        let desktop = theme.colors;
 
-        let highlights = self.highlights(desktop);
-        let glyphs = self.glyphs(desktop);
+        let highlights = self.highlights(&desktop);
+        let glyphs = self.glyphs(&desktop);
         let text = GlyphText::new(self.shared_text(), highlights, glyphs);
         // The layout is read for hit-testing and the caret only after the
         // next paint records `painted_bounds`; GPUI's line-layout cache
@@ -256,7 +261,7 @@ impl Render for TextEditor {
         if self.text.is_empty() {
             // A prompt's placeholder is the composer's secondary text.
             let placeholder = if self.mode == Mode::Prompt {
-                desktop.secondary
+                desktop.workspace_secondary.to_paint()
             } else {
                 style.placeholder_foreground
             };
@@ -274,7 +279,7 @@ impl Render for TextEditor {
 
         let root = self.chrome(&metrics, &style, window, cx);
         let mut root = root
-            .text_color(desktop.foreground)
+            .text_color(desktop.workspace_foreground.to_paint())
             .text_size(metrics.text_size)
             .line_height(line_height)
             .font_weight(ProseTypography::BODY_WEIGHT)
@@ -321,6 +326,19 @@ impl Render for TextEditor {
                 .on_action(cx.listener(Self::cut));
         }
 
+        let root = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .child(root)
+            .when(self.limit_notice, |root| {
+                root.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.colors.destructive.to_paint())
+                        .child("Text is limited to 64 KiB. Attach a file for larger content."),
+                )
+            });
         InputElement {
             child: root.into_any_element(),
             view: cx.entity(),
@@ -410,7 +428,11 @@ impl Element for InputElement {
                 cx.notify();
             }
         });
-        if let Some(caret) = self.view.read(cx).caret_quad(window) {
+        if let Some(caret) = self
+            .view
+            .read(cx)
+            .caret_quad(window, cx.theme().colors.workspace_foreground.to_paint())
+        {
             window.paint_quad(caret);
         }
     }

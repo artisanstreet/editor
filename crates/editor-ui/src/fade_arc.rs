@@ -1,0 +1,129 @@
+//! A loading arc: one clock, two reusable tessellated paths, application motion policy.
+
+use crate::{
+    motion::{FADE_ARC_ROTATION, MotionPolicy},
+    theme::ArtisanTheme,
+};
+use gpui::{
+    Animation, AnimationExt as _, App, Bounds, ColorExt as _, ElementId, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Path, PathBuilder, Pixels, Point,
+    RenderOnce, StatefulInteractiveElement as _, Styled as _, Window, canvas, div,
+    linear_color_stop, linear_gradient, point, px, size,
+};
+use std::{cell::Cell, rc::Rc, sync::OnceLock};
+
+#[derive(IntoElement)]
+pub struct FadeArc {
+    id: ElementId,
+    size: Pixels,
+    color: Hsla,
+}
+impl FadeArc {
+    pub fn new(id: impl Into<ElementId>, theme: ArtisanTheme) -> Self {
+        Self {
+            id: id.into(),
+            size: px(24.0),
+            color: theme.colors.muted_foreground.to_paint(),
+        }
+    }
+    #[must_use]
+    pub fn size(mut self, size: Pixels) -> Self {
+        let value = f32::from(size);
+        self.size = px(if value.is_finite() {
+            value.max(0.0)
+        } else {
+            0.0
+        });
+        self
+    }
+}
+impl RenderOnce for FadeArc {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let phase = Rc::new(Cell::new(0.0f32));
+        let painted_phase = phase.clone();
+        let color = self.color;
+        let canvas = canvas(
+            |bounds, _, _| bounds,
+            move |_, bounds, window, _| {
+                let rotation = painted_phase.get() * std::f32::consts::TAU;
+                let (sin, cos) = rotation.sin_cos();
+                let edge = f32::from(bounds.size.width.min(bounds.size.height));
+                let center = bounds.center();
+                for (index, template) in unit_paths().iter().enumerate() {
+                    let Some(template) = template else {
+                        continue;
+                    };
+                    let mut path = template.clone();
+                    let mut min = point(px(f32::INFINITY), px(f32::INFINITY));
+                    let mut max = point(px(f32::NEG_INFINITY), px(f32::NEG_INFINITY));
+                    for vertex in &mut path.vertices {
+                        let x = f32::from(vertex.xy_position.x) - 12.0;
+                        let y = f32::from(vertex.xy_position.y) - 12.0;
+                        vertex.xy_position = center
+                            + point(
+                                px((x * cos - y * sin) * edge / 24.0),
+                                px((x * sin + y * cos) * edge / 24.0),
+                            );
+                        min.x = min.x.min(vertex.xy_position.x);
+                        min.y = min.y.min(vertex.xy_position.y);
+                        max.x = max.x.max(vertex.xy_position.x);
+                        max.y = max.y.max(vertex.xy_position.y);
+                    }
+                    path.bounds = Bounds::new(min, size(max.x - min.x, max.y - min.y));
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            0.0,
+                            linear_color_stop(
+                                color.opacity(if index == 0 { 1.0 } else { 0.0 }),
+                                0.0,
+                            ),
+                            linear_color_stop(color.opacity(0.55), 1.0),
+                        ),
+                    );
+                }
+            },
+        )
+        .size_full();
+        let root = div()
+            .id(self.id.clone())
+            .role(gpui::Role::ProgressIndicator)
+            .aria_label("Loading")
+            .size(self.size)
+            .child(canvas);
+        if MotionPolicy::current(cx) == MotionPolicy::Reduced {
+            return root.into_any_element();
+        }
+        root.with_animation(
+            self.id,
+            Animation::new(FADE_ARC_ROTATION).repeat(),
+            move |root, progress| {
+                phase.set(progress);
+                root
+            },
+        )
+        .into_any_element()
+    }
+}
+
+fn unit_paths() -> &'static [Option<Path<Pixels>>; 2] {
+    static PATHS: OnceLock<[Option<Path<Pixels>>; 2]> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        [(-90.0f32, 120.0f32, true), (120.0, 270.0, false)].map(|(start, end, large)| {
+            let on_circle = |degrees: f32| -> Point<Pixels> {
+                let (sin, cos) = degrees.to_radians().sin_cos();
+                point(px(12.0 + 10.5 * cos), px(12.0 + 10.5 * sin))
+            };
+            let mut path = PathBuilder::stroke(px(3.0));
+            path.move_to(on_circle(start));
+            path.arc_to(
+                point(px(10.5), px(10.5)),
+                px(0.0),
+                large,
+                true,
+                on_circle(end),
+            );
+            path.build().ok()
+        })
+    })
+}

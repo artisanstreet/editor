@@ -5,8 +5,8 @@
 //! per-session stream, carries text deltas, permission and question requests
 //! and child sessions. Permissions come from agents Forge defines in its own
 //! config directory (one per access × approval mode) and are answered through
-//! the API. OpenCode 1.18 emits no idle event, so the decoder derives "idle"
-//! from step endings and the prompts it has seen start.
+//! the API. Native idle and step endings settle the root turn; typed context
+//! overflow stays recoverable while compaction starts.
 
 mod decoder;
 #[cfg(test)]
@@ -18,15 +18,18 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use artisan_api::Permissions;
 use base64::Engine as _;
 use decoder::Decoder;
+use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
+use sse_core::{SseDecoder, SseEvent, SseStream};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest SSE event we accept; longer ones are dropped with a warning.
+/// Oversized events terminate the run instead of silently skipping state.
 const MAX_EVENT_BYTES: usize = process::MAX_LINE_BYTES;
 
 pub(crate) struct OpenCodeHarness;
@@ -49,7 +52,11 @@ async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
     let password = password()?;
     let config_dir = write_agents(&turn.home)?;
     let mut server = spawn(turn, &password, &config_dir)?;
-    let result = async {
+    let cancel = io.cancel.clone();
+    let result = tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(Outcome::cancelled()),
+        result = async {
         let base = tokio::time::timeout(READY_TIMEOUT, ready(&mut server))
             .await
             .map_err(|_| {
@@ -60,8 +67,8 @@ async fn run(turn: &Turn, io: &mut RunIo) -> Result<Outcome> {
             })??;
         let api = Api::new(base, password)?;
         drive(turn, io, &api, &mut server).await
-    }
-    .await;
+        } => result,
+    };
     server.kill().await;
     let _ = server.wait().await;
     result.map_err(|error| match server.stderr_tail() {
@@ -119,13 +126,7 @@ async fn drive(
 ) -> Result<Outcome> {
     let mut events = subscribe(api).await?;
     let agent = agent_name(turn.config.permissions);
-    // The variant; threads from before variants were listed carry it as
-    // their effort.
-    let variant = turn
-        .config
-        .variant
-        .as_deref()
-        .or(turn.config.effort.as_deref());
+    let variant = turn.config.variant.as_deref();
     let model = model_ref(turn.config.model.as_deref(), variant);
     let session = if let Some(session) = &turn.session_id {
         api.post(
@@ -168,7 +169,11 @@ async fn drive(
 
     let mut decoder = Decoder::new(Some(session.clone()));
     let message = send_prompt(api, &session, &turn.input).await?;
-    emit_all(io, decoder.prompt_sent(&message, None)).await;
+    emit_all(
+        io,
+        decoder.prompt_sent(&message, Some(turn.input.id.clone())),
+    )
+    .await;
     loop {
         if decoder.idle() {
             // A steer that raced the end of the turn starts the next one.
@@ -191,7 +196,7 @@ async fn drive(
             }
             Some(input) = io.inbox.recv() => handle_input(api, &session, &mut decoder, io, input).await?,
             event = events.recv() => match event {
-                Some(data) => emit_all(io, decoder.feed(&data)).await,
+                Some(data) => emit_all(io, decoder.feed(&data)?).await,
                 None => bail!("OpenCode's event stream closed mid-run"),
             },
             line = server.next_line() => match line {
@@ -452,7 +457,10 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>> {
         response.status()
     );
     let (sender, mut receiver) = mpsc::channel(256);
-    tokio::spawn(read_events(response, sender));
+    // The reader keeps the run's span, so its log names the thread.
+    tokio::spawn(tracing::Instrument::in_current_span(read_events(
+        response, sender,
+    )));
     let first = tokio::time::timeout(REQUEST_TIMEOUT, receiver.recv())
         .await
         .map_err(|_| anyhow!("OpenCode's event stream sent nothing"))?
@@ -461,70 +469,28 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>> {
     Ok(receiver)
 }
 
-async fn read_events(mut response: reqwest::Response, sender: mpsc::Sender<String>) {
-    let mut parser = SseParser::default();
+async fn read_events(response: reqwest::Response, sender: mpsc::Sender<String>) {
+    let mut stream = SseStream::with_decoder(SseDecoder::with_limit(
+        NonZeroUsize::new(MAX_EVENT_BYTES).unwrap(),
+    ));
+    stream.attach(response.bytes_stream());
     loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                for data in parser.push(&chunk) {
-                    if sender.send(data).await.is_err() {
-                        return;
-                    }
+        let event = tokio::select! {
+            event = stream.next() => event,
+            () = sender.closed() => return,
+        };
+        match event {
+            Some(Ok(SseEvent::Message(message))) => {
+                if sender.send(message.data).await.is_err() {
+                    return;
                 }
             }
-            Ok(None) => return,
-            Err(error) => {
+            Some(Ok(SseEvent::Retry(_))) => {}
+            Some(Err(error)) => {
                 tracing::warn!("OpenCode event stream failed: {error}");
                 return;
             }
+            None => return,
         }
-    }
-}
-
-/// Splits `text/event-stream` bytes into the `data` of each event.
-#[derive(Default)]
-struct SseParser {
-    line: Vec<u8>,
-    data: String,
-    oversized: bool,
-}
-
-impl SseParser {
-    fn push(&mut self, mut bytes: &[u8]) -> Vec<String> {
-        let mut out = Vec::new();
-        while !bytes.is_empty() {
-            let (chunk, rest, found) = match bytes.iter().position(|byte| *byte == b'\n') {
-                Some(index) => (&bytes[..index], &bytes[index + 1..], true),
-                None => (bytes, &[][..], false),
-            };
-            bytes = rest;
-            if self.line.len() + chunk.len() + self.data.len() > MAX_EVENT_BYTES {
-                self.oversized = true;
-                self.line.clear();
-                self.data.clear();
-            } else {
-                self.line.extend_from_slice(chunk);
-            }
-            if !found {
-                break;
-            }
-            let line = String::from_utf8_lossy(&self.line)
-                .trim_end_matches('\r')
-                .to_owned();
-            self.line.clear();
-            if line.is_empty() {
-                if std::mem::take(&mut self.oversized) {
-                    tracing::warn!("dropped an OpenCode event over {MAX_EVENT_BYTES} bytes");
-                } else if !self.data.is_empty() {
-                    out.push(std::mem::take(&mut self.data));
-                }
-            } else if let Some(data) = line.strip_prefix("data:") {
-                if !self.data.is_empty() {
-                    self.data.push('\n');
-                }
-                self.data.push_str(data.strip_prefix(' ').unwrap_or(data));
-            }
-        }
-        out
     }
 }

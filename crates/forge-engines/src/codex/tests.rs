@@ -4,14 +4,15 @@
 //! server lines as Codex wrote them, and `{"client": …}` lines for what the
 //! recorder sent. The replay plays the driver's part: it registers each
 //! request so response ids line up, and answers approvals the way the
-//! recording did. Consecutive live appends to one target are merged.
+//! recording did. `{"answer": {"key", "answer"}}` lines are the user
+//! answering an item (questions; recordings reply to approvals themselves).
+//! Consecutive live appends to one target are merged.
 
 use super::decoder::Decoder;
-use crate::{EngineEvent, LiveKind, Outcome};
+use crate::{EngineEvent, Outcome};
 use artisan_api::{Answer, Decision};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::path::Path;
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -26,13 +27,14 @@ enum Step {
     },
     /// The root thread's turn ended this way.
     TurnEnd(Outcome),
+    /// A user message the driver sends next (answers to async questions).
+    Message(String),
+    /// A line Codex's protocol can't carry: the run fails.
+    ProtocolError(String),
 }
 
 fn replay(case: &str) -> Vec<Step> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/codex/{case}.jsonl"));
-    let transcript = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let transcript = crate::transcript_tests::read("codex", case);
     let mut decoder = Decoder::default();
     // The recorder's `initialize` (id 1) isn't in the transcript.
     decoder.request("initialize", json!({}));
@@ -40,8 +42,18 @@ fn replay(case: &str) -> Vec<Step> {
     let mut asked: HashMap<String, String> = HashMap::new();
     let mut steps = Vec::new();
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
-        let message: Value =
-            serde_json::from_str(line).unwrap_or_else(|error| panic!("{case}: {error}: {line}"));
+        // A line that isn't JSON still goes to the decoder, which fails it.
+        let message: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+        if let Some(answer) = message.get("answer") {
+            let key = answer["key"].as_str().expect("answered key");
+            let answer: Answer =
+                serde_json::from_value(answer["answer"].clone()).expect("an Answer");
+            let events = decoder.answer(key, &answer);
+            steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
+            steps.extend(decoder.take_outbox().into_iter().map(Step::Reply));
+            steps.extend(decoder.take_messages().into_iter().map(Step::Message));
+            continue;
+        }
         if let Some(client) = message.get("client") {
             match (client["method"].as_str(), &client["id"]) {
                 (Some(method), id) if !id.is_null() => {
@@ -73,17 +85,17 @@ fn replay(case: &str) -> Vec<Step> {
         {
             asked.insert(id.to_string(), item.to_owned());
         }
-        steps.extend(
-            decoder
-                .feed(line)
-                .into_iter()
-                .map(|event| Step::Event(Box::new(event))),
-        );
+        match decoder.feed(line) {
+            Ok(events) => {
+                steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
+            }
+            Err(error) => steps.push(Step::ProtocolError(format!("{error:#}"))),
+        }
         steps.extend(decoder.take_outbox().into_iter().map(Step::Reply));
         for response in decoder.take_responses() {
             steps.push(Step::Response {
                 method: response.method,
-                result: response.result.map(|_| ()),
+                result: response.result.map(|_| ()).map_err(|error| error.message),
             });
         }
         if let Some(outcome) = decoder.take_turn_end() {
@@ -103,21 +115,9 @@ fn merge_live(steps: Vec<Step>) -> Vec<Step> {
     let mut merged: Vec<Step> = Vec::new();
     for step in steps {
         if let Step::Event(event) = &step
-            && let EngineEvent::Live {
-                target,
-                text,
-                append: true,
-            } = event.as_ref()
             && let Some(Step::Event(last)) = merged.last_mut()
-            && let EngineEvent::Live {
-                target: last_target,
-                text: last_text,
-                append: true,
-            } = last.as_mut()
-            && last_target == target
-            && *target != LiveKind::Status
+            && crate::transcript_tests::merge_live(last.as_mut(), event.as_ref())
         {
-            last_text.push_str(text);
             continue;
         }
         merged.push(step);
@@ -150,6 +150,58 @@ fn subagent_becomes_an_agent_item_owning_its_child_items() {
     insta::assert_debug_snapshot!(replay("subagent"));
 }
 
+/// Lines that aren't JSON-RPC, and a turn end Artisan can't read, fail the
+/// run; notices and items it can't read are skipped.
+#[test]
+fn unreadable_frames_fail_the_run_only_when_the_turn_depends_on_them() {
+    insta::assert_debug_snapshot!(replay("malformed"));
+}
+
+/// A completed item missing what it needs is an error, never an empty card.
+#[test]
+fn malformed_items_become_errors_not_empty_cards() {
+    insta::assert_debug_snapshot!(replay("malformed-items"));
+}
+
+/// Web actions show what they looked up, keep what they knew, and leave
+/// out what names nothing; a real error still shows.
+#[test]
+fn web_actions_show_their_query_or_address() {
+    insta::assert_debug_snapshot!(replay("web-search-actions"));
+}
+
+/// Approvals ride on the item they gate: a second one waits behind the
+/// first, one asked before its item makes the item, and Codex can settle
+/// one itself.
+#[test]
+fn approvals_queue_on_the_item_they_gate() {
+    insta::assert_debug_snapshot!(replay("approval-queue"));
+}
+
+/// Questions Codex can't ask are refused with an error; an answer names
+/// the chosen option by id, and the tool call behind it settles it.
+#[test]
+fn user_input_is_answered_by_choice_id() {
+    insta::assert_debug_snapshot!(replay("user-input"));
+}
+
+/// A malformed plan keeps the last good one.
+#[test]
+fn plan_updates_replace_the_plan_and_a_malformed_one_is_an_error() {
+    insta::assert_debug_snapshot!(replay("plan"));
+}
+
+/// Questions inside an agent message are answered with the next message.
+#[test]
+fn async_questions_are_answered_as_a_message() {
+    insta::assert_debug_snapshot!(replay("async-questions"));
+}
+
+#[test]
+fn notices_and_a_refused_turn() {
+    insta::assert_debug_snapshot!(replay("notices"));
+}
+
 /// The tier chosen in the picker is what Codex is asked for, on the thread
 /// and on each turn; the standard tier asks for nothing.
 #[test]
@@ -157,7 +209,11 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     let mut config = artisan_api::EngineConfig::new(artisan_api::EngineId::Codex);
     config.model = Some("gpt-6.1-sol".into());
     config.speed = Some("priority".into());
+    config
+        .options
+        .insert("context_window".to_owned(), json!(1_000_000));
     let mut turn = crate::Turn {
+        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -170,6 +226,14 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
     };
     let (_, params) = super::thread_params(&turn);
     assert_eq!(params["serviceTier"], "priority");
+    assert_eq!(params["config"]["model_context_window"], 1_000_000);
+    turn.session_id = Some("saved-session".into());
+    let (method, resumed) = super::thread_params(&turn);
+    assert_eq!(method, "thread/resume");
+    assert_eq!(resumed["config"]["model_context_window"], 1_000_000);
+    turn.config.options.remove("context_window");
+    let (_, standard) = super::thread_params(&turn);
+    assert!(standard["config"].get("model_context_window").is_none());
     let mut overrides = json!({});
     super::turn_overrides(&turn.config, &mut overrides);
     assert_eq!(overrides["serviceTier"], "priority");
@@ -183,6 +247,7 @@ fn the_chosen_speed_tier_is_the_service_tier_codex_runs() {
 #[test]
 fn permissions_pick_the_reviewed_sandbox_or_full_access() {
     let mut turn = crate::Turn {
+        trace_dir: None,
         thread_id: artisan_api::ThreadId::new(),
         engine: artisan_api::EngineId::Codex,
         binary: "codex".into(),
@@ -219,19 +284,19 @@ fn permissions_pick_the_reviewed_sandbox_or_full_access() {
 /// set, then cleared.
 #[test]
 fn a_goal_is_shown_only_when_one_was_set() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("transcripts/codex/command.jsonl");
-    let transcript = std::fs::read_to_string(path).unwrap();
+    let transcript = crate::transcript_tests::read("codex", "command");
     let mut decoder = Decoder::default();
     decoder.request("initialize", json!({}));
     let mut lines = transcript.lines();
     let start: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
     decoder.request("thread/start", start["client"]["params"].clone());
-    decoder.feed(lines.next().unwrap());
+    decoder.feed(lines.next().unwrap()).unwrap();
     decoder.take_outbox();
     let thread = "01a12bc9-9151-7921-a2d6-1e7b08366259";
     let mut goals = |frame: Value| -> Vec<String> {
         decoder
             .feed(&frame.to_string())
+            .unwrap()
             .into_iter()
             .filter_map(|event| match event {
                 EngineEvent::Item {
@@ -241,7 +306,12 @@ fn a_goal_is_shown_only_when_one_was_set() {
                             text,
                         },
                     ..
-                } => Some(format!("{state}: {text}")),
+                } => {
+                    let artisan_api::TextContent::Inline(text) = text else {
+                        panic!("native goal fixture must be inline before persistence")
+                    };
+                    Some(format!("{state}: {text}"))
+                }
                 _ => None,
             })
             .collect()
@@ -255,4 +325,73 @@ fn a_goal_is_shown_only_when_one_was_set() {
     let set = json!({"method": "thread/goal/updated", "params": {"threadId": thread, "goal": {"objective": "Ship the parser", "status": "active"}}});
     assert_eq!(goals(set), ["active: Ship the parser"]);
     assert_eq!(goals(cleared), ["cleared: Ship the parser"]);
+}
+
+#[test]
+fn reversed_child_arrival_keeps_explicit_spawn_ownership() {
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    for spawn in ["spawn-a", "spawn-b"] {
+        decoder.feed(&json!({ "method": "item/started", "params": { "threadId": "root", "item": { "id": spawn, "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "inProgress", "agentsStates": {}, "prompt": spawn, "receiverThreadIds": [] } } }).to_string()).unwrap();
+    }
+    decoder.feed(&json!({ "method": "thread/started", "params": { "thread": { "id": "child-b", "parentThreadId": "root" } } }).to_string()).unwrap();
+    let before = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "child-b", "item": { "id": "reply-b", "type": "agentMessage", "text": "B reply", "phase": "final_answer" } } }).to_string()).unwrap();
+    assert!(
+        before.is_empty(),
+        "unbound child content waits for explicit relation"
+    );
+    let after = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "spawn-b", "type": "collabAgentToolCall", "tool": "spawnAgent", "status": "inProgress", "agentsStates": {}, "receiverThreadIds": ["child-b"] } } }).to_string()).unwrap();
+    assert!(after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-b")));
+    assert!(!after.iter().any(|event| matches!(event, crate::EngineEvent::Item { key, parent: Some(parent), .. } if key == "reply-b" && parent == "spawn-a")));
+}
+
+/// Sanitized native trace: optional web metadata can remain absent at completion.
+#[test]
+fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
+    let steps = replay("web-search-optional-metadata");
+    assert!(!steps.iter().any(|step| matches!(step,
+        Step::Event(event) if matches!(event.as_ref(), EngineEvent::Item {
+            kind: artisan_api::ItemKind::Error { .. }, ..
+        })
+    )));
+    assert!(steps.iter().any(|step| matches!(step,
+        Step::Event(event) if matches!(event.as_ref(), EngineEvent::Item {
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::Tool {
+                tool: artisan_api::ToolKind::WebSearch { query }, ..
+            }, ..
+        } if query == "example query")
+    )));
+    assert!(
+        steps
+            .iter()
+            .any(|step| matches!(step, Step::TurnEnd(outcome) if outcome.status == artisan_api::RunStatus::Done && outcome.error.is_none()))
+    );
+}
+
+/// Codex waiting on its agents and sleeping read as their own rows: the wait
+/// names the agents' threads for Forge to resolve, the sleep its length.
+#[test]
+fn waits_and_sleeps_become_rows() {
+    use artisan_api::{AgentAction, ItemKind, ToolKind};
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    let wait = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "wait-1", "type": "collabAgentToolCall", "tool": "wait", "status": "completed", "receiverThreadIds": [], "agentsStates": { "child-b": { "message": null }, "child-a": { "message": null } } } } }).to_string()).unwrap();
+    assert!(wait.iter().any(|event| matches!(event,
+        crate::EngineEvent::Item { key, status: artisan_api::Status::Done, kind: ItemKind::Tool {
+            tool: ToolKind::Agents { action: AgentAction::Wait, addresses, .. }, ..
+        }, .. } if key == "wait-1" && addresses == &["child-a", "child-b"])));
+    let sleep = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "sleep-1", "type": "sleep", "durationMs": 30000 } } }).to_string()).unwrap();
+    assert!(sleep.iter().any(|event| matches!(event,
+        crate::EngineEvent::Item { kind: ItemKind::Tool {
+            tool: ToolKind::Other { name, .. }, title: Some(title), ..
+        }, .. } if name == "sleep" && title == "30 s")));
 }

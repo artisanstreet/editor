@@ -1,0 +1,7 @@
+{broken-json
+null
+[]
+{}
+{"type": "assistant", "message": {"content": []}}
+{"type": "assistant", "message": {"id": "", "content": []}}
+{"type": "extension", "payload": {"ignored": true}}

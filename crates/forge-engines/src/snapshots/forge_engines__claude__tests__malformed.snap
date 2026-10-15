@@ -1,0 +1,17 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 772
+expression: "(events, outcome, protocol_errors)"
+---
+(
+    [],
+    None,
+    [
+        "decoding Claude protocol JSON: key must be a string at line 1 column 2",
+        "Claude protocol frame must be an object",
+        "Claude protocol frame must be an object",
+        "Claude protocol frame is missing its type",
+        "Claude assistant frame is missing its message id",
+        "Claude assistant frame is missing its message id",
+    ],
+)

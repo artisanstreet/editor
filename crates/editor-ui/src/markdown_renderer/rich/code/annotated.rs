@@ -7,20 +7,23 @@
 //! so moving between two parts never clears the other's highlight out of
 //! order.
 
-use std::fmt::Write as _;
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
+use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Div, Entity, IntoElement, ParentElement as _, RenderOnce, SharedString,
-    Styled as _, Window, div, prelude::*, px,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::*, px,
 };
 use serde::Deserialize;
 
 use super::super::actions::open_reference;
 use super::super::kit::{self, LineSpan, Tone};
 use super::super::{BlockContext, Chrome, RichBlock};
-use super::{code_lines, code_panel, fence, gutter_width, hover_slot, line_number, path_link};
-use crate::theme::ArtisanTheme;
+use super::{
+    code_lines, code_panel, excerpt_width, gutter_width, hover_slot, line_number, path_link,
+};
+use crate::button::{Button, ButtonVariant};
 
 #[derive(Debug, Deserialize)]
 struct NoteSpec {
@@ -35,8 +38,6 @@ const fn first_line() -> u32 {
 #[derive(Debug, Deserialize)]
 struct Spec {
     code: String,
-    #[serde(default)]
-    language: Option<String>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default = "first_line")]
@@ -55,8 +56,8 @@ struct Note {
 #[derive(Debug)]
 struct Model {
     lines: Vec<SharedString>,
+    width: gpui::Pixels,
     start: u32,
-    language: Option<String>,
     path: Option<SharedString>,
     notes: Vec<Note>,
     /// Per line: the first note covering it.
@@ -75,11 +76,12 @@ impl Model {
 /// The `annotated-code` spec, prepared once.
 #[derive(Debug, Deserialize)]
 #[serde(from = "Spec")]
-pub(super) struct AnnotatedCode(Rc<Model>);
+pub(super) struct AnnotatedCode(Arc<Model>);
 
 impl From<Spec> for AnnotatedCode {
     fn from(spec: Spec) -> Self {
         let lines = code_lines(&spec.code);
+        let width = excerpt_width(&lines);
         let start = spec.start_line.max(1);
         let count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
         let last = start.saturating_add(count.saturating_sub(1));
@@ -106,11 +108,35 @@ impl From<Spec> for AnnotatedCode {
             .collect();
         let mut owner = vec![None; lines.len()];
         let mut marker = vec![None; lines.len()];
+        let mut next_free: Vec<usize> = (0..=lines.len()).collect();
+        fn find(next: &mut [usize], mut index: usize) -> usize {
+            let origin = index;
+            while next[index] != index {
+                index = next[index];
+            }
+            let root = index;
+            index = origin;
+            while next[index] != index {
+                let parent = next[index];
+                next[index] = root;
+                index = parent;
+            }
+            root
+        }
         for (index, note) in notes.iter().enumerate() {
-            for (line, slot) in owner.iter_mut().enumerate() {
-                let number = start.saturating_add(u32::try_from(line).unwrap_or(u32::MAX));
-                if note.span.contains(number) && slot.is_none() {
-                    *slot = Some(index);
+            if note.span.end >= start {
+                let first = usize::try_from(note.span.start.saturating_sub(start))
+                    .unwrap_or(usize::MAX)
+                    .min(lines.len());
+                let end = usize::try_from(note.span.end.saturating_sub(start))
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+                    .min(lines.len());
+                let mut at = find(&mut next_free, first);
+                while at < end {
+                    owner[at] = Some(index);
+                    next_free[at] = find(&mut next_free, at + 1);
+                    at = next_free[at];
                 }
             }
             let first = note.span.start.max(start);
@@ -122,13 +148,10 @@ impl From<Spec> for AnnotatedCode {
                 *slot = Some(index);
             }
         }
-        Self(Rc::new(Model {
+        Self(Arc::new(Model {
             lines,
+            width,
             start,
-            language: spec
-                .language
-                .map(|language| language.trim().to_owned())
-                .filter(|language| !language.is_empty()),
             path: spec
                 .path
                 .map(|path| path.trim().to_owned())
@@ -142,11 +165,29 @@ impl From<Spec> for AnnotatedCode {
 }
 
 impl RichBlock for AnnotatedCode {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Model>()
+            + budget::vector(&self.0.lines)
+            + self.0.lines.iter().map(|line| line.len()).sum::<usize>()
+            + self.0.path.as_ref().map_or(0, |text| text.len())
+            + budget::vector(&self.0.notes)
+            + self
+                .0
+                .notes
+                .iter()
+                .map(|note| note.text.len())
+                .sum::<usize>()
+            + budget::vector(&self.0.owner)
+            + budget::vector(&self.0.marker)
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         AnnotatedView {
             key: cx.key("annotated"),
+            scope: cx.media.and_then(|provider| provider.resource_scope()),
             theme: *cx.theme,
-            model: Rc::clone(&self.0),
+            model: Arc::clone(&self.0),
         }
         .into_any_element()
     }
@@ -165,34 +206,6 @@ impl RichBlock for AnnotatedCode {
                 .join("\n"),
         )
     }
-
-    fn markdown(&self) -> String {
-        let model = &self.0;
-        let mut out = String::new();
-        if let Some(path) = &model.path {
-            let _ = writeln!(out, "`{path}:{}`\n", model.start);
-        }
-        let body = model
-            .lines
-            .iter()
-            .map(SharedString::as_ref)
-            .collect::<Vec<_>>()
-            .join("\n");
-        out.push_str(&fence(model.language.as_deref(), &body));
-        if !model.notes.is_empty() {
-            out.push('\n');
-            for (index, note) in model.notes.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "{}. **{}** {}",
-                    index + 1,
-                    span_text(note.span),
-                    note.text
-                );
-            }
-        }
-        out
-    }
 }
 
 /// `L4` or `L3–5`.
@@ -204,22 +217,24 @@ fn span_text(span: LineSpan) -> String {
     }
 }
 
-#[derive(Default)]
 struct HoverState {
+    model: Arc<Model>,
+    notes: gpui::ListState,
     line: Option<usize>,
     note: Option<usize>,
 }
 
-#[derive(IntoElement)]
+#[derive(Clone, IntoElement)]
 struct AnnotatedView {
+    scope: Option<super::super::actions::ResourceScope>,
     key: SharedString,
     theme: ArtisanTheme,
-    model: Rc<Model>,
+    model: Arc<Model>,
 }
 
 impl AnnotatedView {
     fn id(&self, part: impl std::fmt::Display) -> gpui::ElementId {
-        gpui::ElementId::Name(SharedString::from(format!("{}-{part}", self.key)))
+        kit::part(&self.key, part)
     }
 }
 
@@ -232,8 +247,8 @@ fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(8.0))
-        .text_size(px(10.0))
+        .rounded(RadiusTokens::value(RadiusStep::Md))
+        .text_size(TypographyTokens::size(TextStep::X3s))
         .line_height(px(16.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .bg(color.with_alpha(if active { 0.9 } else { 0.18 }).to_paint())
@@ -247,118 +262,153 @@ fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Div {
 
 impl AnnotatedView {
     /// The code lines, lit where the active note covers them.
-    fn code(&self, state: &Entity<HoverState>, active: Option<usize>) -> Div {
+    fn code(&self, state: &Entity<HoverState>, active: Option<usize>) -> gpui::Stateful<Div> {
         let theme = &self.theme;
         let model = &self.model;
         let accent = Tone::Accent.color(theme);
         let gutter = gutter_width(model.number(model.lines.len().saturating_sub(1)));
         let has_notes = !model.notes.is_empty();
-        let rows = model.lines.iter().enumerate().map(|(index, text)| {
-            let owner = model.owner.get(index).copied().flatten();
-            let lit = active
-                .and_then(|note| model.notes.get(note))
-                .is_some_and(|note| note.span.contains(model.number(index)));
-            let marker = model.marker.get(index).copied().flatten();
-            div()
-                .id(self.id(format!("line-{index}")))
-                .w_full()
-                .min_w_0()
-                .flex()
-                .border_l_2()
-                .border_color(match (lit, owner.is_some()) {
-                    (true, _) => accent.to_paint(),
-                    (false, true) => accent.with_alpha(0.3).to_paint(),
-                    (false, false) => gpui::transparent_black(),
-                })
-                .when(lit, |row| row.bg(accent.with_alpha(0.1).to_paint()))
-                .when(has_notes, |row| {
-                    row.child(
+        let id = self.id("code-rows");
+        let panel_id = self.id("code-scroll");
+        let width = model.width + gutter + px(if has_notes { 24.0 } else { 0.0 });
+        let count = model.lines.len();
+        let view = self.clone();
+        let state = state.clone();
+        let rows =
+            gpui::uniform_list(id, count, move |range, _, _| {
+                let model = &view.model;
+                let theme = &view.theme;
+                range
+                    .map(|index| {
+                        let text = &model.lines[index];
+                        let owner = model.owner.get(index).copied().flatten();
+                        let lit = active
+                            .and_then(|note| model.notes.get(note))
+                            .is_some_and(|note| note.span.contains(model.number(index)));
+                        let marker = model.marker.get(index).copied().flatten();
                         div()
-                            .w(px(24.0))
-                            .flex_shrink_0()
+                            .id(view.id(format!("line-{index}")))
+                            .w_full()
+                            .h(px(20.0))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .min_w_0()
                             .flex()
-                            .justify_center()
-                            .pt(px(2.0))
-                            .children(
-                                marker.map(|note| badge(theme, note + 1, active == Some(note))),
-                            ),
-                    )
-                })
-                .child(line_number(theme, Some(model.number(index)), gutter))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h(px(20.0))
-                        .pr(px(12.0))
-                        .child(text.clone()),
-                )
-                .on_hover(hover_slot(state.clone(), index, |state| &mut state.line))
-        });
-        code_panel(theme).children(rows)
+                            .border_l_2()
+                            .border_color(match (lit, owner.is_some()) {
+                                (true, _) => accent.to_paint(),
+                                (false, true) => accent.with_alpha(0.3).to_paint(),
+                                (false, false) => gpui::transparent_black(),
+                            })
+                            .when(lit, |row| row.bg(accent.with_alpha(0.1).to_paint()))
+                            .when(has_notes, |row| {
+                                row.child(
+                                    div()
+                                        .w(px(24.0))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .justify_center()
+                                        .pt(px(2.0))
+                                        .children(marker.map(|note| {
+                                            badge(theme, note + 1, active == Some(note))
+                                        })),
+                                )
+                            })
+                            .child(line_number(theme, Some(model.number(index)), gutter))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h(px(20.0))
+                                    .pr(px(12.0))
+                                    .child(text.clone()),
+                            )
+                            .on_hover(hover_slot(state.clone(), index, |state| &mut state.line))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .w_full()
+            .min_w(width)
+            .h(px(count.min(18) as f32 * 20.0));
+        code_panel(theme)
+            .id(panel_id)
+            .overflow_x_scroll()
+            .child(rows)
     }
 
     /// The numbered notes under the code; a note opens its first line on
     /// click.
-    fn notes(&self, state: &Entity<HoverState>, active: Option<usize>) -> Div {
+    fn notes(
+        &self,
+        state: &Entity<HoverState>,
+        active: Option<usize>,
+        rows: gpui::ListState,
+    ) -> Div {
         let theme = self.theme;
-        let model = &self.model;
+        let model = self.model.clone();
+        let view = self.clone();
+        let state = state.clone();
+        let height = px(model.notes.len().min(6) as f32 * 40.0);
         div()
             .w_full()
             .min_w_0()
             .pt(px(8.0))
             .border_t_1()
             .border_color(kit::hairline(&theme))
-            .flex()
-            .flex_col()
-            .children(model.notes.iter().enumerate().map(|(index, entry)| {
-                let on = active == Some(index);
-                let path = model.path.clone();
-                let line = entry.span.start;
-                div()
-                    .id(self.id(format!("note-{index}")))
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .flex()
-                    .items_start()
-                    .gap(px(8.0))
-                    .rounded(px(6.0))
-                    .when(path.is_some(), gpui::Styled::cursor_pointer)
-                    .when(on, |row| {
-                        row.bg(Tone::Accent.color(&theme).with_alpha(0.08).to_paint())
-                    })
-                    .child(div().pt(px(2.0)).child(badge(&theme, index + 1, on)))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .min_w(px(36.0))
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
-                            .font_family(theme.typography.mono.family)
-                            .tracking(0.0)
-                            .text_color(theme.colors.muted_foreground.to_paint())
-                            .child(span_text(entry.span)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(14.0))
-                            .line_height(px(20.0))
-                            .text_color(theme.colors.foreground.to_paint())
-                            .child(entry.text.clone()),
-                    )
-                    .on_hover(hover_slot(state.clone(), index, |state| &mut state.note))
-                    .on_click(move |_, window, cx| {
-                        if let Some(path) = &path {
-                            open_reference(path, Some(line), window, cx);
-                        }
-                    })
-            }))
+            .child(
+                gpui::list(rows, move |index, _, _| {
+                    let Some(entry) = model.notes.get(index) else {
+                        return div().into_any_element();
+                    };
+                    let on = active == Some(index);
+                    let path = model.path.clone();
+                    let scope = view.scope.clone();
+                    let line = entry.span.start;
+                    div()
+                        .id(view.id(format!("note-{index}")))
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .flex()
+                        .items_start()
+                        .gap(px(8.0))
+                        .rounded(RadiusTokens::value(RadiusStep::Sm))
+                        .when(on, |row| {
+                            row.bg(Tone::Accent.color(&theme).with_alpha(0.08).to_paint())
+                        })
+                        .child(div().pt(px(2.0)).child(badge(&theme, index + 1, on)))
+                        .child(if let Some(path) = path {
+                            Button::text(
+                                view.id(format!("note-reference-{index}")),
+                                theme,
+                                span_text(entry.span),
+                            )
+                            .variant(ButtonVariant::Ghost)
+                            .on_activate(move |_, window, cx| {
+                                open_reference(&path, Some(line), scope.clone(), window, cx)
+                            })
+                            .into_any_element()
+                        } else {
+                            kit::label(&theme, span_text(entry.span)).into_any_element()
+                        })
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(TypographyTokens::size(TextStep::Sm))
+                                .line_height(px(20.0))
+                                .text_color(theme.colors.foreground.to_paint())
+                                .child(entry.text.clone()),
+                        )
+                        .on_hover(hover_slot(state.clone(), index, |state| &mut state.note))
+                        .into_any_element()
+                })
+                .w_full()
+                .h(height),
+            )
     }
 
     /// The path, opening at the first line.
-    fn head(&self) -> Option<gpui::Stateful<Div>> {
+    fn head(&self) -> Option<Button> {
         let model = &self.model;
         model.path.as_ref().map(|path| {
             path_link(
@@ -366,6 +416,7 @@ impl AnnotatedView {
                 self.id("path"),
                 path,
                 Some(model.start),
+                self.scope.clone(),
                 format!("{path}:{}", model.start),
             )
         })
@@ -374,7 +425,21 @@ impl AnnotatedView {
 
 impl RenderOnce for AnnotatedView {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = kit::keyed(window, cx, self.id("hover"), HoverState::default);
+        let state = kit::keyed(window, cx, self.id("hover"), || HoverState {
+            model: self.model.clone(),
+            notes: gpui::ListState::new(self.model.notes.len(), gpui::ListAlignment::Top, px(96.0)),
+            line: None,
+            note: None,
+        });
+        state.update(cx, |state, _| {
+            if !Arc::ptr_eq(&state.model, &self.model) {
+                state.model = self.model.clone();
+                state.notes.reset(self.model.notes.len());
+                state.line = None;
+                state.note = None;
+            }
+        });
+        let rows = state.read(cx).notes.clone();
         let (line, note) = {
             let read = state.read(cx);
             (read.line, read.note)
@@ -382,7 +447,7 @@ impl RenderOnce for AnnotatedView {
         let model = &self.model;
         let active =
             note.or_else(|| line.and_then(|line| model.owner.get(line).copied().flatten()));
-        let notes = (!model.notes.is_empty()).then(|| self.notes(&state, active));
+        let notes = (!model.notes.is_empty()).then(|| self.notes(&state, active, rows));
         div()
             .w_full()
             .min_w_0()

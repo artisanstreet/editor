@@ -8,7 +8,6 @@
 
 use anyhow::{Context, Result, bail};
 use artisan_api::{EngineId, SignInState};
-use statig::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -32,7 +31,7 @@ pub(crate) fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Co
     }
     let mut command = Command::new(binary);
     command
-        .env("HOME", home)
+        .envs(crate::engines::environment(engine, Some(binary), home))
         .env_remove("CLAUDECODE")
         .env_remove("CLAUDE_CODE_ENTRYPOINT")
         .current_dir(home)
@@ -40,23 +39,10 @@ pub(crate) fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Co
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(windows)]
-    command.env("USERPROFILE", home);
-    match engine {
-        EngineId::Claude => {
-            command
-                .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
-                .env("DISABLE_UPDATES", "1");
-        }
-        EngineId::Codex => {
-            // Codex refuses a CODEX_HOME that doesn't exist yet.
-            let codex_home = home.join(".codex");
-            if let Err(error) = std::fs::create_dir_all(&codex_home) {
-                tracing::warn!(dir = %codex_home.display(), error = %error, "couldn't create CODEX_HOME");
-            }
-            command.env("CODEX_HOME", codex_home);
-        }
-        EngineId::OpenCode | EngineId::Grok | EngineId::Cursor => {}
+    if let Some((directory, _)) = crate::engines::host_spec(engine).config
+        && let Err(error) = std::fs::create_dir_all(home.join(directory))
+    {
+        tracing::warn!(home = %home.display(), %error, "couldn't create engine configuration directory");
     }
     command
 }
@@ -69,12 +55,11 @@ pub(crate) async fn run_short(
     args: &[&str],
     timeout: Duration,
 ) -> Result<(bool, String, String)> {
+    let usage = crate::install::usage_lock(home)?;
+    fs2::FileExt::lock_shared(&usage)?;
     let mut command = engine_command(engine, binary, home);
     command.args(args);
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .with_context(|| format!("{} {} timed out", binary.display(), args.join(" ")))?
-        .with_context(|| format!("running {} {}", binary.display(), args.join(" ")))?;
+    let output = crate::process::probe(command, timeout, 1024 * 1024).await?;
     Ok((
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -164,23 +149,22 @@ fn opencode_sign_in(home: &Path) -> SignInState {
 }
 
 fn login_args(engine: EngineId) -> Result<&'static [&'static str]> {
-    Ok(match engine {
-        EngineId::Claude => &["auth", "login"],
-        EngineId::Codex | EngineId::Grok => &["login", "--device-auth"],
-        EngineId::Cursor => &["login"],
-        EngineId::OpenCode => {
-            bail!("OpenCode signs in per provider; run `opencode auth login` in its home")
-        }
-    })
+    crate::engines::host_spec(engine)
+        .device_login
+        .with_context(|| {
+            format!(
+                "{} signs in per provider; use its interactive CLI sign-in",
+                engine.display_name()
+            )
+        })
 }
 
 fn logout_args(engine: EngineId) -> Result<&'static [&'static str]> {
-    Ok(match engine {
-        EngineId::Claude => &["auth", "logout"],
-        EngineId::Codex | EngineId::Grok | EngineId::Cursor => &["logout"],
-        EngineId::OpenCode => {
-            bail!("OpenCode signs out per provider; run `opencode auth logout` in its home")
-        }
+    crate::engines::host_spec(engine).logout.with_context(|| {
+        format!(
+            "{} signs out per provider; use its interactive CLI",
+            engine.display_name()
+        )
     })
 }
 
@@ -213,24 +197,26 @@ fn is_device_code(line: &str) -> bool {
     part(left) && part(right)
 }
 
-pub(crate) fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for c in chars.by_ref() {
-                    if ('@'..='~').contains(&c) {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
+#[derive(Default)]
+struct TerminalText {
+    text: String,
+}
+impl vte::Perform for TerminalText {
+    fn print(&mut self, character: char) {
+        self.text.push(character);
+    }
+    fn execute(&mut self, byte: u8) {
+        if matches!(byte, b'\n' | b'\r' | b'\t') {
+            self.text.push(char::from(byte));
         }
     }
-    out
+}
+
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut parser = vte::Parser::new();
+    let mut plain = TerminalText::default();
+    parser.advance(&mut plain, text.as_bytes());
+    plain.text
 }
 
 // --- the sign-in lifecycle -------------------------------------------------
@@ -258,104 +244,110 @@ enum Effect {
     Logout,
 }
 
-#[derive(Default)]
-struct Machine;
+#[derive(Debug, Clone)]
+enum State {
+    Unknown {},
+    SignedOut {},
+    SignedIn {
+        account: Option<String>,
+    },
+    Failed {
+        message: String,
+    },
+    LoggingIn {
+        url: Option<String>,
+        code: Option<String>,
+    },
+}
 
-#[state_machine(initial = "State::unknown()", state(derive(Debug, Clone)))]
+struct Machine {
+    state: State,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Self {
+            state: State::Unknown {},
+        }
+    }
+}
+
 impl Machine {
-    #[superstate]
-    fn settled(context: &mut Vec<Effect>, event: &Event) -> Outcome<State> {
-        match event {
-            Event::Checked(probe) => Transition(match probe {
-                SignInState::SignedIn { account } => State::signed_in(account.clone()),
-                SignInState::SignedOut => State::signed_out(),
-                SignInState::Failed { message } => State::failed(message.clone()),
-                SignInState::Unknown | SignInState::LoggingIn { .. } => State::unknown(),
-            }),
-            Event::Login => {
-                context.push(Effect::StartLogin);
-                Transition(State::logging_in(None, None))
-            }
-            _ => Handled,
-        }
+    fn state(&self) -> &State {
+        &self.state
     }
 
-    #[state(superstate = "settled")]
-    fn unknown(event: &Event) -> Outcome<State> {
-        let _ = event;
-        Super
-    }
-
-    #[state(superstate = "settled")]
-    fn signed_out(event: &Event) -> Outcome<State> {
-        let _ = event;
-        Super
-    }
-
-    #[state(superstate = "settled")]
-    fn signed_in(
-        account: &mut Option<String>,
-        context: &mut Vec<Effect>,
-        event: &Event,
-    ) -> Outcome<State> {
-        let _ = account;
-        match event {
-            Event::Logout => {
-                context.push(Effect::Logout);
-                Transition(State::unknown())
-            }
-            _ => Super,
-        }
-    }
-
-    #[state(superstate = "settled")]
-    fn failed(message: &mut String, event: &Event) -> Outcome<State> {
-        let _ = (message, event);
-        Super
-    }
-
-    #[state]
-    fn logging_in(
-        url: &mut Option<String>,
-        code: &mut Option<String>,
-        context: &mut Vec<Effect>,
-        event: &Event,
-    ) -> Outcome<State> {
-        match event {
-            Event::Prompt {
-                url: new_url,
-                code: new_code,
-            } => {
+    fn handle_with_context(&mut self, event: &Event, effects: &mut Vec<Effect>) {
+        let next = match (&mut self.state, event) {
+            (
+                State::LoggingIn { url, code },
+                Event::Prompt {
+                    url: new_url,
+                    code: new_code,
+                },
+            ) => {
                 if new_url.is_some() {
                     url.clone_from(new_url);
                 }
                 if new_code.is_some() {
                     code.clone_from(new_code);
                 }
-                Handled
+                None
             }
-            Event::LoginEnded { error: None } => {
-                context.push(Effect::Check);
-                Transition(State::unknown())
+            (State::LoggingIn { .. }, Event::LoginEnded { error: None }) => {
+                effects.push(Effect::Check);
+                Some(State::Unknown {})
             }
-            Event::LoginEnded {
-                error: Some(message),
-            } => Transition(State::failed(message.clone())),
-            Event::Checked(SignInState::SignedIn { account }) => {
-                context.push(Effect::StopLogin);
-                Transition(State::signed_in(account.clone()))
+            (
+                State::LoggingIn { .. },
+                Event::LoginEnded {
+                    error: Some(message),
+                },
+            ) => Some(State::Failed {
+                message: message.clone(),
+            }),
+            (State::LoggingIn { .. }, Event::Checked(SignInState::SignedIn { account })) => {
+                effects.push(Effect::StopLogin);
+                Some(State::SignedIn {
+                    account: account.clone(),
+                })
             }
-            Event::Cancel => {
-                context.push(Effect::StopLogin);
-                context.push(Effect::Check);
-                Transition(State::unknown())
+            (State::LoggingIn { .. }, Event::Cancel) => {
+                effects.push(Effect::StopLogin);
+                effects.push(Effect::Check);
+                Some(State::Unknown {})
             }
-            _ => Handled,
+            (State::LoggingIn { .. }, _) => None,
+            (State::SignedIn { .. }, Event::Logout) => {
+                effects.push(Effect::Logout);
+                Some(State::Unknown {})
+            }
+            (_, Event::Checked(probe)) => Some(match probe {
+                SignInState::SignedIn { account } => State::SignedIn {
+                    account: account.clone(),
+                },
+                SignInState::SignedOut => State::SignedOut {},
+                SignInState::Failed { message } => State::Failed {
+                    message: message.clone(),
+                },
+                SignInState::Unknown | SignInState::LoggingIn { .. } => State::Unknown {},
+            }),
+            (_, Event::Login) => {
+                effects.push(Effect::StartLogin);
+                Some(State::LoggingIn {
+                    url: None,
+                    code: None,
+                })
+            }
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.state = next;
         }
     }
 }
 
-fn public_state(state: &State) -> SignInState {
+fn public_state(state: &State, engine: EngineId) -> SignInState {
     match state {
         State::Unknown {} => SignInState::Unknown,
         State::SignedOut {} => SignInState::SignedOut,
@@ -366,6 +358,7 @@ fn public_state(state: &State) -> SignInState {
             message: message.clone(),
         },
         State::LoggingIn { url, code } => SignInState::LoggingIn {
+            accepts_code: crate::engines::host_spec(engine).accepts_login_code,
             url: url.clone(),
             code: code.clone(),
         },
@@ -378,9 +371,12 @@ struct LiveLogin {
 }
 
 struct Inner {
-    machine: StateMachine<Machine>,
+    machine: Machine,
+    generation: u64,
     /// The binary of the last call; follow-up probes use it.
     binary: Option<PathBuf>,
+    lease: Option<Arc<crate::BinaryLease>>,
+    probe: Option<tokio_util::task::AbortOnDropHandle<()>>,
     login: Option<LiveLogin>,
 }
 
@@ -401,8 +397,11 @@ impl SignIn {
             home,
             state: watch::Sender::new(SignInState::Unknown),
             inner: Mutex::new(Inner {
-                machine: Machine.state_machine(),
+                machine: Machine::default(),
+                generation: 0,
                 binary: None,
+                lease: None,
+                probe: None,
                 login: None,
             }),
         })
@@ -418,18 +417,70 @@ impl SignIn {
         self.state.subscribe()
     }
 
+    pub(crate) fn context_generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    pub(crate) fn with_context<R>(&self, generation: u64, commit: impl FnOnce() -> R) -> Option<R> {
+        let inner = self.lock();
+        (inner.generation == generation).then(commit)
+    }
+
+    pub(crate) fn login_leased(self: &Arc<Self>, lease: crate::BinaryLease) {
+        let binary = lease.path().to_owned();
+        self.lock().lease = Some(Arc::new(lease));
+        self.login(&binary);
+    }
+
+    pub(crate) fn logout_leased(self: &Arc<Self>, lease: crate::BinaryLease) {
+        let binary = lease.path().to_owned();
+        self.lock().lease = Some(Arc::new(lease));
+        self.logout(&binary);
+    }
+
+    pub(crate) fn stop_owner(&self) {
+        let mut inner = self.lock();
+        inner.generation = inner.generation.wrapping_add(1);
+        inner.lease = None;
+        inner.probe = None;
+        if let Some(login) = inner.login.take() {
+            login.cancel.cancel();
+        }
+    }
+
     /// Probes the engine now and settles the state on the result.
     pub async fn check(self: &Arc<Self>, binary: &Path) {
-        self.lock().binary = Some(binary.to_owned());
+        {
+            let mut inner = self.lock();
+            inner.binary = Some(binary.to_owned());
+            inner.generation = inner.generation.wrapping_add(1);
+        }
         self.recheck().await;
     }
 
     async fn recheck(self: &Arc<Self>) {
-        let Some(binary) = self.lock().binary.clone() else {
-            return;
+        let (binary, generation, lease) = {
+            let mut inner = self.lock();
+            let Some(binary) = inner.binary.clone() else {
+                return;
+            };
+            inner.generation = inner.generation.wrapping_add(1);
+            (binary, inner.generation, inner.lease.clone())
         };
+        self.probe_snapshot(binary, generation, lease).await;
+    }
+
+    async fn probe_snapshot(
+        self: &Arc<Self>,
+        binary: PathBuf,
+        generation: u64,
+        _lease: Option<Arc<crate::BinaryLease>>,
+    ) {
+        if self.context_generation() != generation {
+            return;
+        }
         let probe = check(self.engine, &binary, &self.home).await;
-        self.handle(&Event::Checked(probe));
+        self.handle_if_generation(&Event::Checked(probe), Some(generation));
     }
 
     /// Starts the engine's login flow. The state moves to `LoggingIn` and
@@ -482,37 +533,102 @@ impl SignIn {
     }
 
     fn handle(self: &Arc<Self>, event: &Event) {
+        self.handle_if_generation(event, None);
+    }
+
+    fn handle_if_generation(self: &Arc<Self>, event: &Event, generation: Option<u64>) {
+        self.handle_guarded(event, generation, None);
+    }
+
+    fn handle_login(self: &Arc<Self>, event: &Event, token: &CancellationToken) {
+        self.handle_guarded(event, None, Some(token));
+    }
+
+    fn handle_guarded(
+        self: &Arc<Self>,
+        event: &Event,
+        generation: Option<u64>,
+        token: Option<&CancellationToken>,
+    ) {
         let mut effects = Vec::new();
-        let state = {
+        let (binary, lease, current_generation);
+        {
             let mut inner = self.lock();
+            if token.is_some_and(|token| {
+                inner
+                    .login
+                    .as_ref()
+                    .is_none_or(|login| &login.cancel != token)
+            }) {
+                return;
+            }
+            if generation.is_some_and(|generation| generation != inner.generation) {
+                return;
+            }
+            if matches!(event, Event::Login | Event::Logout | Event::Cancel) {
+                inner.generation = inner.generation.wrapping_add(1);
+            }
+            if matches!(event, Event::LoginEnded { .. }) {
+                inner.login = None;
+            }
             inner.machine.handle_with_context(event, &mut effects);
-            public_state(inner.machine.state())
-        };
-        self.state.send_if_modified(|current| {
-            let changed = *current != state;
-            *current = state;
-            changed
-        });
+            let state = public_state(inner.machine.state(), self.engine);
+            binary = inner.binary.clone();
+            lease = inner.lease.clone();
+            current_generation = inner.generation;
+            if !matches!(state, SignInState::LoggingIn { .. })
+                && !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Check | Effect::Logout))
+            {
+                inner.lease = None;
+            }
+            self.state.send_if_modified(|current| {
+                let changed = *current != state;
+                *current = state;
+                changed
+            });
+        }
         for effect in &effects {
-            self.perform(effect);
+            self.perform(effect, binary.clone(), lease.clone(), current_generation);
         }
     }
 
-    fn perform(self: &Arc<Self>, effect: &Effect) {
+    fn perform(
+        self: &Arc<Self>,
+        effect: &Effect,
+        binary: Option<PathBuf>,
+        lease: Option<Arc<crate::BinaryLease>>,
+        generation: u64,
+    ) {
         let this = Arc::clone(self);
         match effect {
             Effect::Check => {
-                tokio::spawn(async move { this.recheck().await });
+                if let Some(binary) = binary {
+                    let task = tokio::spawn(async move {
+                        this.probe_snapshot(binary, generation, lease).await
+                    });
+                    self.lock().probe = Some(tokio_util::task::AbortOnDropHandle::new(task));
+                }
             }
-            Effect::StartLogin => self.start_login(),
+            Effect::StartLogin => {
+                if let Some(binary) = binary {
+                    self.start_login(binary, lease, generation);
+                }
+            }
             Effect::StopLogin => {
                 if let Some(login) = self.lock().login.take() {
                     login.cancel.cancel();
                 }
             }
             Effect::Logout => {
-                tokio::spawn(async move {
-                    let binary = this.lock().binary.clone().unwrap_or_default();
+                let task = tokio::spawn(async move {
+                    let Some(binary) = binary else {
+                        return;
+                    };
+                    if this.context_generation() != generation {
+                        return;
+                    }
                     match logout_args(this.engine) {
                         Ok(args) => {
                             if let Err(error) =
@@ -523,16 +639,22 @@ impl SignIn {
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(engine = %this.engine, error = %error, "logout unavailable")
+                            tracing::warn!(engine = %this.engine, error = %error, "logout unavailable");
                         }
                     }
-                    this.recheck().await;
+                    this.probe_snapshot(binary, generation, lease).await;
                 });
+                self.lock().probe = Some(tokio_util::task::AbortOnDropHandle::new(task));
             }
         }
     }
 
-    fn start_login(self: &Arc<Self>) {
+    fn start_login(
+        self: &Arc<Self>,
+        binary: PathBuf,
+        lease: Option<Arc<crate::BinaryLease>>,
+        _generation: u64,
+    ) {
         let cancel = CancellationToken::new();
         let stdin = Arc::new(tokio::sync::Mutex::new(None));
         let previous = self.lock().login.replace(LiveLogin {
@@ -545,36 +667,35 @@ impl SignIn {
         let this = Arc::clone(self);
         tokio::spawn(async move {
             let error = this
-                .run_login(stdin, cancel.clone())
+                .run_login(binary, lease, stdin, cancel.clone())
                 .await
                 .err()
                 .map(|error| format!("{error:#}"));
-            let current = this
-                .lock()
-                .login
-                .as_ref()
-                .is_some_and(|login| login.cancel == cancel);
-            if current && !cancel.is_cancelled() {
-                this.lock().login = None;
+            if !cancel.is_cancelled() {
                 if let Some(error) = &error {
-                    tracing::warn!(engine = %this.engine, error = %error, "sign-in failed");
+                    tracing::warn!(engine = %this.engine, error, "sign-in failed");
                 }
-                this.handle(&Event::LoginEnded { error });
+                this.handle_login(&Event::LoginEnded { error }, &cancel);
             }
         });
     }
 
     async fn run_login(
         self: &Arc<Self>,
+        binary: PathBuf,
+        _lease: Option<Arc<crate::BinaryLease>>,
         stdin_slot: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
         cancel: CancellationToken,
     ) -> Result<()> {
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        let usage = crate::install::usage_lock(&self.home)?;
+        fs2::FileExt::lock_shared(&usage)?;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
         let args = login_args(self.engine)?;
-        let binary = self
-            .lock()
-            .binary
-            .clone()
-            .context("the engine is not installed")?;
         let mut command = engine_command(self.engine, &binary, &self.home);
         command
             .args(args)
@@ -583,18 +704,25 @@ impl SignIn {
         // The Editor opens the link, possibly on another machine.
         #[cfg(unix)]
         command.env("BROWSER", "true");
-        let mut child = command
-            .spawn()
+        let mut child = crate::process::owned_command(command)
             .with_context(|| format!("starting {} {}", binary.display(), args.join(" ")))?;
-        *stdin_slot.lock().await = child.stdin.take();
+        *stdin_slot.lock().await = child.stdin().take();
         let (chunks, mut received) = mpsc::channel::<String>(16);
-        if let Some(stdout) = child.stdout.take() {
-            tokio::spawn(forward(stdout, chunks.clone()));
+        let mut pumps = Vec::new();
+        if let Some(stdout) = child.stdout().take() {
+            pumps.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                forward(stdout, chunks.clone()),
+            )));
         }
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(forward(stderr, chunks));
+        if let Some(stderr) = child.stderr().take() {
+            pumps.push(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                forward(stderr, chunks),
+            )));
         }
         let mut output = String::new();
+        let mut terminal_parser = vte::Parser::new();
+        let mut terminal_text = TerminalText::default();
+        let mut scan_start: usize = 0;
         let mut shown = (None, None);
         let deadline = tokio::time::sleep(LOGIN_TIMEOUT);
         tokio::pin!(deadline);
@@ -603,25 +731,40 @@ impl SignIn {
                 () = cancel.cancelled() => return Ok(()),
                 () = &mut deadline => bail!("{} sign-in timed out", self.engine.display_name()),
                 Some(chunk) = received.recv() => {
-                    if output.len() < LOGIN_OUTPUT_CAP {
-                        output.push_str(&chunk);
+                    terminal_parser.advance(&mut terminal_text, chunk.as_bytes());
+                    let plain = std::mem::take(&mut terminal_text.text);
+                    output.push_str(&plain);
+                    if output.len() > LOGIN_OUTPUT_CAP {
+                        let mut cut = output.len() - LOGIN_OUTPUT_CAP;
+                        while !output.is_char_boundary(cut) { cut += 1; }
+                        output.drain(..cut);
+                        scan_start = scan_start.saturating_sub(cut);
                     }
-                    let found = parse_login_output(&output);
+                    let found = parse_login_output(&output[scan_start..]);
+                    scan_start = output.rfind('\n').map_or(0, |index| index + 1);
+                    let found = (found.0.or_else(|| shown.0.clone()), found.1.or_else(|| shown.1.clone()));
                     if found != shown {
                         shown = found.clone();
-                        self.handle(&Event::Prompt { url: found.0, code: found.1 });
+                        self.handle_login(&Event::Prompt { url: found.0, code: found.1 }, &cancel);
                     }
                 }
                 status = child.wait() => break status.context("waiting for the sign-in")?,
             }
         };
+        child.shutdown();
         if status.success() {
             return Ok(());
         }
         // The pipes close with the process; keep what it printed last.
         let _ = tokio::time::timeout(Duration::from_secs(1), async {
             while let Some(chunk) = received.recv().await {
-                output.push_str(&chunk);
+                terminal_parser.advance(&mut terminal_text, chunk.as_bytes());
+                let plain = std::mem::take(&mut terminal_text.text);
+                let mut take = (LOGIN_OUTPUT_CAP - output.len()).min(plain.len());
+                while !plain.is_char_boundary(take) {
+                    take -= 1;
+                }
+                output.push_str(&plain[..take]);
             }
         })
         .await;
@@ -736,11 +879,59 @@ mod tests {
         insta::assert_debug_snapshot!(results);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_status_probes_cannot_restore_an_account_after_logout() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let binary = fixture.path().join("claude");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$2" = "logout" ]; then touch "$HOME/out"; exit 0; fi
+if [ -e "$HOME/out" ]; then
+  echo '{"loggedIn":false}'
+else
+  if [ -e "$HOME/slow" ]; then touch "$HOME/check-started"; sleep 0.2; fi
+  echo '{"loggedIn":true,"email":"old"}'
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sign_in = SignIn::new(EngineId::Claude, home.clone());
+        sign_in.check(&binary).await;
+        assert!(matches!(sign_in.state(), SignInState::SignedIn { .. }));
+        std::fs::write(home.join("slow"), "").unwrap();
+        let probe_owner = Arc::clone(&sign_in);
+        let probe_binary = binary.clone();
+        let old_probe = tokio::spawn(async move { probe_owner.check(&probe_binary).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !home.join("check-started").exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        sign_in.logout(&binary);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while sign_in.state() != SignInState::SignedOut {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        old_probe.await.unwrap();
+        assert_eq!(sign_in.state(), SignInState::SignedOut);
+    }
+
     /// The sign-in lifecycle as the Editor sees it: signed out, logging in
     /// with the link, then signed in once the probe confirms.
     #[test]
     fn login_walks_from_signed_out_to_signed_in() {
-        let mut machine = Machine.state_machine();
+        let mut machine = Machine::default();
         let mut effects = Vec::new();
         let mut seen = Vec::new();
         for event in [
@@ -767,8 +958,60 @@ mod tests {
             },
         ] {
             machine.handle_with_context(&event, &mut effects);
-            seen.push((public_state(machine.state()), std::mem::take(&mut effects)));
+            seen.push((
+                public_state(machine.state(), EngineId::Codex),
+                std::mem::take(&mut effects),
+            ));
         }
         insta::assert_debug_snapshot!(seen);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{Effect, Event, Machine};
+    use artisan_api::SignInState;
+
+    #[test]
+    fn a_stale_signed_out_probe_does_not_interrupt_login_and_cancel_stops_before_checking() {
+        let mut machine = Machine::default();
+        let mut effects = Vec::new();
+        machine.handle_with_context(&Event::Login, &mut effects);
+        assert_eq!(std::mem::take(&mut effects), [Effect::StartLogin]);
+        machine.handle_with_context(
+            &Event::Prompt {
+                url: Some("https://auth.example".into()),
+                code: None,
+            },
+            &mut effects,
+        );
+        machine.handle_with_context(&Event::Checked(SignInState::SignedOut), &mut effects);
+        machine.handle_with_context(&Event::Login, &mut effects);
+        assert!(effects.is_empty());
+        assert!(
+            matches!(machine.state(), super::State::LoggingIn { url: Some(url), code: None }
+            if url == "https://auth.example")
+        );
+        machine.handle_with_context(&Event::Cancel, &mut effects);
+        assert_eq!(effects, [Effect::StopLogin, Effect::Check]);
+        assert!(matches!(machine.state(), super::State::Unknown {}));
+    }
+
+    #[test]
+    fn a_successful_probe_stops_an_active_login_before_publishing_the_account() {
+        let mut machine = Machine::default();
+        let mut effects = Vec::new();
+        machine.handle_with_context(&Event::Login, &mut effects);
+        effects.clear();
+        machine.handle_with_context(
+            &Event::Checked(SignInState::SignedIn {
+                account: Some("alice".into()),
+            }),
+            &mut effects,
+        );
+        assert_eq!(effects, [Effect::StopLogin]);
+        assert!(
+            matches!(machine.state(), super::State::SignedIn { account: Some(account) } if account == "alice")
+        );
     }
 }

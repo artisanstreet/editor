@@ -22,9 +22,8 @@
 //!   PM and APC string, and every unknown or private CSI, is consumed and
 //!   dropped.
 //!
-//! The parser is hand-rolled instead of depending on `vte`: the subset is
-//! small, and the state machine is bounded so no input can panic or grow
-//! memory without limit.
+//! VTE owns incremental byte and escape parsing. The application retains
+//! a width-aware line model bounded by lines, columns and total cells.
 
 mod paint;
 mod parser;

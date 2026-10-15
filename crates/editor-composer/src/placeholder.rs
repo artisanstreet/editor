@@ -1,9 +1,6 @@
-//! The composer's rotating placeholder, ported from the old Editor's
-//! `native_composer_visuals`: each time the draft empties again, the next
-//! phrase of the reference vocabulary shows.
+//! Advances the placeholder when an edited draft becomes empty again.
 
-/// Placeholder vocabulary in reference order
-/// (`modules/data/composer/placeholders.json`).
+/// Phrases advance in this order.
 const VOCABULARY: [&str; 100] = [
     "Do anything",
     "Ask about anything",

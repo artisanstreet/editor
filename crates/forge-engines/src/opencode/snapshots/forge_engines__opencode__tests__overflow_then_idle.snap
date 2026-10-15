@@ -1,0 +1,27 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 149
+expression: "replay(\"context-overflow\")"
+---
+[
+    Event(
+        Item {
+            key: "error:evt_006",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "too much context",
+                ),
+                retryable: true,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+    RunError(
+        "too much context",
+    ),
+]

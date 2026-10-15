@@ -10,8 +10,8 @@ anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
-# The profiler backs the FPS overlay, as in the previous Editor.
-gpui = { workspace = true, features = ["profiler"] }
+# The frame overlay does not need task tracing or profiler history.
+gpui = { workspace = true, features = ["frame-rate"] }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -20,7 +20,7 @@ tracing.workspace = true
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
-gpui = { workspace = true, features = ["profiler", "test-support"] }
+gpui = { workspace = true, features = ["frame-rate", "test-support"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 

@@ -1,4 +1,4 @@
-//! Painting the Marketplace (master's `marketplace_screen/render.rs`).
+//! Virtualized Marketplace rows.
 
 use crate::presentation::{SkillRow, prompt_summary, sections};
 use crate::{MARKETPLACE_SCREEN_SELECTOR, Marketplace};
@@ -6,143 +6,192 @@ use artisan_api::SkillOrigin;
 use editor_core::{Screen, SettingsPage};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
-use editor_ui::button::{Button, ButtonContent, ButtonSize, ButtonVariant};
-use editor_ui::card::{CardStyle, compact_card, compact_card_content};
-use editor_ui::motion::MotionPolicy;
+use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::card::CardStyle;
+use editor_ui::page;
 use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
 use editor_ui::switch::{Switch, SwitchSize};
 use editor_ui::theme::ArtisanTheme;
 use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, px};
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, list, px};
 
-/// Content width, matching Settings.
-const CONTENT_MAX_WIDTH_PX: f32 = 896.0;
-
-impl Render for Marketplace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync(cx);
-        let theme = self.theme;
-        let mut column = div()
-            .w_full()
-            .max_w(px(CONTENT_MAX_WIDTH_PX))
-            .flex()
-            .flex_col()
-            .px(px(24.0))
-            .py(px(48.0))
-            .child(header(&theme));
-        if self.host.is_none() {
-            column = column.child(
-                div()
-                    .mt(px(40.0))
-                    .child(muted(&theme, "Pair a host to see its skills.")),
-            );
-        } else {
-            match &self.catalog {
-                None => {
-                    column = column.child(
-                        div()
-                            .mt(px(96.0))
-                            .flex()
-                            .justify_center()
-                            .child(WordmarkLoader::new("marketplace-loading", theme)),
-                    );
-                }
-                Some(catalog) => {
-                    let catalog: &[artisan_api::CatalogSkill] = match catalog {
-                        Ok(catalog) => catalog,
-                        Err(error) => {
-                            column = column.child(notice_box(&theme, error));
-                            &[]
-                        }
-                    };
-                    if let Some(notice) = &self.notice {
-                        column = column.child(notice_box(&theme, notice));
-                    }
-                    column = column.child(self.prompt_section(&theme, cx));
-                    let sections = sections(catalog);
-                    column = column.child(self.skill_section(
-                        &theme,
-                        "artisan",
-                        "Artisan skills",
-                        Some("Skills that teach every engine how Artisan works."),
-                        &sections.artisan,
-                        None,
-                        cx,
-                    ));
-                    column = column.child(self.skill_section(
-                        &theme,
-                        "adopted",
-                        "Your skills",
-                        None,
-                        &sections.adopted,
-                        Some("Adopt a skill below to keep it in every engine."),
-                        cx,
-                    ));
-                    if !sections.discovered.is_empty() {
-                        column = column.child(self.skill_section(
-                            &theme,
-                            "discovered",
-                            "Found in your engines",
-                            Some(
-                                "Skills an engine has on its own. Adopting one moves each copy into Artisan's backups and keeps Artisan's copy in every engine.",
-                            ),
-                            &sections.discovered,
-                            None,
-                            cx,
-                        ));
-                    }
-                }
-            }
+pub(crate) enum Entry {
+    Header,
+    Prompt,
+    Notices,
+    Group {
+        title: &'static str,
+        intro: Option<&'static str>,
+    },
+    Empty(&'static str),
+    Skill {
+        row: SkillRow,
+        first: bool,
+        last: bool,
+    },
+}
+pub(crate) fn entries(catalog: &[artisan_api::CatalogSkill]) -> Vec<Entry> {
+    let sections = sections(catalog);
+    let mut entries = vec![Entry::Header, Entry::Prompt, Entry::Notices];
+    for (title, intro, rows, empty) in [
+        (
+            "Artisan skills",
+            Some("Skills that teach every engine how Artisan works."),
+            sections.artisan,
+            Some("Nothing here yet."),
+        ),
+        (
+            "Your skills",
+            None,
+            sections.adopted,
+            Some("Adopt a skill below to keep it in every engine."),
+        ),
+        (
+            "Found in your engines",
+            Some(
+                "Skills an engine has on its own. Adopting one moves each copy into Artisan's backups and keeps Artisan's copy in every engine.",
+            ),
+            sections.discovered,
+            None,
+        ),
+    ] {
+        if rows.is_empty() && empty.is_none() {
+            continue;
         }
+        entries.push(Entry::Group { title, intro });
+        if rows.is_empty()
+            && let Some(text) = empty
+        {
+            entries.push(Entry::Empty(text));
+        }
+        let count = rows.len();
+        entries.extend(
+            rows.into_iter()
+                .enumerate()
+                .map(|(index, row)| Entry::Skill {
+                    row,
+                    first: index == 0,
+                    last: index + 1 == count,
+                }),
+        );
+    }
+    entries
+}
+impl Render for Marketplace {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
         div()
             .id("marketplace-screen")
-            .track_focus(&self.focus)
             .debug_selector(|| MARKETPLACE_SCREEN_SELECTOR.to_owned())
             .size_full()
-            .overflow_y_scroll()
+            .min_h_0()
             .bg(theme.colors.background.to_paint())
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_row()
-                    .justify_center()
-                    .child(column),
+                list(
+                    self.list.clone(),
+                    cx.processor(move |this, index, _, cx| {
+                        let content = match &this.entries[index] {
+                            Entry::Header => {
+                                div()
+                                .pt(px(48.0))
+                                .child(page::header(
+                                    &theme,
+                                    "Marketplace",
+                                    "Skills and the global prompt Artisan keeps in every engine. Changes reach each engine on its next session.",
+                                ))
+                                .into_any_element()
+                            }
+                            Entry::Prompt => this.prompt_section(&theme, cx).into_any_element(),
+                            Entry::Notices => this.notices(&theme, cx).into_any_element(),
+                            Entry::Group { title, intro } => div()
+                                .pt(px(40.0))
+                                .pb(px(12.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(*title),
+                                )
+                                .children(intro.map(|text| muted(&theme, text)))
+                                .into_any_element(),
+                            Entry::Empty(text) => {
+                                page::card(
+                                    &theme,
+                                    vec![muted(&theme, text).py(px(14.0)).into_any_element()],
+                                )
+                                    .into_any_element()
+                            }
+                            Entry::Skill { row, first, last } => {
+                                let style = CardStyle::resolve(theme);
+                                let mut band = div()
+                                    .w_full()
+                                    .bg(style.background)
+                                    .text_color(style.foreground)
+                                    .text_size(style.text_size)
+                                    .px(style.content_horizontal_padding)
+                                    .border_x_1()
+                                    .border_color(style.ring_color)
+                                    .child(this.skill_row(&theme, row, cx));
+                                if *first {
+                                    band = band.rounded_t(style.corner_radius).border_t_1();
+                                } else {
+                                    band = band
+                                        .border_t_1()
+                                        .border_color(theme.colors.border.to_paint());
+                                }
+                                if *last {
+                                    band = band.rounded_b(style.corner_radius).border_b_1();
+                                }
+                                band.into_any_element()
+                            }
+                        };
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(page::CONTENT_MAX_WIDTH))
+                                    .px(px(24.0))
+                                    .child(content),
+                            )
+                            .into_any_element()
+                    }),
+                )
+                .size_full(),
             )
     }
 }
 
 impl Marketplace {
-    fn prompt_section(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> Div {
-        let summary = self.prompt.as_ref().map(prompt_summary);
-        let choice = self
-            .prompt
+    fn prompt_section(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> page::PageBlock {
+        let prompt = self
+            .core
+            .read(cx)
+            .active_host()
+            .and_then(|host| host.read(cx).global_prompt.clone());
+        let summary = prompt.as_deref().map(prompt_summary);
+        let choice = prompt
             .as_ref()
             .is_some_and(|prompt| !prompt.candidates.is_empty());
-        let action = Button::new(
+        let this = cx.entity().downgrade();
+        let action = Button::text(
             "marketplace-global-prompt-open",
-            self.focus.clone(),
             *theme,
-            MotionPolicy::Reduced,
-            if choice {
-                ButtonVariant::Default
-            } else {
-                ButtonVariant::Outline
-            },
-            ButtonSize::Small,
-            ButtonContent::text(if choice { "Choose" } else { "Edit" }),
+            if choice { "Choose" } else { "Edit" },
         )
-        .ok()
-        .map(|button| {
-            let this = cx.entity().downgrade();
-            button
-                .debug_selector("marketplace-global-prompt-open")
-                .on_activate(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        this.navigate(Screen::Settings(SettingsPage::GlobalPrompt), cx);
-                    });
-                })
+        .variant(if choice {
+            ButtonVariant::Default
+        } else {
+            ButtonVariant::Outline
+        })
+        .debug_selector("marketplace-global-prompt-open")
+        .on_activate(move |_, _, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.navigate(Screen::Settings(SettingsPage::GlobalPrompt), cx)
+            });
         });
         let mut text = div().flex_1().min_w_0().flex().flex_col().gap(px(6.0));
         match &summary {
@@ -174,94 +223,108 @@ impl Marketplace {
             .gap(px(16.0))
             .py(px(14.0))
             .child(text)
-            .children(action);
-        section(
+            .child(action);
+        page::section_shell(
             theme,
-            "global-prompt",
             "Global prompt",
             Some("Standing instructions every engine reads before your messages."),
-            card(theme, vec![row]),
+            None,
+            page::card(theme, vec![row.into_any_element()]),
         )
+        .debug_selector("marketplace-section-global-prompt")
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one section painter shared by the three skill groups"
-    )]
-    fn skill_section(
-        &self,
-        theme: &ArtisanTheme,
-        anchor: &'static str,
-        title: &str,
-        intro: Option<&str>,
-        rows: &[SkillRow],
-        empty: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let body = if rows.is_empty() {
-            card(
-                theme,
-                vec![
-                    div()
-                        .py(px(14.0))
-                        .child(muted(theme, empty.unwrap_or("Nothing here yet."))),
-                ],
-            )
-        } else {
-            card(
-                theme,
-                rows.iter()
-                    .map(|row| self.skill_row(theme, row, cx))
-                    .collect(),
+    fn notices(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> Div {
+        let Some(host) = self.core.read(cx).active_host().cloned() else {
+            return div().child(muted(theme, "Pair a host to see its skills."));
+        };
+        let (catalog_error, prompt_error, loading) = {
+            let host = host.read(cx);
+            (
+                host.catalog_load().error.clone(),
+                host.prompt_load().error.clone(),
+                host.catalog_load().loading,
             )
         };
-        section(theme, anchor, title, intro, body)
+        let retry = catalog_error.is_some() || prompt_error.is_some();
+        let mut body = div().flex().flex_col();
+        for error in [
+            catalog_error.as_deref(),
+            prompt_error.as_deref(),
+            self.notice.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            body = body
+                .child(page::notice(theme, error.to_owned()).debug_selector("marketplace-notice"));
+        }
+        if retry {
+            body = body.child(
+                Button::text("marketplace-retry", *theme, "Retry")
+                    .variant(ButtonVariant::Outline)
+                    .on_activate(move |_, _, cx| {
+                        host.update(cx, |host, cx| {
+                            host.load_prompt(true, cx);
+                            host.load_skill_catalog(true, cx);
+                        });
+                    }),
+            );
+        }
+        if loading {
+            body = body.child(WordmarkLoader::new("marketplace-loading", *theme));
+        }
+        body
     }
 
     fn skill_row(&self, theme: &ArtisanTheme, row: &SkillRow, cx: &mut Context<Self>) -> Div {
-        let pending = self.pending.contains(&row.id);
+        let pending = self.pending.is_some();
         let selector = format!("marketplace-skill-{}", row.id);
         let control: Option<AnyElement> = if row.origin == SkillOrigin::Discovered {
             let id = row.id.clone();
             let this = cx.entity().downgrade();
-            Button::new(
-                SharedString::from(format!("{selector}-adopt")),
-                self.focus.clone(),
-                *theme,
-                MotionPolicy::Reduced,
-                ButtonVariant::Outline,
-                ButtonSize::Small,
-                ButtonContent::icon_text(AssetId::TABLER_DOWNLOAD, "Adopt"),
+            Some(
+                Button::icon_text(
+                    SharedString::from(format!("{selector}-adopt")),
+                    *theme,
+                    AssetId::TABLER_DOWNLOAD,
+                    "Adopt",
+                )
+                .variant(ButtonVariant::Outline)
+                .disabled(pending)
+                .debug_selector(format!("{selector}-adopt"))
+                .on_activate(move |_, _, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.skill_action(id.clone(), artisan_api::SkillAction::Adopt, cx)
+                    });
+                })
+                .into_any_element(),
             )
-            .ok()
-            .map(|button| {
-                button
-                    .disabled(pending)
-                    .debug_selector(format!("{selector}-adopt"))
-                    .on_activate(move |_, _, cx| {
-                        let _ = this.update(cx, |this, cx| {
-                            this.skill_action(id.clone(), "adopt", cx);
-                        });
-                    })
-                    .into_any_element()
-            })
         } else {
             let id = row.id.clone();
             let this = cx.entity().downgrade();
             Some(
                 Switch::new(
                     SharedString::from(format!("{selector}-switch")),
-                    self.focus.clone(),
                     *theme,
                     SwitchSize::Default,
                     row.enabled,
+                    format!("Enable {}", row.name),
                 )
                 .disabled(pending)
                 .debug_selector(format!("{selector}-switch"))
                 .on_change(move |enabled, _, _, cx| {
                     let id = id.clone();
                     let _ = this.update(cx, |this, cx| {
-                        this.skill_action(id, if enabled { "enable" } else { "disable" }, cx);
+                        this.skill_action(
+                            id,
+                            if enabled {
+                                artisan_api::SkillAction::Enable
+                            } else {
+                                artisan_api::SkillAction::Disable
+                            },
+                            cx,
+                        );
                     });
                 })
                 .into_any_element(),
@@ -317,68 +380,6 @@ impl Marketplace {
     }
 }
 
-fn header(theme: &ArtisanTheme) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_size(px(20.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.colors.foreground.to_paint())
-                .child("Marketplace"),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .text_sm()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(
-                    "Skills and the global prompt Artisan keeps in every engine. Changes reach each engine on its next session.",
-                ),
-        )
-}
-
-fn section(
-    theme: &ArtisanTheme,
-    anchor: &'static str,
-    title: &str,
-    intro: Option<&str>,
-    body: Div,
-) -> Div {
-    let mut head = div().flex().flex_col().child(
-        div()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.colors.foreground.to_paint())
-            .child(title.to_owned()),
-    );
-    if let Some(intro) = intro {
-        head = head.child(div().mt(px(4.0)).child(muted(theme, intro)));
-    }
-    div()
-        .flex()
-        .flex_col()
-        .mt(px(40.0))
-        .debug_selector(move || format!("marketplace-section-{anchor}"))
-        .child(head)
-        .child(div().mt(px(12.0)).child(body))
-}
-
-fn card(theme: &ArtisanTheme, rows: Vec<Div>) -> Div {
-    let style = CardStyle::resolve(*theme);
-    let border = theme.colors.border.to_paint();
-    let mut card = compact_card(style).w_full().gap(px(0.0)).py(px(0.0));
-    for (index, row) in rows.into_iter().enumerate() {
-        let mut band = compact_card_content(style).w_full().child(row);
-        if index > 0 {
-            band = band.border_t_1().border_color(border);
-        }
-        card = card.child(band);
-    }
-    card
-}
-
 fn attention_line(theme: &ArtisanTheme, text: &str) -> Div {
     let tone = tone_color(theme, ChipTone::Warning);
     div()
@@ -393,20 +394,6 @@ fn attention_line(theme: &ArtisanTheme, text: &str) -> Div {
                 .size(px(12.0))
                 .text_color(tone.with_alpha(0.8).to_paint()),
         )
-        .child(text.to_owned())
-}
-
-fn notice_box(theme: &ArtisanTheme, text: &str) -> Div {
-    let tone = tone_color(theme, ChipTone::Danger);
-    div()
-        .mt(px(24.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(10.0))
-        .bg(tone.with_alpha(0.10).to_paint())
-        .text_sm()
-        .text_color(tone.to_paint())
-        .debug_selector(|| "marketplace-notice".to_owned())
         .child(text.to_owned())
 }
 

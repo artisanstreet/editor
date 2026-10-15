@@ -10,6 +10,8 @@
 //! Forge's machine, or a `data:` URL, plays from memory, as the bytes the
 //! row first loaded: a later row naming a rewritten file is a new track.
 
+use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -27,8 +29,7 @@ use serde::Deserialize;
 
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
-use super::source::{Located, MediaFetcher, MediaRequest, Owned, locate};
-use crate::theme::ArtisanTheme;
+use super::source::{Located, MediaProvider, MediaRequest, MediaSource, Owned, Payload, locate};
 
 /// How often a playing row redraws its time.
 const TICK: Duration = Duration::from_millis(200);
@@ -58,7 +59,7 @@ pub(super) struct AudioBlock {
 #[derive(Debug, Deserialize)]
 struct Spec {
     #[serde(default)]
-    src: Option<String>,
+    src: Option<MediaSource>,
     #[serde(default, alias = "label")]
     name: Option<String>,
     #[serde(default)]
@@ -67,7 +68,7 @@ struct Spec {
 
 #[derive(Clone, Debug, Deserialize)]
 struct Track {
-    src: String,
+    src: MediaSource,
     #[serde(default, alias = "label")]
     name: Option<String>,
 }
@@ -103,6 +104,9 @@ impl TryFrom<Spec> for AudioBlock {
             );
         }
         tracks.retain(|track| !track.src.trim().is_empty());
+        if tracks.len() > 16 {
+            return Err("audio preview supports at most 16 tracks".into());
+        }
         if tracks.is_empty() {
             return Err("audio needs a `src` or `tracks`".to_owned());
         }
@@ -111,6 +115,16 @@ impl TryFrom<Spec> for AudioBlock {
 }
 
 impl RichBlock for AudioBlock {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + budget::vector(&self.tracks)
+            + self
+                .tracks
+                .iter()
+                .map(|track| track.src.resident_bytes() + budget::optional(&track.name))
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         div()
             .w_full()
@@ -124,20 +138,13 @@ impl RichBlock for AudioBlock {
                     .enumerate()
                     .map(|(index, track)| TrackRow {
                         id: cx.key(format_args!("track-{index}")),
+                        media: cx.media.cloned(),
                         theme: *cx.theme,
-                        src: SharedString::from(track.src.trim().to_owned()),
+                        src: track.src.clone(),
                         name: track.shown_name(),
                     }),
             )
             .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        self.tracks
-            .iter()
-            .map(|track| format!("- [{}]({})", track.shown_name(), track.src.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 
@@ -146,9 +153,10 @@ impl RichBlock for AudioBlock {
 
 #[derive(IntoElement)]
 struct TrackRow {
+    media: Option<super::source::MediaFetcher>,
     id: SharedString,
     theme: ArtisanTheme,
-    src: SharedString,
+    src: MediaSource,
     name: SharedString,
 }
 
@@ -222,7 +230,7 @@ impl Shown {
 
 impl TrackRow {
     fn part(&self, part: &str) -> ElementId {
-        ElementId::Name(SharedString::from(format!("{}-{part}", self.id)))
+        kit::part(&self.id, part)
     }
 
     /// The row with a muted line in place of its player.
@@ -243,9 +251,9 @@ impl TrackRow {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum AudioBytes {
     /// A `data:` URL's payload.
-    Data(Arc<[u8]>),
+    Data(Payload),
     /// A file fetched from where the open thread's files live.
-    Fetched(MediaRequest),
+    Fetched(MediaRequest, MediaProvider),
 }
 
 impl AudioBytes {
@@ -253,18 +261,12 @@ impl AudioBytes {
     /// machine, but unique to the source and ending in its format. A fetched
     /// file is named for the row `owner` too, as each row plays the bytes it
     /// loaded.
-    fn track(&self, owner: &str, bytes: &[u8]) -> PathBuf {
+    fn track(&self, owner: &str, _bytes: &[u8]) -> PathBuf {
         match self {
-            Self::Fetched(request) => {
+            Self::Fetched(request, _) => {
                 PathBuf::from(format!("forge/{}/{owner}/{}", request.scope, request.path))
             }
-            Self::Data(data) => {
-                use std::hash::{Hash as _, Hasher as _};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                data.hash(&mut hasher);
-                let extension = audio_extension(bytes).unwrap_or("audio");
-                PathBuf::from(format!("data/{:016x}.{extension}", hasher.finish()))
-            }
+            Self::Data(data) => PathBuf::from(format!("data/{}.audio", data.id)),
         }
     }
 }
@@ -280,37 +282,20 @@ impl Asset for AudioBytesLoader {
 
     fn load(
         Owned { source, .. }: Self::Source,
-        cx: &mut App,
+        _cx: &mut App,
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
         let fetch = match &source {
-            AudioBytes::Fetched(request) => cx
-                .try_global::<MediaFetcher>()
-                .map(|fetcher| fetcher.fetch(request.clone())),
+            AudioBytes::Fetched(request, fetcher) => Some(fetcher.fetch(request.clone())),
             AudioBytes::Data(_) => None,
         };
         async move {
+            let _capacity = super::work_permit().await;
             let bytes = match source {
-                AudioBytes::Data(bytes) => bytes,
-                AudioBytes::Fetched(_) => fetch?.await?,
+                AudioBytes::Data(payload) => payload.bytes,
+                AudioBytes::Fetched(_, _) => fetch?.await?,
             };
-            audio_extension(&bytes).is_some().then_some(bytes)
+            Some(bytes)
         }
-    }
-}
-
-/// The file extension of the audio format `bytes` begin with.
-fn audio_extension(bytes: &[u8]) -> Option<&'static str> {
-    let starts = |prefix: &[u8]| bytes.starts_with(prefix);
-    if starts(b"ID3") || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0) {
-        Some("mp3")
-    } else if bytes.len() >= 12 && starts(b"RIFF") && &bytes[8..12] == b"WAVE" {
-        Some("wav")
-    } else if starts(b"fLaC") {
-        Some("flac")
-    } else if starts(b"OggS") {
-        Some("ogg")
-    } else {
-        None
     }
 }
 
@@ -325,17 +310,39 @@ struct Playable {
 impl TrackRow {
     /// The row's track, else the notice the row shows instead.
     fn playable(&self, window: &mut Window, cx: &mut App) -> Result<Playable, String> {
-        let source = match locate(&self.src, cx) {
+        let source = match locate(&self.src, self.media.as_ref(), cx) {
+            #[cfg(test)]
             Located::Path(path) => return Ok(Playable { path, bytes: None }),
-            Located::Data(bytes) => AudioBytes::Data(bytes.into()),
-            Located::Fetched(request) => AudioBytes::Fetched(request),
+            Located::Data(bytes) => AudioBytes::Data(bytes),
+            Located::Fetched(request, fetcher) => AudioBytes::Fetched(request, fetcher),
             Located::Url(_) => return Err("Only local audio files play here".into()),
             Located::Invalid => return Err(format!("Couldn't load {}", self.src.trim())),
         };
-        let owned = Owned::new(&self.id, source);
-        match window.use_asset::<AudioBytesLoader>(&owned, cx) {
+        let immutable = matches!(&source, AudioBytes::Data(_));
+        let owner = self.media.as_ref().map_or_else(
+            || self.id.clone(),
+            |fetcher| fetcher.asset_owner(&self.id, immutable),
+        );
+        let owned = Owned::new(&owner, source);
+        let source_bytes = match &owned.source {
+            AudioBytes::Data(payload) => payload.bytes.len(),
+            AudioBytes::Fetched(request, _) => request.path.len(),
+        } + self.id.len();
+        let output = match &self.media {
+            Some(fetcher) => fetcher.resources.load::<AudioBytesLoader>(
+                &fetcher.owner,
+                &owned,
+                window,
+                cx,
+                source_bytes,
+                |output| output.as_ref().map_or(0, |bytes| bytes.len()),
+                |_, _| {},
+            ),
+            None => window.use_asset::<AudioBytesLoader>(&owned, cx),
+        };
+        match output {
             Some(Some(bytes)) => Ok(Playable {
-                path: owned.source.track(&self.id, &bytes),
+                path: owned.source.track(&owner, &bytes),
                 bytes: Some(bytes),
             }),
             None => Err("Loading…".into()),
@@ -428,7 +435,7 @@ impl RenderOnce for TrackRow {
             .children(time.map(|time| {
                 kit::mono(&theme, time)
                     .flex_shrink_0()
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .text_color(theme.colors.muted_foreground.to_paint())
             }))
             .into_any_element()
@@ -511,7 +518,7 @@ impl TrackRow {
                     .relative()
                     .w_full()
                     .h(px(4.0))
-                    .rounded(px(2.0))
+                    .rounded(RadiusTokens::value(RadiusStep::X2s))
                     .bg(kit::hairline(&theme))
                     .child(
                         canvas(
@@ -528,7 +535,7 @@ impl TrackRow {
                             .left_0()
                             .h_full()
                             .w(relative(shown.progress()))
-                            .rounded(px(2.0))
+                            .rounded(RadiusTokens::value(RadiusStep::X2s))
                             .bg(theme.colors.foreground.with_alpha(0.75).to_paint()),
                     ),
             )
@@ -592,7 +599,7 @@ mod tests {
     #[test]
     fn a_track_is_named_by_its_file_unless_named() {
         let track = |src: &str, name: Option<&str>| Track {
-            src: src.to_owned(),
+            src: src.to_owned().into(),
             name: name.map(str::to_owned),
         };
         assert_eq!(

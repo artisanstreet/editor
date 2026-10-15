@@ -16,6 +16,7 @@ mod fbx;
 mod gltf;
 mod obj;
 mod ply;
+mod scene;
 mod stl;
 
 /// A model file format.
@@ -73,13 +74,38 @@ impl Format {
 pub(in super::super) struct Model {
     pub(in super::super) mesh: Mesh,
     /// The mesh as GPU geometry, for windows whose renderer draws meshes.
-    pub(in super::super) gpu: Arc<gpui::Mesh>,
+    pub(in super::super) gpu: Option<Arc<gpui::Mesh>>,
+    pub(in super::super) triangles: usize,
     pub(in super::super) format: Format,
+}
+
+impl Model {
+    pub(in super::super) fn resident_bytes(&self) -> usize {
+        self.mesh.positions.capacity() * std::mem::size_of::<super::mesh::Vec3>()
+            + self.mesh.normals.capacity() * std::mem::size_of::<super::mesh::Vec3>()
+            + self.mesh.colors.as_ref().map_or(0, |colors| {
+                colors.capacity() * std::mem::size_of::<super::mesh::Vec3>()
+            })
+            + self
+                .gpu
+                .as_ref()
+                .map_or(0, |gpu| std::mem::size_of_val(gpu.vertices()))
+    }
 }
 
 /// Parses `bytes` as `format`, or as the format they look like. `up`
 /// overrides the file's own up axis.
+#[cfg(test)]
 pub(super) fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Result<Model, String> {
+    parse_for_renderer(bytes, format, up, false)
+}
+
+pub(super) fn parse_for_renderer(
+    bytes: &[u8],
+    format: Option<Format>,
+    up: Option<Up>,
+    gpu_enabled: bool,
+) -> Result<Model, String> {
     let format = format
         .or_else(|| Format::sniff(bytes))
         .ok_or("the file is not a model format the viewer reads (OBJ, FBX, STL, PLY, glTF)")?;
@@ -104,11 +130,19 @@ pub(super) fn parse(bytes: &[u8], format: Option<Format>, up: Option<Up>) -> Res
             format.default_up()
         }
     };
-    let mesh = builder.finish(up.unwrap_or(file_up))?;
+    let mut mesh = builder.finish(up.unwrap_or(file_up))?;
+    let triangles = mesh.triangles();
+    let gpu = gpu_enabled.then(|| Arc::new(mesh.to_gpu()));
+    if gpu_enabled {
+        mesh.positions = Vec::new();
+        mesh.normals = Vec::new();
+        mesh.colors = None;
+    }
     Ok(Model {
-        gpu: Arc::new(mesh.to_gpu()),
+        gpu,
         mesh,
         format,
+        triangles,
     })
 }
 

@@ -89,8 +89,17 @@ async fn install_here(
     data_dir: Option<&Path>,
     sys: Sys,
 ) -> Result<()> {
-    let root = Root::locate()?;
     let release = release::resolve(source).await?;
+    install_release(products, release, data_dir, sys).await
+}
+
+async fn install_release(
+    products: &[Product],
+    release: Release,
+    data_dir: Option<&Path>,
+    sys: Sys,
+) -> Result<()> {
+    let root = Root::locate()?;
     let version = release.version().to_owned();
     let (os, arch) = release::this_platform();
     let artifact = release.artifact(os, arch)?;
@@ -106,9 +115,9 @@ async fn install_here(
     if editor && !root.editor(&version).is_file() {
         bail!("release {version} has no Editor for {os} {arch}");
     }
-    let (data, custom_data) = match data_dir {
-        Some(dir) => (dir.to_owned(), true),
-        None => (crate::paths::forge_data()?, false),
+    let data = match data_dir {
+        Some(dir) => dir.to_owned(),
+        None => crate::paths::forge_data()?,
     };
     let forge_was_running = service::is_running(&data);
 
@@ -120,7 +129,7 @@ async fn install_here(
         platform::integrate_editor(sys, &root.editor(&version))?;
     }
     if products.contains(&Product::Forge) {
-        let systemd = service::install(sys, &root.ae(), &data, custom_data)?;
+        let systemd = service::install(sys, &root.ae(), &data)?;
         if !systemd && cfg!(target_os = "linux") {
             println!(
                 "systemd isn't running here, so Forge won't start on its own; run `ae forge start` when needed."
@@ -159,9 +168,9 @@ async fn install_in_wsl(product: Product, distro: &str, source: Source, sys: Sys
     let mut command = std::process::Command::new("wsl.exe");
     command
         .args(["-d", distro, "--exec"])
-        .arg(to_wsl_path(&ae))
+        .arg(to_wsl_path(&ae, Some(distro))?)
         .args(["install", "forge", "--from"])
-        .arg(to_wsl_path(&stage));
+        .arg(to_wsl_path(&stage, Some(distro))?);
     run_remote(command, sys, &stage, &format!("WSL ({distro})"))
 }
 
@@ -172,7 +181,7 @@ async fn install_in_windows(product: Product, source: Source, sys: Sys) -> Resul
     let temp = sys::output("cmd.exe", &["/d", "/c", "echo %TEMP%"])
         .context("find Windows' temp directory")?;
     let windows_stage = format!("{}\\artisan-windows-{}", temp.trim(), release.version());
-    let stage = PathBuf::from(to_wsl_path(Path::new(&windows_stage)));
+    let stage = PathBuf::from(to_wsl_path(Path::new(&windows_stage), None)?);
     let ae = stage_ae(&release, "windows", &stage).await?;
     let mut command = std::process::Command::new(ae);
     let product = if product == Product::Editor {
@@ -212,19 +221,31 @@ fn run_remote(
     Ok(())
 }
 
-/// `C:\Users\me\x` → `/mnt/c/Users/me/x` (WSL's default automount).
-fn to_wsl_path(path: &Path) -> String {
-    let text = path.display().to_string();
-    let bytes = text.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        format!(
-            "/mnt/{}{}",
-            char::from(bytes[0]).to_ascii_lowercase(),
-            text[2..].replace('\\', "/")
-        )
+/// Let the selected WSL distribution resolve its configured mount layout.
+fn to_wsl_path(path: &Path, distro: Option<&str>) -> Result<String> {
+    let mut command = if let Some(distro) = distro {
+        let mut command = std::process::Command::new("wsl.exe");
+        command.args(["-d", distro, "--exec", "wslpath"]);
+        command
     } else {
-        text.replace('\\', "/")
-    }
+        std::process::Command::new("wslpath")
+    };
+    let output = command
+        .args(["-a", "-u"])
+        .arg(path)
+        .output()
+        .context("convert path through WSL")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "WSL path conversion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let converted = String::from_utf8(output.stdout).context("WSL path is not UTF-8")?;
+    anyhow::ensure!(
+        !converted.trim().is_empty(),
+        "WSL path conversion returned an empty path"
+    );
+    Ok(converted.trim().to_owned())
 }
 
 fn in_wsl() -> bool {
@@ -322,7 +343,7 @@ pub fn update(data_dir: Option<&Path>, from: Option<&str>, dry_run: bool) -> Res
             .map(|_| Product::Editor)
             .into_iter()
             .collect();
-        install_here(&products, Source::new(from), data_dir, Sys { dry_run }).await
+        install_release(&products, release, data_dir, Sys { dry_run }).await
     })
 }
 

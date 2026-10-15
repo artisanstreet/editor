@@ -5,57 +5,46 @@
 //! selector: the focus handle that makes it keyboard reachable, and the
 //! moment of the last copy that drives the shared confirmation.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use editor_assets::AssetId;
-use gpui::{App, ClipboardItem, ElementId, FocusHandle, Pixels, SharedString, Window, prelude::*};
+use gpui::{App, ClipboardItem, ElementId, SharedString, Task, Window, prelude::*};
 
-use crate::button::{
-    AccessibleLabel, Button, ButtonContent, ButtonSize, ButtonVariant, FocusVisibility,
-};
+use crate::button::{Button, ButtonVariant};
 use crate::copy_feedback::{COPY_FEEDBACK_WINDOW, copy_feedback_icon, copy_feedback_progress};
-use crate::motion::MotionPolicy;
+use crate::motion::{MotionPlan, MotionPolicy, MotionRecipe};
 use crate::theme::ArtisanTheme;
 
 /// Accessible name of the fence copy action.
 const COPY_CODE_LABEL: &str = "Copy code";
 
-/// Suffix of the copy action's debug selector under its fence selector.
-pub(super) const CODE_COPY_SELECTOR_SUFFIX: &str = "copy";
-
 /// Copies one fence's exact displayed source to the clipboard.
 #[derive(IntoElement)]
 pub(super) struct CodeCopyButton {
     selector: SharedString,
-    state_id: SharedString,
+    state_id: ElementId,
     source: SharedString,
-    corner_radius: Pixels,
     theme: ArtisanTheme,
 }
 
 struct CodeCopyState {
-    focus: FocusHandle,
     copied_at: Option<Instant>,
+    wake: Option<Task<()>>,
 }
 
 impl CodeCopyButton {
-    /// `selector` is the action's stable selector (the fence selector plus
-    /// [`CODE_COPY_SELECTOR_SUFFIX`]) and `state_id` the key of its window
-    /// state (the selector plus `-state`), both formatted once per cached
-    /// document; `source` is the fence body exactly as displayed;
-    /// `corner_radius` is the action's corner, nested inside the fence's own.
+    /// Stable action and state IDs are prepared once per Item. `source`
+    /// contains the exact text copied by this action.
     pub(super) fn new(
         selector: SharedString,
-        state_id: SharedString,
+        state_id: ElementId,
         source: SharedString,
-        corner_radius: Pixels,
         theme: &ArtisanTheme,
     ) -> Self {
         Self {
             selector,
             state_id,
             source,
-            corner_radius,
             theme: *theme,
         }
     }
@@ -63,55 +52,57 @@ impl CodeCopyButton {
 
 impl RenderOnce for CodeCopyButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(ElementId::Name(self.state_id.clone()), cx, |_, cx| {
-            CodeCopyState {
-                focus: cx.focus_handle().tab_stop(true),
-                copied_at: None,
-            }
+        let state = window.use_keyed_state(self.state_id.clone(), cx, |_, _| CodeCopyState {
+            copied_at: None,
+            wake: None,
         });
         let motion = if cx.reduce_motion() {
             MotionPolicy::Reduced
         } else {
             MotionPolicy::Full
         };
+        let transition = match motion.resolve(MotionRecipe::IconSwap) {
+            MotionPlan::Animate(plan) => plan.duration(),
+            MotionPlan::Immediate => Duration::ZERO,
+        };
         let copied = state
             .read(cx)
             .copied_at
             .map(|at| at.elapsed())
             .map_or(0.0, |elapsed| {
-                if elapsed < COPY_FEEDBACK_WINDOW {
+                let progress = copy_feedback_progress(elapsed, motion);
+                if elapsed < transition
+                    || (elapsed < COPY_FEEDBACK_WINDOW && progress > 0.0 && progress < 1.0)
+                {
                     window.request_animation_frame();
                 }
-                copy_feedback_progress(elapsed, motion)
+                progress
             });
-        let focus = state.read(cx).focus.clone();
         let source = self.source;
-        Button::new(
+        Button::icon(
             ElementId::Name(self.selector.clone()),
-            focus,
             self.theme,
-            MotionPolicy::Reduced,
-            ButtonVariant::Ghost,
-            ButtonSize::IconSmall,
-            ButtonContent::icon_only(
-                AssetId::TABLER_COPY,
-                AccessibleLabel::new(COPY_CODE_LABEL).expect("the copy label is not blank"),
-            ),
+            AssetId::TABLER_COPY,
+            COPY_CODE_LABEL,
         )
-        .expect("an icon-only copy button has valid content")
+        .variant(ButtonVariant::Ghost)
         .icon_slot(copy_feedback_icon(copied))
-        .corner_radius(self.corner_radius)
-        .hover_fill()
-        .focus_visibility(FocusVisibility::Visible)
-        .tint(
-            self.theme.colors.muted_foreground.to_paint(),
-            self.theme.colors.foreground.to_paint(),
-        )
         .debug_selector(self.selector)
         .on_activate(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(source.to_string()));
+            let weak = state.downgrade();
+            let wake = cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1500))
+                    .await;
+                let _ = weak.update(cx, |state, cx| {
+                    state.wake = None;
+                    cx.notify();
+                });
+            });
             state.update(cx, |state, cx| {
                 state.copied_at = Some(Instant::now());
+                state.wake = Some(wake);
                 cx.notify();
             });
         })

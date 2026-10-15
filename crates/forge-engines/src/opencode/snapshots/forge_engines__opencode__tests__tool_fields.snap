@@ -1,0 +1,146 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 162
+expression: "replay(\"tool-fields\")"
+---
+[
+    Event(
+        Item {
+            key: "invalid-tool:call_bash",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode bash omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_read",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode read omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_write",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode write omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_edit",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode edit omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_grep",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode grep omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_glob",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode glob omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_webfetch",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode webfetch omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "invalid-tool:call_websearch",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode websearch omitted required native tool fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "call_write_ok",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "file",
+                                op: Add,
+                                diff: None,
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Idle(
+        false,
+    ),
+]

@@ -1,0 +1,62 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 770
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "background-task",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: Some(
+                    "general-purpose",
+                ),
+                description: Inline(
+                    "Exact report",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Run this task",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "background-task",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: Some(
+                    "general-purpose",
+                ),
+                description: Inline(
+                    "Exact report",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Run this task",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: Some(
+                    Inline(
+                        "Exact report",
+                    ),
+                ),
+                label: None,
+            },
+        },
+    ],
+    None,
+)

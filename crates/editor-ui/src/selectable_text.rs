@@ -1,9 +1,7 @@
 //! Reusable native selectable text for transcript bodies.
 //!
-//! Pinned GPUI ships hit-testing and platform clipboard writes but no
-//! selection concept (`docs/ui/GPUI_CAPABILITIES.md` §2.11), while the
-//! transcript renders user bodies and assistant Markdown as many separate
-//! text leaves. This module gives every leaf browser selection behavior:
+//! Transcript bodies are separate text leaves sharing a bounded selection document.
+//! Source ordinals determine copy order; rendering supplies hit geometry:
 //!
 //! - One selection per window ([`document`]), so a drag that starts in one
 //!   paragraph extends through list items, code blocks, and later messages
@@ -21,8 +19,7 @@
 //!
 //! Elements are retained (`SelectableText::retained`): focus and the
 //! compiled [`TextRun`]s live in GPUI element state keyed by the caller's
-//! stable `ElementId`, so `MarkdownRenderer::render_source` stays
-//! synchronous and stateless. Compiled runs are reused while the text,
+//! stable `ElementId`. Compiled runs are reused while the text,
 //! inherited style, caller ranges, and overrides are unchanged; callers
 //! that keep their ranges across frames (the Markdown renderer) hand them
 //! over as shared slices, so an unchanged leaf compares pointers.
@@ -45,6 +42,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Bounds, ClipboardItem, CursorStyle, DispatchPhase, Element, ElementId,
@@ -54,13 +52,109 @@ use gpui::{
     TextLayout, TextRun, TextStyle, Window,
 };
 
-use crate::markdown_cache::same_allocation;
-use crate::text_navigation::{SelectionUnit, caret_index_for_position};
+use crate::text_navigation::SelectionUnit;
+
+mod geometry;
+mod native_geometry;
 use crate::theme::ArtisanTheme;
+use geometry::LeafLayout;
 
 use document::{LeafKey, LiveLeaf, Observed, document};
 
 pub use crate::text_runs::{TextRunOverride, compile_text_runs};
+pub use native_geometry::MAX_NATIVE_SOURCE;
+
+fn same_allocation(left: &SharedString, right: &SharedString) -> bool {
+    left.as_ptr() == right.as_ptr() && left.len() == right.len()
+}
+
+/// Plain source text is owned by its renderer, independently of painted leaves.
+pub struct SelectionLeaf {
+    pub order: Vec<u64>,
+    pub text: SharedString,
+    pub separator: &'static str,
+    pub copies: Rc<[(Range<usize>, SharedString)]>,
+}
+pub struct SelectionSource {
+    scope: SharedString,
+    owner: Rc<[u64]>,
+    leaves: Vec<SelectionLeaf>,
+}
+impl SelectionSource {
+    /// Conservative retained allocation cost for the renderer's source cache.
+    /// Shared strings/substitutions are charged in full here, even if another
+    /// prepared document also owns them. Vec spare capacity and Rc metadata count.
+    pub fn resident_bytes(&self) -> usize {
+        const RC_HEADER: usize = 2 * std::mem::size_of::<usize>();
+        let base = std::mem::size_of::<Self>()
+            .saturating_add(RC_HEADER)
+            .saturating_add(self.scope.len())
+            .saturating_add(RC_HEADER)
+            .saturating_add(std::mem::size_of_val(self.owner.as_ref()))
+            .saturating_add(RC_HEADER)
+            .saturating_add(
+                self.leaves
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SelectionLeaf>()),
+            );
+        self.leaves.iter().fold(base, |bytes, leaf| {
+            let bytes = bytes
+                .saturating_add(
+                    leaf.order
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<u64>()),
+                )
+                .saturating_add(leaf.text.len())
+                .saturating_add(RC_HEADER)
+                .saturating_add(std::mem::size_of_val(leaf.copies.as_ref()))
+                .saturating_add(RC_HEADER);
+            leaf.copies.iter().fold(bytes, |bytes, (_, text)| {
+                bytes.saturating_add(text.len()).saturating_add(RC_HEADER)
+            })
+        })
+    }
+
+    pub fn single(
+        scope: impl Into<SharedString>,
+        order: Vec<u64>,
+        text: impl Into<SharedString>,
+        separator: &'static str,
+    ) -> Rc<Self> {
+        Self::new(
+            scope,
+            order.clone(),
+            vec![SelectionLeaf {
+                order,
+                text: text.into(),
+                separator,
+                copies: Rc::from([]),
+            }],
+        )
+    }
+    /// `owner` identifies one document across content revisions, independently
+    /// of its changing leaf count. Markdown uses its Item/section prefix.
+    pub fn new(
+        scope: impl Into<SharedString>,
+        owner: Vec<u64>,
+        mut leaves: Vec<SelectionLeaf>,
+    ) -> Rc<Self> {
+        leaves.sort_by(|a, b| a.order.cmp(&b.order));
+        Rc::new(Self {
+            scope: scope.into(),
+            owner: owner.into(),
+            leaves,
+        })
+    }
+}
+/// Registration is weak: dropping the owning renderer releases the source.
+pub fn register_selection_source(source: &Rc<SelectionSource>, window: &Window, cx: &mut App) {
+    document(cx, window.window_handle().window_id()).register_source(source, window.current_view());
+}
+
+/// Release both source registrations and gesture snapshots when a thread or overlay closes.
+pub fn release_selection_scope(scope: &str, window: gpui::WindowId, cx: &mut App) {
+    document::release_scope(cx, window, scope);
+}
 
 /// Folds an arbitrary byte index into a valid caret position for `text`.
 ///
@@ -69,11 +163,7 @@ pub use crate::text_runs::{TextRunOverride, compile_text_runs};
 /// legal slicing position.
 #[must_use]
 pub fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
-    let mut clamped = index.min(text.len());
-    while clamped > 0 && !text.is_char_boundary(clamped) {
-        clamped -= 1;
-    }
-    clamped
+    text.floor_char_boundary(index.min(text.len()))
 }
 
 /// Returns whether a keystroke copies the current selection.
@@ -161,7 +251,7 @@ struct CompiledRuns {
     default_style: TextStyle,
     highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
     overrides: RangeSlice<TextRunOverride>,
-    runs: Vec<TextRun>,
+    runs: Arc<[TextRun]>,
 }
 
 /// The inputs of one layout's run compilation.
@@ -200,6 +290,10 @@ struct RetainedLeaf {
     focus: Option<FocusHandle>,
     /// Runs compiled for the last layout, reused while their inputs hold.
     compiled: Rc<RefCell<Option<CompiledRuns>>>,
+    native_geometry: Rc<RefCell<native_geometry::NativeGeometryCache>>,
+    native_report: Rc<RefCell<Option<NativeReport>>>,
+    native_layout_report: Rc<RefCell<Option<NativeLayoutReport>>>,
+    native_error: Rc<RefCell<Option<String>>>,
 }
 
 impl RetainedLeaf {
@@ -209,16 +303,16 @@ impl RetainedLeaf {
     /// A miss moves the caller ranges into the cache (the element is
     /// consumed by this frame and never reads them again), so neither path
     /// copies them.
-    fn compiled_runs(&self, inputs: &mut RunInputs<'_>) -> Vec<TextRun> {
+    fn compiled_runs(&self, inputs: &mut RunInputs<'_>) -> Arc<[TextRun]> {
         let Ok(mut compiled) = self.compiled.try_borrow_mut() else {
-            return compile_runs(inputs);
+            return compile_runs(inputs).into();
         };
         if let Some(cached) = compiled.as_ref()
             && cached.matches(inputs)
         {
             return cached.runs.clone();
         }
-        let runs = compile_runs(inputs);
+        let runs: Arc<[TextRun]> = compile_runs(inputs).into();
         *compiled = Some(CompiledRuns {
             text: inputs.text.clone(),
             default_style: inputs.default_style.clone(),
@@ -230,11 +324,109 @@ impl RetainedLeaf {
     }
 }
 
+/// Compiled original source styles shared by every visual ordinal of a leaf.
+#[derive(Debug)]
+pub(crate) struct NativeRunEntry {
+    key: SharedString,
+    compiled: CompiledRuns,
+}
+fn native_runs(
+    renderer: &crate::markdown_renderer::MarkdownRenderer,
+    key: &SharedString,
+    inputs: &mut RunInputs<'_>,
+) -> Arc<[TextRun]> {
+    let mut entries = renderer.native_runs.borrow_mut();
+    if let Some(entry) = entries
+        .iter()
+        .find(|entry| &entry.key == key && entry.compiled.matches(inputs))
+    {
+        return entry.compiled.runs.clone();
+    }
+    entries.retain(|entry| &entry.key != key);
+    let runs: Arc<[TextRun]> = compile_runs(inputs).into();
+    entries.push_back(NativeRunEntry {
+        key: key.clone(),
+        compiled: CompiledRuns {
+            text: inputs.text.clone(),
+            default_style: inputs.default_style.clone(),
+            highlights: std::mem::take(inputs.highlights),
+            overrides: std::mem::take(inputs.overrides),
+            runs: runs.clone(),
+        },
+    });
+    while entries.len() > 16
+        || entries
+            .iter()
+            .map(|entry| {
+                entry.compiled.text.len() + std::mem::size_of_val(entry.compiled.runs.as_ref())
+            })
+            .sum::<usize>()
+            > 16 * 1024 * 1024
+    {
+        entries.pop_front();
+    }
+    runs
+}
+
 /// The selection identity of a painted leaf.
 #[derive(Clone)]
 struct LeafFrame {
     key: LeafKey,
     focus: FocusHandle,
+}
+
+/// Exact source/style topology supplied to layout and paint callbacks.
+/// Only the paint callback is read evidence.
+#[derive(Clone)]
+pub struct NativeRowReady {
+    pub ordinal: usize,
+    pub row_count: usize,
+    pub width: Pixels,
+    pub font_size: Pixels,
+    pub page: Arc<crate::markdown_renderer::NativeWindow>,
+}
+/// Asks the owner to repaint once a native glyph window is prepared.
+pub type NativeNotify = Rc<dyn Fn(&mut App)>;
+/// Tells the owner a native row was laid out (or painted).
+pub type NativeReady = Rc<dyn Fn(NativeRowReady, &mut App)>;
+/// Tells the owner a native row failed to prepare, and why.
+pub type NativeFailure = Rc<dyn Fn(String, &mut App)>;
+/// Reports where an already shaped prefix ends on screen.
+pub(crate) type FrontierReport = Rc<dyn Fn(Option<Pixels>, &mut Window)>;
+/// Ordinal, row count, width, font size, line height, window start and end
+/// of the last native window reported to the owner.
+type NativeReport = (usize, usize, Pixels, Pixels, Pixels, usize, usize);
+/// Row count, width, font size and ordinal of the last reported layout.
+type NativeLayoutReport = (usize, Pixels, Pixels, usize);
+
+/// What a long literal leaf tells its owner as its native window prepares
+/// and paints.
+pub struct NativeWindowEvents {
+    /// The glyph window finished preparing.
+    pub notify: NativeNotify,
+    /// The row was laid out: its topology is known.
+    pub layout_ready: NativeReady,
+    /// The row painted: evidence it was seen.
+    pub ready: NativeReady,
+}
+type ProjectedState = (
+    Arc<crate::markdown_renderer::native_projection::ProjectedNativeRow>,
+    Pixels,
+    Arc<[TextRun]>,
+);
+/// A prepared native row and what it reported when it became ready.
+type PreparedNative = (ProjectedState, NativeRowReady);
+struct MeasuredNative {
+    renderer: Rc<crate::markdown_renderer::MarkdownRenderer>,
+    key: SharedString,
+    ordinal: usize,
+    range: Range<usize>,
+    notify: NativeNotify,
+    ready: NativeReady,
+    layout_ready: NativeReady,
+    layout_report: Rc<RefCell<Option<NativeLayoutReport>>>,
+    prepared: Rc<RefCell<Option<PreparedNative>>>,
+    report: Rc<RefCell<Option<NativeReport>>>,
 }
 
 /// Read-only selectable text element for transcript bodies.
@@ -246,7 +438,11 @@ struct LeafFrame {
 /// share one behavior.
 pub struct SelectableText {
     id: ElementId,
+    selection_order: Rc<[u64]>,
+    selection_scope: SharedString,
+    separator: &'static str,
     text: SharedString,
+    source_slice: Option<Range<usize>>,
     base_highlights: RangeSlice<(Range<usize>, HighlightStyle)>,
     text_run_overrides: RangeSlice<TextRunOverride>,
     inline_images: Vec<(usize, std::sync::Arc<gpui::RenderImage>)>,
@@ -259,6 +455,12 @@ pub struct SelectableText {
     swatch_edge: Hsla,
     copies: Rc<[(Range<usize>, SharedString)]>,
     styled: Option<StyledText>,
+    projected: Option<ProjectedState>,
+    measured_native: Option<MeasuredNative>,
+    native_failure: Option<NativeFailure>,
+    reveal_frontier: Option<(usize, FrontierReport)>,
+    geometry: Option<LeafLayout>,
+    native_geometry: Option<Rc<RefCell<native_geometry::NativeGeometryCache>>>,
     leaf: Option<LeafFrame>,
 }
 
@@ -280,7 +482,11 @@ impl SelectableText {
     ) -> Self {
         Self {
             id: id.into(),
+            selection_order: Rc::from([]),
+            selection_scope: "".into(),
+            separator: "\n\n",
             text: text.into(),
+            source_slice: None,
             base_highlights: RangeSlice::Owned(base_highlights),
             text_run_overrides: RangeSlice::default(),
             inline_images: Vec::new(),
@@ -293,8 +499,82 @@ impl SelectableText {
             swatch_edge: theme.colors.foreground.with_alpha(0.22).to_paint(),
             copies: Rc::from([]),
             styled: None,
+            projected: None,
+            measured_native: None,
+            native_failure: None,
+            reveal_frontier: None,
+            geometry: None,
+            native_geometry: None,
             leaf: None,
         }
+    }
+
+    /// Measures the actual inherited content width, then requests a bounded
+    /// background native glyph window. No source is shaped during layout.
+    /// `on_layout_ready` publishes topology even if resize removed this ordinal.
+    /// Only `on_ready` is paint evidence; loading placeholders never invoke it.
+    pub fn native_window(
+        mut self,
+        renderer: Rc<crate::markdown_renderer::MarkdownRenderer>,
+        key: SharedString,
+        ordinal: usize,
+        range: Range<usize>,
+        events: NativeWindowEvents,
+    ) -> Self {
+        assert!(range.contains(&ordinal) && range.len() <= 128);
+        self.measured_native = Some(MeasuredNative {
+            renderer,
+            key,
+            ordinal,
+            range,
+            notify: events.notify,
+            ready: events.ready,
+            layout_ready: events.layout_ready,
+            layout_report: Rc::default(),
+            prepared: Rc::default(),
+            report: Rc::default(),
+        });
+        self
+    }
+
+    /// Reports the bottom of an already shaped logical prefix. The complete
+    /// native text remains the layout/selection source; this never shapes a slice.
+    pub(crate) fn with_reveal_frontier(mut self, end: usize, report: FrontierReport) -> Self {
+        self.reveal_frontier = Some((end, report));
+        self
+    }
+
+    /// Reports explicit native admission or shaping errors to the owning view.
+    /// A failed source remains noninteractive until the owner retries or replaces it.
+    pub fn native_failure_handler(mut self, callback: NativeFailure) -> Self {
+        self.native_failure = Some(callback);
+        self
+    }
+
+    /// Stable source order, independent of painting, scrolling and layout. The prefix
+    /// identifies the transcript item; suffixes identify prepared blocks and cells.
+    /// `separator` is inserted before this leaf when a selection crosses into it.
+    #[must_use]
+    pub fn selection_scope(mut self, scope: impl Into<SharedString>) -> Self {
+        self.selection_scope = scope.into();
+        self
+    }
+    pub fn selection_order(mut self, order: Vec<u64>, separator: &'static str) -> Self {
+        self.selection_order = order.into();
+        self.separator = separator;
+        self
+    }
+
+    /// Displays a byte range of the full registered semantic leaf. The caller
+    /// supplies exactly that UTF-8 slice as `text`; links and style ranges remain
+    /// local to the displayed text. Selection/copy offsets address the full source.
+    /// A fragment without a matching registered source cannot become a partial
+    /// substitute for that source.
+    #[must_use]
+    pub fn source_slice(mut self, range: Range<usize>) -> Self {
+        assert_eq!(range.end.checked_sub(range.start), Some(self.text.len()));
+        self.source_slice = Some(range);
+        self
     }
 
     /// Paints color squares in reserved em-space slots, preserving text
@@ -444,6 +724,27 @@ impl Element for SelectableText {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let retained = Self::retained_state(global_id, window, cx);
+        self.native_geometry = retained
+            .as_ref()
+            .map(|retained| retained.native_geometry.clone());
+        self.leaf = retained
+            .as_ref()
+            .and_then(|retained| retained.focus.clone())
+            .zip(global_id)
+            .map(|(focus, global_id)| LeafFrame {
+                key: if self.selection_order.is_empty() {
+                    LeafKey::new(global_id)
+                } else {
+                    LeafKey::semantic(&self.selection_scope, &self.selection_order)
+                },
+                focus,
+            });
+        if let Some((row, height, _)) = &self.projected {
+            let mut style = gpui::Style::default();
+            style.size.width = row.layout.width.into();
+            style.size.height = (*height).into();
+            return (window.request_layout(style, [], cx), ());
+        }
         let default_style = window.text_style();
         let mut inputs = RunInputs {
             text: &self.text,
@@ -451,18 +752,116 @@ impl Element for SelectableText {
             highlights: &mut self.base_highlights,
             overrides: &mut self.text_run_overrides,
         };
-        let runs = match retained.as_ref() {
-            Some(retained) => retained.compiled_runs(&mut inputs),
-            None => compile_runs(&inputs),
+        let runs = if let Some(native) = self.measured_native.as_ref() {
+            native_runs(&native.renderer, &native.key, &mut inputs)
+        } else {
+            match retained.as_ref() {
+                Some(retained) => retained.compiled_runs(&mut inputs),
+                None => Arc::from(compile_runs(&inputs)),
+            }
         };
-        self.leaf = retained
-            .and_then(|retained| retained.focus)
-            .zip(global_id)
-            .map(|(focus, global_id)| LeafFrame {
-                key: LeafKey::new(global_id),
-                focus,
-            });
-        let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
+        if let Some(native) = self.measured_native.as_mut() {
+            if let Some(retained) = retained.as_ref() {
+                native.report = retained.native_report.clone();
+                native.layout_report = retained.native_layout_report.clone();
+            }
+            let renderer = native.renderer.clone();
+            let key = native.key.clone();
+            let range = native.range.clone();
+            let ordinal = native.ordinal;
+            let notify = native.notify.clone();
+            let prepared = native.prepared.clone();
+            let layout_report = native.layout_report.clone();
+            let layout_ready = native.layout_ready.clone();
+            let failure = self.native_failure.clone();
+            let error_state = retained
+                .as_ref()
+                .map(|retained| retained.native_error.clone())
+                .unwrap_or_default();
+            let source = self.text.clone();
+            let font_size = default_style.font_size.to_pixels(window.rem_size());
+            let height = window.pixel_snap(
+                default_style
+                    .line_height
+                    .to_pixels(font_size.into(), window.rem_size()),
+            );
+            let layout = window.request_measured_layout(
+                gpui::Style::default(),
+                move |known, available, _, cx| {
+                    // Intrinsic probes provide no wrap width. Await the parent's
+                    // definite content constraint instead of guessing viewport width.
+                    let width = known.width.or(match available.width {
+                        gpui::AvailableSpace::Definite(width) => Some(width),
+                        _ => None,
+                    });
+                    *prepared.borrow_mut() = None;
+                    let Some(width) = width
+                        .filter(|width| f32::from(*width).is_finite() && *width > Pixels::ZERO)
+                    else {
+                        return gpui::size(Pixels::ZERO, height);
+                    };
+                    let notify = notify.clone();
+                    let result = renderer.prepare_native_window(
+                        key.clone(),
+                        source.clone(),
+                        font_size,
+                        width,
+                        runs.clone(),
+                        range.clone(),
+                        cx,
+                        move |cx| notify(cx),
+                    );
+                    if let crate::markdown_renderer::NativePreparation::Ready(page) = &result {
+                        *error_state.borrow_mut() = None;
+                        let ready = NativeRowReady {
+                            ordinal,
+                            row_count: page.row_count(),
+                            width,
+                            font_size,
+                            page: page.clone(),
+                        };
+                        let fingerprint = (
+                            page.runs.as_ptr() as usize,
+                            width,
+                            font_size,
+                            page.row_count(),
+                        );
+                        if layout_report.borrow().as_ref() != Some(&fingerprint) {
+                            *layout_report.borrow_mut() = Some(fingerprint);
+                            let ready = ready.clone();
+                            let callback = layout_ready.clone();
+                            cx.defer(move |cx| callback(ready, cx));
+                        }
+                        if let Some(row) = ordinal
+                            .checked_sub(page.start)
+                            .and_then(|index| page.rows.get(index))
+                        {
+                            *prepared.borrow_mut() = Some((
+                                (row.clone(), height, page.runs.clone()),
+                                NativeRowReady {
+                                    ordinal,
+                                    row_count: page.row_count(),
+                                    width,
+                                    font_size,
+                                    page: page.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    if let crate::markdown_renderer::NativePreparation::Failed(error) = result
+                        && error_state.borrow().as_ref() != Some(&error)
+                    {
+                        *error_state.borrow_mut() = Some(error.clone());
+                        if let Some(callback) = failure.clone() {
+                            cx.defer(move |cx| callback(error, cx));
+                        }
+                    }
+                    gpui::size(width, height)
+                },
+            );
+            return (layout, ());
+        }
+        let mut styled = StyledText::new(self.text.clone()).with_runs(runs.to_vec());
         let (layout_id, ()) = styled.request_layout(None, inspector_id, window, cx);
         self.styled = Some(styled);
         (layout_id, ())
@@ -477,40 +876,79 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) -> Hitbox {
-        if self.styled.is_none() {
-            // Defensive: the framework always runs `request_layout` first,
-            // so this only covers abnormal embedders. Rebuild from the
-            // caller highlights and run overrides (a legal prepaint-phase
-            // layout) rather than losing the frame or the shaping.
-            let default_style = window.text_style();
-            let runs = compile_text_runs(
-                self.text.as_ref(),
-                &default_style,
-                self.base_highlights.as_slice(),
-                self.text_run_overrides.as_slice(),
-            );
-            let mut styled = StyledText::new(self.text.clone()).with_runs(runs);
-            let _ = styled.request_layout(None, inspector_id, window, cx);
-            self.styled = Some(styled);
+        if let Some(native) = self.measured_native.as_ref() {
+            self.projected = native
+                .prepared
+                .borrow()
+                .as_ref()
+                .map(|(row, _)| row.clone());
+            if self.projected.is_none() {
+                self.geometry = None;
+                return window.insert_hitbox(bounds, HitboxBehavior::Normal);
+            }
         }
         if let Some(leaf) = self.leaf.as_ref() {
             window.set_focus_handle(&leaf.focus, cx);
         }
-        let Some(styled) = self.styled.as_mut() else {
-            return window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        self.geometry = if let Some((row, height, _)) = &self.projected {
+            Some(LeafLayout::Projected {
+                row: row.clone(),
+                bounds,
+                height: *height,
+            })
+        } else {
+            let styled = self
+                .styled
+                .as_mut()
+                .expect("request_layout prepares selectable text before prepaint");
+            styled.prepaint(None, inspector_id, bounds, state, window, cx);
+            let layout = styled.layout().clone();
+            let cells = self.native_geometry.as_ref().and_then(|cache| {
+                cache
+                    .borrow_mut()
+                    .visible(&self.text, &layout, window.content_mask().bounds)
+            });
+            Some(LeafLayout::Native(layout, cells))
         };
-        styled.prepaint(None, inspector_id, bounds, state, window, cx);
+        if let Some((end, report)) = &self.reveal_frontier {
+            let end = (*end).min(self.text.len());
+            let index = self.text[..end]
+                .char_indices()
+                .next_back()
+                .map(|(index, _)| index);
+            let bottom = index.and_then(|index| {
+                if let Some((row, height, _)) = &self.projected {
+                    row.clusters
+                        .iter()
+                        .any(|cluster| cluster.source.start < end)
+                        .then_some(bounds.top() + *height)
+                } else {
+                    // The original TextLayout owns every native glyph and wrap.
+                    // Do not use the clipped hit-cell cache to infer full geometry.
+                    self.styled.as_ref().and_then(|styled| {
+                        let layout = styled.layout();
+                        layout
+                            .position_for_index(index)
+                            .map(|position| position.y + layout.line_height())
+                    })
+                }
+            });
+            report(bottom, window);
+        }
         if let Some(leaf) = self.leaf.as_ref() {
             let window_id = window.window_handle().window_id();
             let doc = document(cx, window_id);
             if doc.is_active() {
                 let observed = Observed {
                     key: leaf.key,
+                    scope: self.selection_scope.clone(),
+                    order: self.selection_order.clone(),
+                    separator: self.separator,
                     text: self.text.clone(),
+                    source_slice: self.source_slice.clone(),
                     copies: Rc::clone(&self.copies),
                     view: window.current_view(),
-                    bounds: styled.layout().bounds(),
-                    line_height: styled.layout().line_height(),
+                    bounds,
                 };
                 if doc.observe_in_frame(observed) {
                     cx.defer(move |cx| document(cx, window_id).flush_frame());
@@ -530,10 +968,30 @@ impl Element for SelectableText {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let Some(layout) = self.styled.as_ref().map(|styled| styled.layout().clone()) else {
+        let Some(layout) = self.geometry.clone() else {
             return;
         };
 
+        if let Some(native) = self.measured_native.as_ref()
+            && bounds.intersects(&window.content_mask().bounds)
+            && let Some((_, ready)) = native.prepared.borrow().as_ref()
+        {
+            let fingerprint = (
+                self.text.as_ptr() as usize,
+                ready.page.runs.as_ptr() as usize,
+                ready.width,
+                ready.font_size,
+                self.projected.as_ref().unwrap().1,
+                ready.ordinal,
+                ready.row_count,
+            );
+            if native.report.borrow().as_ref() != Some(&fingerprint) {
+                *native.report.borrow_mut() = Some(fingerprint);
+                let ready = ready.clone();
+                let callback = native.ready.clone();
+                cx.defer(move |cx| callback(ready, cx));
+            }
+        }
         if hitbox.is_hovered(window) {
             let hovered = layout.index_for_position(window.mouse_position()).ok();
             let over_link = hovered
@@ -553,17 +1011,25 @@ impl Element for SelectableText {
             // Every prepaint of this frame has run, so leaves new to this
             // frame already have their place in the order.
             doc.flush_frame();
-            if let Some(range) = doc.range_in(leaf.key, &self.text) {
-                paint_selection(&layout, &range, self.selection_color, window);
+            if let Some(range) = doc.paint_slice_range(
+                leaf.key,
+                &self.selection_scope,
+                &self.text,
+                self.source_slice.as_ref(),
+            ) {
+                layout.paint_selection(&range, self.selection_color, window);
             }
             let live = LiveLeaf {
                 observed: Observed {
                     key: leaf.key,
+                    scope: self.selection_scope.clone(),
+                    order: self.selection_order.clone(),
+                    separator: self.separator,
                     text: self.text.clone(),
+                    source_slice: self.source_slice.clone(),
                     copies: Rc::clone(&self.copies),
                     view: window.current_view(),
                     bounds: layout.bounds(),
-                    line_height: layout.line_height(),
                 },
                 layout: layout.clone(),
                 hovered: false,
@@ -588,6 +1054,72 @@ impl Element for SelectableText {
 
         if let Some(styled) = self.styled.as_mut() {
             styled.paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+        }
+        if let Some((row, height, styles)) = &self.projected {
+            let baseline =
+                (*height - row.layout.ascent - row.layout.descent) / 2.0 + row.layout.ascent;
+            let style_at = |index: usize| {
+                let mut end = 0;
+                styles.iter().find(|style| {
+                    end += style.len;
+                    index < end
+                })
+            };
+            for cell in &row.clusters {
+                let Some(style) = style_at(cell.source.start) else {
+                    continue;
+                };
+                if let Some(color) = style.background_color {
+                    window.paint_quad(gpui::fill(
+                        Bounds::new(
+                            bounds.origin + gpui::point(cell.left, Pixels::ZERO),
+                            gpui::size(cell.right - cell.left, *height),
+                        ),
+                        color,
+                    ));
+                }
+                if let Some(underline) = &style.underline {
+                    let mut underline = *underline;
+                    underline.color = Some(underline.color.unwrap_or(style.color));
+                    window.paint_underline(
+                        bounds.origin
+                            + gpui::point(cell.left, baseline + row.layout.descent * 0.618),
+                        cell.right - cell.left,
+                        &underline,
+                    );
+                }
+                if let Some(strike) = &style.strikethrough {
+                    let mut strike = *strike;
+                    strike.color = Some(strike.color.unwrap_or(style.color));
+                    window.paint_strikethrough(
+                        bounds.origin
+                            + gpui::point(cell.left, (row.layout.ascent * 0.5 + baseline) * 0.5),
+                        cell.right - cell.left,
+                        &strike,
+                    );
+                }
+            }
+            for run in &row.layout.runs {
+                for glyph in &run.glyphs {
+                    let Some(style) = style_at(glyph.index) else {
+                        continue;
+                    };
+                    let origin =
+                        bounds.origin + glyph.position + gpui::point(Pixels::ZERO, baseline);
+                    if glyph.is_emoji {
+                        let _ =
+                            window.paint_emoji(origin, run.font_id, glyph.id, row.layout.font_size);
+                    } else {
+                        let _ = window.paint_glyph(
+                            origin,
+                            run.font_id,
+                            glyph.id,
+                            row.layout.font_size,
+                            style.color,
+                        );
+                    }
+                }
+            }
         }
         for (index, image) in &self.inline_images {
             if let (Some(origin), Some(end)) = (
@@ -628,7 +1160,7 @@ impl IntoElement for SelectableText {
 /// Paints one color square in its slot: as wide as most of the slot and no
 /// taller than a little over half the line, rounded, with a hairline edge
 /// so dark colors hold their shape on a dark canvas.
-fn paint_swatch(layout: &TextLayout, swatch: &InlineSwatch, edge: Hsla, window: &mut Window) {
+fn paint_swatch(layout: &LeafLayout, swatch: &InlineSwatch, edge: Hsla, window: &mut Window) {
     let (Some(origin), Some(end)) = (
         layout.position_for_index(swatch.offset),
         layout.position_for_index(swatch.offset + '\u{2003}'.len_utf8()),
@@ -660,7 +1192,12 @@ fn paint_swatch(layout: &TextLayout, swatch: &InlineSwatch, edge: Hsla, window: 
 /// Paints the selection behind the glyphs of `range`, one box per visual
 /// row at full line height, the way Chrome highlights a text selection. A
 /// selected line break adds a quarter-line sliver after the row.
-fn paint_selection(layout: &TextLayout, range: &Range<usize>, color: Hsla, window: &mut Window) {
+fn paint_native_selection(
+    layout: &TextLayout,
+    range: &Range<usize>,
+    color: Hsla,
+    window: &mut Window,
+) {
     let bounds = layout.bounds();
     let line_height = layout.line_height();
     let mut row_top = bounds.top();
@@ -804,7 +1341,7 @@ fn register_pointer_listeners(live: &LiveLeaf, hitbox: &Hitbox, window: &mut Win
 
 /// A right-click over one of `ranges` calls `on_context` with its index.
 fn register_context_listener(
-    layout: TextLayout,
+    layout: LeafLayout,
     ranges: Rc<[Range<usize>]>,
     on_context: SelectableContextHandler,
     hitbox: &Hitbox,
@@ -830,7 +1367,7 @@ fn register_context_listener(
     );
 }
 
-/// `ctrl`+A selects this leaf, `ctrl`+C copies the window's selection.
+/// Ctrl+A selects the focused source scope; Ctrl+C copies the selection.
 fn register_key_listener(leaf: &LeafFrame, observed: Observed, window: &mut Window) {
     let leaf = leaf.clone();
     window.on_key_event(
@@ -843,7 +1380,7 @@ fn register_key_listener(leaf: &LeafFrame, observed: Observed, window: &mut Wind
             let window_id = window.window_handle().window_id();
             if is_select_all_keystroke(key, modifiers) {
                 let observed = observed.clone();
-                change_selection(window_id, cx, |doc| doc.select_leaf(observed));
+                change_selection(window_id, cx, |doc| doc.select_source(observed));
                 window.prevent_default();
                 cx.stop_propagation();
             } else if is_copy_keystroke(key, modifiers)
@@ -919,22 +1456,25 @@ fn press(roster: &[LiveLeaf], event: &MouseDownEvent, window: &mut Window, cx: &
         return;
     };
     let unit = SelectionUnit::from_click_count(event.click_count);
-    let offset = match unit {
-        SelectionUnit::Character => caret_index_for_position(&hit.layout, event.position),
+    let offset = hit.observed.source_offset(match unit {
+        SelectionUnit::Character => hit.layout.caret(event.position),
         SelectionUnit::Word | SelectionUnit::Paragraph => glyph_index(hit, event.position),
-    };
+    });
     let glyph = glyph_index(hit, event.position);
     let extend = event.modifiers.shift && document(cx, window_id).has_selection();
-    let live = observed(roster);
+    let live: Vec<_> = observed(roster)
+        .into_iter()
+        .filter(|leaf| leaf.scope == hit.observed.scope)
+        .collect();
     let key = hit.observed.key;
     change_selection(window_id, cx, |doc| {
         if extend {
             doc.observe(&live);
         } else {
-            doc.reset_to(&live);
+            doc.reset_with_sources(&live);
         }
         doc.press(key, offset, unit, extend);
-        doc.set_pressed(key, glyph, event.click_count);
+        doc.set_pressed(key, hit.observed.source_offset(glyph), event.click_count);
     });
     if let Some(focus) = hit.focus.as_ref() {
         window.focus(focus, cx);
@@ -970,8 +1510,12 @@ fn drag_target(roster: &[LiveLeaf], position: Point<Pixels>) -> Option<(LeafKey,
         })
         .min_by(|left, right| f32::from(distance(left)).total_cmp(&f32::from(distance(right))));
     if let Some(live) = spanning {
-        let caret = caret_index_for_position(&live.layout, position);
-        return Some((live.observed.key, caret, glyph_index(live, position)));
+        let caret = live.layout.caret(position);
+        return Some((
+            live.observed.key,
+            live.observed.source_offset(caret),
+            live.observed.source_offset(glyph_index(live, position)),
+        ));
     }
     let above = roster
         .iter()
@@ -981,22 +1525,30 @@ fn drag_target(roster: &[LiveLeaf], position: Point<Pixels>) -> Option<(LeafKey,
                 .total_cmp(&f32::from(right.observed.bounds.bottom()))
         });
     if let Some(live) = above {
-        let end = live.observed.text.len();
+        let end = live
+            .observed
+            .source_offset(live.layout.source_range(live.observed.text.len()).end);
         return Some((live.observed.key, end, end));
     }
-    roster.first().map(|live| (live.observed.key, 0, 0))
+    roster.first().map(|live| {
+        let start = live
+            .observed
+            .source_offset(live.layout.source_range(live.observed.text.len()).start);
+        (live.observed.key, start, start)
+    })
 }
 
 fn drag(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx: &mut App) {
     let window_id = window.window_handle().window_id();
     let live = observed(roster);
     let target = drag_target(roster, position);
-    change_selection(window_id, cx, |doc| {
-        doc.observe(&live);
-        if let Some((key, caret, glyph)) = target {
-            doc.drag_to(key, caret, glyph);
+    let doc = document(cx, window_id);
+    doc.observe(&live);
+    if let Some((key, caret, glyph)) = target {
+        for view in doc.drag_views(key, caret, glyph) {
+            cx.notify(view);
         }
-    });
+    }
 }
 
 /// Ends the gesture. A gesture that left a selection consumes the release;
@@ -1020,6 +1572,9 @@ fn release(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx
     else {
         return;
     };
+    let Some(down) = down.checked_sub(hit.observed.source_offset(0)) else {
+        return;
+    };
     let up = glyph_index(hit, position);
     let Some(on_link) = hit.on_link.clone() else {
         return;
@@ -1032,3 +1587,6 @@ fn release(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx
         on_link(index, window, cx);
     }
 }
+
+#[cfg(test)]
+mod native_tests;

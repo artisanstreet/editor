@@ -1,6 +1,4 @@
-//! Bundled Artisan Neo, Cal Sans, Spline Sans and Spline Sans Mono
-//! native OpenType fonts, plus Test Founders Grotesk for the titlebar
-//! wordmark.
+//! Bundled Spline Sans and Spline Sans Mono native OpenType fonts.
 //!
 //! Files are embedded at compile time and registered once through
 //! `editor_ui::fonts::register_bundled_fonts`. Family names and weight ranges
@@ -17,13 +15,13 @@ use std::borrow::Cow;
 /// One vendored typeface: its family identity plus embedded bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct BundledFont {
-    /// File name under `modules/assets/fonts/`.
+    /// File name under `crates/editor-assets/fonts/`.
     pub file_name: &'static str,
     /// Internal family name used by the native text system.
     pub family: &'static str,
     /// Inclusive weight range verified from the font's fvar or OS/2 table.
     pub weights: (u16, u16),
-    /// Path of the license or provenance note under `modules/assets/`.
+    /// Path of the license or provenance note under `crates/editor-assets/`.
     pub license_path: &'static str,
     /// Embedded license or provenance note contents.
     pub license_text: &'static str,
@@ -53,24 +51,6 @@ impl std::error::Error for UnknownFont {}
 
 /// Every bundled typeface, ordered by family name so lookups binary search.
 pub const ALL: &[BundledFont] = &[
-    BundledFont {
-        file_name: "artisan-neo-600.ttf",
-        family: "Artisan Neo",
-        weights: (600, 600),
-        license_path: "licenses/artisan-neo-OFL.txt",
-        license_text: include_str!("../licenses/artisan-neo-OFL.txt"),
-        bytes: include_bytes!("../fonts/artisan-neo-600.ttf"),
-        static_faces: &[include_bytes!("../fonts/artisan-neo-600.ttf")],
-    },
-    BundledFont {
-        file_name: "cal-sans-700.ttf",
-        family: "Cal Sans",
-        weights: (700, 700),
-        license_path: "licenses/cal-sans-OFL.txt",
-        license_text: include_str!("../licenses/cal-sans-OFL.txt"),
-        bytes: include_bytes!("../fonts/cal-sans-700.ttf"),
-        static_faces: &[include_bytes!("../fonts/cal-sans-700.ttf")],
-    },
     BundledFont {
         file_name: "spline-sans-variable.ttf",
         family: "Spline Sans",

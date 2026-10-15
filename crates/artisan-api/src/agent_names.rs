@@ -108,8 +108,9 @@ pub const AGENT_NAMES: [&str; 100] = [
 
 /// A name for the agent `seed` (its item id) that `taken` doesn't hold,
 /// case-insensitively. Base names come first; once every one is taken they
-/// repeat with a number ("Ada 2"). The seed picks among what's free, so a
-/// name doesn't depend on the order agents were stored in.
+/// repeat with a number ("Ada 2"). The seed picks among the names currently
+/// free; assignment depends on which agents have already reserved a name.
+/// Forge persists the chosen name so later reads do not reassign it.
 #[must_use]
 pub fn choose_agent_name<'a>(seed: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
     let taken: std::collections::HashSet<String> =
@@ -138,7 +139,9 @@ pub fn choose_agent_name<'a>(seed: &str, taken: impl IntoIterator<Item = &'a str
 /// A name for an agent stored before Artisan named them: stable per id.
 #[must_use]
 pub fn fallback_agent_name(seed: &str) -> &'static str {
-    pick_from(&AGENT_NAMES, seed_hash(seed)).copied().unwrap_or("Agent")
+    pick_from(&AGENT_NAMES, seed_hash(seed))
+        .copied()
+        .unwrap_or("Agent")
 }
 
 fn pick_from<T>(from: &[T], pick: u64) -> Option<&T> {
@@ -161,11 +164,20 @@ mod tests {
     fn names_are_unique_in_a_thread_then_numbered() {
         let mut taken: Vec<String> = Vec::new();
         for agent in 0..AGENT_NAMES.len() + 3 {
-            let name = choose_agent_name(&format!("agent-{agent}"), taken.iter().map(String::as_str));
+            let name =
+                choose_agent_name(&format!("agent-{agent}"), taken.iter().map(String::as_str));
             assert!(!taken.contains(&name), "{name} reused");
             taken.push(name);
         }
-        assert!(taken[..AGENT_NAMES.len()].iter().all(|name| !name.contains(' ')));
-        assert!(taken[AGENT_NAMES.len()..].iter().all(|name| name.ends_with(" 2")));
+        assert!(
+            taken[..AGENT_NAMES.len()]
+                .iter()
+                .all(|name| !name.contains(' '))
+        );
+        assert!(
+            taken[AGENT_NAMES.len()..]
+                .iter()
+                .all(|name| name.ends_with(" 2"))
+        );
     }
 }

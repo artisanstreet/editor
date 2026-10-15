@@ -8,12 +8,14 @@
 //!
 //! Verified against Codex 0.162.1: approvals answered `acceptForSession`
 //! skip the next identical prompt and `decline` declines the call, though
-//! `availableDecisions` lists neither; MCP servers passed as
-//! `-c mcp_servers.<name>={…}` reach every thread (a `mcp_servers` table in
-//! `thread/start`'s `config` would replace them, so it's never sent); a
+//! `availableDecisions` lists neither; MCP servers in the managed config
+//! reach every thread (a `mcp_servers` table in `thread/start` would replace
+//! that config, so it is not sent); a
 //! steer after the turn ended is rejected with "no active turn to steer".
 
+mod citations;
 mod decoder;
+mod protocol;
 #[cfg(test)]
 mod tests;
 
@@ -61,7 +63,7 @@ impl Harness for CodexHarness {
             });
             let events = run.decoder.finish();
             run.emit(events).await;
-            run.process.close_stdin();
+            run.process.close_stdin("the turn ended");
             run.process.kill().await;
             outcome
         })
@@ -81,10 +83,11 @@ fn start(turn: &Turn) -> Result<EngineProcess> {
     process::spawn(turn, &["app-server".to_owned()])
 }
 
-/// A user message on its way to Codex: `steer` names it when it was a steer.
+/// One queued provider input and whether it acknowledges a persisted user input.
 struct Queued {
     input: UserInput,
-    steer: bool,
+    /// Provider-generated follow-ups have no durable user input to acknowledge.
+    acknowledge: bool,
 }
 
 struct Run {
@@ -93,10 +96,10 @@ struct Run {
     io: RunIo,
     /// Messages for the next `turn/start`.
     queued: Vec<Queued>,
-    /// The `turn/start` in flight and the steers it carries.
+    /// The `turn/start` in flight and the durable input IDs it acknowledges.
     starting: Option<(u64, Vec<ItemId>)>,
     /// `turn/steer` requests in flight.
-    steering: HashMap<u64, UserInput>,
+    steering: HashMap<u64, Queued>,
     cancelling: bool,
     /// Start a turn with no new input: Codex holds a message it never answered.
     nudge: bool,
@@ -134,7 +137,7 @@ impl Run {
         }
         self.queued.push(Queued {
             input: turn.input.clone(),
-            steer: false,
+            acknowledge: true,
         });
         self.pump(turn).await?;
         self.drive(turn).await
@@ -195,7 +198,7 @@ impl Run {
                         }
                     }
                     for text in self.decoder.take_messages() {
-                        self.queued.push(Queued { input: UserInput { id: ItemId::new(), text, images: Vec::new() }, steer: false });
+                        self.queued.push(Queued { input: UserInput { id: ItemId::default(), text, images: Vec::new() }, acknowledge: false });
                     }
                     if self.idle() {
                         // A steer that raced the turn's end still gets its turn.
@@ -244,7 +247,10 @@ impl Run {
 
     async fn input(&mut self, input: Input) -> Result<()> {
         match input {
-            Input::Steer(input) => self.queued.push(Queued { input, steer: true }),
+            Input::Steer(input) => self.queued.push(Queued {
+                input,
+                acknowledge: true,
+            }),
             Input::Answer { key, answer } => {
                 let events = self.decoder.answer(&key, &answer);
                 self.emit(events).await;
@@ -265,7 +271,7 @@ impl Run {
             for queued in std::mem::take(&mut self.queued) {
                 let params = json!({ "threadId": thread, "expectedTurnId": turn_id, "input": user_input(&queued.input) });
                 let id = self.decoder.request("turn/steer", params);
-                self.steering.insert(id, queued.input);
+                self.steering.insert(id, queued);
             }
         } else if self.steering.is_empty() {
             self.nudge = false;
@@ -277,12 +283,12 @@ impl Run {
             let mut params = json!({ "threadId": thread, "input": input });
             turn_overrides(&turn.config, &mut params);
             let id = self.decoder.request("turn/start", params);
-            let steers = queued
+            let inputs = queued
                 .into_iter()
-                .filter(|queued| queued.steer)
+                .filter(|queued| queued.acknowledge)
                 .map(|queued| queued.input.id)
                 .collect();
-            self.starting = Some((id, steers));
+            self.starting = Some((id, inputs));
         }
         self.flush().await
     }
@@ -297,24 +303,26 @@ impl Run {
                     return Err(anyhow!("Codex turn/start: {error}"));
                 }
                 for id in steers {
-                    self.io.emit(EngineEvent::SteerAccepted { id }).await;
+                    self.io.emit(EngineEvent::InputAccepted { id }).await;
                 }
             }
             "turn/steer" => {
-                let Some(input) = self.steering.remove(&response.id) else {
+                let Some(queued) = self.steering.remove(&response.id) else {
                     return Ok(());
                 };
                 match response.result {
                     Ok(_) => {
-                        self.io
-                            .emit(EngineEvent::SteerAccepted { id: input.id })
-                            .await
+                        if queued.acknowledge {
+                            self.io
+                                .emit(EngineEvent::InputAccepted {
+                                    id: queued.input.id,
+                                })
+                                .await;
+                        }
                     }
                     Err(error) => {
-                        // Usually "no active turn to steer": the turn ended
-                        // first. It goes into the next turn instead.
-                        tracing::debug!(item = %input.id, "Codex took a steer as the next turn: {error}");
-                        self.queued.insert(0, Queued { input, steer: true });
+                        tracing::debug!(item = %queued.input.id, "Codex takes rejected steer as the next turn: {error}");
+                        self.queued.insert(0, queued);
                     }
                 }
             }
@@ -329,7 +337,7 @@ impl Run {
     }
 
     async fn handle_line(&mut self, line: &str) -> Result<()> {
-        let events = self.decoder.feed(line);
+        let events = self.decoder.feed(line)?;
         self.emit(events).await;
         self.flush().await
     }
@@ -371,6 +379,9 @@ fn thread_params(turn: &Turn) -> (&'static str, Value) {
     settings.insert("model_reasoning_summary".to_owned(), json!("auto"));
     if let Some(effort) = non_empty(config.effort.as_deref()) {
         settings.insert("model_reasoning_effort".to_owned(), json!(effort));
+    }
+    if let Some(tokens) = config.context_window_override() {
+        settings.insert("model_context_window".to_owned(), json!(tokens));
     }
     let mut params = json!({
         "cwd": turn.cwd,
@@ -416,11 +427,10 @@ fn turn_overrides(config: &EngineConfig, params: &mut Value) {
 }
 
 /// The chosen tier's id (`priority`); the standard tier sends nothing.
-/// Threads imported from the old Forge carry theirs in `options`.
 fn service_tier(config: &EngineConfig) -> Option<&str> {
     match non_empty(config.speed.as_deref()) {
         Some(speed) => Some(speed).filter(|speed| *speed != crate::catalog::STANDARD_SPEED),
-        None => non_empty(config.option_str("service_tier")).filter(|tier| *tier != "default"),
+        None => None,
     }
 }
 

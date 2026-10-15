@@ -1,0 +1,18 @@
+[package]
+name = "editor-sources"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "Bounded viewers for stored Forge sources: raw text pages and record collections, shared by the composer, conversation and inspector."
+
+[dependencies]
+anyhow.workspace = true
+artisan-api = { path = "../artisan-api" }
+editor-core = { path = "../editor-core" }
+editor-ui = { path = "../editor-ui" }
+gpui.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[lints]
+workspace = true

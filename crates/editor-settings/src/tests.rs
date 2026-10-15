@@ -8,7 +8,7 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use std::time::Duration;
 
 /// Runs GPUI until `check` holds; network work happens on real threads.
-fn wait_for<T>(
+pub(super) fn wait_for<T>(
     cx: &mut VisualTestContext,
     what: &str,
     check: impl Fn(&gpui::App) -> Option<T>,
@@ -127,4 +127,139 @@ fn pasted_pairing_string_adds_a_live_host_and_the_prompt_saves_to_forge(cx: &mut
         Screen::Marketplace,
         "the button opens the Marketplace"
     );
+}
+
+/// Holds a completed real request before its view callback. Each fixture owns
+/// its gate; unrelated Settings instances and network work are unaffected.
+#[derive(Clone)]
+pub(super) struct CompletionGate(std::sync::Arc<GateState>);
+struct GateState {
+    entered: std::sync::atomic::AtomicBool,
+    released: tokio::sync::Semaphore,
+    finished: std::sync::atomic::AtomicBool,
+}
+impl CompletionGate {
+    pub(super) fn new() -> Self {
+        Self(std::sync::Arc::new(GateState {
+            entered: std::sync::atomic::AtomicBool::new(false),
+            released: tokio::sync::Semaphore::new(0),
+            finished: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+    pub(super) async fn wait(&self) {
+        use std::sync::atomic::Ordering;
+        self.0.entered.store(true, Ordering::Release);
+        self.0.released.acquire().await.unwrap().forget();
+        self.0.finished.store(true, Ordering::Release);
+    }
+    pub(super) fn entered(&self) -> bool {
+        self.0.entered.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(super) fn release(&self) {
+        self.0.released.add_permits(1);
+    }
+    pub(super) fn finished(&self) -> bool {
+        self.0.finished.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[path = "../../editor-ui/test_support/forge.rs"]
+mod forge_fixture;
+
+pub(super) struct SettingsFixture {
+    pub(super) core: Entity<Core>,
+    pub(super) hosts: [editor_core::HostId; 2],
+    _runtime: tokio::runtime::Runtime,
+    _directory: tempfile::TempDir,
+}
+impl SettingsFixture {
+    pub(super) fn new(cx: &mut TestAppContext) -> Self {
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut configs = Vec::new();
+        let mut files = None;
+        for index in 0..2 {
+            let server = runtime
+                .block_on(forge_http::start(forge_http::ServeConfig {
+                    data_dir: directory.path().join(format!("forge-{index}")),
+                    listen: "127.0.0.1:0".parse().unwrap(),
+                }))
+                .unwrap();
+            let address = server.local_addr().unwrap().to_string();
+            let store = server.store().clone();
+            runtime.spawn(async move {
+                let _ = server.run().await;
+            });
+            let (paired_files, config) =
+                forge_fixture::pair(&store, &runtime, &address, &directory.path().join("editor"));
+            files = Some(paired_files);
+            configs.push(config);
+        }
+        let files = files.unwrap();
+        let hosts = [configs[0].id.clone(), configs[1].id.clone()];
+        files
+            .save_hosts(&editor_core::hosts::HostsFile {
+                hosts: configs,
+                last: Some(hosts[0].clone()),
+            })
+            .unwrap();
+        let core = cx.new(|cx| Core::new(files, cx).unwrap());
+        Self {
+            core,
+            hosts,
+            _runtime: runtime,
+            _directory: directory,
+        }
+    }
+    pub(super) fn open<'a>(
+        &self,
+        cx: &'a mut TestAppContext,
+        page: SettingsPage,
+    ) -> (Entity<Settings>, &'a mut VisualTestContext) {
+        let core = self.core.clone();
+        core.update(cx, |core, cx| core.navigate(Screen::Settings(page), cx));
+        cx.update(editor_ui::text_editor::TextEditor::bind_actions);
+        let (settings, cx) = cx.add_window_view(|window, cx| {
+            Settings::new(core.clone(), BuildInfo::default(), window, cx)
+        });
+        wait_for(cx, "both isolated hosts", |cx| {
+            self.hosts
+                .iter()
+                .all(|id| {
+                    core.read(cx)
+                        .host(id)
+                        .is_some_and(|host| host.read(cx).is_live())
+                })
+                .then_some(())
+        });
+        (settings, cx)
+    }
+    pub(super) fn select(&self, index: usize, page: SettingsPage, cx: &mut VisualTestContext) {
+        self.core.update(cx, |core, cx| {
+            core.navigate(
+                Screen::NewThread {
+                    host: self.hosts[index].clone(),
+                    project: None,
+                },
+                cx,
+            );
+            core.navigate(Screen::Settings(page), cx);
+        });
+        cx.run_until_parked();
+    }
+}
+pub(super) fn wait_gate(cx: &mut VisualTestContext, gate: &CompletionGate) {
+    wait_for(cx, "completed request at callback gate", |_| {
+        gate.entered().then_some(())
+    });
+}
+pub(super) fn finish_gate(cx: &mut VisualTestContext, gate: &CompletionGate) {
+    gate.release();
+    wait_for(cx, "released callback", |_| gate.finished().then_some(()));
+    cx.run_until_parked();
 }

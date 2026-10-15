@@ -4,15 +4,14 @@
 //! series over one x scale. Rendering recomputes the visible geometry from
 //! the window state (hidden series, hover, zoom, thresholds) every frame.
 
-use std::fmt::Write as _;
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _, SharedString};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::{BlockContext, RichBlock, kit, spec};
-use super::scale::exact;
+use super::super::{BlockContext, RichBlock, spec};
 
 pub(super) mod model;
 mod plot;
@@ -37,17 +36,8 @@ pub(super) enum XValue {
     Text(String),
 }
 
-impl XValue {
-    fn display(&self) -> String {
-        match self {
-            Self::Number(value) => exact(*value),
-            Self::Text(text) => text.clone(),
-        }
-    }
-}
-
 /// One series: `values` along the categories, or `[x, y]` points.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct SeriesSpec {
     #[serde(default)]
     pub(super) name: String,
@@ -58,7 +48,7 @@ pub(super) struct SeriesSpec {
 }
 
 /// An axis's label, unit, and pinned ends.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(super) struct Axis {
     #[serde(default)]
     pub(super) label: Option<String>,
@@ -71,7 +61,7 @@ pub(super) struct Axis {
 }
 
 /// A vertical rule (`x`), a horizontal rule (`y`), or a band (`x`..`x_end`).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct Annotation {
     #[serde(default)]
     pub(super) x: Option<XValue>,
@@ -93,7 +83,7 @@ pub(super) enum ParamKind {
 }
 
 /// A declared control; `threshold` moves a horizontal rule.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct Param {
     #[serde(default)]
     pub(super) id: String,
@@ -109,7 +99,7 @@ pub(super) struct Param {
 }
 
 /// The `chart` spec.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub(super) struct ChartSpec {
     #[serde(default)]
     pub(super) mark: Mark,
@@ -130,7 +120,32 @@ pub(super) struct ChartSpec {
     pub(super) params: Vec<Param>,
 }
 
-impl ChartSpec {
+/// Render configuration after raw samples/categories move into the indexed model.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ChartStyle {
+    pub(super) mark: Mark,
+    pub(super) stacked: bool,
+    pub(super) normalize: bool,
+    pub(super) x: Axis,
+    pub(super) y: Axis,
+    pub(super) annotations: Vec<Annotation>,
+    pub(super) params: Vec<Param>,
+}
+impl From<ChartSpec> for ChartStyle {
+    fn from(spec: ChartSpec) -> Self {
+        Self {
+            mark: spec.mark,
+            stacked: spec.stacked,
+            normalize: spec.normalize,
+            x: spec.x,
+            y: spec.y,
+            annotations: spec.annotations,
+            params: spec.params,
+        }
+    }
+}
+
+impl ChartStyle {
     /// Stacks when asked to, and always when normalizing to shares.
     pub(super) fn stacks(&self) -> bool {
         self.stacked || self.normalize
@@ -148,119 +163,100 @@ impl ChartSpec {
 /// A parsed chart: its spec and the model resolved from it.
 #[derive(Debug)]
 pub(super) struct Chart {
-    spec: Rc<ChartSpec>,
-    model: Rc<model::Model>,
+    spec: Arc<ChartStyle>,
+    model: Arc<model::Model>,
 }
 
 /// Parses a `chart` spec.
-pub(super) fn parse(value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let spec = spec::<ChartSpec>(value)?;
     let model = model::Model::from_spec(&spec);
-    Ok(Rc::new(Chart {
-        spec: Rc::new(spec),
-        model: Rc::new(model),
+    if model.series.len() > 128
+        || model
+            .series
+            .iter()
+            .map(|series| series.points.len())
+            .sum::<usize>()
+            > 16384
+    {
+        return Err("chart preview supports at most 128 series and 16384 populated points".into());
+    }
+    let spec = ChartStyle::from(spec);
+    if spec.stacks() && model.series.len().saturating_mul(model.xs.len()) > 16_384 {
+        return Err(
+            "stacked chart preview exceeds 16384 aligned cells; use fewer series or points"
+                .to_owned(),
+        );
+    }
+    if spec.stacks() && !spec.normalize {
+        let tracks = model.tracks(&vec![true; model.series.len()], true, false);
+        if tracks
+            .iter()
+            .flatten()
+            .filter_map(|(_, extent)| *extent)
+            .any(|(start, end)| !start.is_finite() || !end.is_finite())
+        {
+            return Err("stacked values exceed the finite chart range".to_owned());
+        }
+    }
+    Ok(Arc::new(Chart {
+        spec: Arc::new(spec),
+        model: Arc::new(model),
     }))
 }
 
 impl RichBlock for Chart {
+    fn resident_bytes(&self) -> usize {
+        let x = |value: &XValue| match value {
+            XValue::Text(text) => text.capacity(),
+            XValue::Number(_) => 0,
+        };
+        let axis = |axis: &Axis| budget::optional(&axis.label) + budget::optional(&axis.unit);
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<ChartStyle>()
+            + std::mem::size_of::<model::Model>()
+            + axis(&self.spec.x)
+            + axis(&self.spec.y)
+            + budget::vector(&self.spec.annotations)
+            + self
+                .spec
+                .annotations
+                .iter()
+                .map(|note| {
+                    note.label.capacity()
+                        + note.x.as_ref().map_or(0, x)
+                        + note.x_end.as_ref().map_or(0, x)
+                })
+                .sum::<usize>()
+            + budget::vector(&self.spec.params)
+            + self
+                .spec
+                .params
+                .iter()
+                .map(|param| param.id.capacity() + param.label.capacity())
+                .sum::<usize>()
+            + budget::vector(&self.model.xs)
+            + budget::vector(&self.model.series)
+            + self
+                .model
+                .series
+                .iter()
+                .map(|series| series.name.capacity() + budget::vector(&series.points))
+                .sum::<usize>()
+            + match &self.model.x {
+                model::XScale::Category(names) => budget::strings(names),
+                model::XScale::Number => 0,
+            }
+    }
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         view::ChartView {
             id: cx.key("chart"),
             theme: *cx.theme,
-            spec: Rc::clone(&self.spec),
-            model: Rc::clone(&self.model),
+            spec: Arc::clone(&self.spec),
+            model: Arc::clone(&self.model),
         }
         .into_any_element()
     }
-
-    fn markdown(&self) -> String {
-        markdown(&self.spec, &self.model)
-    }
-}
-
-/// The data as a table (x by series), then annotations and thresholds.
-pub(super) fn markdown(spec: &ChartSpec, model: &model::Model) -> String {
-    let x_header = spec
-        .x
-        .label
-        .clone()
-        .filter(|label| !label.trim().is_empty())
-        .unwrap_or_else(|| {
-            if model.is_categorical() {
-                "Category"
-            } else {
-                "x"
-            }
-            .to_owned()
-        });
-    let mut header = vec![x_header];
-    header.extend(model.series.iter().map(|series| series.name.clone()));
-    let aligned: Vec<Vec<Option<f64>>> = (0..model.series.len())
-        .map(|index| model.aligned(index))
-        .collect();
-    let rows: Vec<Vec<String>> = model
-        .xs
-        .iter()
-        .enumerate()
-        .map(|(row, x)| {
-            let mut cells = vec![model.x_label(*x)];
-            cells.extend(
-                aligned
-                    .iter()
-                    .map(|values| values[row].map(exact).unwrap_or_default()),
-            );
-            cells
-        })
-        .collect();
-    let mut out = if model.series.is_empty() {
-        "_No data._\n".to_owned()
-    } else {
-        kit::markdown_table(&header, &rows)
-    };
-    let units: Vec<String> = [("x", &spec.x), ("y", &spec.y)]
-        .iter()
-        .filter_map(|(axis, spec)| {
-            let unit = spec.unit.as_deref()?.trim();
-            (!unit.is_empty()).then(|| format!("{axis} in {unit}"))
-        })
-        .collect();
-    if !units.is_empty() {
-        let _ = write!(out, "\n_{}_\n", units.join(", "));
-    }
-    let notes: Vec<String> = spec
-        .annotations
-        .iter()
-        .filter_map(annotation_line)
-        .chain(spec.thresholds().map(|(_, param)| {
-            let label = if param.label.trim().is_empty() {
-                "Threshold"
-            } else {
-                param.label.trim()
-            };
-            format!("- {label}: {}", exact(param.value))
-        }))
-        .collect();
-    if !notes.is_empty() {
-        out.push('\n');
-        out.push_str(&notes.join("\n"));
-        out.push('\n');
-    }
-    out
-}
-
-fn annotation_line(annotation: &Annotation) -> Option<String> {
-    let label = if annotation.label.trim().is_empty() {
-        "Annotation"
-    } else {
-        annotation.label.trim()
-    };
-    let at = match (&annotation.x, &annotation.x_end, annotation.y) {
-        (Some(x), Some(end), _) => format!("x {} to {}", x.display(), end.display()),
-        (Some(x), None, _) => format!("x = {}", x.display()),
-        (None, _, Some(y)) => format!("y = {}", exact(y)),
-        (None, _, None) => return None,
-    };
-    Some(format!("- {label} ({at})"))
 }
 
 /// The name drawn for a series: its own, or its position.

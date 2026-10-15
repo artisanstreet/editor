@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 127
 expression: "replay(\"steer\")"
 ---
 [
@@ -15,7 +16,9 @@ expression: "replay(\"steer\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 8 && echo first",
+                    command: Inline(
+                        "sleep 8 && echo first",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -33,16 +36,19 @@ expression: "replay(\"steer\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 8 && echo first",
+                    command: Inline(
+                        "sleep 8 && echo first",
+                    ),
                     cwd: None,
                     background: false,
                 },
                 title: None,
                 output: Some(
                     Output {
-                        head: "first\n\nCommand exited with code 0.",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "first\n\nCommand exited with code 0.",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: Some(
@@ -73,7 +79,7 @@ expression: "replay(\"steer\")"
         ),
     ),
     Event(
-        SteerAccepted {
+        InputAccepted {
             id: ItemId(
                 "steer-2",
             ),
@@ -85,7 +91,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -100,14 +108,12 @@ expression: "replay(\"steer\")"
         },
     ),
     Event(
-        Item {
-            key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
-            parent: None,
-            status: Done,
-            kind: AssistantMessage {
-                text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_129d751ee001Cci2nUOn1KBN93/text-0",
             },
+            text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+            append: false,
         },
     ),
     Event(
@@ -136,13 +142,15 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+                text: Inline(
+                    "banana\n\nThe command output was:\n\n```\nfirst\n```\n\nIt exited with code 0.",
+                ),
                 phase: Final,
             },
         },
     ),
     Event(
-        SteerAccepted {
+        InputAccepted {
             id: ItemId(
                 "steer-3",
             ),
@@ -154,7 +162,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -169,14 +179,12 @@ expression: "replay(\"steer\")"
         },
     ),
     Event(
-        Item {
-            key: "msg_129d7a1c70015V4linelfEWy40/text-0",
-            parent: None,
-            status: Done,
-            kind: AssistantMessage {
-                text: "cherry",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_129d7a1c70015V4linelfEWy40/text-0",
             },
+            text: "cherry",
+            append: false,
         },
     ),
     Event(
@@ -205,7 +213,9 @@ expression: "replay(\"steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "cherry",
+                text: Inline(
+                    "cherry",
+                ),
                 phase: Final,
             },
         },

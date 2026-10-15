@@ -1,4 +1,4 @@
-//! Data kinds: parsing and Markdown renditions.
+//! Data kinds: production preparation and numerical styling.
 
 use super::super::kit::Tone;
 use super::super::{Prepared, RichFence, prepare};
@@ -23,26 +23,13 @@ fn tile(json: &str) -> Tile {
 }
 
 #[test]
-fn stats_parse_and_copy_as_a_table() {
-    let markdown = ready(
+fn stats_prepares_tiles_and_requires_values() {
+    let _prepared = ready(
         "stats",
         r#"{"tiles": [
             {"label": "Requests", "value": 85000, "delta": 0.12, "sparkline": [1, 3, 2]},
             {"label": "p95", "value": "41 ms", "delta": "-8%", "good": "down", "hint": "Last 24 h"}
         ]}"#,
-    )
-    .markdown();
-    assert!(
-        markdown.starts_with("| Metric | Value | Change | Note |"),
-        "{markdown}"
-    );
-    assert!(
-        markdown.contains("| Requests | 85k | +0.12 |  |"),
-        "{markdown}"
-    );
-    assert!(
-        markdown.contains("| p95 | 41 ms | -8% | Last 24 h |"),
-        "{markdown}"
     );
     assert!(invalid("stats", r#"{"tiles": [{"label": "x"}]}"#).contains("value"));
     assert!(invalid("stats", r#"{"tiles": [{"value": 1}]}"#).contains("label"));

@@ -1,0 +1,15 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{broken-json
+null
+[]
+{}
+{"method": "model/rerouted", "params": {"threadId": "root", "turnId": "turn"}}
+{"method": "model/rerouted", "params": {"threadId": "root", "turnId": " ", "fromModel": "a", "toModel": "b", "reason": "highRiskCyberActivity"}}
+{"method": "thread/goal/updated", "params": {"threadId": "root", "goal": {"objective": "", "status": "active"}}}
+{"method": "thread/tokenUsage/updated", "params": {"threadId": "root", "tokenUsage": {"last": {"totalTokens": "many"}}}}
+{"method": "future/method", "params": {"threadId": "root"}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "future", "type": "futureItem"}}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}

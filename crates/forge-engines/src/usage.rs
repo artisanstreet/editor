@@ -8,16 +8,21 @@
 
 use crate::account::engine_command;
 use anyhow::{Context, Result, bail};
-use artisan_api::{EngineId, Timestamp, UsageLimits, UsageWindow};
+use artisan_api::{EngineId, Timestamp, UsageCadence, UsageLimits, UsageWindow};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{
+    Mutex, PoisonError,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-const CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
+/// `claude -p /usage` starts a whole CLI: about 5 s, far more on a busy
+/// machine.
+const CLAUDE_TIMEOUT: Duration = Duration::from_secs(45);
+/// A failed read is tried again after this, not after the full TTL.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
 const CODEX_TIMEOUT: Duration = Duration::from_secs(15);
 const CURSOR_TIMEOUT: Duration = Duration::from_secs(10);
 const CURSOR_USAGE_URL: &str =
@@ -54,11 +59,21 @@ pub struct UsageCache {
 #[derive(Default)]
 struct Slot {
     reading: tokio::sync::Mutex<()>,
-    last: Mutex<Option<(Instant, Option<UsageLimits>)>>,
+    last: Mutex<Last>,
+    generation: AtomicU64,
+    reads: AtomicU64,
+}
+
+/// One engine's reads: the last good one is kept through failures.
+#[derive(Default)]
+struct Last {
+    good: Option<UsageLimits>,
+    /// When it was last read, and whether that read failed.
+    attempt: Option<(Instant, bool)>,
 }
 
 impl Slot {
-    fn last(&self) -> std::sync::MutexGuard<'_, Option<(Instant, Option<UsageLimits>)>> {
+    fn last(&self) -> std::sync::MutexGuard<'_, Last> {
         self.last.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -73,34 +88,53 @@ impl UsageCache {
         Self { ttl, slots }
     }
 
-    /// The last read, however old; never reads.
+    /// The last good read, however old; never reads.
     #[must_use]
     pub fn cached(&self, engine: EngineId) -> Option<UsageLimits> {
-        self.slots
-            .get(&engine)?
-            .last()
-            .as_ref()
-            .and_then(|(_, usage)| usage.clone())
+        self.slots.get(&engine)?.last().good.clone()
     }
 
-    /// The cached read when fresh, otherwise a new one.
-    pub async fn read(&self, engine: EngineId, binary: &Path, home: &Path) -> Option<UsageLimits> {
+    /// Reads the engine's usage when its last read is due (older than the
+    /// TTL, or a minute after a failure), or always with `force`. Returns
+    /// the last good read: a failed read keeps the one before, which shows
+    /// how old it is.
+    pub async fn read(
+        &self,
+        engine: EngineId,
+        binary: &Path,
+        home: &Path,
+        force: bool,
+    ) -> Option<UsageLimits> {
         let slot = self.slots.get(&engine)?;
+        let observed_reads = slot.reads.load(Ordering::Acquire);
         let _reading = slot.reading.lock().await;
-        if let Some((at, usage)) = slot.last().as_ref()
-            && at.elapsed() < self.ttl
-        {
-            return usage.clone();
+        let generation = slot.generation.load(Ordering::Acquire);
+        let due = (force && slot.reads.load(Ordering::Acquire) == observed_reads)
+            || slot.last().attempt.is_none_or(|(at, failed)| {
+                at.elapsed() >= if failed { RETRY_AFTER } else { self.ttl }
+            });
+        if due {
+            let usage = read_usage(engine, binary, home).await;
+            let mut last = slot.last();
+            if slot.generation.load(Ordering::Acquire) != generation {
+                return last.good.clone();
+            }
+            slot.reads.fetch_add(1, Ordering::Release);
+            last.attempt = Some((Instant::now(), usage.is_none()));
+            if usage.is_some() {
+                last.good = usage;
+            }
         }
-        let usage = read_usage(engine, binary, home).await;
-        *slot.last() = Some((Instant::now(), usage.clone()));
-        usage
+        slot.last().good.clone()
     }
 
-    /// Forgets the cached read (after a sign-in change or a finished run).
+    /// Forgets the reads (after a sign-in change): another account's usage
+    /// is not this one's.
     pub fn invalidate(&self, engine: EngineId) {
         if let Some(slot) = self.slots.get(&engine) {
-            *slot.last() = None;
+            let mut last = slot.last();
+            slot.generation.fetch_add(1, Ordering::Release);
+            *last = Last::default();
         }
     }
 }
@@ -110,12 +144,11 @@ impl UsageCache {
 async fn read_claude(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
     let mut command = engine_command(EngineId::Claude, binary, home);
     command
-        .args(["-p", "/usage", "--output-format", "json"])
+        // MCP servers are no part of `/usage`; starting them took most of
+        // its 30 s and timed it out.
+        .args(["-p", "/usage", "--output-format", "json", "--strict-mcp-config"])
         .env("TZ", "UTC");
-    let output = tokio::time::timeout(CLAUDE_TIMEOUT, command.output())
-        .await
-        .context("claude /usage timed out")?
-        .context("running claude /usage")?;
+    let output = crate::process::probe(command, CLAUDE_TIMEOUT, 1024 * 1024).await?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let start = stdout.find('{').context("claude /usage printed no JSON")?;
     let end = stdout.rfind('}').context("claude /usage printed no JSON")?;
@@ -134,14 +167,18 @@ fn parse_claude_usage(text: &str, now: Timestamp) -> Vec<UsageWindow> {
         let Some((head, rest)) = line.split_once(':') else {
             continue;
         };
-        let label = match head {
-            "Current session" => "Session".to_owned(),
-            "Current week (all models)" => "Week".to_owned(),
+        let (label, cadence, scope) = match head {
+            "Current session" => ("Session".to_owned(), UsageCadence::Session, None),
+            "Current week (all models)" => ("Week".to_owned(), UsageCadence::Week, None),
             _ => match head
                 .strip_prefix("Current week (")
                 .and_then(|model| model.strip_suffix(')'))
             {
-                Some(model) if !model.trim().is_empty() => format!("Week ({})", model.trim()),
+                Some(model) if !model.trim().is_empty() => (
+                    format!("Week ({})", model.trim()),
+                    UsageCadence::Week,
+                    Some(model.trim().to_owned()),
+                ),
                 _ => continue,
             },
         };
@@ -158,6 +195,8 @@ fn parse_claude_usage(text: &str, now: Timestamp) -> Vec<UsageWindow> {
         }
         windows.push(UsageWindow {
             label,
+            cadence,
+            scope,
             used_percent: percent.clamp(0.0, 100.0),
             resets_at: claude_reset(line, now),
         });
@@ -199,32 +238,16 @@ fn claude_reset(line: &str, now: Timestamp) -> Option<Timestamp> {
         return None;
     }
     let hour = hour % 12 + if pm { 12 } else { 0 };
-    let (mut year, now_month) = year_month(now);
-    if now_month == 12 && month == 1 {
-        year += 1;
-    }
-    Some((days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60) * 1_000)
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year.rem_euclid(400);
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    era * 146_097 + year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year - 719_468
-}
-
-fn year_month(ms: Timestamp) -> (i64, i64) {
-    let days = ms.div_euclid(86_400_000) + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let mp = (5 * day_of_year + 2) / 153;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    (year, month)
+    use chrono::{Datelike, NaiveDate, Utc};
+    let now_date = chrono::DateTime::<Utc>::from_timestamp_millis(now)?;
+    [now_date.year() - 1, now_date.year(), now_date.year() + 1]
+        .into_iter()
+        .filter_map(|year| {
+            NaiveDate::from_ymd_opt(year, month as u32, day as u32)?
+                .and_hms_opt(hour as u32, minute as u32, 0)
+                .map(|date| date.and_utc().timestamp_millis())
+        })
+        .min_by_key(|date| date.abs_diff(now))
 }
 
 // --- Codex -----------------------------------------------------------------
@@ -236,49 +259,13 @@ async fn read_codex(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
 }
 
 async fn read_codex_inner(binary: &Path, home: &Path) -> Result<Vec<UsageWindow>> {
-    let mut command = engine_command(EngineId::Codex, binary, home);
-    command
-        .arg("app-server")
-        .stdin(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().context("starting codex app-server")?;
-    let mut stdin = child.stdin.take().context("codex stdin")?;
-    let mut lines = BufReader::new(child.stdout.take().context("codex stdout")?).lines();
-    let mut call = async |id: u64, method: &str| -> Result<Value> {
-        let mut request = json!({ "id": id, "method": method, "params": {} });
-        if method == "initialize" {
-            request["params"] = json!({ "clientInfo": { "name": "artisan-usage", "version": env!("CARGO_PKG_VERSION") } });
-        }
-        stdin
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .context("writing to codex")?;
-        if method == "initialize" {
-            stdin
-                .write_all(b"{\"method\":\"initialized\",\"params\":{}}\n")
-                .await
-                .context("writing to codex")?;
-        }
-        while let Some(line) = lines.next_line().await.context("reading codex")? {
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if message["id"] != json!(id) {
-                continue;
-            }
-            if let Some(error) = message.get("error") {
-                bail!("codex {method} failed: {error}");
-            }
-            return Ok(message["result"].clone());
-        }
-        bail!("codex exited before answering {method}")
-    };
-    call(1, "initialize").await?;
-    let account = call(2, "account/read").await?;
+    let mut session =
+        crate::rpc::Session::codex(engine_command(EngineId::Codex, binary, home)).await?;
+    let account = session.call("account/read", json!({})).await?;
     if account["account"].is_null() {
         bail!("codex is not signed in");
     }
-    let limits = call(3, "account/rateLimits/read").await?;
+    let limits = session.call("account/rateLimits/read", json!({})).await?;
     Ok(parse_codex_limits(&limits))
 }
 
@@ -301,6 +288,12 @@ fn parse_codex_limits(result: &Value) -> Vec<UsageWindow> {
                 .map_or_else(|| slot.to_owned(), duration_label);
             windows.push(UsageWindow {
                 label: name.map_or_else(|| span.clone(), |name| format!("{name} ({span})")),
+                cadence: match window["windowDurationMins"].as_u64() {
+                    Some(300) => UsageCadence::Session,
+                    Some(10_080) => UsageCadence::Week,
+                    _ => UsageCadence::Other,
+                },
+                scope: name.map(str::to_owned),
                 used_percent: percent.clamp(0.0, 100.0),
                 resets_at: window["resetsAt"].as_i64().map(|seconds| seconds * 1_000),
             });
@@ -323,9 +316,7 @@ fn duration_label(minutes: u64) -> String {
 
 fn cursor_auth_file(home: &Path) -> PathBuf {
     if cfg!(windows) {
-        std::env::var_os("APPDATA")
-            .map_or_else(|| home.join("AppData/Roaming"), PathBuf::from)
-            .join("Cursor/auth.json")
+        home.join("AppData/Roaming/Cursor/auth.json")
     } else {
         home.join(".config/cursor/auth.json")
     }
@@ -372,6 +363,8 @@ fn parse_cursor_usage(response: &Value) -> Result<Vec<UsageWindow>> {
     let resets_at = number(&response["billingCycleEnd"]).map(|ms| ms as Timestamp);
     let window = |label: &str, percent: f64| UsageWindow {
         label: label.to_owned(),
+        cadence: UsageCadence::Other,
+        scope: None,
         used_percent: percent.clamp(0.0, 100.0),
         resets_at,
     };
@@ -438,6 +431,8 @@ pub fn has_usage_reader(engine: EngineId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::sync::Arc;
 
     // 2026-10-11T09:00:00Z
     const NOW: Timestamp = 1_791_709_200_000;
@@ -481,5 +476,147 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(parse_cursor_usage(&json!({})).is_err());
+    }
+
+    #[cfg(unix)]
+    fn gated_usage_cli(home: &Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let binary = home.join("fake-usage");
+        std::fs::write(&binary, r#"#!/bin/sh
+percentage=$(cat "$HOME/percentage")
+printf 'probe\n' >> "$HOME/calls"
+touch "$HOME/started"
+while [ ! -e "$HOME/release" ]; do sleep 0.01; done
+printf '{"result":"Current week (all models): %s%% used · resets Oct 13, 9:59pm (UTC)"}\n' "$percentage"
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(home.join("percentage"), "34").unwrap();
+        binary
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_usage_probe(home: &Path) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !home.join("started").exists() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_invalidated_old_account_read_cannot_repopulate_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = gated_usage_cli(directory.path());
+        let cache = Arc::new(UsageCache::new(Duration::from_secs(300)));
+        let owner = cache.clone();
+        let home = directory.path().to_owned();
+        let old_binary = binary.clone();
+        let old_read =
+            tokio::spawn(
+                async move { owner.read(EngineId::Claude, &old_binary, &home, true).await },
+            );
+        wait_for_usage_probe(directory.path()).await;
+        cache.invalidate(EngineId::Claude);
+        std::fs::write(directory.path().join("percentage"), "15").unwrap();
+        std::fs::write(directory.path().join("release"), "").unwrap();
+        assert!(old_read.await.unwrap().is_none());
+        assert!(cache.cached(EngineId::Claude).is_none());
+        let current = cache
+            .read(EngineId::Claude, &binary, directory.path(), true)
+            .await
+            .unwrap();
+        assert_eq!(current.windows[0].used_percent, 15.0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overlapping_forced_usage_reads_share_the_same_probe() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = gated_usage_cli(directory.path());
+        let cache = Arc::new(UsageCache::new(Duration::from_secs(300)));
+        let owner = cache.clone();
+        let home = directory.path().to_owned();
+        let first_binary = binary.clone();
+        let first = tokio::spawn(async move {
+            owner
+                .read(EngineId::Claude, &first_binary, &home, true)
+                .await
+        });
+        wait_for_usage_probe(directory.path()).await;
+        let owner = cache.clone();
+        let home = directory.path().to_owned();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let second = tokio::spawn(async move {
+            let _ = started.send(());
+            owner.read(EngineId::Claude, &binary, &home, true).await
+        });
+        waiting.await.unwrap();
+        // The current-thread runtime has polled the second read to its mutex wait.
+        std::fs::write(directory.path().join("release"), "").unwrap();
+        assert_eq!(first.await.unwrap(), second.await.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    /// A usage read that fails (Claude timing out on a busy machine) keeps
+    /// the last good reading; it was showing "checking" and then nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_read_keeps_the_last_good_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fail = dir.path().join("fail");
+        let binary = dir.path().join("claude");
+        let result = "Current week (all models): 34% used · resets Oct 13, 9:59pm (UTC)";
+        std::fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\n[ -e {fail} ] && exit 1\necho '{{\"result\":\"{result}\"}}'\n",
+                fail = fail.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cache = UsageCache::new(Duration::from_secs(300));
+        let read = |force| cache.read(EngineId::Claude, &binary, dir.path(), force);
+        let good = read(true).await.expect("the first read");
+        std::fs::write(&fail, "").unwrap();
+        let after = read(true).await;
+        assert_eq!(
+            after.as_ref(),
+            Some(&good),
+            "a failed read dropped the last good one"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_managed_home_tests {
+    use super::*;
+    #[test]
+    fn native_cursor_credentials_stay_inside_the_supplied_engine_home() {
+        let managed = tempfile::tempdir().unwrap();
+        let path = cursor_auth_file(managed.path());
+        assert_eq!(
+            path,
+            managed
+                .path()
+                .join("AppData")
+                .join("Roaming")
+                .join("Cursor")
+                .join("auth.json")
+        );
+        assert!(path.starts_with(managed.path()));
+        if let Some(global) = std::env::var_os("APPDATA") {
+            assert_ne!(path, PathBuf::from(global).join("Cursor").join("auth.json"));
+        }
     }
 }

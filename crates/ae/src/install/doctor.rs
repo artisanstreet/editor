@@ -69,12 +69,11 @@ pub fn doctor(fix: bool, dry_run: bool, data_dir: &Path) -> Result<()> {
             if cfg!(target_os = "linux") && service::systemd_available() {
                 let unit = service::unit_path()?;
                 let current = std::fs::read_to_string(&unit).unwrap_or_default();
-                let custom = *data_dir != crate::paths::forge_data()?;
-                let expected = service::unit_text(&root.ae(), custom.then_some(data_dir));
+                let expected = service::unit_text(&root.ae(), data_dir);
                 let exec_ok = current.lines().find(|line| line.starts_with("ExecStart="))
                     == expected.lines().find(|line| line.starts_with("ExecStart="));
                 report.check(&format!("Forge service {}", service::UNIT), exec_ok, || {
-                    service::install(sys, &root.ae(), data_dir, custom).map(drop)
+                    service::install(sys, &root.ae(), data_dir).map(drop)
                 });
             }
         }

@@ -27,33 +27,34 @@ pub(super) fn run(
     let device = ::cpal::default_host()
         .default_output_device()
         .ok_or_else(|| "No audio output: no output device found".to_owned())?;
-    let config = device
+    let default = device
         .default_output_config()
-        .map_err(|error| format!("No audio output: {}", error_chain(&error)))?
-        .config();
-    let out_channels = usize::from(config.channels);
-    let step = f64::from(format.rate) / f64::from(config.sample_rate.max(1));
-
-    let callback_shared = Arc::clone(shared);
-    let error_shared = Arc::clone(shared);
-    let mut phase = 0.0;
-    let stream = device
-        .build_output_stream::<f32, _, _>(
-            config,
-            move |data: &mut [f32], _: &::cpal::OutputCallbackInfo| {
-                callback_shared
-                    .lock()
-                    .fill(generation, data, out_channels, step, &mut phase);
-            },
-            move |error| {
-                error_shared.lock().fail(
-                    generation,
-                    format!("Audio output stopped: {}", error_chain(&error)),
-                );
-            },
-            None,
-        )
         .map_err(|error| format!("No audio output: {}", error_chain(&error)))?;
+    let config = default.config();
+    macro_rules! stream {
+        ($sample:ty) => {
+            create_stream::<$sample>(&device, config, shared, generation, format.rate)?
+        };
+    }
+    let stream = match default.sample_format() {
+        ::cpal::SampleFormat::I8 => stream!(i8),
+        ::cpal::SampleFormat::I16 => stream!(i16),
+        ::cpal::SampleFormat::I24 => stream!(::cpal::I24),
+        ::cpal::SampleFormat::I32 => stream!(i32),
+        ::cpal::SampleFormat::I64 => stream!(i64),
+        ::cpal::SampleFormat::U8 => stream!(u8),
+        ::cpal::SampleFormat::U16 => stream!(u16),
+        ::cpal::SampleFormat::U24 => stream!(::cpal::U24),
+        ::cpal::SampleFormat::U32 => stream!(u32),
+        ::cpal::SampleFormat::U64 => stream!(u64),
+        ::cpal::SampleFormat::F32 => stream!(f32),
+        ::cpal::SampleFormat::F64 => stream!(f64),
+        other => {
+            return Err(format!(
+                "No audio output: unsupported PCM sample format {other:?}"
+            ));
+        }
+    };
 
     let stopped = |error: ::cpal::Error| format!("Audio output stopped: {}", error_chain(&error));
     control(
@@ -70,4 +71,40 @@ pub(super) fn run(
         },
         || Ok(()),
     )
+}
+
+fn create_stream<T: ::cpal::SizedSample + ::cpal::FromSample<f32>>(
+    device: &::cpal::Device,
+    config: ::cpal::StreamConfig,
+    shared: &Arc<Shared>,
+    generation: u64,
+    track_rate: u32,
+) -> Result<::cpal::Stream, String> {
+    let out_channels = usize::from(config.channels);
+    let step = f64::from(track_rate) / f64::from(config.sample_rate.max(1));
+    let callback_shared = shared.clone();
+    let error_shared = shared.clone();
+    let mut phase = 0.0;
+    device
+        .build_output_stream::<T, _, _>(
+            config,
+            move |data: &mut [T], _: &::cpal::OutputCallbackInfo| {
+                callback_shared.lock().fill_mapped(
+                    generation,
+                    data,
+                    out_channels,
+                    step,
+                    &mut phase,
+                    T::from_sample,
+                );
+            },
+            move |error| {
+                error_shared.lock().fail(
+                    generation,
+                    format!("Audio output stopped: {}", error_chain(&error)),
+                )
+            },
+            None,
+        )
+        .map_err(|error| format!("No audio output: {}", error_chain(&error)))
 }

@@ -1,0 +1,12 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"id": 9, "method": "item/tool/requestUserInput", "params": {"threadId": "root", "turnId": "turn", "itemId": "bad", "isBlocking": true, "questions": [{"id": "q", "header": "", "question": " ", "options": []}]}}
+{"id": 10, "method": "item/tool/requestUserInput", "params": {"threadId": "root", "turnId": "turn", "itemId": "twice", "isBlocking": true, "questions": [{"id": "q", "header": "", "question": "One", "options": null}, {"id": "q", "header": "", "question": "Two", "options": null}]}}
+{"id": 11, "method": "item/tool/requestUserInput", "params": {"threadId": "root", "turnId": "turn", "itemId": "question", "isBlocking": true, "questions": [{"id": "q", "header": "Pick", "question": "Choose", "options": [{"label": "Same", "description": ""}, {"label": "Same", "description": "the second"}]}]}}
+{"answer": {"key": "question", "answer": {"type": "question", "answers": [{"kind": "choices", "ids": ["option-9"]}]}}}
+{"answer": {"key": "question", "answer": {"type": "question", "answers": [{"kind": "choices", "ids": ["option-1"]}]}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "question", "status": "completed", "success": true, "tool": "request_user_input", "arguments": null, "type": "dynamicToolCall"}}}
+{"id": 12, "method": "mcpServer/elicitation/request", "params": {"threadId": "root", "serverName": "docs", "message": "Which space?"}}
+{"id": 13, "method": "thread/archive/request", "params": {"threadId": "root"}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}

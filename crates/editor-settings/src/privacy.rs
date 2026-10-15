@@ -3,9 +3,9 @@
 //! undecided and disabled, as the previous Editor painted them.
 
 use crate::Settings;
-use crate::chrome::{card, header, row, section_shell};
 use crate::page;
 use editor_core::SettingsPage;
+use editor_ui::page::{card, header, row, section_shell};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{AnyElement, Div, IntoElement, ParentElement as _, Styled as _, div, px};
 
@@ -49,22 +49,20 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme) -> Div {
             page::label(SettingsPage::Privacy),
             page::description(SettingsPage::Privacy),
         ))
-        .child(section_shell(
-            theme,
-            "telemetry",
-            "Observability",
-            Some("Telemetry choices are not yet configurable in the native app."),
-            None,
-            telemetry,
-        ))
-        .child(section_shell(
-            theme,
-            "never-collected",
-            "Never collected",
-            None,
-            None,
-            never,
-        ))
+        .child(
+            section_shell(
+                theme,
+                "Observability",
+                Some("Telemetry choices are not yet configurable in the native app."),
+                None,
+                telemetry,
+            )
+            .debug_selector("settings-section-telemetry"),
+        )
+        .child(
+            section_shell(theme, "Never collected", None, None, never)
+                .debug_selector("settings-section-never-collected"),
+        )
 }
 
 /// One category: its caption beside the switch.

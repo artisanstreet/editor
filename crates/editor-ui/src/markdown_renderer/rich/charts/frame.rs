@@ -4,18 +4,18 @@
 //! Tick labels are divs placed at the same fractions the canvas paints at,
 //! so labels and marks share one scale without measuring text.
 
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement as _,
-    SharedString, Styled as _, div, prelude::*, px, relative,
+    AnyElement, App, Div, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString,
+    Styled as _, div, px, relative,
 };
 
 use super::super::kit;
 use super::scale::Ticks;
 use super::scene::{Shape, hrule, vrule};
 use crate::hover_card::{glass_hover_card, hover_card_row, hover_card_title};
-use crate::theme::ArtisanTheme;
 
 /// Height of a chart's plot area.
 pub(super) const PLOT_HEIGHT: f32 = 240.0;
@@ -102,30 +102,15 @@ impl Frame {
                 .justify_end()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .text_color(muted)
                 .child(tick.label)
         });
-        let x_labels = self.x_ticks.into_iter().map(|tick| {
-            div()
-                .absolute()
-                .top_0()
-                .left(relative(tick.at))
-                .ml(px(-X_LABEL_WIDTH / 2.0))
-                .w(px(X_LABEL_WIDTH))
-                .flex()
-                .justify_center()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(px(11.0))
-                .line_height(px(16.0))
-                .text_color(muted)
-                .child(tick.label)
-        });
+        let x_labels = x_tick_strip(theme, self.x_ticks);
         let title = |text: SharedString| {
             div()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(muted)
@@ -165,14 +150,7 @@ impl Frame {
                     .w_full()
                     .flex()
                     .child(div().flex_shrink_0().w(px(self.y_axis_width)))
-                    .child(
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(16.0))
-                            .children(x_labels),
-                    )
+                    .child(div().flex_1().min_w_0().child(x_labels))
                     .child(div().flex_shrink_0().w(px(gutter_width))),
             )
             .children(
@@ -180,6 +158,30 @@ impl Frame {
                     .map(|text| div().w_full().flex().justify_end().child(title(text))),
             )
     }
+}
+
+/// Shared bounded x-axis text placement for fixed and windowed plot rows.
+pub(super) fn x_tick_strip(theme: &ArtisanTheme, ticks: Vec<Tick>) -> Div {
+    let muted = theme.colors.muted_foreground.to_paint();
+    div()
+        .relative()
+        .h(px(16.0))
+        .children(ticks.into_iter().map(|tick| {
+            div()
+                .absolute()
+                .top_0()
+                .left(relative(tick.at))
+                .ml(px(-X_LABEL_WIDTH / 2.0))
+                .w(px(X_LABEL_WIDTH))
+                .flex()
+                .justify_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_size(TypographyTokens::size(TextStep::X2s))
+                .line_height(px(16.0))
+                .text_color(muted)
+                .child(tick.label)
+        }))
 }
 
 /// The right gutter holding direct series labels.
@@ -199,7 +201,7 @@ fn gutter(labels: Vec<EndLabel>, width: f32) -> Div {
                 .h(px(16.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .text_color(label.color)
                 .child(label.text)
@@ -237,6 +239,19 @@ impl ReadoutRow {
             value: value.into(),
         }
     }
+}
+
+/// Native focus value uses the same prepared reading as the visual card.
+pub(super) fn reading_label(heading: Option<&str>, rows: &[ReadoutRow]) -> SharedString {
+    let mut pieces = Vec::with_capacity(rows.len() + 1);
+    if let Some(heading) = heading.filter(|text| !text.is_empty()) {
+        pieces.push(heading.to_owned());
+    }
+    pieces.extend(
+        rows.iter()
+            .map(|row| format!("{}: {}", row.label, row.value)),
+    );
+    SharedString::from(pieces.join("; "))
 }
 
 /// The glass hover card near plot fraction `x`, flipping to the left of it
@@ -280,7 +295,8 @@ fn readout_card(
             rows.into_iter()
                 .map(|row| hover_card_row(theme, row.color, row.label, row.value)),
         );
-    let card = glass_hover_card(theme, content)
+    let card = div()
+        .child(glass_hover_card(theme, content))
         .absolute()
         .min_w(px(140.0))
         .max_w(px(280.0));
@@ -319,47 +335,38 @@ pub(super) fn legend(
                 .flex_shrink_0()
                 .w(px(12.0))
                 .h(px(4.0))
-                .rounded(px(2.0))
+                .rounded(RadiusTokens::value(RadiusStep::X2s))
                 .bg(if entry.hidden {
                     kit::hairline(theme)
                 } else {
                     entry.color
                 });
-            let row = div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "{id}-legend-{index}"
-                ))))
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .opacity(alpha)
-                .text_size(px(12.0))
-                .line_height(px(16.0))
-                .text_color(theme.colors.foreground.to_paint())
-                .child(swatch)
-                .child(entry.name);
+            let entry_id = kit::part(id, format_args!("legend-{index}"));
             match toggle.cloned() {
-                Some(toggle) => row
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| toggle(index, cx))
+                Some(toggle) => crate::button::Button::text(entry_id, *theme, entry.name)
+                    .variant(crate::button::ButtonVariant::Ghost)
+                    .icon_slot(swatch)
+                    .on_activate(move |_, _, cx| toggle(index, cx))
                     .into_any_element(),
-                None => row.into_any_element(),
+                None => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .opacity(alpha)
+                    .text_size(TypographyTokens::size(TextStep::Xs))
+                    .line_height(px(16.0))
+                    .text_color(theme.colors.foreground.to_paint())
+                    .child(swatch)
+                    .child(entry.name)
+                    .into_any_element(),
             }
         }))
 }
 
 /// The quiet stand-in for a block with nothing to draw.
 pub(super) fn empty(theme: &ArtisanTheme, text: &str) -> AnyElement {
-    div()
-        .w_full()
-        .h(px(72.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(kit::inner_radius())
-        .border_1()
-        .border_color(kit::hairline(theme))
-        .child(kit::muted(theme, text.to_owned()))
+    crate::empty_state::EmptyState::new(*theme, text.to_owned())
+        .variant(crate::empty_state::EmptyStateVariant::Framed)
         .into_any_element()
 }
 
@@ -426,9 +433,9 @@ pub(super) fn plot_label(theme: &ArtisanTheme, label: PlotLabel) -> Div {
         .overflow_hidden()
         .whitespace_nowrap()
         .px(px(4.0))
-        .rounded(px(4.0))
+        .rounded(RadiusTokens::value(RadiusStep::Xs))
         .bg(theme.colors.background.with_alpha(0.7).to_paint())
-        .text_size(px(11.0))
+        .text_size(TypographyTokens::size(TextStep::X2s))
         .line_height(px(16.0))
         .text_color(color)
         .child(text);

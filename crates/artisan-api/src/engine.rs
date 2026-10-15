@@ -82,6 +82,9 @@ pub struct EngineConfig {
     /// Engine-specific extras (Codex's `service_tier`, …).
     #[serde(default)]
     pub options: serde_json::Map<String, serde_json::Value>,
+    /// Thread-owned adapter settings, never inherited by a new thread.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub session_options: serde_json::Map<String, serde_json::Value>,
 }
 
 impl EngineConfig {
@@ -95,7 +98,26 @@ impl EngineConfig {
             speed: None,
             variant: None,
             options: serde_json::Map::new(),
+            session_options: serde_json::Map::new(),
         }
+    }
+
+    /// The remembered model/effort preferences, without thread-scoped state.
+    #[must_use]
+    pub fn preference_config(&self) -> Self {
+        Self {
+            session_options: serde_json::Map::new(),
+            ..self.clone()
+        }
+    }
+
+    /// An explicit context override; absence keeps the engine's standard window.
+    #[must_use]
+    pub fn context_window_override(&self) -> Option<u64> {
+        self.options
+            .get("context_window")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|tokens| (1..=100_000_000).contains(tokens))
     }
 
     #[must_use]
@@ -130,6 +152,9 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effort_notes: Vec<EffortNote>,
     pub context_window: Option<u64>,
+    /// Advertised context choices. An absent override is the standard window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_windows: Vec<ContextWindow>,
     #[serde(default)]
     pub supports_images: bool,
     /// Speed tiers, the default first. Empty when the model has one speed.
@@ -145,6 +170,9 @@ pub struct Model {
 /// What one effort level does, as the engine describes it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffortNote {
+    /// A separately presented special mode, advertised by the adapter.
+    #[serde(default)]
+    pub special: bool,
     /// One of the model's `efforts`.
     pub effort: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -182,7 +210,7 @@ pub struct EngineStatus {
     pub engine: EngineId,
     pub install: InstallState,
     pub sign_in: SignInState,
-    pub models: Vec<Model>,
+    pub models: std::sync::Arc<[Model]>,
     pub default_model: Option<String>,
     pub usage: Option<UsageLimits>,
     /// How this engine's downloads are verified. `None` when there is no
@@ -191,8 +219,8 @@ pub struct EngineStatus {
     pub integrity: Option<Integrity>,
     /// The vendor's published versions, newest first. Empty until asked for
     /// (the `versions` engine action).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub versions: Vec<PublishedVersion>,
+    #[serde(default, skip_serializing_if = "<[PublishedVersion]>::is_empty")]
+    pub versions: std::sync::Arc<[PublishedVersion]>,
 }
 
 /// What a download is checked against before it is installed.
@@ -250,6 +278,8 @@ pub enum SignInState {
     LoggingIn {
         url: Option<String>,
         code: Option<String>,
+        #[serde(default)]
+        accepts_code: bool,
     },
     SignedIn {
         account: Option<String>,
@@ -266,9 +296,64 @@ pub struct UsageLimits {
     pub read_at: crate::Timestamp,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCadence {
+    Session,
+    Week,
+    #[default]
+    Other,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UsageWindow {
     pub label: String,
+    #[serde(default)]
+    pub cadence: UsageCadence,
+    #[serde(default)]
+    pub scope: Option<String>,
     pub used_percent: f64,
     pub resets_at: Option<crate::Timestamp>,
+}
+
+#[cfg(test)]
+mod shared_status_tests {
+    use super::*;
+    #[test]
+    fn shared_catalog_wire_stays_an_array_and_empty_versions_stay_omitted() {
+        let status: EngineStatus = serde_json::from_value(serde_json::json!({
+            "engine":"claude","install":{"state":"absent"},"sign_in":{"state":"unknown"},
+            "models":[],"default_model":null,"usage":null
+        }))
+        .unwrap();
+        let copy = status.clone();
+        assert!(std::sync::Arc::ptr_eq(&copy.models, &status.models));
+        assert!(std::sync::Arc::ptr_eq(&copy.versions, &status.versions));
+        let wire = serde_json::to_value(status).unwrap();
+        assert_eq!(wire["models"], serde_json::json!([]));
+        assert!(wire.get("versions").is_none());
+    }
+}
+
+/// One context choice advertised by the engine's catalog.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextWindow {
+    pub tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_tokens: Option<u64>,
+}
+
+impl Model {
+    /// Drops a stale, malformed, or unsupported override after a model change.
+    pub fn normalize_context_window(&self, config: &mut EngineConfig) {
+        if config.options.contains_key("context_window")
+            && !config.context_window_override().is_some_and(|tokens| {
+                self.context_windows
+                    .iter()
+                    .any(|choice| choice.override_tokens == Some(tokens))
+            })
+        {
+            config.options.remove("context_window");
+        }
+    }
 }

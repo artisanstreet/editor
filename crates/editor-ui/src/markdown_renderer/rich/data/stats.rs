@@ -1,6 +1,8 @@
 //! `stats`: a row of figures with deltas, sparklines, and hover hints.
 
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
+use std::sync::Arc;
 
 use editor_assets::AssetId;
 use gpui::{
@@ -9,11 +11,10 @@ use gpui::{
 };
 use serde::Deserialize;
 
+use super::super::kit::part;
 use super::super::kit::{self, Tone};
-use super::super::kit::{part, shared};
 use super::super::{BlockContext, RichBlock};
 use crate::hover_card::{glass_hover_card, hover_card_text, hover_card_title};
-use crate::theme::ArtisanTheme;
 
 /// A figure as written: a number, formatted for reading, or text as is.
 #[derive(Clone, Debug, Deserialize)]
@@ -53,6 +54,16 @@ impl Figure {
     }
 }
 
+fn tiles<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Arc<[Tile]>, D::Error> {
+    let tiles = Vec::<Tile>::deserialize(deserializer)?;
+    if tiles.len() > 64 {
+        return Err(serde::de::Error::custom(
+            "stats preview supports at most 64 tiles",
+        ));
+    }
+    Ok(tiles.into())
+}
+
 /// Which way a figure moved.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -65,8 +76,8 @@ pub(super) enum Trend {
 /// The `stats` spec.
 #[derive(Debug, Deserialize)]
 pub(super) struct Stats {
-    #[serde(deserialize_with = "shared")]
-    tiles: Rc<[Tile]>,
+    #[serde(deserialize_with = "tiles")]
+    tiles: Arc<[Tile]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +91,7 @@ pub(super) struct Tile {
     #[serde(default)]
     good: Option<Trend>,
     #[serde(default)]
-    sparkline: Vec<f64>,
+    sparkline: Sparkline,
     #[serde(default)]
     hint: Option<String>,
 }
@@ -115,6 +126,26 @@ impl Tile {
 }
 
 impl RichBlock for Stats {
+    fn resident_bytes(&self) -> usize {
+        let figure = |value: &Figure| match value {
+            Figure::Text(text) => text.capacity(),
+            Figure::Number(_) => 0,
+        };
+        std::mem::size_of::<Self>()
+            + std::mem::size_of_val(self.tiles.as_ref())
+            + self
+                .tiles
+                .iter()
+                .map(|tile| {
+                    tile.label.capacity()
+                        + figure(&tile.value)
+                        + tile.delta.as_ref().map_or(0, figure)
+                        + std::mem::size_of_val(tile.sparkline.0.as_ref())
+                        + budget::optional(&tile.hint)
+                })
+                .sum::<usize>()
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         StatsView {
             id: cx.key("stats"),
@@ -123,39 +154,13 @@ impl RichBlock for Stats {
         }
         .into_any_element()
     }
-
-    fn markdown(&self) -> String {
-        let hints = self.tiles.iter().any(|tile| tile.hint().is_some());
-        let mut header = vec!["Metric".to_owned(), "Value".to_owned(), "Change".to_owned()];
-        if hints {
-            header.push("Note".to_owned());
-        }
-        let rows: Vec<Vec<String>> = self
-            .tiles
-            .iter()
-            .map(|tile| {
-                let mut row = vec![
-                    tile.label.trim().to_owned(),
-                    tile.value.text(false),
-                    tile.delta
-                        .as_ref()
-                        .map_or_else(|| "–".to_owned(), |delta| delta.text(true)),
-                ];
-                if hints {
-                    row.push(tile.hint().unwrap_or("").to_owned());
-                }
-                row
-            })
-            .collect();
-        kit::markdown_table(&header, &rows)
-    }
 }
 
 #[derive(IntoElement)]
 struct StatsView {
     id: SharedString,
     theme: ArtisanTheme,
-    tiles: Rc<[Tile]>,
+    tiles: Arc<[Tile]>,
 }
 
 #[derive(Default)]
@@ -163,33 +168,76 @@ struct StatsState {
     hovered: Option<usize>,
 }
 
-/// A small line through `values`, scaled to its own range.
-fn sparkline(values: &[f64], color: Hsla) -> AnyElement {
-    let values: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
-    let (low, high) = values
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &v| {
-            (low.min(v), high.max(v))
-        });
+/// Normalized once during background preparation, shared across paints.
+#[derive(Debug, Default)]
+struct Sparkline(Arc<[f32]>);
+
+impl Sparkline {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn normalize(values: &[f64]) -> Self {
+        let scale = values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()))
+            .max(f64::MIN_POSITIVE);
+        let (low, high) = values
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(|value| value / scale)
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+                (low.min(value), high.max(value))
+            });
+        let span = high - low;
+        Self(
+            values
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .map(|value| {
+                    if span > 0.0 {
+                        ((value / scale - low) / span) as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for Sparkline {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let values = Vec::<f64>::deserialize(deserializer)?;
+        if values.len() > 4096 {
+            return Err(serde::de::Error::custom(
+                "sparkline preview supports at most 4096 samples",
+            ));
+        }
+        Ok(Self::normalize(&values))
+    }
+}
+
+fn sparkline(values: &Sparkline, color: Hsla) -> AnyElement {
+    let values = values.0.clone();
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
             if values.len() < 2 {
                 return;
             }
-            let span = if high - low > f64::EPSILON {
-                high - low
-            } else {
-                1.0
-            };
             #[expect(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
                 reason = "a sparkline needs no precision"
             )]
-            let at = |index: usize, value: f64| {
+            let at = |index: usize, value: f32| {
                 let x = index as f32 / (values.len() - 1) as f32;
-                let y = ((value - low) / span) as f32;
+                let y = value;
                 point(
                     bounds.origin.x + bounds.size.width * x,
                     bounds.origin.y + bounds.size.height * (1.0 - y),
@@ -243,7 +291,7 @@ impl StatsView {
                 .child(kit::label(theme, delta.text(true)).text_color(color))
         });
         let spark_color = if tone == Tone::Neutral {
-            kit::series_color(theme, 0).to_paint()
+            kit::series_color(0).to_paint()
         } else {
             color
         };
@@ -279,7 +327,7 @@ impl StatsView {
             })
             .child(
                 div()
-                    .text_size(px(22.0))
+                    .text_size(TypographyTokens::size(TextStep::X2l))
                     .line_height(px(28.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.colors.foreground.to_paint())
@@ -301,22 +349,23 @@ impl StatsView {
             })
             .when_some(tile.hint().filter(|_| hovered), |cell, hint| {
                 cell.child(
-                    glass_hover_card(
-                        theme,
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.0))
-                            .px(px(14.0))
-                            .py(px(12.0))
-                            .child(hover_card_title(theme, tile.label.trim().to_owned()))
-                            .child(hover_card_text(theme, hint.to_owned(), &[])),
-                    )
-                    .absolute()
-                    .top_full()
-                    .mt(px(8.0))
-                    .left(px(if index > 0 { 16.0 } else { 0.0 }))
-                    .w(px(260.0)),
+                    div()
+                        .child(glass_hover_card(
+                            theme,
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.0))
+                                .px(px(14.0))
+                                .py(px(12.0))
+                                .child(hover_card_title(theme, tile.label.trim().to_owned()))
+                                .child(hover_card_text(theme, hint.to_owned(), &[])),
+                        ))
+                        .absolute()
+                        .top_full()
+                        .mt(px(8.0))
+                        .left(px(if index > 0 { 16.0 } else { 0.0 }))
+                        .w(px(260.0)),
                 )
             })
     }
@@ -341,5 +390,33 @@ impl RenderOnce for StatsView {
             .flex_wrap()
             .gap_y(px(16.0))
             .children(tiles)
+    }
+}
+
+#[cfg(test)]
+mod sparkline_tests {
+    use super::Sparkline;
+
+    #[test]
+    fn normalization_handles_opposite_extremes_nonfinite_and_flat_values() {
+        let values = Sparkline::normalize(&[-f64::MAX, 0.0, f64::MAX, f64::NAN, f64::INFINITY]);
+        assert_eq!(values.0.as_ref(), &[0.0, 0.5, 1.0]);
+        assert_eq!(Sparkline::normalize(&[7.0, 7.0]).0.as_ref(), &[0.0, 0.0]);
+        assert!(Sparkline::normalize(&[f64::NAN]).0.is_empty());
+        assert_eq!(
+            Sparkline::normalize(&[0.0, f64::MIN_POSITIVE]).0.as_ref(),
+            &[0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn excess_sparkline_work_is_explicit() {
+        let source = serde_json::to_string(&vec![1.0; 4097]).unwrap();
+        assert!(
+            serde_json::from_str::<Sparkline>(&source)
+                .unwrap_err()
+                .to_string()
+                .contains("4096")
+        );
     }
 }

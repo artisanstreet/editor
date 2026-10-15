@@ -1,94 +1,47 @@
-//! Synchronous native rendering for an accepted Markdown message body.
-//!
-//! [`MarkdownRenderer`] is intentionally a small presentation seam over the
-//! owned vocabulary in [`crate::markdown`]. It parses through the bounded
-//! [`MarkdownParseCache`](crate::markdown_cache) and immediately turns the
-//! resulting blocks into ordinary GPUI elements; the only retained state is
-//! the engine and its bounded parse cache, never message state.
-//!
-//! Per-body work happens once, when a body enters the cache: the cached
-//! entry carries a prepared presentation (the `prepared` submodule) with flattened
-//! inline text, theme-independent style runs, fence sources and tokens, and
-//! every element id. A frame over an unchanged body only resolves theme
-//! colors (memoized per leaf) and builds elements from shared data.
-//!
-//! Every text leaf — paragraph and heading runs, code blocks, HTML carried
-//! as inert text, and the plain-source fallback — renders through retained
-//! [`SelectableText`](crate::selectable_text::SelectableText), so transcript
-//! bodies share one drag-select, copy, and link behavior with no
-//! caller-side per-block state. Selection, drag latch, and focus live in
-//! framework element state under stable selector-derived ids; the renderer
-//! itself stays synchronous and stateless.
-//!
-//! Fences always render inside the fence chrome: a fence without classified
-//! tokens (still streaming, bare, indented, or in a language the bundled
-//! grammars do not cover) reads as unhighlighted code. It never demotes the
-//! surrounding message to raw source, so emphasis, lists, and headings
-//! beside it keep rendering.
-//!
-//! Closed `mermaid` fences draw as diagrams on the same card (see
-//! [`diagram`]); source the diagram renderer rejects stays code.
-//!
-//! Tables render as a native content-sized grid (see [`table`]).
-//!
-//! Lists render as native stacked rows with muted markers (`•` or `1.`)
-//! instead of HTML list elements; emphasis and strong survive as inline
-//! structure at reference weights (strong 600, links 500), and absolute
-//! `http(s)`/`mailto:` link labels render underlined in the accent token
-//! and open through the platform browser on click.
-//! Relative and other-scheme destinations keep their plain label: with no
-//! project base the renderer must not open arbitrary local paths, and raw
-//! HTML stays inert text.
-//!
-//! Trailing citation attributions leave prose entirely: links whose authored
-//! label is exactly `Source`/`Sources` are hoisted out of the paragraph into
-//! secondary badge pills that trail the sentence on its own line (resolved
-//! title or host, favicon when the rich-link table has one), `ChatGPT`-chip
-//! style. Only trailing attributions qualify — GPUI flexbox has no inline
-//! layout (see `crate::badge`), so a pill can never flow mid-sentence — and
-//! only the bare source labels qualify, so ordinary titled links keep their
-//! inline treatment.
-//!
-//! Spacing and type follow [`ProseTypography`](crate::theme::ProseTypography):
-//! 16 px / 28 px body at weight 410, per-heading sizes with collapsing
-//! block margins, and fences on the composer's glass card. Inline
-//! code reads 400 muted with no wash; mono face and normal tracking ride
-//! the frozen text-run contract through `InlinePresentation.code_ranges`
-//! (see `code_style`). Size has no override in that API, so inline code
-//! keeps the inherited 16 px instead of the reference 0.875 em.
+//! Native Markdown presentation with bounded asynchronous preparation.
+//! The worker normalizes syntax, inline text, rich specs, and code presentation.
+//! The transcript constructs only visible semantic rows; nested lists and
+//! tables flatten into that same row stream. Ordinary code uses a bounded
+//! native line viewport, shared CodeCard chrome, and source-owned selection.
+//! Shared media components load through the scoped Forge provider.
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::cell::{Cell, RefCell};
+use crate::theme::{ArtisanTheme, Oklch, ProseTypography, TextStep, TypographyTokens};
+use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, Div, ElementId, FontStyle, FontWeight, HighlightStyle, ImageSource, IntoElement,
-    ParentElement, Pixels, RenderImage, SharedString, Styled, div, img,
-    prelude::{InteractiveElement as _, StatefulInteractiveElement as _},
-    px,
+    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement, Pixels,
+    SharedString, Styled, div, img, prelude::InteractiveElement as _, px,
 };
 
-use crate::badge::BadgeStyle;
-use crate::glass::{
-    GlassStrength, glass_card_shadows, glass_foreground_base, glass_highlight_layer,
-    glass_material_layer,
-};
-
-use crate::markdown::{
-    Block, CodeToken, CodeTokenKind, ListItem, MarkdownDocument, MarkdownEngine, Span, Table,
-};
-use crate::markdown_cache::{MarkdownParseCache, MarkdownParseReport, MarkdownWorkCounters};
-use crate::markdown_reveal::{RevealFade, apply_reveal_fade};
+use crate::markdown::{Block, CodeToken, CodeTokenKind, Span};
 use crate::selectable_text::SelectableText;
-use crate::theme::{ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens};
 
+mod async_preparation;
+mod budget;
+pub mod native_projection;
+mod projection_owner;
+mod projection_worker;
+pub use projection_owner::NativePreparation;
+pub use projection_worker::NativeWindow;
+mod literal;
+mod stored;
+pub use literal::{LiteralLeaf, LiteralPreparation};
+pub use stored::{
+    ContentFetch as MarkdownContentFetch, SourceIndexFetch as MarkdownSourceIndexFetch,
+    StoredPreparation, StoredSource,
+};
 mod code_copy;
+pub use async_preparation::{MarkdownPreparation, PreparedSource};
 mod diagram;
 mod inline;
 mod prepared;
+mod reveal;
+pub use reveal::PreparedReveal;
 mod rich;
 mod table;
 
@@ -96,47 +49,374 @@ use code_copy::CodeCopyButton;
 use inline::flatten_inline;
 pub(crate) use prepared::PreparedMarkdown;
 use prepared::{
-    LeafPresentation, PreparedBlock, PreparedBlocks, PreparedCode, PreparedKind, PreparedLeaf,
-    PreparedList, ROOT_SLOT, Slot,
+    LeafPresentation, PreparedBlock, PreparedCode, PreparedKind, PreparedLeaf, ROOT_SLOT, Slot,
 };
 pub use rich::{
-    CopyEntry, CopyKind, ImageShowcase, MediaFetch, MediaFetcher, MediaRequest, MediaRoot,
-    OpenReference, ShowCopyMenu,
+    CopyEntry, CopyKind, MediaFetch, MediaFetcher, MediaRequest, OpenReference, ResourceScope,
+    ShowCopyMenu, decode_image_bytes, image_resident_bytes,
 };
 
-/// Synchronous renderer for accepted Markdown message bodies.
-///
-/// The engine and its bounded parse cache are the only retained state. Source
-/// text and syntax ranges are owned only for the duration of one render call;
-/// a parsed document stays cached under its exact body identity until the
-/// cache evicts it.
+/// Renderer-owned bounded preparation, resource, and selection state.
 #[derive(Debug)]
 pub struct MarkdownRenderer {
-    engine: MarkdownEngine,
-    cache: RefCell<MarkdownParseCache>,
     prose_measure: Option<Pixels>,
+    media: RefCell<Option<MediaFetcher>>,
+    selection_prefix: RefCell<Vec<u64>>,
+    selection_scope: RefCell<SharedString>,
+    selection_sources: RefCell<Vec<SelectionEntry>>,
+    preparation: async_preparation::PreparationOwner,
+    stored: stored::StoredOwner,
+    literal: literal::LiteralOwner,
+    projection: projection_owner::ProjectionOwner,
+    pub(crate) native_runs:
+        RefCell<std::collections::VecDeque<crate::selectable_text::NativeRunEntry>>,
+}
+
+struct SelectionEntry {
+    scope: SharedString,
+    prefix: Vec<u64>,
+    prepared: std::rc::Weak<PreparedMarkdown>,
+    source: Rc<crate::selectable_text::SelectionSource>,
+    bytes: usize,
+}
+impl std::fmt::Debug for SelectionEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionEntry")
+            .field("scope", &self.scope)
+            .field("prefix", &self.prefix)
+            .finish()
+    }
 }
 
 impl MarkdownRenderer {
-    /// Constructs a renderer with the shared bundled Markdown engine.
-    ///
-    /// The engine's only construction failure is a rejected fixed classifier
-    /// selector, which is a first-party programming error rather than input
-    /// supplied by a conversation.
-    ///
-    /// # Panics
-    ///
-    /// Panics only if the fixed first-party classifier selector table is
-    /// invalid.
+    /// Constructs lazy, renderer-owned preparation and resource state.
     #[must_use]
     pub fn new() -> Self {
-        diagram::warm_up();
         Self {
-            engine: MarkdownEngine::new()
-                .expect("the built-in Markdown classifier selectors must remain valid"),
-            cache: RefCell::new(MarkdownParseCache::default()),
             prose_measure: None,
+            media: RefCell::new(None),
+            selection_prefix: RefCell::new(Vec::new()),
+            selection_scope: RefCell::new({
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                SharedString::from(format!(
+                    "markdown-{}",
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ))
+            }),
+            selection_sources: RefCell::new(Vec::new()),
+            preparation: async_preparation::PreparationOwner::default(),
+            stored: stored::StoredOwner::default(),
+            literal: literal::LiteralOwner::default(),
+            projection: projection_owner::ProjectionOwner::default(),
+            native_runs: RefCell::default(),
         }
+    }
+
+    /// Changes this renderer's immutable host/thread resource provider.
+    pub fn set_media_fetcher(&self, fetcher: Option<MediaFetcher>) {
+        *self.media.borrow_mut() = fetcher;
+    }
+
+    /// Releases resources for Items no longer resident in the transcript window.
+    pub fn retain_resource_owners(&self, owners: &[Vec<u64>], cx: &mut gpui::App) {
+        if let Some(media) = self.media.borrow().as_ref() {
+            media.retain_resources(owners, cx);
+        }
+    }
+
+    /// Semantic transcript Item order; prepared block ordinals follow it.
+    pub fn set_selection_prefix(&self, prefix: Vec<u64>) {
+        *self.selection_prefix.borrow_mut() = prefix;
+    }
+
+    /// Selection document identity. Conversation renderers share a host/thread scope;
+    /// standalone previews retain their default isolated identity.
+    pub fn set_selection_scope(&self, scope: impl Into<SharedString>) {
+        *self.selection_scope.borrow_mut() = scope.into();
+    }
+
+    /// Parses/highlights one Item revision on the renderer's bounded worker.
+    pub fn prepare_source(
+        &self,
+        key: SharedString,
+        source: Arc<str>,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> MarkdownPreparation {
+        self.preparation
+            .prepare(key, async_preparation::Source::Text(source), cx, notify)
+    }
+    /// Publishes only admitted native hot glyph windows. The caller supplies
+    /// its actual resolved layout width and stable immutable TextRuns identity.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, source, typography, width, runs, window and the callback"
+    )]
+    pub fn prepare_native_window(
+        &self,
+        key: SharedString,
+        source: SharedString,
+        font_size: Pixels,
+        width: Pixels,
+        runs: Arc<[gpui::TextRun]>,
+        range: Range<usize>,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> NativePreparation {
+        let worker = match self.preparation.worker() {
+            Ok(worker) => worker,
+            Err(error) => return NativePreparation::Failed(error),
+        };
+        self.projection.prepare(
+            key, source, font_size, width, runs, range, &worker, cx, notify,
+        )
+    }
+    pub fn native_row_count(
+        &self,
+        key: &SharedString,
+        source: &SharedString,
+        font_size: Pixels,
+        width: Pixels,
+        runs: &Arc<[gpui::TextRun]>,
+    ) -> Option<usize> {
+        self.projection
+            .row_count(key, source, font_size, width, runs)
+    }
+    pub fn retry_native_window(&self, key: &SharedString) {
+        self.projection.retry(key);
+    }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, reference, format, both fetchers and the callback"
+    )]
+    pub fn prepare_stored_source(
+        &self,
+        key: SharedString,
+        reference: artisan_api::ContentRef,
+        format: artisan_api::SourceIndexFormat,
+        fetcher: MarkdownContentFetch,
+        index_fetcher: MarkdownSourceIndexFetch,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> StoredPreparation {
+        self.stored.prepare(
+            key,
+            reference,
+            format,
+            fetcher,
+            index_fetcher,
+            None,
+            cx,
+            notify,
+        )
+    }
+    pub fn prepare_stored_leaf(
+        &self,
+        key: SharedString,
+        source: &StoredSource,
+        leaf: usize,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> MarkdownPreparation {
+        if source.format() != artisan_api::SourceIndexFormat::Markdown {
+            return MarkdownPreparation::Failed(
+                "Literal sources require the literal projection renderer".into(),
+            );
+        }
+        let index = &source.index;
+        let Some(descriptor) = source.leaf_descriptor(leaf) else {
+            return MarkdownPreparation::Pending;
+        };
+        self.preparation.prepare(
+            key,
+            async_preparation::Source::Remote {
+                reference: source.reference.clone(),
+                metadata: index.header.metadata.clone(),
+                descriptor,
+                fetcher: source.fetcher.clone(),
+            },
+            cx,
+            notify,
+        )
+    }
+    /// Fetches only one indexed raw literal leaf after bounded admission.
+    pub fn prepare_stored_literal_leaf(
+        &self,
+        key: SharedString,
+        source: &StoredSource,
+        ordinal: usize,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> LiteralPreparation {
+        self.literal.prepare(key, source, ordinal, cx, notify)
+    }
+    /// Proves raw bytes belong to this exact source descriptor, not glyph paint.
+    pub fn is_stored_literal_leaf_prepared(
+        &self,
+        key: &SharedString,
+        source: &StoredSource,
+        ordinal: usize,
+    ) -> bool {
+        self.literal.is_prepared(key, source, ordinal)
+    }
+    pub fn request_stored_window(
+        &self,
+        key: SharedString,
+        source: &StoredSource,
+        offset: u64,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> StoredPreparation {
+        self.stored.prepare(
+            key,
+            source.reference.clone(),
+            source.format,
+            source.fetcher.clone(),
+            source.index_fetcher.clone(),
+            Some(offset),
+            cx,
+            notify,
+        )
+    }
+    pub fn is_stored_leaf_prepared(
+        &self,
+        key: &SharedString,
+        source: &StoredSource,
+        leaf: usize,
+    ) -> bool {
+        self.preparation
+            .is_remote_prepared(key, &source.reference, leaf)
+    }
+    /// Receives a cheap live snapshot; bounded text flattening happens on the worker.
+    pub fn prepare_rope_source(
+        &self,
+        key: SharedString,
+        source: Arc<ropey::Rope>,
+        cx: &mut gpui::App,
+        notify: impl Fn(&mut gpui::App) + 'static,
+    ) -> MarkdownPreparation {
+        self.preparation
+            .prepare(key, async_preparation::Source::Rope(source), cx, notify)
+    }
+    pub fn is_rope_source_prepared(&self, key: &SharedString, source: &Arc<ropey::Rope>) -> bool {
+        self.preparation.is_rope_prepared(key, source)
+    }
+    /// Most recent prepared revision, useful while its successor is pending.
+    pub fn prepared_source(&self, key: &SharedString) -> Option<Rc<PreparedSource>> {
+        self.preparation.prepared(key)
+    }
+    /// True only for the current completed revision, including source identity.
+    pub fn is_source_prepared(&self, key: &SharedString, source: &Arc<str>) -> bool {
+        self.preparation.is_prepared(key, source)
+    }
+    /// Cancels old Item jobs and releases all prepared/cache resources when
+    /// the owning thread changes or closes.
+    pub fn clear(&self, cx: &mut gpui::App) {
+        self.stored.clear();
+        self.literal.clear();
+        self.projection.clear();
+        self.native_runs.borrow_mut().clear();
+        self.preparation.clear(cx);
+        if let Some(media) = self.media.borrow_mut().take() {
+            media.clear_resources(cx);
+        }
+        self.selection_prefix.borrow_mut().clear();
+        self.selection_sources.borrow_mut().clear();
+    }
+    /// Draws only the requested semantic leaf-row range. The caller's native
+    /// list owns row visibility and measurement; block identity remains its
+    /// source ordinal across different windows.
+    pub fn render_prepared_range(
+        &self,
+        prepared: &PreparedSource,
+        range: Range<usize>,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+    ) -> AnyElement {
+        self.render_prepared(
+            prepared.presentation.clone(),
+            prepared.revision(),
+            &theme,
+            &selector.into(),
+            tone,
+            range,
+            None,
+        )
+    }
+
+    /// Paints paced word fades over complete prepared native leaves. The range
+    /// retains its original layout and selection ownership during the reveal.
+    pub fn render_prepared_revealing_range(
+        &self,
+        prepared: &PreparedSource,
+        range: Range<usize>,
+        theme: ArtisanTheme,
+        selector: impl Into<SharedString>,
+        tone: MarkdownBodyTone,
+        reveal: &PreparedReveal,
+    ) -> AnyElement {
+        self.render_prepared(
+            prepared.presentation.clone(),
+            prepared.revision(),
+            &theme,
+            &selector.into(),
+            tone,
+            range,
+            Some(reveal),
+        )
+    }
+
+    fn selection_source(
+        &self,
+        prepared: &Rc<PreparedMarkdown>,
+        scope: &SharedString,
+        prefix: &[u64],
+    ) -> Rc<crate::selectable_text::SelectionSource> {
+        let mut sources = self.selection_sources.borrow_mut();
+        sources.retain(|entry| entry.prepared.strong_count() > 0);
+        let index = sources
+            .iter()
+            .position(|entry| &entry.scope == scope && entry.prefix == prefix);
+        if let Some(index) = index {
+            let entry = sources.remove(index);
+            if entry.prepared.ptr_eq(&Rc::downgrade(prepared)) {
+                let source = entry.source.clone();
+                sources.push(entry);
+                return source;
+            }
+        }
+        let source = prepared.selection_source(scope, prefix);
+        let bytes = source
+            .resident_bytes()
+            .saturating_add(std::mem::size_of::<SelectionEntry>())
+            .saturating_add(std::mem::size_of_val(prefix))
+            .saturating_add(scope.len());
+        const SELECTION_SOURCE_BYTES: usize = 32 * 1024 * 1024;
+        while !sources.is_empty()
+            && (sources.len() >= 48
+                || sources
+                    .iter()
+                    .map(|entry| entry.bytes)
+                    .sum::<usize>()
+                    .saturating_add(bytes)
+                    > SELECTION_SOURCE_BYTES)
+        {
+            sources.remove(0);
+        }
+        // The current render owns its source even when it cannot fit in the
+        // retained registry. Never cache an oversized document indefinitely.
+        if bytes > SELECTION_SOURCE_BYTES {
+            return source;
+        }
+        sources.push(SelectionEntry {
+            scope: scope.clone(),
+            prefix: prefix.to_vec(),
+            prepared: Rc::downgrade(prepared),
+            source: source.clone(),
+            bytes,
+        });
+        source
     }
 
     /// Bounds reading blocks to `measure` while code fences keep the full
@@ -153,286 +433,147 @@ impl MarkdownRenderer {
         self
     }
 
-    /// Parses one body through the bounded parse cache.
-    ///
-    /// Repeated calls for the same body identity borrow the same parsed
-    /// document; a changed body parses once and becomes the newest cache
-    /// entry. Returns `None` when the engine rejects the source, exactly like
-    /// the render fallback path.
-    #[must_use]
-    pub fn cached_document(&self, source: &str) -> Option<Rc<MarkdownDocument>> {
-        self.cache.borrow_mut().document(&self.engine, source)
-    }
-
-    /// Returns the parse-cache counters for tests and review.
-    #[must_use]
-    pub fn parse_report(&self) -> MarkdownParseReport {
-        self.cache.borrow().report()
-    }
-
-    /// Parses and renders one source body as inert native GPUI elements.
-    ///
-    /// The supplied selector is the stable parent identity of the owning
-    /// message card. It is never combined with source text or parser output.
-    /// Only a parse failure, or a non-empty body that produced no blocks,
-    /// uses the plain body fallback.
-    #[must_use]
-    pub fn render_source(
-        &self,
-        source: &str,
-        theme: ArtisanTheme,
-        selector: impl Into<SharedString>,
-    ) -> AnyElement {
-        self.render_source_with_tone(source, theme, selector, MarkdownBodyTone::Muted)
-    }
-
-    /// Parses and renders one source body with an explicit body text tone.
-    ///
-    /// Assistant replies render [`MarkdownBodyTone::Foreground`]; every other
-    /// message keeps the reference muted body.
-    #[must_use]
-    pub fn render_source_with_tone(
-        &self,
-        source: &str,
-        theme: ArtisanTheme,
-        selector: impl Into<SharedString>,
-        tone: MarkdownBodyTone,
-    ) -> AnyElement {
-        self.render_source_with_tone_and_titles(source, theme, selector, tone, &NoRichLinkTitles)
-    }
-
-    /// Parses and renders one source body with resolved rich-link titles.
-    ///
-    /// An openable HTTP(S) link whose destination has a resolved title renders
-    /// that title in place of the authored label while keeping the exact
-    /// destination and link range; every unresolved or failed destination
-    /// keeps the authored label. Callers without resolver state use
-    /// [`Self::render_source_with_tone`], which behaves as an empty lookup.
-    #[must_use]
-    pub fn render_source_with_tone_and_titles(
-        &self,
-        source: &str,
-        theme: ArtisanTheme,
-        selector: impl Into<SharedString>,
-        tone: MarkdownBodyTone,
-        titles: &dyn RichLinkTitleSource,
-    ) -> AnyElement {
-        let prepared = self.cache.borrow_mut().prepared(&self.engine, source);
-        self.render_prepared(
-            prepared,
-            source,
-            &theme,
-            &selector.into(),
-            tone,
-            titles,
-            None,
-        )
-        .0
-    }
-
-    /// Renders one revealing prefix of a streamed body, fading freshly
-    /// revealed units by `fade`.
-    ///
-    /// Returns the element and the body's visible length in the fade's
-    /// coordinates: leaf text bytes in document order, with each fence,
-    /// table, and raw HTML block counted as one unit. A caller marks the
-    /// next revealed segment at the length this returned for the previous
-    /// prefix. Fading recolors glyphs and blocks only; layout is exactly
-    /// that of [`Self::render_source_with_tone_and_titles`].
-    #[must_use]
-    pub fn render_revealing_source(
-        &self,
-        source: &str,
-        theme: ArtisanTheme,
-        selector: impl Into<SharedString>,
-        tone: MarkdownBodyTone,
-        titles: &dyn RichLinkTitleSource,
-        fade: &RevealFade,
-    ) -> (AnyElement, usize) {
-        let prepared = self.cache.borrow_mut().prepared(&self.engine, source);
-        self.render_prepared(
-            prepared,
-            source,
-            &theme,
-            &selector.into(),
-            tone,
-            titles,
-            Some(fade),
-        )
-    }
-
-    /// Renders like [`Self::render_source_with_tone_and_titles`] from a body
-    /// the caller already holds as a [`SharedString`].
-    ///
-    /// The cache keeps the body's allocation, so while the caller keeps
-    /// handing over the same string the lookup is a pointer comparison: no
-    /// hashing and no byte comparison of the body on any frame.
-    #[must_use]
-    pub fn render_shared_source_with_tone_and_titles(
-        &self,
-        source: &SharedString,
-        theme: ArtisanTheme,
-        selector: impl Into<SharedString>,
-        tone: MarkdownBodyTone,
-        titles: &dyn RichLinkTitleSource,
-    ) -> AnyElement {
-        let prepared = self
-            .cache
-            .borrow_mut()
-            .prepared_shared(&self.engine, source);
-        self.render_prepared(
-            prepared,
-            source,
-            &theme,
-            &selector.into(),
-            tone,
-            titles,
-            None,
-        )
-        .0
-    }
-
     #[expect(
         clippy::too_many_arguments,
-        reason = "the one render seam threads the prepared body, its theme and identity, the tone, title lookup, and optional reveal fade"
+        reason = "one draw of a prepared range with its theme, selector, tone and optional reveal"
     )]
     fn render_prepared(
         &self,
-        prepared: Option<Rc<PreparedMarkdown>>,
-        source: &str,
+        prepared: Rc<PreparedMarkdown>,
+        revision: u64,
         theme: &ArtisanTheme,
         selector: &SharedString,
         tone: MarkdownBodyTone,
-        titles: &dyn RichLinkTitleSource,
-        fade: Option<&RevealFade>,
-    ) -> (AnyElement, usize) {
-        let Some(prepared) = prepared else {
-            return plain_source(source, theme, selector, tone, self.prose_measure, fade);
-        };
-        let blocks = prepared.document().blocks();
-        if !source.is_empty() && blocks.is_empty() {
-            return plain_source(source, theme, selector, tone, self.prose_measure, fade);
-        }
-
-        let ids = prepared.ids(selector);
+        range: Range<usize>,
+        reveal: Option<&PreparedReveal>,
+    ) -> AnyElement {
+        let selection_prefix = self.selection_prefix.borrow();
+        let media = self
+            .media
+            .borrow()
+            .clone()
+            .map(|media| media.owned_by(&selection_prefix, revision));
+        let selection_scope = self.selection_scope.borrow();
+        let selection_source =
+            self.selection_source(&prepared, &selection_scope, &selection_prefix);
         let render = RenderContext {
             theme,
+            media: media.as_ref(),
+            selection_prefix: &selection_prefix,
+            selection_scope: &selection_scope,
             tone,
-            titles,
-            ids: &ids,
-            counters: prepared.counters(),
-            fade,
-            cursor: Cell::new(0),
+            selector,
+            reveal,
         };
         let mut root = markdown_root(render.id(ROOT_SLOT), theme, tone);
-        let root_blocks = prepared.root();
-        for (index, block) in root_blocks.blocks.iter().enumerate() {
-            let measure = match block.kind {
-                PreparedKind::Code(_) => None,
-                _ => self.prose_measure,
+        let flow = prepared.flow();
+        for row in flow
+            .iter()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+        {
+            let (content, measure) = match &row.kind {
+                prepared::FlowKind::Block(block) => (
+                    render_block(block, &render),
+                    if matches!(block.kind, PreparedKind::Code(_)) {
+                        None
+                    } else {
+                        self.prose_measure
+                    },
+                ),
+                prepared::FlowKind::TableRow { block, row } => {
+                    let PreparedKind::Table(table) = &block.kind else {
+                        unreachable!("prepared table row")
+                    };
+                    (table::render_row(table, *row, &render), self.prose_measure)
+                }
+                prepared::FlowKind::Empty { leaf, slot } => {
+                    (render_leaf(leaf, *slot, "\n", &render), self.prose_measure)
+                }
             };
+            let mut frame = div()
+                .relative()
+                .w_full()
+                .min_w_0()
+                .pl(px(row.indent as f32 * ProseTypography::LIST_INDENT_PX))
+                .child(content);
+            if let (Some(reveal), prepared::FlowKind::Block(block)) = (reveal, &row.kind)
+                && matches!(
+                    block.kind,
+                    PreparedKind::Code(_) | PreparedKind::Html { .. }
+                )
+                && let Some((alpha, rise)) = reveal.block_entrance(block.selector)
+            {
+                frame = reveal.block_panel(block.selector, frame.opacity(alpha).top(px(rise)));
+            }
+            for (indent, marker, ordered) in &row.markers {
+                let mut label = div()
+                    .absolute()
+                    .left(px(*indent as f32 * ProseTypography::LIST_INDENT_PX))
+                    .top_0()
+                    .text_color(theme.colors.muted_foreground.to_paint());
+                if *ordered {
+                    label = label.font_weight(FontWeight::NORMAL);
+                }
+                frame = frame.child(label.child(marker.clone()));
+            }
             root = root.child(with_block_margins(
-                render_block(blocks.get(index), block, &render, 0),
-                root_blocks.gaps.get(index).copied().unwrap_or_default(),
+                frame.into_any_element(),
+                row.gap,
                 measure,
             ));
         }
-        (root.into_any_element(), render.cursor.get())
+        let content = root.into_any_element();
+        let content = if let Some(reveal) = reveal {
+            reveal.mask(content)
+        } else {
+            content
+        };
+        SelectionRegistration {
+            source: selection_source,
+            content,
+        }
+        .into_any_element()
+    }
+}
+
+#[derive(gpui::IntoElement)]
+struct SelectionRegistration {
+    source: Rc<crate::selectable_text::SelectionSource>,
+    content: AnyElement,
+}
+impl gpui::RenderOnce for SelectionRegistration {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+        crate::selectable_text::register_selection_source(&self.source, window, cx);
+        self.content
     }
 }
 
 /// Everything one render pass threads through the block tree.
 struct RenderContext<'a> {
+    selection_prefix: &'a [u64],
+    selection_scope: &'a SharedString,
+    media: Option<&'a MediaFetcher>,
     theme: &'a ArtisanTheme,
     tone: MarkdownBodyTone,
-    titles: &'a dyn RichLinkTitleSource,
-    /// This document's element ids under the caller's selector.
-    ids: &'a [SharedString],
-    counters: &'a MarkdownWorkCounters,
-    /// The reveal fade of a streaming body, if any.
-    fade: Option<&'a RevealFade>,
-    /// Visible units rendered so far, in document order (see
-    /// [`MarkdownRenderer::render_revealing_source`]).
-    cursor: Cell<usize>,
+    /// Namespace for stable prepared ordinals.
+    selector: &'a SharedString,
+    reveal: Option<&'a PreparedReveal>,
 }
 
 impl RenderContext<'_> {
-    /// The element id in `slot`. Slots are assigned by the same prepared
-    /// document the table was formatted from, so every slot is in range.
     fn id(&self, slot: Slot) -> SharedString {
-        self.ids.get(slot).cloned().unwrap_or_default()
+        SharedString::from(format!("{}-md-{slot}", self.selector))
     }
 
-    /// Claims the next `len` visible units and returns their translucent
-    /// leaf-local spans.
-    fn claim_leaf(&self, len: usize) -> Vec<(Range<usize>, f32)> {
-        let base = self.cursor.get();
-        self.cursor.set(base + len);
-        self.fade
-            .map(|fade| fade.leaf_spans(base, len))
-            .unwrap_or_default()
+    fn element_id(&self, slot: Slot) -> gpui::ElementId {
+        gpui::ElementId::NamedInteger(self.selector.clone(), slot as u64)
     }
 
-    /// Claims one atomic unit and returns its opacity.
-    fn claim_block(&self) -> f32 {
-        let at = self.cursor.get();
-        self.cursor.set(at + 1);
-        self.fade.map_or(1.0, |fade| fade.alpha_at(at))
-    }
-
-    /// A context for the inside of an atomic block: same theme and ids, no
-    /// fade, and a private cursor.
-    fn without_fade(&self) -> RenderContext<'_> {
-        RenderContext {
-            theme: self.theme,
-            tone: self.tone,
-            titles: self.titles,
-            ids: self.ids,
-            counters: self.counters,
-            fade: None,
-            cursor: Cell::new(0),
-        }
-    }
-
-    /// The opacity of whatever renders next, without claiming it.
-    fn alpha_next(&self) -> f32 {
-        self.fade
-            .map_or(1.0, |fade| fade.alpha_at(self.cursor.get()))
-    }
-}
-
-/// Fades one whole block by `alpha`, untouched at full opacity.
-fn faded(element: AnyElement, alpha: f32) -> AnyElement {
-    if alpha >= 1.0 {
-        element
-    } else {
-        div().opacity(alpha).child(element).into_any_element()
-    }
-}
-
-/// Read-only lookup for resolved rich-link page titles.
-///
-/// The renderer consults this seam for every openable HTTP(S) link: a present
-/// title replaces the authored label; `None` keeps it. Implementations own
-/// their caching, freshness, and request policy; the renderer is synchronous
-/// and never fetches.
-pub trait RichLinkTitleSource {
-    /// An already decoded optional favicon. Never performs I/O.
-    fn favicon(&self, _destination: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
-        None
-    }
-
-    /// Returns the resolved title for one absolute destination, if known.
-    fn resolved_title(&self, destination: &str) -> Option<SharedString>;
-}
-
-/// Empty title lookup for callers without resolver state.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoRichLinkTitles;
-
-impl RichLinkTitleSource for NoRichLinkTitles {
-    fn resolved_title(&self, _destination: &str) -> Option<SharedString> {
-        None
+    fn selection_order(&self, slot: Slot) -> Vec<u64> {
+        let mut order = self.selection_prefix.to_vec();
+        order.push(slot as u64);
+        order
     }
 }
 
@@ -448,35 +589,6 @@ fn markdown_root(selector: SharedString, theme: &ArtisanTheme, tone: MarkdownBod
     let mut root = body_container(theme, tone).flex().flex_col();
     root = root.debug_selector(move || selector.to_string());
     root
-}
-
-fn plain_source(
-    source: &str,
-    theme: &ArtisanTheme,
-    selector: &str,
-    tone: MarkdownBodyTone,
-    measure: Option<Pixels>,
-    fade: Option<&RevealFade>,
-) -> (AnyElement, usize) {
-    let spans = fade
-        .map(|fade| fade.leaf_spans(0, source.len()))
-        .unwrap_or_default();
-    let selector = format!("{selector}-markdown");
-    let id = SharedString::from(format!("{selector}-plain"));
-    let mut root = body_container(theme, tone);
-    if let Some(measure) = measure {
-        root = root.max_w(measure);
-    }
-    root = root.debug_selector(move || selector);
-    let element = root
-        .child(SelectableText::retained(
-            id,
-            source.to_owned(),
-            *theme,
-            apply_reveal_fade(&[], &spans),
-        ))
-        .into_any_element();
-    (element, source.len())
 }
 
 /// Which body text tone a rendered message carries.
@@ -612,15 +724,9 @@ pub fn block_gaps(blocks: &[Block], scope: BlockScope) -> Vec<f32> {
     gaps
 }
 
-/// Renders one prepared block. `block` is the matching parsed block, read
-/// only for the inline spans a title change re-flattens and the nested
-/// items and cells those spans live in.
-fn render_block(
-    block: Option<&Block>,
-    prepared: &PreparedBlock,
-    render: &RenderContext<'_>,
-    depth: u32,
-) -> AnyElement {
+/// Render the immutable prepared block using the current presentation context.
+/// Parsing and inline-span preparation are owned by the source revision worker.
+fn render_block(prepared: &PreparedBlock, render: &RenderContext<'_>) -> AnyElement {
     let theme = render.theme;
     let selector = render.id(prepared.selector);
     let mut element = body_container(theme, render.tone).flex().flex_col();
@@ -635,149 +741,36 @@ fn render_block(
                 .line_height(px(heading.line_px))
                 .letter_spacing(px(heading.tracking_px))
                 .text_color(theme.colors.foreground.to_paint())
-                .child(render_leaf(
-                    block_spans(block),
-                    leaf,
-                    selector.clone(),
-                    render,
-                ));
+                .child(render_leaf(leaf, prepared.selector, "\n\n", render));
         }
         PreparedKind::Paragraph { leaf } => {
-            element = element.child(render_leaf(
-                block_spans(block),
-                leaf,
-                selector.clone(),
-                render,
-            ));
+            element = element.child(render_leaf(leaf, prepared.selector, "\n\n", render));
         }
         PreparedKind::Code(code) => {
-            // Fences, tables, and raw HTML reveal whole, so they fade whole.
-            let alpha = render.claim_block();
-            element = element.child(faded(render_code(code, render), alpha));
+            element = element.child(render_code(code, render));
         }
         PreparedKind::Html { id, source } => {
-            // Carried verbatim as inert data, exactly as before, but
-            // selectable like every other transcript leaf.
-            let alpha = render.claim_block();
-            element = element.child(faded(
-                SelectableText::retained(render.id(*id), source.clone(), *theme, Vec::new())
-                    .into_any_element(),
-                alpha,
-            ));
+            element = element.child(
+                SelectableText::retained(
+                    render.element_id(*id),
+                    source.clone(),
+                    *theme,
+                    Vec::new(),
+                )
+                .selection_order(render.selection_order(*id), "\n")
+                .selection_scope(render.selection_scope.clone()),
+            );
         }
         PreparedKind::List(list) => {
-            element = element.child(render_list(block_items(block), list, render, depth));
+            let _ = list;
+            unreachable!("list containers are flattened into prepared flow rows");
         }
-        PreparedKind::Table(table) => {
-            // The table fades as one block; its cells render without their
-            // own fade and claim no units of their own.
-            let alpha = render.claim_block();
-            let cells = render.without_fade();
-            element = element.child(faded(
-                table::render_table(block_table(block), table, &cells),
-                alpha,
-            ));
+        PreparedKind::Table(_) => {
+            unreachable!("table containers are flattened into prepared flow rows")
         }
     }
     element = element.debug_selector(move || selector.to_string());
     element.into_any_element()
-}
-
-/// The inline spans of a heading or paragraph; empty for anything else.
-fn block_spans(block: Option<&Block>) -> &[Span] {
-    match block {
-        Some(Block::Heading { spans, .. } | Block::Paragraph { spans, .. }) => spans,
-        _ => &[],
-    }
-}
-
-/// The items of a list; empty for anything else.
-fn block_items(block: Option<&Block>) -> &[ListItem] {
-    match block {
-        Some(Block::List { items, .. }) => items,
-        _ => &[],
-    }
-}
-
-/// The table of a table block.
-fn block_table(block: Option<&Block>) -> Option<&Table> {
-    match block {
-        Some(Block::Table(table)) => Some(table),
-        _ => None,
-    }
-}
-
-/// Renders an ordered or unordered list as native rows: one marker plus the
-/// item's own blocks. Rows keep the `li` 8 px pitch; item content blocks
-/// collapse with the item-scope recipe and zero outer margins, so a tight
-/// single-paragraph item reads exactly its row pitch. Nested lists recurse
-/// with the reference 26 px list indent.
-fn render_list(
-    items: &[ListItem],
-    prepared: &PreparedList,
-    render: &RenderContext<'_>,
-    depth: u32,
-) -> AnyElement {
-    let theme = render.theme;
-    let mut list = div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(ProseTypography::ITEM_GAP_PX))
-        .pl(px(ProseTypography::LIST_INDENT_PX));
-    if depth > 0 {
-        list = list.pl(px(ProseTypography::LIST_INDENT_PX));
-    }
-    for (position, item) in prepared.items.iter().enumerate() {
-        let item_blocks = items
-            .get(position)
-            .map_or(&[][..], |item| item.blocks.as_slice());
-        let item_selector = render.id(item.selector);
-        // The marker reveals with its item's first word, so it fades with it.
-        let marker_alpha = render.alpha_next();
-        let mut content = div().flex().flex_1().min_w_0().flex_col();
-        if let Some(empty) = &item.empty {
-            content = content.child(render_leaf(&[], empty, item_selector.clone(), render));
-        }
-        let PreparedBlocks { blocks, gaps } = &item.blocks;
-        for (sub_index, block) in blocks.iter().enumerate() {
-            content = content.child(with_block_margins(
-                render_block(
-                    item_blocks.get(sub_index),
-                    block,
-                    render,
-                    depth.saturating_add(1),
-                ),
-                gaps.get(sub_index).copied().unwrap_or_default(),
-                None,
-            ));
-        }
-        let mut row = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .gap(theme.spacing.steps(2.0));
-        // Ordered markers read at 400 (`ol > li::marker`); unordered
-        // markers inherit body weight like the reference.
-        let mut marker_element = div()
-            .flex_shrink_0()
-            .text_color(theme.colors.muted_foreground.to_paint());
-        if prepared.ordered {
-            marker_element = marker_element.font_weight(FontWeight::NORMAL);
-        }
-        if marker_alpha < 1.0 {
-            marker_element = marker_element.opacity(marker_alpha);
-        }
-        row = row.child(marker_element.child(item.marker.clone()));
-        row = row.child(content);
-        row = row.debug_selector(move || item_selector.to_string());
-        list = list.child(row);
-    }
-    let selector = render.id(prepared.list);
-    list.debug_selector(move || selector.to_string())
-        .into_any_element()
 }
 
 fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) -> String {
@@ -796,56 +789,24 @@ fn item_marker(ordered: bool, base: u64, position: usize, task: Option<bool>) ->
 
 /// Renders one prepared inline leaf under `selector`.
 fn render_leaf(
-    spans: &[Span],
     leaf: &PreparedLeaf,
-    selector: SharedString,
+    slot: Slot,
+    separator: &'static str,
     render: &RenderContext<'_>,
 ) -> AnyElement {
+    let selector = render.element_id(slot);
+    let order = render.selection_order(slot);
     let theme = render.theme;
-    let (presentation, icons) = leaf.presentation(spans, render.titles, render.counters);
-    let fade = render.claim_leaf(presentation.text.len());
-    if presentation.citations.is_empty() {
-        return selectable_leaf(selector, &presentation, icons, theme, &fade);
-    }
-    // One nowrap row: the prose hugs its content and the pills trail the
-    // sentence on its line, bottom-aligned with the last line, instead of
-    // dropping to a chip row beneath the paragraph. The prose keeps
-    // `min-w-0` so narrow windows shrink and rewrap it instead of pushing
-    // the pills out; short prose leaves the pills hugging the sentence end.
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .flex_nowrap()
-        .items_end()
-        .gap(theme.spacing.steps(2.0))
-        .debug_selector({
-            let selector = selector.clone();
-            move || format!("{selector}-cites")
-        });
-    if !presentation.text.trim().is_empty() {
-        row = row.child(
-            div()
-                .min_w_0()
-                .debug_selector({
-                    let selector = selector.clone();
-                    move || format!("{selector}-prose")
-                })
-                .child(selectable_leaf(
-                    selector.clone(),
-                    &presentation,
-                    icons,
-                    theme,
-                    &fade,
-                )),
-        );
-    }
-    row.child(citation_chips(
-        &selector,
-        &presentation.citations,
+    let presentation = leaf.presentation();
+    selectable_leaf(
+        selector,
+        &presentation,
         theme,
-        render.titles,
-    ))
-    .into_any_element()
+        order,
+        separator,
+        render.selection_scope.clone(),
+        render.reveal.map(|reveal| (reveal, slot)),
+    )
 }
 
 /// Renders one flattened leaf as retained selectable text.
@@ -854,24 +815,32 @@ fn render_leaf(
 /// so no separate click handler lives beside it: one element, one behavior.
 /// Text, resolved runs, overrides, and link data are shared with the cached
 /// presentation, so nothing here copies the leaf's content. Only a leaf
-/// with translucent reveal spans copies its highlights to overlay them.
+/// with shared highlights avoids rebuilding style ranges.
 fn selectable_leaf(
-    id: SharedString,
+    id: impl Into<gpui::ElementId>,
     presentation: &LeafPresentation,
-    icons: Vec<(usize, Arc<RenderImage>)>,
     theme: &ArtisanTheme,
-    fade: &[(Range<usize>, f32)],
+    order: Vec<u64>,
+    separator: &'static str,
+    scope: SharedString,
+    reveal: Option<(&PreparedReveal, usize)>,
 ) -> AnyElement {
     let (highlights, overrides) = presentation.resolved(theme);
-    let highlights = if fade.is_empty() {
-        highlights
-    } else {
-        Rc::from(apply_reveal_fade(&highlights, fade))
-    };
+    let highlights = reveal.map_or_else(
+        || highlights.clone(),
+        |(reveal, slot)| reveal.highlights(slot, &presentation.text, highlights.clone()),
+    );
     let mut element = SelectableText::retained(id, presentation.text.clone(), *theme, Vec::new())
+        .selection_order(order, separator)
+        .selection_scope(scope)
         .with_shared_highlights(highlights)
-        .with_shared_text_run_overrides(overrides)
-        .with_inline_images(icons);
+        .with_shared_text_run_overrides(overrides);
+    if let Some((reveal, slot)) = reveal {
+        let end = reveal.visible_end(slot, &presentation.text);
+        if end < presentation.text.len() {
+            element = element.with_reveal_frontier(end, reveal.frontier_reporter());
+        }
+    }
     if !presentation.color_ranges.is_empty() {
         // A color value the reply wrote shows as a swatch and copies in
         // every notation.
@@ -904,175 +873,6 @@ fn selectable_leaf(
         .into_any_element()
 }
 
-/// Flattens one link label to plain text for attribution matching.
-///
-/// Nested emphasis, strong, code, and links contribute their leaves; the
-/// result names what the author wrote, never the resolved rich-link title.
-fn span_label_text(spans: &[Span]) -> String {
-    let mut text = String::new();
-    for span in spans {
-        match span {
-            Span::Text(inline) | Span::Html(inline) | Span::Code(inline) => {
-                text.push_str(inline);
-            }
-            Span::Emphasis(inner) | Span::Strong(inner) => {
-                text.push_str(&span_label_text(inner));
-            }
-            Span::Link { label, .. } => text.push_str(&span_label_text(label)),
-        }
-    }
-    text
-}
-
-/// Whether one authored link label is a bare citation attribution.
-///
-/// Only the exact `Source`/`Sources` labels (case-insensitive, surrounding
-/// whitespace ignored) qualify, so ordinary titled links — including
-/// citation-resolved titles — keep their inline treatment.
-fn is_source_attribution_label(label: &str) -> bool {
-    label.trim().eq_ignore_ascii_case("source") || label.trim().eq_ignore_ascii_case("sources")
-}
-
-/// Hoists trailing citation attributions out of one inline presentation.
-///
-/// The render path splits cached leaves once, in the prepared presentation;
-/// this owned form keeps the split observable on [`InlinePresentation`] for
-/// the renderer's tests.
-///
-/// Returns the body presentation plus the stripped attribution links in
-/// source order. A trailing run qualifies link by link from the end: each
-/// entry must be a recorded `Source`/`Sources` attribution whose range ends
-/// exactly where the remaining body ends (trailing whitespace ignored), so
-/// `…Morrissey.[Source](https://…)` strips the chip while `see [Source](…).
-/// Next.` and mid-sentence attributions stay inline. Stripped ranges are
-/// dropped from every channel — links, highlights, code ranges, and favicon
-/// slots — and the body is end-trimmed, so all surviving ranges still
-/// address the returned source.
-#[cfg(test)]
-fn split_trailing_source_links(
-    mut presentation: InlinePresentation,
-) -> (InlinePresentation, Vec<InlineLink>) {
-    let stripped = inline::split_trailing_citations(inline::InlineChannels {
-        source: &mut presentation.source,
-        runs: &mut presentation.highlights,
-        links: &mut presentation.links,
-        citation_links: &mut presentation.citation_links,
-        code_ranges: &mut presentation.code_ranges,
-        icon_offsets: &mut presentation.icon_offsets,
-    });
-    (presentation, stripped)
-}
-
-/// Renders stripped citation attributions as trailing secondary pills.
-///
-/// Each pill carries the secondary badge recipe — same fitted 20 px pill
-/// geometry as the outline badge, but the filled `secondary` face with
-/// `secondary-foreground` text and no hairline — plus the resolved page
-/// title (host fallback, then `Source`), a 14 px favicon when the rich-link
-/// table has one, and opens its destination through the platform browser on
-/// click: the `ChatGPT` source-chip treatment the inline blue link replaces.
-/// The pills refuse to shrink and never wrap among themselves, so the prose
-/// row absorbs every width change instead.
-fn citation_chips(
-    selector: &str,
-    citations: &[InlineLink],
-    theme: &ArtisanTheme,
-    titles: &dyn RichLinkTitleSource,
-) -> AnyElement {
-    let style = BadgeStyle::resolve(*theme);
-    let chips_selector = format!("{selector}-chips");
-    // The row bottom-anchors the chips to the prose block bottom, which is
-    // the last line bottom: lifting by half the line/pill height difference
-    // centers the 20 px pill on the 28 px prose line instead of sinking it
-    // flush with the line bottom.
-    let center_lift = (px(ProseTypography::BODY_LINE_PX) - style.height) / 2.0;
-    let mut chips = div()
-        .flex()
-        .flex_row()
-        .flex_nowrap()
-        .flex_shrink_0()
-        .items_center()
-        .gap(style.child_gap)
-        .mb(center_lift)
-        .debug_selector(move || chips_selector.clone());
-    for (index, citation) in citations.iter().enumerate() {
-        let destination = SharedString::from(citation.destination.clone());
-        let label = citation_chip_label(&citation.destination, titles);
-        let pill_id = SharedString::from(format!("{selector}-cite-{index}"));
-        let pill_selector = format!("{selector}-cite-{index}");
-        let mut pill = div()
-            .id(ElementId::Name(pill_id))
-            .flex()
-            .flex_row()
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .h(style.height)
-            .px(style.horizontal_padding)
-            .py(style.vertical_padding)
-            .gap(style.child_gap)
-            .rounded(style.corner_radius)
-            .bg(theme.colors.secondary.to_paint())
-            .text_color(theme.colors.secondary_foreground.to_paint())
-            .text_size(style.text_size)
-            .font_weight(FontWeight::MEDIUM)
-            .line_height(style.line_height)
-            .whitespace_nowrap()
-            .overflow_hidden()
-            .cursor_pointer()
-            .aria_label(format!("Open cited source {label}"))
-            .debug_selector(move || pill_selector.clone())
-            .on_click(move |_, _, cx| cx.open_url(destination.as_ref()));
-        if let Some(icon) = titles.favicon(&citation.destination) {
-            pill = pill.child(img(ImageSource::Render(icon)).w(px(14.0)).h(px(14.0)));
-        }
-        chips = chips.child(pill.child(label));
-    }
-    chips.into_any_element()
-}
-
-/// Names one citation pill: the resolved page title, else the link host,
-/// else the bare `Source` fallback.
-fn citation_chip_label(destination: &str, titles: &dyn RichLinkTitleSource) -> SharedString {
-    if let Some(title) = titles.resolved_title(destination)
-        && !title.trim().is_empty()
-    {
-        return title;
-    }
-    if let Some(host) = citation_host(destination) {
-        return SharedString::from(host);
-    }
-    SharedString::from("Source")
-}
-
-/// Extracts the display host from one absolute HTTP(S) destination.
-///
-/// Strips credentials, port, path, and a leading `www.`; brackets fall off
-/// IPv6 literals. Returns `None` when no host survives.
-fn citation_host(destination: &str) -> Option<String> {
-    let authority = destination.split("://").nth(1)?;
-    let host = authority.split(['/', '?', '#']).next()?.trim();
-    if host.is_empty() {
-        return None;
-    }
-    let host = host.rsplit('@').next().unwrap_or(host);
-    let host = host.split(':').next().unwrap_or(host);
-    let host = host.trim_matches(['[', ']']);
-    let host = host.strip_prefix("www.").unwrap_or(host);
-    if host.is_empty() {
-        return None;
-    }
-    Some(host.to_owned())
-}
-
-/// Inset of the fence copy action from the fence's top and right edges: the
-/// shared nesting gap (`--radius-gap`, 8 px) its corner radius is derived
-/// from.
-const CODE_COPY_INSET_PX: f32 = 8.0;
-
-/// Edge of the fence copy action (`ButtonSize::IconSmall`).
-const CODE_COPY_SIZE_PX: f32 = 32.0;
-
 fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     let theme = render.theme;
     let fence = &code.fence;
@@ -1092,82 +892,55 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     let source = fence.source.clone();
     let highlights = fence.highlights(theme);
     let selector = render.id(code.code);
-    // The fence is the composer's glass card: the quiet material and
-    // highlight layers over the foreground lift, the `card-glass` edge
-    // stack, and the composer's 18 px radius, spanning the prose column.
-    // The backdrop blur is left out: a fence scrolls over the flat
-    // transcript canvas, where a blur pass per fence changes no pixel. Type
-    // stays 14 px mono at 24 px leading with 16 px padding, in the
-    // foreground pre-code token at 400 with normal tracking. Filename
-    // chrome has no renderer counterpart.
-    //
-    // The copy action nests in the fence's top-right corner at the shared
-    // 8 px nesting gap (`--radius-gap`), so its corner is the fence's nested
-    // corner, 18 − 8 = 10 px, the same pair the composer's card and its
-    // controls use. A fence with more than one line pins the action 8 px
-    // from the top and right edges; a single line centers it vertically
-    // instead, in the 56 px the line and its padding make. The text column
-    // stops short of the action so no line runs beneath it, and the action
-    // hovers with the shared hover-pill face.
-    let multiline = fence.multiline;
-    let copy_slot = div()
-        .absolute()
-        .right(px(CODE_COPY_INSET_PX))
-        .flex()
-        .items_center();
-    let copy_slot = if multiline {
-        copy_slot.top(px(CODE_COPY_INSET_PX))
+    let placement = if fence.multiline {
+        crate::code_card::CopyPlacement::TopRight
     } else {
-        copy_slot.top(px(0.0)).bottom(px(0.0))
+        crate::code_card::CopyPlacement::CenterRight
     };
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let copy = copy_slot.child(CodeCopyButton::new(
+    let copy = CodeCopyButton::new(
         render.id(code.copy),
-        render.id(code.copy_state),
+        render.element_id(code.copy_state),
         source.clone(),
-        RadiusTokens::nested(radius, px(CODE_COPY_INSET_PX)),
         theme,
-    ));
-    let text_id = render.id(code.text);
-    let diagram = fence
-        .diagram
-        .then(|| diagram::mermaid_diagram(&fence.source, theme))
-        .flatten();
-    let mut code = body_container(theme, MarkdownBodyTone::Muted)
+    );
+    let text_id = render.element_id(code.text);
+    let text_order = render.selection_order(code.text);
+    let diagram = fence.diagram.as_ref();
+    let mut body = body_container(theme, MarkdownBodyTone::Muted)
         .relative()
         .font_family(theme.typography.mono.family)
         .text_size(px(ProseTypography::CODE_SIZE_PX))
         .line_height(px(ProseTypography::CODE_LINE_PX))
         .font_weight(FontWeight::NORMAL)
         .letter_spacing(px(0.0))
-        .text_color(theme.colors.foreground.to_paint())
-        .bg(glass_foreground_base(theme))
-        .rounded(radius)
-        .shadow(glass_card_shadows())
-        .p(px(ProseTypography::CODE_PAD_PX))
-        .child(glass_material_layer(GlassStrength::Quiet, radius))
-        .child(glass_highlight_layer(GlassStrength::Quiet, radius));
-    code = match diagram {
+        .text_color(theme.colors.foreground.to_paint());
+    body = match diagram {
         // The diagram centers between gutters as wide as the copy action's,
         // and claims its laid-out aspect before the image rasterizes, so
         // the card never resizes under the transcript.
-        Some(diagram) => code
-            .px(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(diagram.width))
-                    .aspect_ratio(diagram.width / diagram.height)
-                    .child(img(Arc::clone(&diagram.image)).size_full()),
-            ),
-        None => code
-            .pr(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
-            .child(fence_text(text_id, fence, highlights, theme)),
+        Some(diagram) => body.flex().justify_center().child(
+            div()
+                .w_full()
+                .max_w(px(diagram.width))
+                .aspect_ratio(diagram.width / diagram.height)
+                .child(img(Arc::clone(&diagram.image)).size_full()),
+        ),
+        None => body.child(fence_text(
+            text_id,
+            fence,
+            highlights,
+            theme,
+            text_order,
+            render.selection_scope.clone(),
+        )),
     };
-    code = code.child(copy);
-    code = code.debug_selector(move || selector.to_string());
+    let mut card = crate::code_card::CodeCard::new(*theme, body)
+        .copy_action(copy, placement)
+        .debug_selector(selector);
+    if diagram.is_some() {
+        card = card.balanced_gutters();
+    }
+    let code = card.into_any_element();
     match note {
         // A rich fence that could not draw says why under its code.
         Some(note) => div()
@@ -1178,7 +951,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
             .child(code)
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
                     .text_color(theme.colors.muted_foreground.to_paint())
                     .child(note),
@@ -1188,31 +961,118 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     }
 }
 
-/// A fence's selectable text: its drawn body, a swatch before each color
-/// value that copies in every notation on a right-click.
+/// Ordinary code has a bounded native line viewport; source-owned selection
+/// includes every line even when the native list has not painted it.
 fn fence_text(
-    id: SharedString,
+    id: impl Into<gpui::ElementId>,
     fence: &prepared::PreparedFence,
     highlights: Rc<[(Range<usize>, HighlightStyle)]>,
     theme: &ArtisanTheme,
-) -> SelectableText {
-    let text = SelectableText::retained(id, fence.shown.clone(), *theme, Vec::new())
-        .with_shared_highlights(highlights);
-    let colors = &fence.colors;
-    if colors.ranges.is_empty() {
-        return text;
-    }
-    let values = Rc::clone(&colors.values);
-    text.with_inline_swatches(Rc::clone(&colors.swatches))
-        .with_copy_substitutions(Rc::clone(&colors.copies))
-        .shared_context_ranges(
-            Rc::clone(&colors.ranges),
-            move |index, position, window, cx| {
-                if let Some(value) = values.get(index) {
-                    rich::show_copy_menu(position, rich::color_copy_entries(value), window, cx);
-                }
-            },
-        )
+    order: Vec<u64>,
+    scope: SharedString,
+) -> AnyElement {
+    let id = id.into();
+    let lines = fence.lines.clone();
+    let colors = fence.colors.clone();
+    let count = lines.len();
+    let theme = *theme;
+    let line_px = ProseTypography::CODE_LINE_PX;
+    let line_namespace = SharedString::from(id.to_string());
+    let list_id = id.clone();
+    gpui::uniform_list(list_id, count, move |range, _, _| {
+        range
+            .filter_map(|index| {
+                lines.get(index).map(|(range, text)| {
+                    let mut line_order = order.clone();
+                    line_order.push(index as u64);
+                    let line_id =
+                        gpui::ElementId::NamedInteger(line_namespace.clone(), index as u64);
+                    let begin = highlights.partition_point(|(token, _)| token.end <= range.start);
+                    let runs: Rc<[_]> = highlights[begin..]
+                        .iter()
+                        .take_while(|(token, _)| token.start < range.end)
+                        .filter_map(|(token, style)| {
+                            let start = token.start.max(range.start);
+                            let end = token.end.min(range.end);
+                            (start < end).then(|| (start - range.start..end - range.start, *style))
+                        })
+                        .collect();
+                    let mut leaf =
+                        SelectableText::retained(line_id, text.clone(), theme, Vec::new())
+                            .selection_order(line_order, "\n")
+                            .selection_scope(scope.clone())
+                            .with_shared_highlights(runs);
+                    let selected: Vec<_> = colors
+                        .ranges
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, color)| {
+                            (color.start >= range.start && color.end <= range.end).then_some(index)
+                        })
+                        .collect();
+                    if !selected.is_empty() {
+                        let values: Rc<[_]> = selected
+                            .iter()
+                            .map(|index| colors.values[*index].clone())
+                            .collect();
+                        let ranges: Rc<[_]> = selected
+                            .iter()
+                            .map(|index| {
+                                colors.ranges[*index].start - range.start
+                                    ..colors.ranges[*index].end - range.start
+                            })
+                            .collect();
+                        let swatches: Rc<[_]> = colors
+                            .swatches
+                            .iter()
+                            .filter(|&swatch| {
+                                swatch.offset >= range.start && swatch.offset < range.end
+                            })
+                            .map(|swatch| crate::selectable_text::InlineSwatch {
+                                offset: swatch.offset - range.start,
+                                color: swatch.color,
+                                alone: swatch.alone,
+                            })
+                            .collect();
+                        let copies: Rc<[_]> = colors
+                            .copies
+                            .iter()
+                            .filter(|&(copy, _text)| {
+                                copy.start >= range.start && copy.end <= range.end
+                            })
+                            .map(|(copy, text)| {
+                                (
+                                    copy.start - range.start..copy.end - range.start,
+                                    text.clone(),
+                                )
+                            })
+                            .collect();
+                        leaf = leaf
+                            .with_inline_swatches(swatches)
+                            .with_copy_substitutions(copies)
+                            .shared_context_ranges(ranges, move |index, position, window, cx| {
+                                if let Some(value) = values.get(index) {
+                                    rich::show_copy_menu(
+                                        position,
+                                        rich::color_copy_entries(value),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            });
+                    }
+                    div()
+                        .h(px(line_px))
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(leaf)
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .w_full()
+    .h(px(count.min(24) as f32 * line_px))
+    .into_any_element()
 }
 
 /// A rich block: code on the fence's glass card with its copy action,
@@ -1224,6 +1084,7 @@ fn render_rich(
 ) -> AnyElement {
     let cx = rich::BlockContext {
         theme: render.theme,
+        media: render.media,
         id: render.id(code.code),
     };
     let content = rich::render_content(prepared, &cx);
@@ -1253,39 +1114,19 @@ fn rich_card(
 ) -> AnyElement {
     let theme = render.theme;
     let selector = render.id(code.code);
-    let radius = RadiusTokens::value(RadiusStep::X2l);
-    let card = div()
-        .relative()
-        .w_full()
-        .min_w_0()
-        .text_color(theme.colors.foreground.to_paint())
-        .bg(glass_foreground_base(theme))
-        .rounded(radius)
-        .shadow(glass_card_shadows())
-        .p(px(ProseTypography::CODE_PAD_PX))
-        .child(glass_material_layer(GlassStrength::Quiet, radius))
-        .child(glass_highlight_layer(GlassStrength::Quiet, radius))
-        .child(div().relative().w_full().min_w_0().child(content));
-    let card = match copy {
-        Some(source) => card
-            .pr(px(CODE_COPY_INSET_PX * 2.0 + CODE_COPY_SIZE_PX))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(CODE_COPY_INSET_PX))
-                    .right(px(CODE_COPY_INSET_PX))
-                    .child(CodeCopyButton::new(
-                        render.id(code.copy),
-                        render.id(code.copy_state),
-                        source,
-                        RadiusTokens::nested(radius, px(CODE_COPY_INSET_PX)),
-                        theme,
-                    )),
+    let mut card = crate::code_card::CodeCard::new(*theme, content).debug_selector(selector);
+    if let Some(source) = copy {
+        card = card.copy_action(
+            CodeCopyButton::new(
+                render.id(code.copy),
+                render.element_id(code.copy_state),
+                source,
+                theme,
             ),
-        None => card,
-    };
-    card.debug_selector(move || selector.to_string())
-        .into_any_element()
+            crate::code_card::CopyPlacement::TopRight,
+        );
+    }
+    card.into_any_element()
 }
 
 /// The fence body as displayed: without the line terminator that ends its
@@ -1330,11 +1171,6 @@ pub struct InlineLink {
 /// `with_font_family_overrides` consumes for the mono face, with run-level
 /// tracking reset beside it). Additive changes only — never reshape.
 ///
-/// `citation_links` is the additive citation-attribution channel: the subset
-/// of `links` whose authored label is exactly `Source`/`Sources` on an
-/// HTTP(S) destination, in source order with ranges addressing `source`.
-/// The renderer's citation split consumes trailing entries into the chip
-/// row; mid-sentence entries stay inline through `links` untouched.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InlinePresentation {
     /// Flattened visible text.
@@ -1344,29 +1180,13 @@ pub struct InlinePresentation {
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
     /// Openable links in source order.
     pub links: Vec<InlineLink>,
-    /// Citation-attribution links: the `Source`/`Sources`-labeled subset of
-    /// `links`, in source order, addressing the same `source`.
-    pub citation_links: Vec<InlineLink>,
     /// Inline-code ranges in source order for family/tracking treatment.
     pub code_ranges: Vec<Range<usize>>,
-    /// Decorative favicon slots, addressed by UTF-8 byte offset.
-    pub icon_offsets: Vec<(usize, String)>,
 }
 
-/// Flattens spans into presentation data with a single merged highlight
-/// list.
-///
-/// `StyledText::with_highlights` replaces its stored highlights on every
-/// call, so code, strong, emphasis, and link ranges must merge into one
-/// iterator here. Styles propagate recursively: each nested run inherits
-/// its parent style combined through the existing
-/// [`HighlightStyle::highlight`] helper, and leaf text emits one run only
-/// when the inherited style is non-default. Emission is strictly
-/// source-ordered, so runs arrive ordered and non-overlapping in a single
-/// linear pass with no boundary sort and no per-segment tag scan — the old
-/// sweep shape (sorted boundaries crossed with every tag range) was
-/// quadratic in formatted-run count and stalled large replies that the
-/// renderer re-parses on every render.
+/// Flattens inline spans into text and source-ordered, nonoverlapping runs.
+/// Nested styles inherit their parent through [`HighlightStyle::highlight`];
+/// one linear traversal emits the combined ranges consumed by StyledText.
 ///
 /// # Must use
 ///
@@ -1374,37 +1194,13 @@ pub struct InlinePresentation {
 /// silently loses the presentation.
 #[must_use]
 pub fn present_inline(spans: &[Span], theme: ArtisanTheme) -> InlinePresentation {
-    present_inline_with_titles(spans, theme, &NoRichLinkTitles)
-}
-
-/// Flattens spans with resolved rich-link titles and one merged highlight
-/// list.
-///
-/// Behaves exactly like [`present_inline`], except an openable HTTP(S) link
-/// whose destination resolves through `titles` replaces its authored label
-/// with the resolved title. The link entry still names the authored
-/// destination and its range addresses the substituted visible text, so
-/// selection, clipboard, and click behavior stay on one presentation.
-///
-/// # Must use
-///
-/// The return value owns the flattened text the ranges address; dropping it
-/// silently loses the presentation.
-#[must_use]
-pub fn present_inline_with_titles(
-    spans: &[Span],
-    theme: ArtisanTheme,
-    titles: &dyn RichLinkTitleSource,
-) -> InlinePresentation {
-    let flat = flatten_inline(spans, titles);
+    let flat = flatten_inline(spans);
     let highlights = flat.resolve_runs(&theme);
     InlinePresentation {
         source: flat.source,
         highlights,
         links: flat.links,
-        citation_links: flat.citation_links,
         code_ranges: flat.code_ranges,
-        icon_offsets: flat.icon_offsets,
     }
 }
 
@@ -1431,18 +1227,23 @@ fn bare_url_spans(text: &str) -> Option<Vec<Span>> {
         let mut end = tail
             .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`'))
             .unwrap_or(tail.len());
-        loop {
-            let candidate = &tail[..end];
-            let Some(last) = candidate.chars().next_back() else {
-                break;
-            };
-            let excess_closer = [('(', ')'), ('[', ']'), ('{', '}')]
-                .iter()
-                .any(|(open, close)| {
-                    last == *close
-                        && candidate.matches(*close).count() > candidate.matches(*open).count()
-                });
-            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') || excess_closer {
+        let mut balance = [0isize; 3];
+        for ch in tail[..end].chars() {
+            for (index, (open, close)) in [('(', ')'), ('[', ']'), ('{', '}')].iter().enumerate() {
+                if ch == *open {
+                    balance[index] -= 1;
+                }
+                if ch == *close {
+                    balance[index] += 1;
+                }
+            }
+        }
+        while let Some(last) = tail[..end].chars().next_back() {
+            let closer = [')', ']', '}'].iter().position(|close| *close == last);
+            if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
+                end -= last.len_utf8();
+            } else if let Some(index) = closer.filter(|index| balance[*index] > 0) {
+                balance[index] -= 1;
                 end -= last.len_utf8();
             } else {
                 break;
@@ -1489,15 +1290,6 @@ fn is_openable_link_destination(destination: &str) -> bool {
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
-/// Whether one destination is eligible for resolved rich-link titles.
-///
-/// Mirrors the native URL policy: only absolute HTTP(S) links resolve; a
-/// `mailto:` destination is openable but never replaced.
-fn is_rich_link_destination(destination: &str) -> bool {
-    let lower = destination.trim().to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://")
-}
-
 fn code_style(theme: &ArtisanTheme, in_link: bool) -> HighlightStyle {
     // Reference inline code reads 400 muted with no wash (`prose.css`
     // inline-code over plugin `code`), except inside a link where `a code`
@@ -1541,11 +1333,7 @@ fn emphasis_style() -> HighlightStyle {
 }
 
 fn link_style(theme: &ArtisanTheme) -> HighlightStyle {
-    // Conversation links always render through the anchor component
-    // (`ProseA`), i.e. the `conversation-link` class: blue with no
-    // underline (`prose.css` links/conversation-link rules), never the
-    // plain-`a` foreground+underline. `banner_info` is exactly that blue
-    // per mode (Tailwind blue-500 light / blue-400 dark).
+    // Links use the shared information color and authored label.
     HighlightStyle {
         color: Some(theme.colors.banner_info.to_paint()),
         font_weight: Some(ProseTypography::LINK_WEIGHT),
@@ -1572,27 +1360,3 @@ fn code_token_style(theme: &ArtisanTheme, kind: CodeTokenKind) -> HighlightStyle
 #[cfg(test)]
 #[path = "markdown_renderer_tests.rs"]
 mod tests;
-
-/// Unresolved provider references are not display text or browser destinations.
-/// Keep an explicit readable fallback, and hide incomplete streaming markers.
-fn readable_citations(text: &str) -> String {
-    let mut output = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('\u{e200}') {
-        output.push_str(&rest[..start]);
-        let marker = &rest[start + '\u{e200}'.len_utf8()..];
-        let Some(end) = marker.find('\u{e201}') else {
-            return output;
-        };
-        if marker[..end].starts_with("cite\u{e202}") {
-            output.push_str(" [source unavailable]");
-        } else {
-            output.push_str(
-                &rest[start..start + '\u{e200}'.len_utf8() + end + '\u{e201}'.len_utf8()],
-            );
-        }
-        rest = &marker[end + '\u{e201}'.len_utf8()..];
-    }
-    output.push_str(rest);
-    output
-}

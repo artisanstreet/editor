@@ -1,0 +1,146 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 202
+expression: "replay(\"notices\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "reroute:turn",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Reroute {
+                    model: "gpt-5.6-safe",
+                },
+                text: Inline(
+                    "Codex moved this turn from gpt-5.6 to gpt-5.6-safe (highRiskCyberActivity).",
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "safety:turn",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Safety,
+                text: Inline(
+                    "Codex is holding this reply for a safety check.",
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "goal",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Goal {
+                    state: "paused",
+                },
+                text: Inline(
+                    "Ship the parser",
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "goal",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Goal {
+                    state: "cleared",
+                },
+                text: Inline(
+                    "Ship the parser",
+                ),
+            },
+        },
+    ),
+    Event(
+        Live {
+            target: Status,
+            text: "Rate limited. Retrying…",
+            append: false,
+        },
+    ),
+    Event(
+        Item {
+            key: "warning-1",
+            parent: None,
+            status: Done,
+            kind: Notice {
+                kind: Info,
+                text: Inline(
+                    "Disk almost full",
+                ),
+            },
+        },
+    ),
+    Event(
+        Usage(
+            Usage {
+                input: 0,
+                output: 0,
+                reasoning: 0,
+                cache_read: 0,
+                cache_write: Some(
+                    0,
+                ),
+                context_used: Some(
+                    0,
+                ),
+                context_window: None,
+                cost_usd: None,
+            },
+        ),
+    ),
+    Event(
+        Title {
+            title: "Parser work",
+        },
+    ),
+    Event(
+        Item {
+            key: "error-2",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Refusal,
+                message: Inline(
+                    "Blocked by policy",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Refused,
+            error: Some(
+                "Blocked by policy",
+            ),
+        },
+    ),
+]

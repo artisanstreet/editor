@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 120
 expression: "replay(\"approval\")"
 ---
 [
@@ -31,7 +32,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -51,7 +54,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I’ll run the two requested shell calls separately, requesting escalation for each.",
+                text: Inline(
+                    "I’ll run the two requested shell calls separately, requesting escalation for each.",
+                ),
                 phase: Commentary,
             },
         },
@@ -63,7 +68,9 @@ expression: "replay(\"approval\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -83,7 +90,9 @@ expression: "replay(\"approval\")"
             status: AwaitingUser,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -95,13 +104,17 @@ expression: "replay(\"approval\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch a.txt",
+                            command: Inline(
+                                "touch a.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I create a.txt in the workspace as requested?",
+                            Inline(
+                                "May I create a.txt in the workspace as requested?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -122,7 +135,9 @@ expression: "replay(\"approval\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -134,13 +149,17 @@ expression: "replay(\"approval\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch a.txt",
+                            command: Inline(
+                                "touch a.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I create a.txt in the workspace as requested?",
+                            Inline(
+                                "May I create a.txt in the workspace as requested?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -171,7 +190,9 @@ expression: "replay(\"approval\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -185,13 +206,17 @@ expression: "replay(\"approval\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch a.txt",
+                            command: Inline(
+                                "touch a.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I create a.txt in the workspace as requested?",
+                            Inline(
+                                "May I create a.txt in the workspace as requested?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -234,7 +259,9 @@ expression: "replay(\"approval\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -254,7 +281,9 @@ expression: "replay(\"approval\")"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "touch a.txt",
+                    command: Inline(
+                        "touch a.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -295,7 +324,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -315,7 +346,9 @@ expression: "replay(\"approval\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "done",
+                text: Inline(
+                    "done",
+                ),
                 phase: Final,
             },
         },

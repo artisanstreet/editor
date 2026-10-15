@@ -5,7 +5,7 @@ cover. Never a primary text family: Spline Sans/Spline Sans Mono remain
 the only text faces (user-selected; typography separately audited), and
 this face participates exclusively through cosmic/fontdb fallback
 resolution. Registration uses the existing bundled font catalog and asset build inputs. Shared integration contract:
-`docs/reference-emoji-interface.md`.
+`crates/editor-assets/src/fonts.rs` and `crates/editor-ui/src/fonts.rs`.
 
 ## Source
 

@@ -82,8 +82,10 @@ pub fn path_ok(root: &Root) -> bool {
                 .any(|entry| Path::new(entry.trim()) == root.bin())
         })
     } else {
-        unix_link()
-            .is_ok_and(|link| std::fs::read_link(link).is_ok_and(|target| target == root.ae()))
+        unix_link().is_ok_and(|link| {
+            std::fs::read_link(&link).is_ok_and(|target| target == root.ae())
+                && link.parent().is_some_and(on_path)
+        })
     }
 }
 
@@ -221,26 +223,87 @@ fn desktop_file() -> Result<PathBuf> {
 pub fn retire_editors(sys: Sys, root: &Root) -> Result<()> {
     let versions = root.versions();
     if cfg!(windows) {
-        let prefix = ps_quote(&versions.join(""));
-        sys.powershell(&format!(
-            "$p = @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and \
-             $_.ExecutablePath.StartsWith({prefix}, 'OrdinalIgnoreCase') }}); \
-             foreach ($x in $p) {{ taskkill.exe /PID $x.ProcessId | Out-Null }}; \
-             foreach ($x in $p) {{ Wait-Process -Id $x.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }}; \
-             foreach ($x in $p) {{ Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }}"
-        ))
+        let query = "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | ForEach-Object { [pscustomobject]@{ pid=$_.ProcessId; executable=$_.ExecutablePath; created=$_.CreationDate.ToString('o') } })";
+        let output = super::sys::powershell(query)
+            .output()
+            .context("query running Editor identities")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot inspect running Windows processes"
+        );
+        let processes: Vec<WindowsProcess> = serde_json::from_slice(&output.stdout)?;
+        for process in processes
+            .into_iter()
+            .filter(|process| process.is_editor(&versions.to_string_lossy()))
+        {
+            if sys.dry_run {
+                println!(
+                    "would close Editor pid {} from {}",
+                    process.pid, process.executable
+                );
+                continue;
+            }
+            // One identity check, right before acting. The open handle pins
+            // the pid, so taskkill and the forced stop reach that process.
+            let executable = ps_quote(Path::new(&process.executable));
+            let created = format!("'{}'", process.created.replace('\'', "''"));
+            sys.powershell(&format!(
+                "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
+                 if ($p) {{ \
+                   $null = $p.Handle; \
+                   $x = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; \
+                   if ($x -and $x.ExecutablePath -ieq {executable} -and $x.CreationDate.ToString('o') -eq {created}) {{ \
+                     taskkill.exe /PID {pid} | Out-Null; \
+                     if (-not $p.WaitForExit(10000)) {{ try {{ $p.Kill() }} catch {{}} }} \
+                   }} \
+                 }}", pid=process.pid
+            ))?;
+        }
+        Ok(())
     } else {
-        let Ok(processes) = std::fs::read_dir("/proc") else {
-            return Ok(());
-        };
-        for process in processes.flatten() {
-            let pid = process.file_name().to_string_lossy().into_owned();
-            if pid.bytes().all(|byte| byte.is_ascii_digit())
-                && std::fs::read_link(process.path().join("exe"))
-                    .is_ok_and(|exe| exe.starts_with(&versions))
-            {
-                println!("Closing the running Editor (pid {pid}).");
-                sys.run("kill", &["-TERM", &pid])?;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+        );
+        let editors = system
+            .processes()
+            .iter()
+            .filter_map(|(pid, process)| {
+                let executable = process.exe()?;
+                let filename = executable.file_name()?.to_string_lossy();
+                (executable.starts_with(&versions)
+                    && matches!(
+                        filename.as_ref(),
+                        "artisan-editor" | "artisan-editor (deleted)"
+                    ))
+                .then_some((*pid, process.start_time()))
+            })
+            .collect::<Vec<_>>();
+        for (pid, started) in editors {
+            println!("Closing the running Editor (pid {pid}).");
+            sys.run("kill", &["-TERM", &pid.to_string()])?;
+            if sys.dry_run {
+                continue;
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let mut current = sysinfo::System::new();
+                current.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::Some(&[pid]),
+                    sysinfo::ProcessRefreshKind::new().with_exe(sysinfo::UpdateKind::Always),
+                );
+                let alive = current
+                    .process(pid)
+                    .is_some_and(|process| process.start_time() == started);
+                if !alive {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "Editor pid {pid} did not close within 10 seconds"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
         Ok(())
@@ -294,4 +357,46 @@ pub fn wsl_distros() -> Result<Vec<String>> {
         })
         .filter(|line| !line.is_empty())
         .collect())
+}
+
+#[derive(serde::Deserialize)]
+struct WindowsProcess {
+    pid: u32,
+    executable: String,
+    created: String,
+}
+
+impl WindowsProcess {
+    fn is_editor(&self, versions: &str) -> bool {
+        let executable = self.executable.replace('\\', "/").to_ascii_lowercase();
+        let prefix = format!(
+            "{}/",
+            versions
+                .replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+        );
+        executable.starts_with(&prefix)
+            && executable.rsplit('/').next() == Some("artisan-editor.exe")
+    }
+}
+
+#[cfg(test)]
+mod process_selection_tests {
+    use super::*;
+    fn process(executable: &str, created: &str) -> WindowsProcess {
+        WindowsProcess {
+            pid: 42,
+            executable: executable.into(),
+            created: created.into(),
+        }
+    }
+    #[test]
+    fn windows_retirement_selects_only_editor_role_in_this_install() {
+        let root = r"C:\Artisan\versions";
+        assert!(process(r"C:\ARTISAN\versions\v1\ARTISAN-EDITOR.EXE", "a").is_editor(root));
+        assert!(!process(r"C:\Artisan\versions\v1\ae.exe", "a").is_editor(root));
+        assert!(!process(r"C:\Artisan\versions-other\v1\artisan-editor.exe", "a").is_editor(root));
+        assert!(!process(r"C:\Other\versions\v1\artisan-editor.exe", "a").is_editor(root));
+    }
 }

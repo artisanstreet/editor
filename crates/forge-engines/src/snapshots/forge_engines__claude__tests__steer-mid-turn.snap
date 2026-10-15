@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -16,7 +17,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 3 && ls",
+                    command: Inline(
+                        "sleep 3 && ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -48,7 +51,9 @@ expression: "(events, outcome)"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "sleep 3 && ls",
+                    command: Inline(
+                        "sleep 3 && ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -57,16 +62,17 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "a.txt\ncreated.txt\nnotes.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "a.txt\ncreated.txt\nnotes.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
                 approval: None,
             },
         },
-        SteerAccepted {
+        InputAccepted {
             id: ItemId(
                 "steer-2",
             ),
@@ -81,7 +87,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -134,21 +142,21 @@ expression: "(events, outcome)"
             text: " banana",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
             },
+            text: "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
+            append: false,
         },
         Item {
             key: "msg_011Cfv2w5wrFBGKokk48NfwF:1",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
+                text: Inline(
+                    "The `ls` output showed three files in the current directory: `a.txt`, `created.txt`, and `notes.txt`. banana",
+                ),
                 phase: Final,
             },
         },

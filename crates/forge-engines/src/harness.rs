@@ -28,6 +28,8 @@ pub struct Turn {
     pub input: UserInput,
     /// Extra arguments and environment from customisation (MCP, settings).
     pub launch: Launch,
+    /// Explicit diagnostic trace destination. Normal runs do not record raw content.
+    pub trace_dir: Option<PathBuf>,
 }
 
 /// A user message as the engine receives it.
@@ -73,12 +75,21 @@ pub enum EngineEvent {
         title: String,
     },
     /// Create or replace an item. `key` is the engine's own id, or one the
-    /// adapter makes up that stays stable for the item's life.
+    /// adapter makes up that stays stable for the item's life. An approval
+    /// rides on the item it gates (`Tool`/`Plan` with `approval` set and
+    /// status `AwaitingUser`), keyed like that item.
     Item {
         key: String,
         parent: Option<String>,
         status: Status,
         kind: ItemKind,
+    },
+    /// An adapter produced an image file; Forge stores it as a canonical blob.
+    Image {
+        key: String,
+        parent: Option<String>,
+        path: PathBuf,
+        caption: Option<String>,
     },
     /// Change only an item's status.
     Status {
@@ -92,8 +103,8 @@ pub enum EngineEvent {
         append: bool,
     },
     Usage(Usage),
-    /// A steer reached the engine.
-    SteerAccepted {
+    /// An initial input or steer reached the engine.
+    InputAccepted {
         id: ItemId,
     },
 }

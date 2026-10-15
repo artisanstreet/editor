@@ -1,0 +1,206 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "list-0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Agents {
+                    action: List,
+                    addresses: [],
+                    targets: [],
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "list-0",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Agents {
+                    action: List,
+                    addresses: [],
+                    targets: [],
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "This session is shooter-d0 [948227].\n\nSubagents (1):\n  a15c59c4974306334  ·  general-purpose  ·  running",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "stop-0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Agents {
+                    action: Stop,
+                    addresses: [
+                        "a15c59c4974306334",
+                    ],
+                    targets: [],
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "stop-0",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Agents {
+                    action: Stop,
+                    addresses: [
+                        "a15c59c4974306334",
+                    ],
+                    targets: [],
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "{\"message\":\"Successfully stopped task: a15c59c4974306334\"}",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "monitor-0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "tail -f build.log",
+                    ),
+                    cwd: None,
+                    background: true,
+                },
+                title: Some(
+                    "Watch the build",
+                ),
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "handback-0",
+            parent: Some(
+                "agent-0",
+            ),
+            status: Running,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "main",
+                    target: None,
+                    summary: None,
+                    text: Inline(
+                        "## Summary\n- The build is green.",
+                    ),
+                    direction: Report,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "handback-0",
+            parent: Some(
+                "agent-0",
+            ),
+            status: Done,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "main",
+                    target: None,
+                    summary: None,
+                    text: Inline(
+                        "## Summary\n- The build is green.",
+                    ),
+                    direction: Report,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "{\"success\":true,\"message\":\"Report delivered to your caller.\"}",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "peer:u-1",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "a15c59c4974306334",
+                    target: None,
+                    summary: None,
+                    text: Inline(
+                        "Diagnostic build is ready.",
+                    ),
+                    direction: Received,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "peer:m-1",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "shooter-e7",
+                    target: None,
+                    summary: None,
+                    text: Inline(
+                        "Render orchestrator here.",
+                    ),
+                    direction: Received,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Status {
+            key: "monitor-0",
+            status: Cancelled,
+        },
+    ],
+    None,
+)

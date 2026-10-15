@@ -1,47 +1,44 @@
 //! What rich blocks ask of the host.
 //!
 //! The UI crate cannot open files or reach the composer, so blocks dispatch
-//! these actions and the host decides what they do. A block whose action no
-//! handler takes copies the same text to the clipboard instead, so every
-//! gesture does something.
+//! these actions and the application root owns their handlers. Opening and
+//! copying are separate actions; missing routing never silently copies a path.
 
-use gpui::{Action, App, ClipboardItem, Pixels, Point, SharedString, Window};
+use gpui::{App, Pixels, Point, SharedString, Window};
+
+/// Immutable host and thread owning a resource action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceScope {
+    pub host: String,
+    pub thread: artisan_api::ThreadId,
+}
 
 /// Opens a file of the project at a line.
 #[derive(Clone, Debug, Eq, PartialEq, gpui::Action)]
 #[action(no_json, namespace = rich_blocks, name = "OpenReference")]
 pub struct OpenReference {
+    /// Immutable host/thread resource scope captured by the rendered block.
+    pub scope: Option<ResourceScope>,
     /// The path as the agent wrote it, relative to the project.
     pub path: SharedString,
     /// The 1-based line, when the reference names one.
     pub line: Option<u32>,
 }
 
-/// Dispatches `action`, or copies `fallback` when nothing handles it.
-pub(super) fn dispatch_or_copy(
-    action: &dyn Action,
-    fallback: &str,
+/// Opens `path` at `line` through its owning Forge preview.
+pub(super) fn open_reference(
+    path: &str,
+    line: Option<u32>,
+    scope: Option<ResourceScope>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if window.is_action_available(action, cx) {
-        window.dispatch_action(action.boxed_clone(), cx);
-    } else {
-        cx.write_to_clipboard(ClipboardItem::new_string(fallback.to_owned()));
-    }
-}
-
-/// Opens `path` at `line` through the host, or copies `path:line`.
-pub(super) fn open_reference(path: &str, line: Option<u32>, window: &mut Window, cx: &mut App) {
-    let fallback = match line {
-        Some(line) => format!("{path}:{line}"),
-        None => path.to_owned(),
-    };
     let action = OpenReference {
+        scope,
         path: SharedString::from(path.to_owned()),
         line,
     };
-    dispatch_or_copy(&action, &fallback, window, cx);
+    window.dispatch_action(Box::new(action), cx);
 }
 
 /// Shows a menu at the pointer whose items copy one value each: a color as
@@ -94,17 +91,16 @@ impl CopyEntry {
     }
 }
 
-/// Shows `entries` as a copy menu at `position` through the host, or copies
-/// the first entry.
+/// Shows `entries` as the application copy menu at `position`.
 pub(in crate::markdown_renderer) fn show_copy_menu(
     position: Point<Pixels>,
     entries: Vec<CopyEntry>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let Some(first) = entries.first().map(|entry| entry.text.clone()) else {
+    if entries.is_empty() {
         return;
-    };
+    }
     let action = ShowCopyMenu { position, entries };
-    dispatch_or_copy(&action, &first, window, cx);
+    window.dispatch_action(Box::new(action), cx);
 }

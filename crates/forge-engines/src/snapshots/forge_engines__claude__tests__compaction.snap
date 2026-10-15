@@ -1,0 +1,60 @@
+---
+source: crates/forge-engines/src/claude.rs
+expression: "(events, outcome)"
+---
+(
+    [
+        Session {
+            id: "35b932c7-c2e5-4fb0-9af1-07f50872cddb",
+        },
+        Model {
+            id: "claude-opus-5-5",
+        },
+        Item {
+            key: "compaction-1",
+            parent: None,
+            status: Running,
+            kind: Compaction {
+                tokens_before: None,
+                tokens_after: None,
+            },
+        },
+        Item {
+            key: "compaction-1",
+            parent: None,
+            status: Done,
+            kind: Compaction {
+                tokens_before: Some(
+                    967306,
+                ),
+                tokens_after: Some(
+                    7389,
+                ),
+            },
+        },
+        Usage(
+            Usage {
+                input: 14,
+                output: 2130,
+                reasoning: 168,
+                cache_read: 1097359,
+                cache_write: Some(
+                    22298,
+                ),
+                context_used: None,
+                context_window: Some(
+                    1000000,
+                ),
+                cost_usd: Some(
+                    323.74137084999944,
+                ),
+            },
+        ),
+    ],
+    Some(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+)

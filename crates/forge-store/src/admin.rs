@@ -3,16 +3,14 @@
 //! `ae forge pair` and `ae forge devices` use this instead of [`Store`]:
 //! opening a `Store` recovers runs left live, which would cancel the running
 //! Forge's work. Nothing here takes a seq while Forge may be running: pair
-//! codes and devices carry none, and a setting is only ever added when
-//! absent (Forge writes its identity on its first start, so a running Forge
-//! already has it).
+//! codes, devices and secrets carry none.
 //!
 //! [`Store`]: crate::Store
 
-use crate::{BUSY_TIMEOUT, Device, read, schema};
+use crate::{BUSY_TIMEOUT, Device, schema};
 use anyhow::{Context, Result};
 use artisan_api::{DeviceId, Timestamp};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 /// A plain connection to `forge.sqlite3` in a data directory.
@@ -34,14 +32,16 @@ impl Admin {
         Ok(Self { conn })
     }
 
-    pub fn setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        read::setting(&self.conn, key).with_context(|| format!("read setting {key}"))
+    pub fn secret(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
     }
 
-    /// Stores `value` under `key` unless a value is there already, and
-    /// returns whichever value is stored. The seq is taken in the same
-    /// immediate transaction, after every other writer's.
-    /// [`crate::Store::secret_or_insert`] without a running Forge.
+    /// Inserts an unsequenced secret only when absent.
     pub fn secret_or_insert(&mut self, key: &str, value: &str) -> Result<String> {
         self.conn.execute(
             "INSERT INTO secrets (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
@@ -52,30 +52,6 @@ impl Admin {
             .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
                 row.get(0)
             })?)
-    }
-
-    pub fn setting_or_insert(
-        &mut self,
-        key: &str,
-        value: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(existing) =
-            read::setting(&tx, key).with_context(|| format!("read setting {key}"))?
-        {
-            return Ok(existing);
-        }
-        let seq = read::max_seq(&tx)? + 1;
-        tx.execute(
-            "INSERT INTO kv (key, seq, value) VALUES (?1, ?2, ?3)",
-            params![key, seq, read::to_body(&value)?],
-        )
-        .with_context(|| format!("save setting {key}"))?;
-        tx.commit()
-            .with_context(|| format!("commit setting {key}"))?;
-        Ok(value)
     }
 
     pub fn add_pair_code(&self, code_sha256: &str, expires_at: Timestamp) -> Result<()> {

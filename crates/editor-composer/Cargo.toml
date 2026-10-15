@@ -8,13 +8,15 @@ description = "Draft, attachments (converted to WebP), model picker, send / stee
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+artisan-mentions = { path = "../artisan-mentions" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
+editor-sources = { path = "../editor-sources" }
 gpui.workspace = true
+futures.workspace = true
 image = { workspace = true, features = ["gif", "jpeg", "png", "webp", "bmp"] }
 serde.workspace = true
 serde_json.workspace = true
-statig.workspace = true
 tracing.workspace = true
 webp.workspace = true
 
@@ -22,7 +24,6 @@ webp.workspace = true
 forge-engines = { path = "../forge-engines" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
-futures.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }

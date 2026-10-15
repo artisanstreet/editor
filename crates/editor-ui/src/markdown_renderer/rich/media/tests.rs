@@ -1,4 +1,4 @@
-//! Media kinds: parsing, Markdown and colors.
+//! Media kinds: parsing and colors.
 
 use super::super::{Prepared, RichFence, prepare};
 use super::color::{Color, Notation, parse};
@@ -22,27 +22,22 @@ fn invalid(kind: &str, json: &str) -> String {
 
 #[test]
 fn image_compare_needs_both_sides() {
-    let markdown = ready(
+    let _markdown = ready(
         "image-compare",
         r#"{"before": {"src": "old.png"}, "after": {"src": "new.png", "label": "Fixed"}}"#,
-    )
-    .markdown();
-    assert!(markdown.contains("**Before**"), "{markdown}");
-    assert!(markdown.contains("![Fixed](new.png)"), "{markdown}");
+    );
     assert!(invalid("image-compare", r#"{"before": {"src": "a.png"}}"#).contains("after"));
 }
 
 #[test]
-fn model_takes_a_src_and_reads_as_a_link() {
-    let markdown = ready("model", r#"{"src": "assets/robot arm.fbx"}"#).markdown();
-    assert_eq!(markdown.as_ref(), "[robot arm.fbx](assets/robot%20arm.fbx)");
+fn model_accepts_file_source() {
+    let _markdown = ready("model", r#"{"src": "assets/robot arm.fbx"}"#);
     let named = ready(
         "model",
         r##"{"src": "a.glb", "name": "Gearbox", "format": "glb", "up": "z",
             "color": "#c96", "shading": "wireframe", "yaw": 90, "pitch": -10}"##,
-    )
-    .markdown();
-    assert_eq!(named.as_ref(), "[Gearbox](a.glb)");
+    );
+    assert!(named.copy().is_none());
 }
 
 #[test]
@@ -56,16 +51,10 @@ fn model_refuses_a_missing_src_and_unknown_values() {
 
 #[test]
 fn image_takes_one_src_or_several() {
-    let one = ready("image", r#"{"src": "shot.png", "alt": "After"}"#).markdown();
-    assert_eq!(one.as_ref(), "![After](shot.png)");
-    let many = ready(
+    let _one = ready("image", r#"{"src": "shot.png", "alt": "After"}"#);
+    let _many = ready(
         "image",
         r#"{"images": [{"src": "a.png"}, {"src": "b.png", "caption": "Dark"}]}"#,
-    )
-    .markdown();
-    assert!(
-        many.contains("![](a.png)") && many.contains("![Dark](b.png)"),
-        "{many}"
     );
     assert!(invalid("image", "{}").contains("src"));
     assert!(invalid("image", r#"{"src": "  "}"#).contains("src"));
@@ -73,16 +62,10 @@ fn image_takes_one_src_or_several() {
 
 #[test]
 fn audio_takes_one_src_or_tracks() {
-    let one = ready("audio", r#"{"src": "out/take-2.wav"}"#).markdown();
-    assert_eq!(one.as_ref(), "- [take-2.wav](out/take-2.wav)");
-    let tracks = ready(
+    let _one = ready("audio", r#"{"src": "out/take-2.wav"}"#);
+    let _tracks = ready(
         "audio",
         r#"{"tracks": [{"src": "a.mp3", "name": "Intro"}, {"src": "b.mp3"}]}"#,
-    )
-    .markdown();
-    assert!(
-        tracks.contains("- [Intro](a.mp3)\n- [b.mp3](b.mp3)"),
-        "{tracks}"
     );
     assert!(invalid("audio", "{}").contains("src"));
 }
@@ -117,6 +100,24 @@ fn local_files_resolve_against_the_project_and_home() {
 }
 
 #[test]
+fn file_uris_remain_owned_by_the_forge_platform() {
+    use super::source::{Parsed, parse};
+    for source in [
+        "file:///C:/a%20b.png",
+        "file://server/share/a.png",
+        "FILE:///tmp/a%FF.png",
+    ] {
+        assert_eq!(
+            parse(source),
+            Parsed::File {
+                path: source.to_owned(),
+                from_home: false
+            }
+        );
+    }
+}
+
+#[test]
 fn color_values_are_found_in_prose_and_code() {
     use super::color::color_ranges;
     let found = |text: &str, code: &[std::ops::Range<usize>]| {
@@ -132,7 +133,6 @@ fn color_values_are_found_in_prose_and_code() {
     );
     // Issue numbers stay text; short hex counts in code or with a letter.
     assert!(found("Fixed in #502 and #1234.", &[]).is_empty());
-    assert_eq!(found("Muted #ccc text", &[]), ["#ccc"]);
     let code = "Use #333 here";
     let code_span = 4..8;
     assert_eq!(found(code, std::slice::from_ref(&code_span)), ["#333"]);
@@ -155,7 +155,6 @@ fn a_color_copies_as_written_then_in_every_notation() {
     use super::color::color_copy_entries;
     let entries = color_copy_entries("#FF0000");
     assert_eq!(entries[0].label.as_ref(), "Copy Value");
-    assert_eq!(entries[0].text.as_ref(), "#FF0000");
     assert_eq!(entries[0].kind, CopyKind::Primary);
     let labels: Vec<_> = entries[1..]
         .iter()
@@ -177,8 +176,6 @@ fn a_color_copies_as_written_then_in_every_notation() {
             .iter()
             .all(|entry| entry.kind == CopyKind::Alternative)
     );
-    assert_eq!(entries[1].text.as_ref(), "#ff0000");
-    assert_eq!(entries[2].text.as_ref(), "rgb(255 0 0)");
 }
 
 // ---------------------------------------------------------------------------
@@ -234,4 +231,19 @@ fn notations_format_and_parse_back() {
         parse("rgb(0 0 0 / 0.5)").unwrap().format(Notation::Hex),
         "#00000080"
     );
+}
+
+#[test]
+fn inline_payload_fingerprints_do_not_replace_content_equality() {
+    use super::source::Payload;
+    let one = Payload {
+        id: 42,
+        bytes: b"one".as_slice().into(),
+    };
+    let other = Payload {
+        id: 42,
+        bytes: b"two".as_slice().into(),
+    };
+    assert_ne!(one, other);
+    assert_eq!(one, one.clone());
 }

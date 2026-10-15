@@ -1,0 +1,7 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "turn/plan/updated", "params": {"threadId": "root", "turnId": "turn", "plan": [{"step": "Read", "status": "completed"}, {"step": "Write", "status": "inProgress"}]}}
+{"method": "turn/plan/updated", "params": {"threadId": "root", "turnId": "turn", "plan": [{"step": "Read", "status": "completed"}, {"status": "pending"}]}}
+{"method": "turn/plan/updated", "params": {"threadId": "root", "turnId": "turn", "plan": [{"step": "Read", "status": "completed"}, {"step": "Write", "status": "completed"}]}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}

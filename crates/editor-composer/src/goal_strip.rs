@@ -20,16 +20,17 @@
 //! run (a held response, a reroute, a refusal), ahead of the goal: it says
 //! why the turn changed course, which the reader needs before anything else.
 
+use editor_ui::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::time::{Duration, Instant};
 
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::motion::MotionCurve;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Filter, IntoElement, ParentElement as _, SharedString, Styled as _, div, px,
+    AnyElement, Filter, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    Styled as _, div, px,
 };
-
-use editor_ui::theme::{ArtisanTheme, DesktopTheme, ThemeMode};
 
 const GROW: Duration = Duration::from_millis(400);
 const LABEL_DELAY: Duration = Duration::from_millis(250);
@@ -140,9 +141,18 @@ impl GoalStrip {
     pub(crate) fn frame(
         &mut self,
         now: Instant,
-        theme: DesktopTheme,
+        theme: ArtisanTheme,
+        reduced: bool,
         moving: &mut bool,
     ) -> Option<GoalStripFrame> {
+        if reduced {
+            if self.leaving_at.is_some() {
+                *self = Self::default();
+            } else {
+                self.grown_at = None;
+                self.swap = None;
+            }
+        }
         let goal = self.shown.clone()?;
         let mut reveal = 1.0;
         let mut label = 1.0;
@@ -200,7 +210,7 @@ impl GoalStrip {
 }
 
 /// The strip's label: what the goal is and where it stands.
-fn goal_label(goal: &ComposerGoal, theme: DesktopTheme, opacity: f32, rise: f32) -> AnyElement {
+fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32) -> AnyElement {
     let state = match goal.state {
         ComposerGoalState::Paused => Some(SharedString::from("Paused")),
         ComposerGoalState::Active
@@ -209,33 +219,27 @@ fn goal_label(goal: &ComposerGoal, theme: DesktopTheme, opacity: f32, rise: f32)
         | ComposerGoalState::SafetyRefused => goal.detail.clone(),
     };
     let (glyph, tone) = match goal.state {
-        ComposerGoalState::Active | ComposerGoalState::Paused => {
-            (AssetId::TABLER_TARGET_ARROW, theme.secondary)
-        }
-        // The composer paints dark, so the banner tones come from the dark
-        // palette.
+        ComposerGoalState::Active | ComposerGoalState::Paused => (
+            AssetId::TABLER_TARGET_ARROW,
+            theme.colors.workspace_secondary.to_paint(),
+        ),
         ComposerGoalState::SafetyHolding | ComposerGoalState::SafetyRerouted => (
             AssetId::TABLER_SHIELD_LOCK,
-            ArtisanTheme::for_mode(ThemeMode::Dark)
-                .colors
-                .banner_warning
-                .to_paint(),
+            theme.colors.banner_warning.to_paint(),
         ),
         ComposerGoalState::SafetyRefused => (
             AssetId::TABLER_SHIELD_LOCK,
-            ArtisanTheme::for_mode(ThemeMode::Dark)
-                .colors
-                .banner_error
-                .to_paint(),
+            theme.colors.banner_error.to_paint(),
         ),
     };
     let headline = if goal.state.is_safety() {
         tone
     } else {
-        theme.foreground
+        theme.colors.workspace_foreground.to_paint()
     };
     let blur = (rise.abs() / 2.0).min(2.0);
     div()
+        .debug_selector(|| "composer-goal-label".into())
         .relative()
         .top(px(rise))
         .h_full()
@@ -244,9 +248,9 @@ fn goal_label(goal: &ComposerGoal, theme: DesktopTheme, opacity: f32, rise: f32)
         .flex()
         .items_center()
         .gap(px(6.0))
-        .text_size(px(13.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
         .opacity(opacity)
-        .when_some_blur(blur)
+        .when(blur > 0., |label| label.filter(vec![Filter::Blur(px(blur))]))
         // The goal's mark, sized and toned like the tab's folder; a safety
         // notice takes the shield in its banner tone.
         .child(
@@ -269,7 +273,7 @@ fn goal_label(goal: &ComposerGoal, theme: DesktopTheme, opacity: f32, rise: f32)
             }
         })
         .children(state.map(|state| {
-            let state = div().truncate().text_color(theme.secondary).child(state);
+            let state = div().truncate().text_color(theme.colors.workspace_secondary.to_paint()).child(state);
             if goal.state.is_safety() {
                 state.min_w_0()
             } else {
@@ -277,21 +281,6 @@ fn goal_label(goal: &ComposerGoal, theme: DesktopTheme, opacity: f32, rise: f32)
             }
         }))
         .into_any_element()
-}
-
-/// Applies a blur only while there is one: a zero blur still costs a layer.
-trait BlurWhile {
-    fn when_some_blur(self, blur: f32) -> Self;
-}
-
-impl BlurWhile for gpui::Div {
-    fn when_some_blur(self, blur: f32) -> Self {
-        if blur > 0.0 {
-            self.filter(vec![Filter::Blur(px(blur))])
-        } else {
-            self
-        }
-    }
 }
 
 fn progress(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
@@ -321,7 +310,7 @@ mod tests {
     fn reveal(strip: &mut GoalStrip, at: Instant) -> Option<(f32, bool)> {
         let mut moving = false;
         strip
-            .frame(at, DesktopTheme::neutral_dark(), &mut moving)
+            .frame(at, ArtisanTheme::resolved(), false, &mut moving)
             .map(|frame| (frame.reveal, moving))
     }
 
@@ -398,5 +387,32 @@ mod tests {
             start,
             false
         ));
+    }
+    #[test]
+    fn enabling_reduced_motion_finishes_an_in_progress_transition() {
+        let start = Instant::now();
+        let mut strip = GoalStrip::default();
+        strip.set(
+            Some(goal("tests pass", ComposerGoalState::Active)),
+            start,
+            false,
+        );
+        let mut moving = false;
+        let frame = strip
+            .frame(
+                start + GROW / 2,
+                ArtisanTheme::resolved(),
+                true,
+                &mut moving,
+            )
+            .unwrap();
+        assert_eq!(frame.reveal, 1.0);
+        assert!(!moving);
+        strip.set(None, start, false);
+        assert!(
+            strip
+                .frame(start, ArtisanTheme::resolved(), true, &mut moving)
+                .is_none()
+        );
     }
 }

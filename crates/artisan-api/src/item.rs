@@ -1,4 +1,4 @@
-use crate::{BlobHash, ItemId, RunId, Seq, ThreadId, Timestamp};
+use crate::{BlobHash, Collection, ItemId, RunId, Seq, TextContent, ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Anything in a thread. Adapters map each engine's wiring onto these kinds.
@@ -13,9 +13,6 @@ pub struct Item {
     pub run_id: Option<RunId>,
     /// Set when the item belongs to a subagent: the subagent's `Agent` item.
     pub parent_id: Option<ItemId>,
-    /// The engine's own id (tool_use_id, Codex item id, ACP toolCallId…),
-    /// used only to update the item in place.
-    pub native_id: Option<String>,
     pub status: Status,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -54,7 +51,7 @@ impl Status {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ItemKind {
     UserMessage {
-        text: String,
+        text: TextContent,
         #[serde(default)]
         images: Vec<BlobHash>,
         /// Sent while a run was active.
@@ -62,7 +59,7 @@ pub enum ItemKind {
         steer: bool,
     },
     AssistantMessage {
-        text: String,
+        text: TextContent,
         phase: Phase,
     },
     Tool {
@@ -70,24 +67,32 @@ pub enum ItemKind {
         title: Option<String>,
         output: Option<Output>,
         exit_code: Option<i32>,
+        /// Set while the engine asks the user before running it, and kept
+        /// with the decision; the item is `AwaitingUser` until answered.
         approval: Option<Approval>,
     },
     Agent {
         /// The engine's name for it: a type ("general-purpose"), a nickname
         /// or nothing.
         name: Option<String>,
-        description: String,
+        description: TextContent,
         /// The full task it was given, when the engine reports one apart
         /// from the description (Claude's `prompt`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        prompt: Option<String>,
+        prompt: Option<TextContent>,
         /// The engine's own id for the running agent (Claude's `agentId`,
         /// the address its `SendMessage` uses).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+        /// Tokens in the agent's context after its latest message, and the
+        /// model it runs on: what the context meter shows in its view.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_used: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         #[serde(default)]
         background: bool,
-        result: Option<String>,
+        result: Option<TextContent>,
         /// Artisan's name for it, unique in its thread ([`AGENT_NAMES`]):
         /// Forge assigns it when the agent is first stored. `None` on agents
         /// stored before; read [`Item::agent_label`].
@@ -97,19 +102,23 @@ pub enum ItemKind {
     Question {
         /// The engine waits for the answer.
         blocking: bool,
-        questions: Vec<Question>,
+        questions: Collection<Question>,
         /// One entry per question; `None` means skipped.
-        answers: Option<Vec<Option<Vec<String>>>>,
+        answers: Option<Collection<Option<QuestionAnswer>>>,
+        /// Forge-computed literal history. Clients never resolve opaque IDs or
+        /// duplicate labels to construct display text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer_text: Option<TextContent>,
     },
     Plan {
-        steps: Vec<PlanStep>,
+        steps: Collection<PlanStep>,
         /// A markdown plan awaiting approval.
-        proposal: Option<String>,
+        proposal: Option<TextContent>,
         approval: Option<Approval>,
     },
     Image {
         blob: BlobHash,
-        caption: Option<String>,
+        caption: Option<TextContent>,
     },
     Compaction {
         tokens_before: Option<u64>,
@@ -117,11 +126,11 @@ pub enum ItemKind {
     },
     Notice {
         kind: NoticeKind,
-        text: String,
+        text: TextContent,
     },
     Error {
         kind: ErrorKind,
-        message: String,
+        message: TextContent,
         #[serde(default)]
         retryable: bool,
     },
@@ -139,8 +148,33 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolKind {
+    /// A message between this thread's agents, or with another session.
+    AgentMessage {
+        /// The engine's address for the other side: who it went to (Claude's
+        /// `to`), or who sent it when it came in.
+        recipient: String,
+        /// The thread's `Agent` item on the other side, when it is one; Forge
+        /// resolves it from the address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<ItemId>,
+        summary: Option<String>,
+        text: TextContent,
+        #[serde(default, skip_serializing_if = "MessageDirection::is_sent")]
+        direction: MessageDirection,
+    },
+    /// Work on agents or background jobs as a whole: listing, waiting for or
+    /// stopping them.
+    Agents {
+        action: AgentAction,
+        /// The engine's addresses for the agents or jobs it acted on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        addresses: Vec<String>,
+        /// The thread's `Agent` items among them; Forge resolves them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<ItemId>,
+    },
     Shell {
-        command: String,
+        command: TextContent,
         cwd: Option<String>,
         #[serde(default)]
         background: bool,
@@ -150,7 +184,7 @@ pub enum ToolKind {
         range: Option<(u64, u64)>,
     },
     Edit {
-        changes: Vec<FileChange>,
+        changes: Collection<FileChange>,
     },
     Search {
         pattern: String,
@@ -167,7 +201,7 @@ pub enum ToolKind {
         server: String,
         tool: String,
         #[serde(default)]
-        input: Option<String>,
+        input: Option<TextContent>,
     },
     ViewImage {
         path: String,
@@ -175,8 +209,34 @@ pub enum ToolKind {
     Other {
         name: String,
         #[serde(default)]
-        input: Option<String>,
+        input: Option<TextContent>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDirection {
+    #[default]
+    Sent,
+    /// Came in from another agent or session.
+    Received,
+    /// A subagent's report to whoever started it.
+    Report,
+}
+
+impl MessageDirection {
+    #[must_use]
+    pub fn is_sent(&self) -> bool {
+        *self == Self::Sent
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAction {
+    List,
+    Wait,
+    Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,7 +252,7 @@ pub struct FileChange {
     pub path: String,
     pub op: FileOp,
     /// Unified diff, when the engine provides one.
-    pub diff: Option<String>,
+    pub diff: Option<TextContent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,54 +264,31 @@ pub enum FileOp {
     Move { from: String },
 }
 
-/// Tool output kept for display: the head and tail of what the tool printed.
+/// Complete tool output. Historical imports can explicitly report bytes already lost.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Output {
-    pub head: String,
-    pub tail: String,
-    /// Bytes dropped between head and tail.
-    pub truncated_bytes: u64,
+    pub text: TextContent,
+    #[serde(default)]
+    pub omitted_bytes: u64,
 }
-
 impl Output {
-    /// Bytes kept from each end.
-    pub const KEEP: usize = 8 * 1024;
-
-    /// Keeps the first and last [`Self::KEEP`] bytes on char boundaries.
     #[must_use]
     pub fn from_text(text: &str) -> Self {
-        if text.len() <= Self::KEEP * 2 {
-            return Self {
-                head: text.to_owned(),
-                tail: String::new(),
-                truncated_bytes: 0,
-            };
-        }
-        let mut head_end = Self::KEEP;
-        while !text.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        let mut tail_start = text.len() - Self::KEEP;
-        while !text.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
         Self {
-            head: text[..head_end].to_owned(),
-            tail: text[tail_start..].to_owned(),
-            truncated_bytes: (tail_start - head_end) as u64,
+            text: text.into(),
+            omitted_bytes: 0,
         }
     }
-
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.head.is_empty() && self.tail.is_empty()
+        self.text.byte_len() == 0 && self.omitted_bytes == 0
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Approval {
     pub request: ApprovalRequest,
-    pub reason: Option<String>,
+    pub reason: Option<TextContent>,
     /// What the engine offers; the client shows only these.
     pub options: Vec<Decision>,
     pub decision: Option<Decision>,
@@ -261,12 +298,12 @@ pub struct Approval {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalRequest {
     Command {
-        command: String,
+        command: TextContent,
         cwd: Option<String>,
     },
     FileChange,
     Action {
-        description: String,
+        description: TextContent,
     },
 }
 
@@ -291,21 +328,123 @@ impl Decision {
 pub struct Question {
     pub id: String,
     pub header: Option<String>,
-    pub text: String,
+    pub text: TextContent,
     #[serde(default)]
     pub multi_select: bool,
-    pub options: Vec<QuestionOption>,
+    pub options: Collection<QuestionOption>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionOption {
+    pub id: String,
     pub label: String,
-    pub description: Option<String>,
+    pub description: Option<TextContent>,
+}
+
+/// Choice identity stays separate from presentation and free-form answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionAnswer {
+    Choices { ids: Collection<String> },
+    Text { text: String },
+}
+impl Question {
+    pub fn validate_answer_structure(
+        &self,
+        answer: &Option<QuestionAnswer>,
+    ) -> Result<(), &'static str> {
+        match answer {
+            None => Ok(()),
+            Some(QuestionAnswer::Text { text }) if text.trim().is_empty() => {
+                Err("answer text is empty")
+            }
+            Some(QuestionAnswer::Text { text }) if text.len() > crate::INLINE_TEXT_BYTES => {
+                Err("answer text exceeds 16 KiB")
+            }
+            Some(QuestionAnswer::Text { .. }) => Ok(()),
+            Some(QuestionAnswer::Choices { ids }) => {
+                let ids = ids.inline().ok_or("submitted choices must be inline")?;
+                if ids.is_empty() {
+                    return Err("no choice was selected");
+                }
+                if !self.multi_select && ids.len() > 1 {
+                    return Err("question does not allow multiple choices");
+                }
+                let mut seen = std::collections::HashSet::new();
+                for id in ids {
+                    if !seen.insert(id) {
+                        return Err("choice was selected twice");
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    pub fn validate_answer(&self, answer: &Option<QuestionAnswer>) -> Result<(), &'static str> {
+        self.validate_answer_structure(answer)?;
+        if let Some(QuestionAnswer::Choices { ids }) = answer {
+            let choices = self
+                .options
+                .inline()
+                .ok_or("question choices must be loaded before validation")?;
+            let known = choices
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            for id in ids.inline().ok_or("submitted choices must be inline")? {
+                if !known.contains(id.as_str()) {
+                    return Err("unknown question choice");
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Readable history/next-turn copy; transport answers retain opaque IDs.
+    pub fn answer_text(&self, answer: &QuestionAnswer) -> Result<String, &'static str> {
+        match answer {
+            QuestionAnswer::Text { text } => Ok(text.clone()),
+            QuestionAnswer::Choices { ids } => {
+                let ids = ids
+                    .inline()
+                    .ok_or("saved choice identities must be loaded before formatting")?;
+                let mut labels = std::collections::HashMap::new();
+                let choices = self
+                    .options
+                    .inline()
+                    .ok_or("question choices must be loaded before formatting")?;
+                let options = choices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, option)| {
+                        *labels.entry(option.label.as_str()).or_insert(0usize) += 1;
+                        (option.id.as_str(), (index, option))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                ids.iter()
+                    .map(|id| {
+                        let (index, option) =
+                            options.get(id.as_str()).ok_or("unknown question choice")?;
+                        Ok(if labels[option.label.as_str()] > 1 {
+                            format!(
+                                "{} (option {} of {})",
+                                option.label,
+                                index + 1,
+                                self.options.len()
+                            )
+                        } else {
+                            option.label.clone()
+                        })
+                    })
+                    .collect::<Result<Vec<_>, &'static str>>()
+                    .map(|labels| labels.join(", "))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanStep {
-    pub text: String,
+    pub text: TextContent,
     pub status: StepStatus,
 }
 
@@ -337,12 +476,26 @@ pub enum ErrorKind {
 }
 
 impl Item {
+    /// Stateful plans, agents and questions can be explicitly reused by an adapter.
+    /// Completed output and accepted input remain terminal.
+    #[must_use]
+    pub fn next_status(&self, next: Status) -> Status {
+        if matches!(
+            self.kind,
+            ItemKind::Plan { .. } | ItemKind::Agent { .. } | ItemKind::Question { .. }
+        ) {
+            next
+        } else {
+            self.status.advance(next)
+        }
+    }
+
     /// The text a reader sees first, for previews and titles.
     #[must_use]
     pub fn preview(&self) -> Option<&str> {
         match &self.kind {
             ItemKind::UserMessage { text, .. } | ItemKind::AssistantMessage { text, .. } => {
-                Some(text)
+                text.inline()
             }
             _ => None,
         }
@@ -360,5 +513,71 @@ impl Item {
                 .clone()
                 .unwrap_or_else(|| crate::fallback_agent_name(self.id.as_str()).to_owned()),
         )
+    }
+}
+
+#[cfg(test)]
+mod question_identity_tests {
+    use super::{Question, QuestionAnswer, QuestionOption};
+    #[test]
+    fn duplicate_labels_keep_distinct_choice_identity_and_text_is_not_a_choice() {
+        let question = Question {
+            id: "q".into(),
+            header: None,
+            text: "Pick".into(),
+            multi_select: false,
+            options: vec![
+                QuestionOption {
+                    id: "a".into(),
+                    label: "Same".into(),
+                    description: None,
+                },
+                QuestionOption {
+                    id: "b".into(),
+                    label: "Same".into(),
+                    description: None,
+                },
+            ]
+            .into(),
+        };
+        let answer = QuestionAnswer::Choices {
+            ids: vec!["b".into()].into(),
+        };
+        assert!(question.validate_answer(&Some(answer.clone())).is_ok());
+        let encoded = serde_json::to_string(&answer).unwrap();
+        assert_eq!(
+            serde_json::from_str::<QuestionAnswer>(&encoded).unwrap(),
+            answer
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["Same".into()].into()
+                }))
+                .is_err()
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Text {
+                    text: "Same".into()
+                }))
+                .is_ok()
+        );
+        assert!(
+            question
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["a".into(), "b".into()].into()
+                }))
+                .is_err()
+        );
+        let mut multi = question;
+        multi.multi_select = true;
+        assert!(
+            multi
+                .validate_answer(&Some(QuestionAnswer::Choices {
+                    ids: vec!["a".into(), "a".into()].into()
+                }))
+                .is_err()
+        );
     }
 }

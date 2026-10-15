@@ -1,9 +1,6 @@
-//! Data kinds: `stats` and `table`. See `docs/rich-blocks.md`.
-//!
-//! The small controls these share with the agent family (part ids, text
-//! buttons, shared slices) live in `agent`.
+//! Summary statistic blocks. Shared presentation helpers live in `kit`.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -15,7 +12,7 @@ mod stats;
 mod tests;
 
 /// Claims this family's kinds; `None` for every other kind.
-pub(super) fn parse(kind: &str, value: &Value) -> Option<Result<Rc<dyn RichBlock>, String>> {
+pub(super) fn parse(kind: &str, value: &Value) -> Option<Result<Arc<dyn RichBlock>, String>> {
     Some(match kind {
         "stats" => block::<stats::Stats>(value),
         _ => return None,

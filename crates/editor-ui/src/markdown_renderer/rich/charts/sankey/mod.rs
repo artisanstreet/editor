@@ -5,15 +5,16 @@
 //! links are filled cubic bands from a source's right edge to a target's
 //! left edge, stacked in the order of the nodes they reach.
 
+use crate::markdown_renderer::rich::budget;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _};
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::super::{BlockContext, RichBlock, kit, spec};
-use super::scale::{exact, f32_of, f64_of};
+use super::super::{BlockContext, RichBlock, spec};
+use super::scale::{f32_of, f64_of};
 
 mod view;
 
@@ -48,13 +49,19 @@ pub(super) struct Link {
 }
 
 /// The nodes and the flows the drawing uses.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Graph {
     pub(super) labels: Vec<String>,
     /// Positive, finite flows between distinct nodes that close no cycle.
     pub(super) links: Vec<Link>,
     /// Each node's rank: the longest path to it from a root.
     pub(super) ranks: Vec<usize>,
+    pub(super) incoming: Vec<Vec<usize>>,
+    pub(super) outgoing: Vec<Vec<usize>>,
+    inflows: Vec<f64>,
+    outflows: Vec<f64>,
+    rank_count: usize,
+    pub(super) tallest: usize,
 }
 
 impl Graph {
@@ -87,28 +94,44 @@ impl Graph {
             }
         }
         let links = acyclic(labels.len(), links);
+        let mut incoming = vec![Vec::new(); labels.len()];
+        let mut outgoing = vec![Vec::new(); labels.len()];
+        let mut inflows = vec![0.0; labels.len()];
+        let mut outflows = vec![0.0; labels.len()];
+        for (index, link) in links.iter().enumerate() {
+            incoming[link.to].push(index);
+            outgoing[link.from].push(index);
+            inflows[link.to] += link.value;
+            outflows[link.from] += link.value;
+        }
         let ranks = ranks(labels.len(), &links);
+        let rank_count = ranks.iter().max().map_or(0, |rank| rank + 1);
+        let mut population = vec![0usize; rank_count];
+        for (node, rank) in ranks.iter().copied().enumerate() {
+            if inflows[node].max(outflows[node]) > 0.0 {
+                population[rank] += 1;
+            }
+        }
+        let tallest = population.into_iter().max().unwrap_or(0);
         Self {
             labels,
             links,
             ranks,
+            incoming,
+            outgoing,
+            inflows,
+            outflows,
+            rank_count,
+            tallest,
         }
     }
 
     pub(super) fn inflow(&self, node: usize) -> f64 {
-        self.links
-            .iter()
-            .filter(|link| link.to == node)
-            .map(|link| link.value)
-            .sum()
+        self.inflows[node]
     }
 
     pub(super) fn outflow(&self, node: usize) -> f64 {
-        self.links
-            .iter()
-            .filter(|link| link.from == node)
-            .map(|link| link.value)
-            .sum()
+        self.outflows[node]
     }
 
     pub(super) fn throughput(&self, node: usize) -> f64 {
@@ -116,7 +139,7 @@ impl Graph {
     }
 
     pub(super) fn rank_count(&self) -> usize {
-        self.ranks.iter().max().map_or(0, |rank| rank + 1)
+        self.rank_count
     }
 }
 
@@ -169,13 +192,16 @@ fn acyclic(count: usize, links: Vec<Link>) -> Vec<Link> {
 /// The longest path from a root to each node of an acyclic graph.
 fn ranks(count: usize, links: &[Link]) -> Vec<usize> {
     let mut incoming = vec![0usize; count];
-    for link in links {
+    let mut outgoing = vec![Vec::new(); count];
+    for (index, link) in links.iter().enumerate() {
         incoming[link.to] += 1;
+        outgoing[link.from].push(index);
     }
     let mut ranks = vec![0; count];
     let mut ready: Vec<usize> = (0..count).filter(|node| incoming[*node] == 0).collect();
     while let Some(node) = ready.pop() {
-        for link in links.iter().filter(|link| link.from == node) {
+        for index in &outgoing[node] {
+            let link = &links[*index];
             ranks[link.to] = ranks[link.to].max(ranks[node] + 1);
             incoming[link.to] -= 1;
             if incoming[link.to] == 0 {
@@ -208,6 +234,18 @@ pub(super) struct Layout {
     pub(super) nodes: Vec<NodeBox>,
     /// One band per [`Graph::links`] entry.
     pub(super) bands: Vec<Band>,
+    pub(super) columns: Vec<Vec<usize>>,
+    /// Sorted by starting rank, then ending rank; each link belongs to one group.
+    pub(super) hit_groups: Vec<LinkGroup>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LinkGroup {
+    pub(super) from: usize,
+    pub(super) to: usize,
+    pub(super) links: Vec<usize>,
+    pub(super) y0: f32,
+    pub(super) y1: f32,
 }
 
 impl Layout {
@@ -226,11 +264,19 @@ pub(super) fn layout(graph: &Graph, height: f32, gap: f32) -> Layout {
     let ranks = graph.rank_count();
     let mut columns: Vec<Vec<usize>> = vec![Vec::new(); ranks];
     for (node, rank) in graph.ranks.iter().enumerate() {
-        columns[*rank].push(node);
+        if graph.throughput(node) > 0.0 {
+            columns[*rank].push(node);
+        }
     }
     let values: Vec<f64> = (0..graph.labels.len())
         .map(|node| graph.throughput(node))
         .collect();
+    let max_nodes = columns.iter().map(Vec::len).max().unwrap_or(0);
+    let gap = if max_nodes > 1 {
+        gap.min(height / f32_of(f64_of(max_nodes)) * 0.5)
+    } else {
+        0.0
+    };
     let scale = columns
         .iter()
         .filter_map(|column| {
@@ -254,7 +300,7 @@ pub(super) fn layout(graph: &Graph, height: f32, gap: f32) -> Layout {
         }
         let heights: Vec<f32> = column
             .iter()
-            .map(|node| f32_of(values[*node] * scale).max(2.0))
+            .map(|node| f32_of(values[*node] * scale))
             .collect();
         let total =
             heights.iter().sum::<f32>() + gap * f32_of(f64_of(column.len().saturating_sub(1)));
@@ -269,31 +315,64 @@ pub(super) fn layout(graph: &Graph, height: f32, gap: f32) -> Layout {
         }
     }
     let bands = bands(graph, &nodes, scale);
+    let mut groups = std::collections::BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (index, link) in graph.links.iter().enumerate() {
+        groups
+            .entry((nodes[link.from].rank, nodes[link.to].rank))
+            .or_default()
+            .push(index);
+    }
+    let hit_groups = groups
+        .into_iter()
+        .map(|((from, to), links)| {
+            let y0 = links
+                .iter()
+                .map(|index| bands[*index].source.0.min(bands[*index].target.0))
+                .fold(f32::INFINITY, f32::min);
+            let y1 = links
+                .iter()
+                .map(|index| bands[*index].source.1.max(bands[*index].target.1))
+                .fold(f32::NEG_INFINITY, f32::max);
+            LinkGroup {
+                from,
+                to,
+                links,
+                y0,
+                y1,
+            }
+        })
+        .collect();
     Layout {
         ranks,
         nodes,
         bands,
+        columns,
+        hit_groups,
     }
 }
 
 /// Sorts a column by the flow-weighted middle of each node's sources.
 fn order_by_sources(column: &mut [usize], graph: &Graph, placed: &[NodeBox]) {
-    let center = |node: usize| {
-        let (weight, sum) = graph.links.iter().filter(|link| link.to == node).fold(
-            (0.0, 0.0),
-            |(weight, sum), link| {
-                let source = placed[link.from];
-                let middle = f64::from(source.y0 + source.y1) / 2.0;
-                (weight + link.value, sum + middle * link.value)
-            },
-        );
-        if weight > 0.0 {
-            sum / weight
-        } else {
-            f64::INFINITY
-        }
-    };
-    column.sort_by(|a, b| center(*a).total_cmp(&center(*b)));
+    let centers: HashMap<usize, f64> = column
+        .iter()
+        .map(|node| {
+            let total = graph.inflow(*node);
+            let center = if total > 0.0 {
+                graph.incoming[*node]
+                    .iter()
+                    .map(|index| {
+                        let link = &graph.links[*index];
+                        f64::from(f32::midpoint(placed[link.from].y0, placed[link.from].y1))
+                            * (link.value / total)
+                    })
+                    .sum()
+            } else {
+                f64::INFINITY
+            };
+            (*node, center)
+        })
+        .collect();
+    column.sort_by(|a, b| centers[a].total_cmp(&centers[b]));
 }
 
 fn bands(graph: &Graph, nodes: &[NodeBox], scale: f64) -> Vec<Band> {
@@ -306,9 +385,7 @@ fn bands(graph: &Graph, nodes: &[NodeBox], scale: f64) -> Vec<Band> {
         graph.links.len()
     ];
     for (node, place) in nodes.iter().enumerate() {
-        let mut outgoing: Vec<usize> = (0..graph.links.len())
-            .filter(|link| graph.links[*link].from == node)
-            .collect();
+        let mut outgoing = graph.outgoing[node].clone();
         outgoing.sort_by(|a, b| middle(graph.links[*a].to).total_cmp(&middle(graph.links[*b].to)));
         let mut y = place.y0;
         for link in outgoing {
@@ -316,9 +393,7 @@ fn bands(graph: &Graph, nodes: &[NodeBox], scale: f64) -> Vec<Band> {
             bands[link].source = (y, y + width);
             y += width;
         }
-        let mut incoming: Vec<usize> = (0..graph.links.len())
-            .filter(|link| graph.links[*link].to == node)
-            .collect();
+        let mut incoming = graph.incoming[node].clone();
         incoming
             .sort_by(|a, b| middle(graph.links[*a].from).total_cmp(&middle(graph.links[*b].from)));
         let mut y = place.y0;
@@ -334,49 +409,142 @@ fn bands(graph: &Graph, nodes: &[NodeBox], scale: f64) -> Vec<Band> {
 /// A parsed sankey: the spec for Markdown, the graph for drawing.
 #[derive(Debug)]
 pub(super) struct Sankey {
-    spec: SankeySpec,
-    graph: Rc<Graph>,
+    graph: Arc<Graph>,
 }
 
-pub(super) fn parse(value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let spec = spec::<SankeySpec>(value)?;
-    let graph = Rc::new(Graph::from_spec(&spec));
-    Ok(Rc::new(Sankey { spec, graph }))
+    if spec.nodes.len() > 512 || spec.links.len() > 2048 {
+        return Err("flow preview supports at most 512 declared nodes and 2048 flows".into());
+    }
+    let mut declared = HashMap::new();
+    for node in &spec.nodes {
+        if let Some(previous) = declared.insert(&node.id, &node.label)
+            && previous != &node.label
+        {
+            return Err(format!("conflicting labels for node `{}`", node.id));
+        }
+    }
+    for (index, link) in spec.links.iter().enumerate() {
+        if link.from == link.to || !link.value.is_finite() || link.value <= 0.0 {
+            return Err(format!(
+                "links[{index}] needs a finite positive flow between distinct nodes"
+            ));
+        }
+    }
+    let graph = Arc::new(Graph::from_spec(&spec));
+    if graph.labels.len() > 512 {
+        return Err("flow preview supports at most 512 nodes".into());
+    }
+    if graph.links.len() != spec.links.len() {
+        return Err("cyclic flows are unsupported; supply an acyclic graph".to_owned());
+    }
+    if !graph
+        .links
+        .iter()
+        .map(|link| link.value)
+        .sum::<f64>()
+        .is_finite()
+    {
+        return Err("flow total exceeds the finite numeric range".to_owned());
+    }
+    if graph
+        .inflows
+        .iter()
+        .chain(&graph.outflows)
+        .any(|value| !value.is_finite())
+    {
+        return Err("flow totals exceed the finite numeric range".to_owned());
+    }
+    Ok(Arc::new(Sankey { graph }))
 }
 
 impl RichBlock for Sankey {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Graph>()
+            + budget::strings(&self.graph.labels)
+            + budget::vector(&self.graph.links)
+            + budget::vector(&self.graph.ranks)
+            + budget::vector(&self.graph.incoming)
+            + self
+                .graph
+                .incoming
+                .iter()
+                .map(budget::vector)
+                .sum::<usize>()
+            + budget::vector(&self.graph.outgoing)
+            + self
+                .graph
+                .outgoing
+                .iter()
+                .map(budget::vector)
+                .sum::<usize>()
+            + budget::vector(&self.graph.inflows)
+            + budget::vector(&self.graph.outflows)
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         view::SankeyView {
             id: cx.key("sankey"),
             theme: *cx.theme,
-            graph: Rc::clone(&self.graph),
+            graph: Arc::clone(&self.graph),
         }
         .into_any_element()
     }
+}
 
-    fn markdown(&self) -> String {
-        if self.spec.links.is_empty() {
-            return "_No flows._\n".to_owned();
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn dense_rank_fits_its_plot() {
+        let links: Vec<LinkSpec> = (0..40)
+            .map(|index| LinkSpec {
+                from: "root".into(),
+                to: index.to_string(),
+                value: 1.0,
+            })
+            .collect();
+        let graph = Graph::from_spec(&SankeySpec {
+            nodes: Vec::new(),
+            links,
+        });
+        let laid = layout(&graph, 380.0, 10.0);
+        for node in &laid.nodes {
+            assert!(node.y0 >= 0.0 && node.y1 <= 380.01);
         }
-        let label = |id: &str| {
-            self.spec
-                .nodes
-                .iter()
-                .find(|node| node.id == id)
-                .and_then(|node| node.label.clone())
-                .filter(|label| !label.trim().is_empty())
-                .unwrap_or_else(|| id.to_owned())
+        for band in &laid.bands {
+            assert!(
+                band.source.0 >= 0.0
+                    && band.source.1 <= 380.01
+                    && band.target.0 >= 0.0
+                    && band.target.1 <= 380.01
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod population_tests {
+    use super::*;
+    #[test]
+    fn cached_population_counts_only_drawable_nodes() {
+        let spec = SankeySpec {
+            nodes: (0..100)
+                .map(|id| NodeSpec {
+                    id: format!("unused-{id}"),
+                    label: None,
+                })
+                .collect(),
+            links: vec![LinkSpec {
+                from: "a".into(),
+                to: "b".into(),
+                value: 1.0,
+            }],
         };
-        let header: Vec<String> = ["From", "To", "Value"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let rows: Vec<Vec<String>> = self
-            .spec
-            .links
-            .iter()
-            .map(|link| vec![label(&link.from), label(&link.to), exact(link.value)])
-            .collect();
-        kit::markdown_table(&header, &rows)
+        let graph = Graph::from_spec(&spec);
+        assert_eq!(graph.rank_count(), 2);
+        assert_eq!(graph.tallest, 1);
     }
 }

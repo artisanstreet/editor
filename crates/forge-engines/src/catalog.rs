@@ -5,12 +5,12 @@
 
 use crate::engines::{ModelSource, host_spec};
 use anyhow::{Context, Result, bail, ensure};
-use artisan_api::{EffortNote, EngineId, Model, Speed, Variant};
+use artisan_api::{ContextWindow, EffortNote, EngineId, Model, Speed, Variant};
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 const CLAUDE_CATALOG: &str = "https://downloads.claude.ai/model-catalog/v1/catalog.json";
 const DEADLINE: Duration = Duration::from_secs(15);
@@ -64,6 +64,8 @@ fn command(program: &Program<'_>) -> Result<tokio::process::Command> {
     let binary = program.binary.context("not installed")?;
     let mut command = tokio::process::Command::new(binary);
     command
+        .env_remove("CLAUDECODE")
+        .env_remove("CLAUDE_CODE_ENTRYPOINT")
         .envs(program.env.iter().map(|(key, value)| (key, value)))
         .current_dir(program.home)
         .stdin(Stdio::null())
@@ -75,36 +77,10 @@ fn command(program: &Program<'_>) -> Result<tokio::process::Command> {
 
 /// Runs a listing subcommand and returns its stdout.
 async fn run(program: &Program<'_>, args: &[&str]) -> Result<String> {
-    let mut child = command(program)?
-        .args(args)
-        .spawn()
-        .context("starting the engine")?;
-    let (mut stdout, mut stderr) = (
-        child.stdout.take().context("stdout")?,
-        child.stderr.take().context("stderr")?,
-    );
-    let output = tokio::time::timeout(DEADLINE, async {
-        let (mut out, mut err) = (Vec::new(), Vec::new());
-        let (mut stdout, mut stderr) = (
-            (&mut stdout).take(MAX_OUTPUT_BYTES as u64),
-            (&mut stderr).take(MAX_OUTPUT_BYTES as u64),
-        );
-        let (read_out, read_err) =
-            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
-        read_out?;
-        read_err?;
-        Ok::<_, std::io::Error>((child.wait().await?, out, err))
-    })
-    .await
-    .with_context(|| {
-        format!(
-            "`{}` did not finish in {}s",
-            args.join(" "),
-            DEADLINE.as_secs()
-        )
-    })?
-    .context("reading the engine output")?;
-    let (status, out, err) = output;
+    let mut command = command(program)?;
+    command.args(args);
+    let output = crate::process::probe(command, DEADLINE, MAX_OUTPUT_BYTES).await?;
+    let (status, out, err) = (output.status, output.stdout, output.stderr);
     if !status.success() {
         let stderr = String::from_utf8_lossy(&err);
         let stdout = String::from_utf8_lossy(&out);
@@ -118,6 +94,21 @@ async fn run(program: &Program<'_>, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
+fn read_json_file(path: &Path) -> Option<Value> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_OUTPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_OUTPUT_BYTES {
+        tracing::warn!(path = %path.display(), "model cache exceeds byte budget");
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
 // ---------------------------------------------------------------- one id per line (Grok, Cursor)
 
 /// `[*|-] <id> [label] [(default)]` lines, after a `…models:` header when
@@ -129,7 +120,11 @@ pub(crate) fn parse_lines(output: &str) -> Listing {
         .position(|line| line.trim().to_ascii_lowercase().ends_with("models:"))
         .map_or(0, |header| header + 1);
     let mut listing = Listing::default();
+    let mut seen = HashSet::new();
     for line in &lines[start..] {
+        if listing.models.len() >= MAX_MODELS {
+            break;
+        }
         let marked =
             line.starts_with(char::is_whitespace) || line.starts_with('*') || line.starts_with('-');
         let trimmed = line.trim();
@@ -145,7 +140,7 @@ pub(crate) fn parse_lines(output: &str) -> Listing {
                 .all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c));
         let signal = id.chars().any(|c| c.is_ascii_digit() || "-._".contains(c));
         // Unindented prose ("not authenticated") is not a model.
-        if !valid || !(marked || signal) {
+        if !valid || !(marked || signal) || !seen.insert(id) {
             continue;
         }
         let label = parts
@@ -182,16 +177,21 @@ pub(crate) fn fold_fast_ids(listing: &mut Listing) {
         .iter()
         .map(|model| model.id.clone())
         .collect();
-    let mut folded = Vec::new();
+    let indexed: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect();
+    let mut folded = HashSet::new();
     for fast in &ids {
         let Some(base) = fast.strip_suffix("-fast") else {
             continue;
         };
-        if !ids.iter().any(|id| id == base) {
+        let Some(index) = indexed.get(base).copied() else {
             continue;
-        }
+        };
         let fast_default = listing.default.as_deref() == Some(fast.as_str());
-        if let Some(model) = listing.models.iter_mut().find(|model| model.id == base) {
+        if let Some(model) = listing.models.get_mut(index) {
             model.speeds = vec![
                 Speed {
                     id: STANDARD_SPEED.to_owned(),
@@ -210,9 +210,11 @@ pub(crate) fn fold_fast_ids(listing: &mut Listing) {
         if fast_default {
             listing.default = Some(base.to_owned());
         }
-        folded.push(fast.clone());
+        folded.insert(fast.as_str());
     }
-    listing.models.retain(|model| !folded.contains(&model.id));
+    listing
+        .models
+        .retain(|model| !folded.contains(model.id.as_str()));
 }
 
 /// Engines report hyphenated names (`GPT-6-Astra`) where the picker reads
@@ -244,14 +246,21 @@ fn title_case(id: &str) -> String {
 
 async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing> {
     let published = async {
-        let response = http
+        let mut response = http
             .get(CLAUDE_CATALOG)
             .timeout(Duration::from_secs(5))
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)?;
-        let text = response.text().await?;
-        anyhow::Ok(serde_json::from_str::<Value>(&text)?)
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                bytes.len().saturating_add(chunk.len()) <= MAX_OUTPUT_BYTES,
+                "Claude catalog exceeds byte budget"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        anyhow::Ok(serde_json::from_slice::<Value>(&bytes)?)
     }
     .await;
     let published = match published {
@@ -262,7 +271,10 @@ async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing> {
             None
         }
     };
-    let served = claude_served_cache(&home.join(".claude/cache/model-catalog"));
+    let directory = home.join(".claude/cache/model-catalog");
+    let served = tokio::task::spawn_blocking(move || claude_served_cache(&directory))
+        .await
+        .context("read Claude model cache")?;
     let listing = merge_claude(published.as_ref(), served.as_ref());
     ensure!(
         !listing.models.is_empty(),
@@ -274,14 +286,17 @@ async fn claude(http: &reqwest::Client, home: &Path) -> Result<Listing> {
 /// The newest `*-cc.json` the CLI cached: what this account is actually served.
 fn claude_served_cache(dir: &Path) -> Option<Value> {
     let mut newest: Option<(u64, Value)> = None;
+    let mut matched = 0;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         if !entry.file_name().to_string_lossy().ends_with("-cc.json") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(entry.path()) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        matched += 1;
+        if matched > 256 {
+            tracing::warn!(directory = %dir.display(), "too many cached Claude catalogs");
+            return None;
+        }
+        let Some(value) = read_json_file(&entry.path()) else {
             continue;
         };
         if claude_served_models(&value).is_empty() {
@@ -307,7 +322,7 @@ fn claude_served_models(value: &Value) -> Vec<&Value> {
         .filter(|config| config.get("id").and_then(Value::as_str) == Some("cc"))
         .and_then(|config| config.get("models"))
         .and_then(Value::as_array)
-        .map(|models| models.iter().collect())
+        .map(|models| models.iter().take(MAX_MODELS).collect())
         .unwrap_or_default()
 }
 
@@ -320,6 +335,7 @@ fn claude_published_models(value: &Value) -> Vec<&Value> {
         .filter(|config| config.get("id").and_then(Value::as_str) == Some("cc"))
         .filter_map(|config| config.get("models").and_then(Value::as_array))
         .flatten()
+        .take(MAX_MODELS)
         .collect()
 }
 
@@ -328,16 +344,24 @@ fn claude_published_models(value: &Value) -> Vec<&Value> {
 fn merge_claude(published: Option<&Value>, served: Option<&Value>) -> Listing {
     let published = published.map(claude_published_models).unwrap_or_default();
     let served = served.map(claude_served_models).unwrap_or_default();
+    let published_index: HashMap<&str, &Value> = published
+        .iter()
+        .filter_map(|row| Some((row["id"].as_str()?, *row)))
+        .collect();
     let rows: Vec<Value> = if served.is_empty() {
-        published.iter().map(|model| (*model).clone()).collect()
+        published
+            .iter()
+            .take(MAX_MODELS)
+            .map(|model| (*model).clone())
+            .collect()
     } else {
         served
             .iter()
+            .take(MAX_MODELS)
             .map(|model| {
-                let id = model.get("id");
-                let mut merged = published
-                    .iter()
-                    .find(|base| id.is_some() && base.get("id") == id)
+                let id = model["id"].as_str();
+                let mut merged = id
+                    .and_then(|id| published_index.get(id))
                     .and_then(|base| base.as_object().cloned())
                     .unwrap_or_default();
                 merged.extend(model.as_object().cloned().unwrap_or_default());
@@ -346,12 +370,10 @@ fn merge_claude(published: Option<&Value>, served: Option<&Value>) -> Listing {
             .collect()
     };
     let mut listing = Listing::default();
+    let mut seen = HashSet::new();
     for row in &rows {
         if let Some(model) = claude_model(row)
-            && !listing
-                .models
-                .iter()
-                .any(|existing| existing.id == model.id)
+            && seen.insert(model.id.clone())
         {
             listing.models.push(model);
         }
@@ -416,6 +438,7 @@ fn claude_model(value: &Value) -> Option<Model> {
             .then(|| text(option.pointer("/badge/message")))
             .flatten();
             (description.is_some() || advisory.is_some()).then(|| EffortNote {
+                special: false,
                 effort: effort.to_owned(),
                 description,
                 advisory,
@@ -433,6 +456,12 @@ fn claude_model(value: &Value) -> Option<Model> {
         efforts,
         default_effort,
         effort_notes,
+        context_windows: runtime
+            .and_then(|r| r.get("max_input_tokens"))
+            .and_then(Value::as_u64)
+            .map_or_else(Vec::new, |base| {
+                context_choices(EngineId::Claude, base, base)
+            }),
         context_window: runtime
             .and_then(|r| r.get("max_input_tokens"))
             .and_then(Value::as_u64),
@@ -490,85 +519,63 @@ fn text(value: Option<&Value>) -> Option<String> {
 // ---------------------------------------------------------------- Codex
 
 async fn codex(program: &Program<'_>) -> Result<Listing> {
-    let mut child = command(program)?
-        .args(["app-server", "--stdio"])
-        .stdin(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let mut lines = BufReader::new(child.stdout.take().context("stdout")?).lines();
     let rows = tokio::time::timeout(DEADLINE, async {
-        send(&mut stdin, json!({
-            "id": 0, "method": "initialize",
-            "params": { "clientInfo": { "name": "artisan", "version": env!("CARGO_PKG_VERSION") },
-                        "capabilities": { "experimentalApi": false } },
-        }))
-        .await?;
+        let mut session = crate::rpc::Session::codex(command(program)?).await?;
         let mut rows = Vec::new();
-        let mut page = 0_u64;
-        loop {
-            let Some(line) = lines.next_line().await? else {
-                bail!("codex app-server closed its output")
-            };
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let Some(id) = message.get("id").and_then(Value::as_u64) else {
-                continue;
-            };
-            if let Some(error) = message.get("error") {
-                bail!("codex app-server: {error}");
-            }
-            let cursor = if id == 0 {
-                send(&mut stdin, json!({ "method": "initialized" })).await?;
-                None
-            } else {
-                let result = message
-                    .get("result")
-                    .context("model/list without a result")?;
-                rows.extend(
-                    result
-                        .get("data")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default(),
-                );
-                match result
-                    .get("nextCursor")
-                    .and_then(Value::as_str)
-                    .filter(|c| !c.is_empty())
-                {
-                    Some(cursor) if rows.len() < MAX_MODELS && page < 16 => Some(cursor.to_owned()),
-                    _ => return Ok(rows),
-                }
-            };
-            page += 1;
+        let mut cursor = None;
+        for _ in 0..16 {
             let mut params = json!({ "includeHidden": true });
-            if let Some(cursor) = cursor {
-                params["cursor"] = json!(cursor);
+            if let Some(cursor) = cursor.take() {
+                params["cursor"] = cursor;
             }
-            send(
-                &mut stdin,
-                json!({ "id": page, "method": "model/list", "params": params }),
-            )
-            .await?;
+            let result = session.call("model/list", params).await?;
+            let data = result["data"]
+                .as_array()
+                .context("model/list omitted data")?;
+            rows.extend(data.iter().take(MAX_MODELS - rows.len()).cloned());
+            if rows.len() >= MAX_MODELS {
+                break;
+            }
+            cursor = result["nextCursor"]
+                .as_str()
+                .filter(|cursor| !cursor.is_empty())
+                .map(|cursor| json!(cursor));
+            if cursor.is_none() {
+                break;
+            }
         }
+        Ok::<_, anyhow::Error>(rows)
     })
     .await
-    .context("codex model/list timed out")?;
-    let _ = child.kill().await;
-    let rows = rows?;
-    let windows = codex_context_windows(&program.home.join(".codex/models_cache.json"));
+    .context("codex model/list timed out")??;
+    let path = program.home.join(".codex/models_cache.json");
+    let windows = tokio::task::spawn_blocking(move || codex_context_windows(&path))
+        .await
+        .context("read Codex model cache")?;
     Ok(codex_listing(&rows, &windows))
 }
 
 /// `model/list` rows as models. Hidden rows are engine internals, never
 /// offered.
-fn codex_listing(rows: &[Value], windows: &[(String, u64)]) -> Listing {
+fn codex_listing(rows: &[Value], windows: &[(String, u64, u64)]) -> Listing {
+    let windows: HashMap<&str, (u64, u64)> = windows
+        .iter()
+        .take(MAX_MODELS)
+        .map(|(id, base, max)| (id.as_str(), (*base, *max)))
+        .collect();
     let mut listing = Listing::default();
-    for row in rows {
-        let Some(id) = row.get("id").and_then(Value::as_str) else {
+    let mut seen = HashSet::new();
+    for row in rows.iter().take(MAX_MODELS) {
+        let Some(id) = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
             continue;
         };
+        if !seen.insert(id) {
+            continue;
+        }
         if row.get("hidden").and_then(Value::as_bool).unwrap_or(false) {
             continue;
         }
@@ -592,13 +599,14 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64)]) -> Listing {
         let effort_notes = options
             .iter()
             .filter_map(|option| {
-                Some(EffortNote {
-                    effort: option
-                        .get("reasoningEffort")
-                        .and_then(Value::as_str)?
-                        .to_owned(),
-                    description: Some(text(option.get("description"))?),
+                let effort = option.get("reasoningEffort").and_then(Value::as_str)?;
+                let description = text(option.get("description"));
+                let special = effort == "ultra";
+                (special || description.is_some()).then(|| EffortNote {
+                    effort: effort.to_owned(),
+                    description,
                     advisory: None,
+                    special,
                 })
             })
             .collect();
@@ -617,10 +625,10 @@ fn codex_listing(rows: &[Value], windows: &[(String, u64)]) -> Listing {
                 .map(str::to_owned),
             efforts,
             effort_notes,
-            context_window: windows
-                .iter()
-                .find(|(slug, _)| slug == id)
-                .map(|(_, tokens)| *tokens),
+            context_window: windows.get(id).map(|(base, _)| *base),
+            context_windows: windows.get(id).map_or_else(Vec::new, |(base, max)| {
+                context_choices(EngineId::Codex, *base, *max)
+            }),
             supports_images: row
                 .get("inputModalities")
                 .and_then(Value::as_array)
@@ -691,18 +699,9 @@ fn codex_speeds(row: &Value) -> Vec<Speed> {
     tiers
 }
 
-async fn send(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()> {
-    stdin.write_all(format!("{value}\n").as_bytes()).await?;
-    stdin.flush().await?;
-    Ok(())
-}
-
 /// `model/list` has no context windows; the CLI's own cache does.
-fn codex_context_windows(path: &Path) -> Vec<(String, u64)> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+fn codex_context_windows(path: &Path) -> Vec<(String, u64, u64)> {
+    let Some(value) = read_json_file(path) else {
         return Vec::new();
     };
     value
@@ -710,10 +709,15 @@ fn codex_context_windows(path: &Path) -> Vec<(String, u64)> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .take(MAX_MODELS)
         .filter_map(|model| {
             Some((
                 model.get("slug").and_then(Value::as_str)?.to_owned(),
                 model.get("context_window").and_then(Value::as_u64)?,
+                model
+                    .get("max_context_window")
+                    .and_then(Value::as_u64)
+                    .or_else(|| model.get("context_window").and_then(Value::as_u64))?,
             ))
         })
         .collect()
@@ -723,10 +727,15 @@ fn codex_context_windows(path: &Path) -> Vec<(String, u64)> {
 
 async fn opencode(program: &Program<'_>) -> Result<Listing> {
     let output = run(program, &["models"]).await?;
-    let cache = [".cache", "cache"]
-        .iter()
-        .map(|dir| program.home.join(dir).join("opencode/models.json"))
-        .find_map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).ok()?).ok());
+    let home = program.home.to_owned();
+    let cache = tokio::task::spawn_blocking(move || {
+        [".cache", "cache"]
+            .iter()
+            .map(|dir| home.join(dir).join("opencode/models.json"))
+            .find_map(|path| read_json_file(&path))
+    })
+    .await
+    .context("read OpenCode model cache")?;
     let listing = opencode_listing(&output, cache.as_ref());
     ensure!(!listing.models.is_empty(), "opencode listed no models");
     Ok(listing)
@@ -737,18 +746,23 @@ async fn opencode(program: &Program<'_>) -> Result<Listing> {
 /// are the variants OpenCode runs it as (`model.variant`).
 fn opencode_listing(output: &str, cache: Option<&Value>) -> Listing {
     let mut listing = Listing::default();
+    let mut seen = HashSet::new();
     for line in output.lines().map(str::trim) {
+        if listing.models.len() >= MAX_MODELS {
+            break;
+        }
         let Some((provider, model)) = line.split_once('/') else {
             continue;
         };
         if provider.is_empty() || model.is_empty() || line.contains(char::is_whitespace) {
             continue;
         }
-        if listing.models.iter().any(|existing| existing.id == line) {
+        if !seen.insert(line) {
             continue;
         }
         let meta = cache.and_then(|cache| cache.get(provider)?.get("models")?.get(model));
         let mut variants: Vec<Variant> = Vec::new();
+        let mut variant_ids = HashSet::new();
         for id in meta
             .and_then(|meta| meta.get("reasoning_options"))
             .and_then(Value::as_array)
@@ -760,7 +774,10 @@ fn opencode_listing(output: &str, cache: Option<&Value>) -> Listing {
             .filter_map(Value::as_str)
             .filter(|id| !id.is_empty() && *id != "default")
         {
-            if !variants.iter().any(|variant| variant.id == id) {
+            if variants.len() == 128 {
+                break;
+            }
+            if variant_ids.insert(id) {
                 variants.push(Variant {
                     id: id.to_owned(),
                     label: variant_label(id),
@@ -775,6 +792,12 @@ fn opencode_listing(output: &str, cache: Option<&Value>) -> Listing {
                 .unwrap_or(line)
                 .to_owned(),
             description: text(meta.and_then(|m| m.get("description"))),
+            context_windows: meta
+                .and_then(|m| m.pointer("/limit/context"))
+                .and_then(Value::as_u64)
+                .map_or_else(Vec::new, |base| {
+                    context_choices(EngineId::OpenCode, base, base)
+                }),
             context_window: meta
                 .and_then(|m| m.pointer("/limit/context"))
                 .and_then(Value::as_u64),
@@ -808,9 +831,156 @@ fn variant_label(id: &str) -> String {
     }
 }
 
+/// Choices come from reported model limits, never a model-name guess.
+fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> {
+    if base == 0 || base > 100_000_000 {
+        return Vec::new();
+    }
+    let mut choices = Vec::new();
+    if engine == EngineId::Claude && base >= 1_000_000 {
+        choices.push(ContextWindow {
+            tokens: 400_000,
+            override_tokens: Some(400_000),
+        });
+    }
+    choices.push(ContextWindow {
+        tokens: base,
+        override_tokens: None,
+    });
+    if engine == EngineId::Codex && max > base && max <= 100_000_000 {
+        choices.push(ContextWindow {
+            tokens: max,
+            override_tokens: Some(max),
+        });
+    }
+    choices
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_choices_follow_reported_limits_and_default_without_override() {
+        let listing = codex_listing(
+            &[json!({"id":"gpt-test"})],
+            &[("gpt-test".to_owned(), 272_000, 1_000_000)],
+        );
+        assert_eq!(listing.models[0].context_window, Some(272_000));
+        assert_eq!(
+            listing.models[0].context_windows,
+            [
+                ContextWindow {
+                    tokens: 272_000,
+                    override_tokens: None
+                },
+                ContextWindow {
+                    tokens: 1_000_000,
+                    override_tokens: Some(1_000_000)
+                },
+            ]
+        );
+        assert!(
+            codex_listing(&[json!({"id":"unknown"})], &[]).models[0]
+                .context_windows
+                .is_empty()
+        );
+        let claude =
+            claude_model(&json!({"id":"claude-test", "runtime":{"max_input_tokens":1_000_000}}))
+                .unwrap();
+        assert_eq!(
+            claude.context_windows,
+            [
+                ContextWindow {
+                    tokens: 400_000,
+                    override_tokens: Some(400_000)
+                },
+                ContextWindow {
+                    tokens: 1_000_000,
+                    override_tokens: None
+                },
+            ]
+        );
+        let small =
+            claude_model(&json!({"id":"claude-small", "runtime":{"max_input_tokens":200_000}}))
+                .unwrap();
+        assert_eq!(
+            small.context_windows,
+            [ContextWindow {
+                tokens: 200_000,
+                override_tokens: None
+            }]
+        );
+    }
+
+    #[test]
+    fn codex_cache_retains_base_and_extended_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("models_cache.json");
+        std::fs::write(
+            &path,
+            json!({"models":[
+                {"slug":"extended", "context_window":272_000, "max_context_window":1_000_000},
+                {"slug":"standard", "context_window":400_000}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            codex_context_windows(&path),
+            [
+                ("extended".to_owned(), 272_000, 1_000_000),
+                ("standard".to_owned(), 400_000, 400_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_catalog_has_unique_nonempty_model_identities() {
+        let listing = codex_listing(
+            &[
+                json!({"id":"m1"}),
+                json!({"id":"m1"}),
+                json!({"id":""}),
+                json!({"id":"m2"}),
+            ],
+            &[],
+        );
+        assert_eq!(
+            listing
+                .models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m1", "m2"]
+        );
+    }
+
+    #[test]
+    fn oversized_claude_lists_are_capped_before_collecting_and_joining() {
+        let models: Vec<_> = (0..MAX_MODELS * 2)
+            .map(|index| json!({"id":format!("model-{index}")}))
+            .collect();
+        let published =
+            json!({"surfaces":{"cc":{"model_selector_config":[{"id":"cc","models":models}]}}});
+        let served = json!({"catalog":{"surface":"cc","config":{"id":"cc","models":models}}});
+        assert_eq!(claude_published_models(&published).len(), MAX_MODELS);
+        assert_eq!(claude_served_models(&served).len(), MAX_MODELS);
+        let listing = merge_claude(Some(&published), Some(&served));
+        assert_eq!(listing.models.len(), MAX_MODELS);
+        assert_eq!(
+            listing.models.last().unwrap().id,
+            format!("model-{}", MAX_MODELS - 1)
+        );
+    }
+
+    #[test]
+    fn oversized_cached_catalogs_are_not_loaded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.json");
+        std::fs::write(&path, "x".repeat(MAX_OUTPUT_BYTES + 1)).unwrap();
+        assert!(read_json_file(&path).is_none());
+    }
 
     #[test]
     fn grok_listing_marks_the_default_and_skips_prose() {

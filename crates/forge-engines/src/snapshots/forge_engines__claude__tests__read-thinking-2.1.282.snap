@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -51,9 +52,10 @@ expression: "(events, outcome)"
                 title: None,
                 output: Some(
                     Output {
-                        head: "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -68,87 +70,7 @@ expression: "(events, outcome)"
         Live {
             target: Reasoning,
             text: "Checking the pair sums",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: ",",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: " 42+9=",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "51 is closest to 50",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: ", ed",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "ging out 17",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "+31=48 ",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "by a",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: " smaller margin. I should",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: " double-",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "check the probl",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "em statement again to be",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: " sure I'm answ",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "ering what",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "'s as",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "ked.",
-            append: true,
-        },
-        Live {
-            target: Reasoning,
-            text: "\n\n",
-            append: true,
+            append: false,
         },
         Item {
             key: "toolu_fixture_02",
@@ -191,9 +113,10 @@ expression: "(events, outcome)"
                 title: None,
                 output: Some(
                     Output {
-                        head: "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "1\talpha 17\n2\tbeta 42\n3\tgamma 9\n4\tdelta 31\n5\t",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -205,7 +128,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -314,21 +239,21 @@ expression: "(events, outcome)"
             text: "48.",
             append: true,
         },
-        Item {
-            key: "msg_fixture_03:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_fixture_03:0",
             },
+            text: "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
+            append: false,
         },
         Item {
             key: "msg_fixture_03:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
+                text: Inline(
+                    "The two values closest to 50 are beta (42) and gamma (9), which sum to 51, and a second read of the file confirmed the same numbers; the next closest pair is alpha (17) and delta (31), which sum to 48.",
+                ),
                 phase: Final,
             },
         },

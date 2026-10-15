@@ -1,0 +1,10 @@
+{"client":{"id":2,"method":"thread/start","params":{}}}
+{"id":2,"result":{"thread":{"id":"root"}}}
+{"method":"thread/started","params":{"thread":{"id":"root"}}}
+{"method":"turn/started","params":{"threadId":"root","turn":{"id":"turn"}}}
+{"method":"item/started","params":{"threadId":"root","turnId":"turn","item":{"id":"opaque-web","type":"webSearch","query":"","action":null,"results":null}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn","item":{"id":"opaque-web","type":"webSearch","query":"","action":{"type":"other"},"results":null}}}
+{"method":"item/started","params":{"threadId":"root","turnId":"turn","item":{"id":"search-web","type":"webSearch","query":"","action":null,"results":null}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn","item":{"id":"search-web","type":"webSearch","query":"example query","action":{"type":"search","query":"example query","queries":null},"results":null}}}
+{"method":"item/completed","params":{"threadId":"root","turnId":"turn","item":{"id":"answer","type":"agentMessage","text":"Finished.","phase":"final_answer"}}}
+{"method":"turn/completed","params":{"threadId":"root","turn":{"id":"turn","status":"completed","error":null}}}

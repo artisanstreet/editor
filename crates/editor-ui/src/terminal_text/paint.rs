@@ -8,7 +8,7 @@ use gpui::{
 };
 
 use super::style::{TerminalColor, TerminalLine};
-use crate::theme::{ArtisanTheme, ThemeMode};
+use crate::theme::ArtisanTheme;
 
 /// Alpha applied to dim (SGR 2) text.
 const DIM_ALPHA: f32 = 0.6;
@@ -18,7 +18,7 @@ const MIN_CONTRAST: f32 = 2.0;
 /// Lightness step of that nudge.
 const NUDGE_STEP: f32 = 0.05;
 
-/// Dark-mode base colours, after the VS Code dark terminal: saturated enough
+/// Base colours, after the VS Code dark terminal: saturated enough
 /// to read as the program meant on the `S900` popover surface.
 const DARK_BASE: [u32; 16] = [
     0x0000_0000,
@@ -39,27 +39,6 @@ const DARK_BASE: [u32; 16] = [
     0x00e5_e5e5,
 ];
 
-/// Light-mode base colours, after the VS Code light terminal with the bright
-/// green and yellow darkened so they hold up on the white popover surface.
-const LIGHT_BASE: [u32; 16] = [
-    0x0000_0000,
-    0x00cd_3131,
-    0x0010_7c10,
-    0x0094_9800,
-    0x0004_51a5,
-    0x00bc_05bc,
-    0x0005_98bc,
-    0x0055_5555,
-    0x0066_6666,
-    0x00cd_3131,
-    0x0014_a814,
-    0x00a6_a800,
-    0x0004_51a5,
-    0x00bc_05bc,
-    0x0005_98bc,
-    0x00a5_a5a5,
-];
-
 /// The 16 themed base colours terminal indices 0–15 resolve through.
 /// Indices 16–255 and truecolor are fixed and need no palette.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,22 +49,12 @@ pub struct TerminalPalette {
 }
 
 impl TerminalPalette {
-    /// The palette for one theme mode.
+    /// The palette the theme's terminal surfaces use.
     #[must_use]
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        let hexes = match mode {
-            ThemeMode::Light => LIGHT_BASE,
-            ThemeMode::Dark => DARK_BASE,
-        };
+    pub fn for_theme(_theme: &ArtisanTheme) -> Self {
         Self {
-            base: hexes.map(|hex| rgb_to_hsla(rgb(hex))),
+            base: DARK_BASE.map(|hex| rgb_to_hsla(rgb(hex))),
         }
-    }
-
-    /// The palette for `theme`'s mode.
-    #[must_use]
-    pub fn for_theme(theme: &ArtisanTheme) -> Self {
-        Self::for_mode(theme.mode)
     }
 
     /// Resolves one terminal colour: base indices through the palette, the

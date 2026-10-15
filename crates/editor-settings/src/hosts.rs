@@ -2,12 +2,12 @@
 //! by pasting what `ae forge pair` printed.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use anyhow::Result;
 use editor_core::hosts::{self, LocalTarget};
 use editor_core::{ConnectionStatus, HostConfig, HostId, HostKind, SettingsPage};
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{card, error_text, header, row, section_shell};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -20,7 +20,6 @@ pub(crate) struct HostsForm {
     /// What is being paired right now ("this computer", an address, …).
     pending: Option<String>,
     error: Option<String>,
-    wsl_distros: Vec<String>,
     _submit: Subscription,
 }
 
@@ -35,25 +34,21 @@ impl HostsForm {
                 TextEditorEvent::Changed => cx.notify(),
             },
         );
-        cx.spawn(async move |this, cx| {
-            let distros = hosts::wsl_distros().await;
-            let _ = this.update(cx, |this, cx| {
-                this.hosts.wsl_distros = distros;
-                cx.notify();
-            });
-        })
-        .detach();
         Self {
             pairing,
             pending: None,
             error: None,
-            wsl_distros: Vec::new(),
             _submit: submit,
         }
     }
 }
 
 impl Settings {
+    pub(crate) fn discover_hosts(&mut self, cx: &mut Context<Self>) {
+        self.core
+            .update(cx, |core, cx| core.load_pairing_targets(false, cx));
+    }
+
     #[cfg(test)]
     pub(crate) fn hosts_error(&self) -> Option<&str> {
         self.hosts.error.as_deref()
@@ -72,6 +67,11 @@ impl Settings {
         };
         let core = self.core.read(cx);
         let (identity, device) = (core.identity.clone(), core.device_name.clone());
+        let Some(identity) = identity else {
+            self.hosts.error = Some("This device's identity could not be loaded. Repair its configuration before pairing.".into());
+            cx.notify();
+            return;
+        };
         let name = address
             .rsplit_once(':')
             .map_or(address.as_str(), |(host, _)| host)
@@ -93,6 +93,11 @@ impl Settings {
     fn pair_local(&mut self, target: LocalTarget, cx: &mut Context<Self>) {
         let core = self.core.read(cx);
         let (identity, device) = (core.identity.clone(), core.device_name.clone());
+        let Some(identity) = identity else {
+            self.hosts.error = Some("This device's identity could not be loaded. Repair its configuration before pairing.".into());
+            cx.notify();
+            return;
+        };
         let label = match &target {
             LocalTarget::ThisMachine => "this computer".to_owned(),
             LocalTarget::Wsl { distro } => format!("WSL: {distro}"),
@@ -238,7 +243,7 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
             cx,
         ));
     }
-    for distro in settings.hosts.wsl_distros.clone() {
+    for distro in settings.core.read(cx).pairing_targets().distros.clone() {
         if !has_kind(&HostKind::Wsl {
             distro: distro.clone(),
         }) {
@@ -285,6 +290,18 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
                 )
                 .child(pair_button),
         );
+    if let Some(error) = settings.core.read(cx).pairing_targets().error.clone() {
+        add = add.child(error_text(theme, error)).child(settings.button(
+            "retry-local-targets",
+            "Retry WSL discovery",
+            ButtonVariant::Outline,
+            false,
+            cx.listener(|this, _, _, cx| {
+                this.core
+                    .update(cx, |core, cx| core.load_pairing_targets(true, cx))
+            }),
+        ));
+    }
     if let Some(label) = &settings.hosts.pending {
         add = add.child(muted(theme, format!("Pairing with {label}…")));
     }
@@ -299,13 +316,12 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
             page::label(SettingsPage::Hosts),
             page::description(SettingsPage::Hosts),
         ))
-        .child(section_shell(
-            theme,
-            "paired",
-            "Paired hosts",
-            None,
-            None,
-            card(theme, rows),
-        ))
-        .child(section_shell(theme, "pair", "Pair a host", None, None, add))
+        .child(
+            section_shell(theme, "Paired hosts", None, None, card(theme, rows))
+                .debug_selector("settings-section-paired"),
+        )
+        .child(
+            section_shell(theme, "Pair a host", None, None, add)
+                .debug_selector("settings-section-pair"),
+        )
 }

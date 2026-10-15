@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -18,11 +19,17 @@ expression: "(events, outcome)"
                 name: Some(
                     "general-purpose",
                 ),
-                description: "List directory file names",
+                description: Inline(
+                    "List directory file names",
+                ),
                 prompt: Some(
-                    "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
                 ),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: false,
                 result: None,
                 label: None,
@@ -36,13 +43,19 @@ expression: "(events, outcome)"
                 name: Some(
                     "general-purpose",
                 ),
-                description: "List directory file names",
+                description: Inline(
+                    "List directory file names",
+                ),
                 prompt: Some(
-                    "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
                 ),
                 agent_id: Some(
                     "a690c63ee97fcb211",
                 ),
+                context_used: None,
+                model: None,
                 background: false,
                 result: None,
                 label: None,
@@ -56,13 +69,19 @@ expression: "(events, outcome)"
                 name: Some(
                     "general-purpose",
                 ),
-                description: "List directory file names",
+                description: Inline(
+                    "List directory file names",
+                ),
                 prompt: Some(
-                    "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
                 ),
                 agent_id: Some(
                     "a690c63ee97fcb211",
                 ),
+                context_used: None,
+                model: None,
                 background: true,
                 result: None,
                 label: None,
@@ -88,6 +107,36 @@ expression: "(events, outcome)"
             append: false,
         },
         Item {
+            key: "toolu_01F5M5oRfcxHN7WK38kHP7DC",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: Some(
+                    "general-purpose",
+                ),
+                description: Inline(
+                    "List directory file names",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a690c63ee97fcb211",
+                ),
+                context_used: Some(
+                    17021,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
             key: "toolu_01MBxQQX4HcVMYiKSUCQfZW3",
             parent: Some(
                 "toolu_01F5M5oRfcxHN7WK38kHP7DC",
@@ -95,7 +144,9 @@ expression: "(events, outcome)"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -115,7 +166,9 @@ expression: "(events, outcome)"
             status: Done,
             kind: Tool {
                 tool: Shell {
-                    command: "ls",
+                    command: Inline(
+                        "ls",
+                    ),
                     cwd: None,
                     background: false,
                 },
@@ -124,9 +177,10 @@ expression: "(events, outcome)"
                 ),
                 output: Some(
                     Output {
-                        head: "a.txt\ncreated.txt\nnotes.txt",
-                        tail: "",
-                        truncated_bytes: 0,
+                        text: Inline(
+                            "a.txt\ncreated.txt\nnotes.txt",
+                        ),
+                        omitted_bytes: 0,
                     },
                 ),
                 exit_code: None,
@@ -138,7 +192,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -240,21 +296,21 @@ expression: "(events, outcome)"
             text: "ification arrives.",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv3ADKyA6A7TvYtwNVwW:1",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "The subagent is still running the `ls`, so I don't have the file names yet. I'll send you the one-sentence result when its completion notification arrives.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv3ADKyA6A7TvYtwNVwW:1",
             },
+            text: "The subagent is still running the `ls`, so I don't have the file names yet. I'll send you the one-sentence result when its completion notification arrives.",
+            append: false,
         },
         Item {
             key: "msg_011Cfv3ADKyA6A7TvYtwNVwW:1",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The subagent is still running the `ls`, so I don't have the file names yet. I'll send you the one-sentence result when its completion notification arrives.",
+                text: Inline(
+                    "The subagent is still running the `ls`, so I don't have the file names yet. I'll send you the one-sentence result when its completion notification arrives.",
+                ),
                 phase: Final,
             },
         },
@@ -293,15 +349,54 @@ expression: "(events, outcome)"
             },
         ),
         Item {
+            key: "toolu_01F5M5oRfcxHN7WK38kHP7DC",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: Some(
+                    "general-purpose",
+                ),
+                description: Inline(
+                    "List directory file names",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
+                ),
+                agent_id: Some(
+                    "a690c63ee97fcb211",
+                ),
+                context_used: Some(
+                    18659,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
             key: "msg_011Cfv3AJQpSzupVWXgTHvxn:1",
             parent: Some(
                 "toolu_01F5M5oRfcxHN7WK38kHP7DC",
             ),
             status: Running,
             kind: AssistantMessage {
-                text: "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
+        },
+        Live {
+            target: Text {
+                key: "msg_011Cfv3AJQpSzupVWXgTHvxn:1",
+            },
+            text: "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+            append: false,
         },
         Item {
             key: "msg_011Cfv3AJQpSzupVWXgTHvxn:1",
@@ -310,7 +405,9 @@ expression: "(events, outcome)"
             ),
             status: Done,
             kind: AssistantMessage {
-                text: "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+                text: Inline(
+                    "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+                ),
                 phase: Commentary,
             },
         },
@@ -322,16 +419,28 @@ expression: "(events, outcome)"
                 name: Some(
                     "general-purpose",
                 ),
-                description: "List directory file names",
+                description: Inline(
+                    "List directory file names",
+                ),
                 prompt: Some(
-                    "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    Inline(
+                        "Run the Bash command `ls` in the current working directory (/tmp/claude-rec/work) and report the file names it returns.",
+                    ),
                 ),
                 agent_id: Some(
                     "a690c63ee97fcb211",
                 ),
+                context_used: Some(
+                    18659,
+                ),
+                model: Some(
+                    "claude-haiku-5-5",
+                ),
                 background: true,
                 result: Some(
-                    "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+                    Inline(
+                        "The current directory `/tmp/claude-rec/work` contains three files: `a.txt`, `created.txt`, and `notes.txt`.",
+                    ),
                 ),
                 label: None,
             },
@@ -341,7 +450,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -394,21 +505,21 @@ expression: "(events, outcome)"
             text: ", and notes.txt.",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv3AR8PK2Xo99PzzzgcH:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "The subagent's `ls` in /tmp/claude-rec/work returned three files: a.txt, created.txt, and notes.txt.",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv3AR8PK2Xo99PzzzgcH:0",
             },
+            text: "The subagent's `ls` in /tmp/claude-rec/work returned three files: a.txt, created.txt, and notes.txt.",
+            append: false,
         },
         Item {
             key: "msg_011Cfv3AR8PK2Xo99PzzzgcH:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "The subagent's `ls` in /tmp/claude-rec/work returned three files: a.txt, created.txt, and notes.txt.",
+                text: Inline(
+                    "The subagent's `ls` in /tmp/claude-rec/work returned three files: a.txt, created.txt, and notes.txt.",
+                ),
                 phase: Final,
             },
         },

@@ -1,36 +1,13 @@
-# Recent-thread project icons
+# Project icons
 
-The icon beside a thread's project subtitle is 14 pixels wide. Disk-only
-projects and Git repositories without a network remote show a folder.
+Forge owns project-file discovery, Git remote inspection, avatar downloads and image normalization. Client requests `/projects/{id}/icon`, receives `null` or a `BlobRef`, then fetches the content-addressed image through `/blobs/{hash}`. These are ordinary paired HTTP requests; there is no recent-thread icon subscription.
 
-For a remote repository, the first available icon wins:
+The resolver tries `.artisan/icon.png`, `.artisan/icon.webp`, `icon.png`, `favicon.png`, and `public/favicon.png` in that order. If none is usable, it resolves public artwork from the remote host. GitHub supplies an owner avatar; the other supported host APIs may supply repository or owner artwork. The Client uses the bundled host or folder glyph when artwork is absent. API lookup sends no repository credentials.
 
-1. A project file, checked in this order: `.artisan/icon.png`,
-   `.artisan/icon.webp`, `icon.png`, `favicon.png`, `public/favicon.png`.
-2. Repository artwork supplied by the Git host.
-3. Organization, namespace, or user artwork supplied by the Git host.
-4. The hosting service's bundled logo, or the Git logo for unknown hosts.
+The Sidebar requests icons for visible projects, admits at most four concurrent lookups and retains at most 128 entries for its current Host. Switching Hosts clears that lookup cache. The shared Host owns decoded images and releases them on eviction. Failed lookups have an explicit retry control. Forge coalesces repository and avatar observations in a cache of at most 64 paths with at most four active probes. Repository observations, including failures, expire after two seconds; successful avatars after five minutes and absent/failed avatars after five seconds. Those TTLs apply when requested; the Client does not run a background icon-refresh subscription.
 
-GitHub resolves the public organization/user avatar. GitLab, Bitbucket,
-Codeberg, and Gitea resolve repository artwork before owner artwork. GitHub
-has no dedicated repository avatar endpoint, so a local project file provides
-its project-specific artwork. Private or inaccessible metadata requires no
-login and falls back to the logo. No credentials are sent by this resolver.
+Forge stores WebP. Existing WebP bytes are preserved; other supported images are decoded and encoded at quality 85. Images are limited to 32 MiB encoded input, 8192 pixels per dimension, 16 megapixels and a 64 MiB decoder allocation budget. The pipeline does not resize artwork to 48 pixels or promise a 16 KiB payload. Normalization runs in a blocking worker, and blob hashes identify encoded content rather than project identity.
 
-Forge discovers and downloads icons in the background. Subtitles and icons
-come from cached repository observations; listing threads and painting the
-sidebar perform no Git, file, or network I/O. Successful artwork is refreshed
-after an hour, absent artwork after five minutes. Changes are pushed through
-the existing recent-thread subscription. A changed remote invalidates the
-previous icon. Detached projects leave the cache.
+Implementation: [HTTP resolver](../../crates/forge-http/src/routes.rs), [repository metadata and avatar lookup](../../crates/forge-http/src/repository.rs), [blob admission and encoding](../../crates/forge-store/src/blobs.rs), [Sidebar request cache](../../crates/editor-sidebar/src/lib.rs), and [Host decoded image ownership](../../crates/editor-core/src/host.rs).
 
-Downloaded input is capped at 512 KiB and decoding runs off the Forge event
-loop with image allocation and dimension limits. Artwork is normalized to a
-PNG within 48 by 48 pixels and 16 KiB before crossing the protocol. Editor
-reuses the decoded image identity between repaints. The added protocol fields
-are optional, so an older Forge supplies folder fallback and an older Editor
-ignores the artwork.
-
-Metadata field references: [GitHub account avatars](https://docs.github.com/en/rest/users/users#get-a-user),
-[GitLab project and namespace avatars](https://docs.gitlab.com/api/projects/),
-and [Gitea repository metadata](https://docs.gitea.com/api/operations/repo-get/).
+Forge shares one HTTP client across avatar requests and streams at most 512 KiB for metadata or avatar input even without Content-Length. Local icon files are admitted before decoding and read with a 32 MiB limit. Git observations use at most three bounded subprocess calls, sharing the existing process owner and a three-second/64 KiB output budget. The FG-016/017 implementation is integrated; its temporary-repository, worktree, concurrent-cache and oversized-response regressions await the central test run.

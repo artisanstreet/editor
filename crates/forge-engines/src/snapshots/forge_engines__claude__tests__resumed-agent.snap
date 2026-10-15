@@ -1,0 +1,54 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 770
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "toolu_linnea",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Attachments drawn on guns",
+                ),
+                prompt: None,
+                agent_id: Some(
+                    "a4c1",
+                ),
+                context_used: None,
+                model: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_linnea",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Attachments drawn on guns",
+                ),
+                prompt: None,
+                agent_id: Some(
+                    "a4c1",
+                ),
+                context_used: None,
+                model: None,
+                background: true,
+                result: Some(
+                    Inline(
+                        "Attachments now show on the gun.",
+                    ),
+                ),
+                label: None,
+            },
+        },
+    ],
+    None,
+)

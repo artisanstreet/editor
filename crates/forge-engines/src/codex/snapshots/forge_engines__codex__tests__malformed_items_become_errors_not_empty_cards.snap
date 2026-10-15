@@ -1,0 +1,178 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 163
+expression: "replay(\"malformed-items\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex commandExecution omitted its command",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-2",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex dynamicToolCall omitted its tool name",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-3",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex imageView omitted its path",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-4",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex fileChange omitted its changes",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-5",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex fileChange supplied an invalid file change",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "unsuccessful",
+            parent: None,
+            status: Failed,
+            kind: Tool {
+                tool: Other {
+                    name: "lookup",
+                    input: Some(
+                        Inline(
+                            "{\"q\":1}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "not found",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "mcp",
+            parent: None,
+            status: Failed,
+            kind: Tool {
+                tool: Mcp {
+                    server: "docs",
+                    tool: "search",
+                    input: None,
+                },
+                title: None,
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "server down",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "moved",
+            parent: None,
+            status: Declined,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "new.rs",
+                                op: Move {
+                                    from: "old.rs",
+                                },
+                                diff: None,
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

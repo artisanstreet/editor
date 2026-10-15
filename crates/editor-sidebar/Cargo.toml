@@ -14,15 +14,12 @@ gpui.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-native-dialog.workspace = true
-
 [dev-dependencies]
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
 [lints]
 workspace = true

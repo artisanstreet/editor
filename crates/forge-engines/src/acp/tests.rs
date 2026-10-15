@@ -10,7 +10,6 @@ use super::decode::{AcpDecoder, needs_sign_in};
 use crate::EngineEvent;
 use serde_json::Value;
 use std::fmt::Write as _;
-use std::path::Path;
 
 #[derive(Debug)]
 #[expect(dead_code, reason = "read through the Debug snapshot")]
@@ -23,6 +22,8 @@ enum Step {
         result: Result<String, String>,
         sign_in: bool,
     },
+    /// A line ACP can't carry: the run fails.
+    ProtocolError(String),
 }
 
 fn replay(profile: Profile, case: &str) -> Vec<Step> {
@@ -30,17 +31,26 @@ fn replay(profile: Profile, case: &str) -> Vec<Step> {
         Profile::Grok => "grok",
         Profile::Cursor => "cursor",
     };
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("transcripts/{engine}/{case}.jsonl"));
-    let transcript = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+    let transcript = crate::transcript_tests::read(engine, case);
     let mut decoder = AcpDecoder::new(profile);
     let mut steps = Vec::new();
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
         let entry: Value =
             serde_json::from_str(line).unwrap_or_else(|error| panic!("{case}: {error}: {line}"));
         let events = match entry["dir"].as_str() {
-            Some("in") => decoder.feed(&entry["line"].to_string()),
+            Some("in") => {
+                let line = match &entry["line"] {
+                    Value::String(raw) => raw.clone(),
+                    line => line.to_string(),
+                };
+                match decoder.feed(&line) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        steps.push(Step::ProtocolError(format!("{error:#}")));
+                        continue;
+                    }
+                }
+            }
             Some("out") => {
                 decoder.sent(&entry["line"]);
                 Vec::new()
@@ -61,12 +71,12 @@ fn replay(profile: Profile, case: &str) -> Vec<Step> {
         );
         steps.extend(decoder.take_responses().into_iter().map(|response| {
             Step::Response {
-                sign_in: response
-                    .result
-                    .as_ref()
-                    .is_err_and(|error| needs_sign_in(error)),
+                sign_in: response.result.as_ref().is_err_and(needs_sign_in),
                 method: response.method,
-                result: response.result.map(|value| abbreviate(&value)),
+                result: response
+                    .result
+                    .map(|value| abbreviate(&value))
+                    .map_err(|error| error.message),
             }
         }));
     }
@@ -129,6 +139,60 @@ fn cursor_tool_permission() {
 #[test]
 fn cursor_plan_and_question() {
     insta::assert_debug_snapshot!(replay(Profile::Cursor, "plan-question"));
+}
+
+#[test]
+fn cursor_malformed_lines_fail_the_run() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "malformed"));
+}
+
+/// Two requests for one call queue on it: each answer replies to the
+/// oldest, an option the request didn't offer changes nothing, and a cancel
+/// settles every request still open.
+#[test]
+fn cursor_permissions_queue_on_their_tool() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "permission-queue"));
+}
+
+/// Options Artisan can't answer with are refused, never half shown.
+#[test]
+fn cursor_malformed_permission_options_are_refused_with_an_error() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "permission-malformed"));
+}
+
+/// Questions without ids or with shared ids are refused, and the user
+/// sees why.
+#[test]
+fn cursor_malformed_questions_are_refused_with_an_error() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "question-malformed"));
+}
+
+/// A choice is answered by its id, whatever its label.
+#[test]
+fn cursor_answers_name_the_chosen_option_by_id() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "question-duplicate-labels"));
+}
+
+#[test]
+fn cursor_todos_merge_by_id_and_a_bad_batch_changes_nothing() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "todos"));
+}
+
+#[test]
+fn cursor_tool_inputs_keep_argv_and_ranges_and_a_pathless_read_is_an_error() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "tool-inputs"));
+}
+
+#[test]
+fn cursor_late_reports_replace_a_settled_result() {
+    insta::assert_debug_snapshot!(replay(Profile::Cursor, "agent-report"));
+}
+
+/// Form answers become the schema's values: the chosen option's own value
+/// and typed scalars; one that doesn't fit leaves the form open.
+#[test]
+fn grok_elicitation_answers_become_typed_values() {
+    insta::assert_debug_snapshot!(replay(Profile::Grok, "elicitation"));
 }
 
 /// Cursor runs its fast tier as the model's `-fast` id.

@@ -17,11 +17,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "legacy-import")]
+mod legacy;
+#[cfg(feature = "legacy-import")]
+pub use legacy::import_legacy_extensions;
 mod prompt;
 mod skills;
 
 pub use prompt::{
-    PromptApplied, PromptFile, apply_prompt, normalize_prompt, prompt_digest, read_prompt_file,
+    PromptApplied, PromptFile, apply_prompt, inspect_prompt, normalize_prompt, prompt_digest,
+    read_prompt_file,
 };
 pub use skills::{adopt_skill, enabled_skills, skill_catalog};
 
@@ -44,19 +49,7 @@ pub struct Customisation {
     pub disabled_skills: BTreeSet<String>,
 }
 
-/// A stdio server (`command`, `args`, `env`) or, with `url`, an HTTP one.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct McpServer {
-    pub name: String,
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-}
+pub use artisan_api::McpServer;
 
 struct Paths {
     prompt: PathBuf,
@@ -83,6 +76,19 @@ fn paths(engine: EngineId, home: &Path) -> Option<Paths> {
         shadows,
         skills: config.join("skills"),
     })
+}
+
+/// Explicit skill mutation/install boundary; catalog reads never call this.
+pub fn reconcile_skills(homes: &[(EngineId, Option<PathBuf>)], c: &Customisation) -> Result<()> {
+    let wanted = skills::wanted(c)?;
+    let owned = skills::owned_roots(&c.skills_dir);
+    for (engine, home) in homes {
+        if let Some(paths) = home.as_deref().and_then(|home| paths(*engine, home)) {
+            sync_skills(&paths.skills, &wanted, &owned)
+                .with_context(|| format!("linking {engine} skills"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Brings `home` in line with `c` and returns how to pass MCP servers.
@@ -190,12 +196,41 @@ fn sync_skills(
                 continue;
             }
             Entry::Ours(Some(current)) if current == target => continue,
+            Entry::Ours(None) if copied_skill_matches(&link, &target) => continue,
             Entry::Ours(_) => remove_entry(&link)?,
             Entry::Missing => {}
         }
         place(&target, &link)?;
     }
     Ok(())
+}
+
+fn copied_skill_matches(link: &Path, target: &Path) -> bool {
+    use std::io::Read as _;
+    let path = link.join(COPY_MARKER);
+    let Ok(metadata) = fs::metadata(&path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return false;
+    }
+    let Ok(file) = fs::File::open(&path) else {
+        return false;
+    };
+    let mut marker = String::new();
+    if file
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut marker)
+        .is_err()
+        || marker.len() > 64 * 1024
+    {
+        return false;
+    }
+
+    let Ok((digest, _, _)) = skills::measure_inner(target, true) else {
+        return false;
+    };
+    marker == format!("{}\n{digest}", target.display())
 }
 
 fn remove_entry(path: &Path) -> io::Result<()> {
@@ -221,7 +256,13 @@ fn place(target: &Path, link: &Path) -> io::Result<()> {
         Err(error) if cfg!(windows) => {
             tracing::debug!(error = %error, skill = %target.display(), "symlink refused; copying the skill");
             copy_dir(target, link)?;
-            fs::write(link.join(COPY_MARKER), target.to_string_lossy().as_bytes())
+            {
+                let (digest, _, _) = skills::measure(target)?;
+                fs::write(
+                    link.join(COPY_MARKER),
+                    format!("{}\n{digest}", target.display()),
+                )
+            }
         }
         Err(error) => Err(error),
     }
@@ -229,15 +270,25 @@ fn place(target: &Path, link: &Path) -> io::Result<()> {
 
 /// Copies a folder; files come out writable even if the source was not.
 fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
+    // Validate the whole supported shape before publishing or backing up anything.
+    let entries = skills::entries(from)?;
     fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let destination = to.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_dir(&entry.path(), &destination)?;
-        } else if kind.is_file() {
-            fs::write(&destination, fs::read(entry.path())?)?;
+    for entry in entries {
+        let relative = entry.path().strip_prefix(from).map_err(io::Error::other)?;
+        let destination = to.join(relative);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(destination)?;
+        } else if entry.file_type().is_file() {
+            fs::copy(entry.path(), &destination)?;
+            let mut permissions = fs::metadata(&destination)?.permissions();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                permissions.set_mode(permissions.mode() | 0o200);
+            }
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            fs::set_permissions(destination, permissions)?;
         }
     }
     Ok(())
@@ -263,14 +314,53 @@ fn launch(engine: EngineId, home: &Path, servers: &[McpServer]) -> Result<Launch
             }
         }
         EngineId::Codex => {
+            let path = home.join(".codex/config.toml");
+            let mut config: toml::Table = match fs::read_to_string(&path) {
+                Ok(text) => {
+                    toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => toml::Table::new(),
+                Err(error) => return Err(error.into()),
+            };
+            let mut entries = toml::Table::new();
             for server in servers {
-                launch.args.push("-c".to_owned());
-                launch.args.push(format!(
-                    "mcp_servers.{}={}",
-                    codex_key(&server.name),
-                    codex_server(server)
-                ));
+                anyhow::ensure!(
+                    !server.name.is_empty() && !entries.contains_key(&server.name),
+                    "MCP server names must be nonempty and unique"
+                );
+                let mut entry = toml::Table::new();
+                if let Some(url) = &server.url {
+                    entry.insert("url".into(), url.clone().into());
+                } else {
+                    entry.insert("command".into(), server.command.clone().into());
+                    entry.insert(
+                        "args".into(),
+                        toml::Value::Array(
+                            server
+                                .args
+                                .iter()
+                                .cloned()
+                                .map(toml::Value::String)
+                                .collect(),
+                        ),
+                    );
+                    entry.insert(
+                        "env".into(),
+                        toml::Value::Table(
+                            server
+                                .env
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.clone(), toml::Value::String(value.clone()))
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                entries.insert(server.name.clone(), entry.into());
             }
+            config.insert("mcp_servers".into(), entries.into());
+            write_if_changed(&path, toml::to_string_pretty(&config)?.as_bytes())?;
         }
         EngineId::OpenCode => {
             if !servers.is_empty() {
@@ -314,39 +404,6 @@ fn opencode_servers(servers: &[McpServer]) -> Map<String, Value> {
         .collect()
 }
 
-/// Codex splits `-c` paths on dots, so a key can't be quoted.
-fn codex_key(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// A TOML inline table. JSON strings are valid TOML basic strings.
-fn codex_server(server: &McpServer) -> String {
-    let quote = |text: &str| Value::from(text).to_string();
-    if let Some(url) = &server.url {
-        return format!("{{url={}}}", quote(url));
-    }
-    let args: Vec<String> = server.args.iter().map(|arg| quote(arg)).collect();
-    let env: Vec<String> = server
-        .env
-        .iter()
-        .map(|(key, value)| format!("{}={}", quote(key), quote(value)))
-        .collect();
-    format!(
-        "{{command={},args=[{}],env={{{}}}}}",
-        quote(&server.command),
-        args.join(","),
-        env.join(",")
-    )
-}
-
 /// Merges another JSON object into an `OPENCODE_CONFIG_CONTENT` value in
 /// `launch` (the `OpenCode` adapter adds its agents this way).
 pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
@@ -378,72 +435,6 @@ pub fn merge_opencode_config(launch: &mut Launch, extra: &Value) {
 
 // --- imports ---------------------------------------------------------------
 
-/// One-time import of real skill folders already in engine homes into
-/// `skills_dir` (copies; a name already there wins). Returns the names
-/// imported.
-///
-/// # Errors
-///
-/// When a folder can't be copied into `skills_dir`.
-pub fn import_skills(
-    engine_homes: &[(EngineId, PathBuf)],
-    skills_dir: &Path,
-) -> Result<Vec<String>> {
-    let mut imported = Vec::new();
-    for (engine, home) in engine_homes {
-        let Some(paths) = paths(*engine, home) else {
-            continue;
-        };
-        let Ok(entries) = fs::read_dir(&paths.skills) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // Only real folders: links are Forge's or point somewhere the user manages.
-            let real_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            if name.starts_with('.') || !real_dir || !entry.path().join("SKILL.md").is_file() {
-                continue;
-            }
-            if import_folder(&entry.path(), skills_dir, &name)? {
-                imported.push(name);
-            }
-        }
-    }
-    Ok(imported)
-}
-
-/// Best-effort import of skills from the old content-addressed store
-/// (`<old data>/extensions/store/<digest>/`), named by their `SKILL.md`.
-/// Skills that fail to copy are logged and skipped.
-///
-/// # Errors
-///
-/// Never at present; kept fallible for the caller's `?`.
-pub fn import_legacy_extensions(old_data_dir: &Path, skills_dir: &Path) -> Result<Vec<String>> {
-    let store = old_data_dir.join("extensions/store");
-    let Ok(entries) = fs::read_dir(&store) else {
-        return Ok(Vec::new());
-    };
-    let mut imported = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(text) = fs::read_to_string(entry.path().join("SKILL.md")) else {
-            continue;
-        };
-        let Some(name) = frontmatter_name(&text) else {
-            tracing::info!(folder = %entry.path().display(), "old skill without a usable name; skipped");
-            continue;
-        };
-        match import_folder(&entry.path(), skills_dir, &name) {
-            Ok(true) => imported.push(name),
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(skill = %name, error = %format!("{error:#}"), "couldn't import an old skill")
-            }
-        }
-    }
-    Ok(imported)
-}
-
 fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool> {
     let to = skills_dir.join(name);
     if to.exists() {
@@ -458,32 +449,84 @@ fn import_folder(from: &Path, skills_dir: &Path, name: &str) -> Result<bool> {
     Ok(true)
 }
 
-fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+fn frontmatter(text: &str) -> Option<serde_yaml_ng::Value> {
     let mut lines = text.lines();
     if lines.next()?.trim() != "---" {
         return None;
     }
-    let value = lines
-        .take_while(|line| line.trim() != "---")
-        .find_map(|line| line.strip_prefix(key))?;
-    let value = value.trim().trim_matches(['"', '\'']);
-    (!value.is_empty()).then(|| value.to_owned())
+    let mut yaml = String::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        if yaml.len() + line.len() > 64 * 1024 {
+            return None;
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    if !closed {
+        return None;
+    }
+    serde_yaml_ng::from_str(&yaml).ok()
 }
 
-/// `name:` from YAML frontmatter, if it is a single safe path component.
-fn frontmatter_name(text: &str) -> Option<String> {
-    let mut lines = text.lines();
-    if lines.next()?.trim() != "---" {
+fn read_skill_header(path: &Path) -> io::Result<String> {
+    use std::io::{BufRead, Read};
+    let file = fs::File::open(path)?;
+    let mut reader = io::BufReader::new(file).take(64 * 1024);
+    let mut header = String::new();
+    if reader.read_line(&mut header)? == 0 || header.trim() != "---" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "skill lacks YAML frontmatter",
+        ));
+    }
+    loop {
+        let start = header.len();
+        if reader.read_line(&mut header)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "skill metadata is unclosed or exceeds 64 KiB",
+            ));
+        }
+        if header[start..].trim() == "---" {
+            return Ok(header);
+        }
+    }
+}
+
+fn skill_metadata(text: &str) -> Option<(String, String)> {
+    let data = frontmatter(text)?;
+    let field = |key: &str| {
+        data.get(key)?
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let name = field("name")?;
+    if !artisan_mentions::valid_mention_name(&name) {
         return None;
     }
-    let name = lines
-        .take_while(|line| line.trim() != "---")
-        .find_map(|line| line.strip_prefix("name:"))?
-        .trim()
-        .trim_matches(['"', '\''])
-        .to_owned();
-    let safe = !name.is_empty() && !name.starts_with('.') && !name.contains(['/', '\\', ':']);
-    safe.then_some(name)
+    Some((name, field("description").unwrap_or_default()))
+}
+
+#[cfg(any(test, feature = "legacy-import"))]
+fn frontmatter_name(text: &str) -> Option<String> {
+    skill_metadata(text).map(|(name, _)| name)
+}
+
+#[cfg(test)]
+fn frontmatter_field(text: &str, key: &str) -> Option<String> {
+    frontmatter(text)?
+        .get(key.trim_end_matches(':'))?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -621,6 +664,7 @@ mod tests {
         assert!(launch.args.is_empty() && !home.join(".artisan/claude-mcp.json").exists());
     }
 
+    #[cfg(feature = "legacy-import")]
     #[test]
     fn imports_copy_real_skill_folders_once() {
         let root = tempfile::tempdir().unwrap();
@@ -648,14 +692,173 @@ mod tests {
         )
         .unwrap();
 
-        let homes = [(EngineId::Claude, claude), (EngineId::Codex, codex)];
-        let first = import_skills(&homes, &skills_dir).unwrap();
-        let again = import_skills(&homes, &skills_dir).unwrap();
-        let legacy = import_legacy_extensions(&old, &skills_dir).unwrap();
-        assert_eq!(first, ["design"]);
-        assert!(again.is_empty());
+        assert!(
+            import_folder(&claude.join(".claude/skills/design"), &skills_dir, "design").unwrap()
+        );
+        assert!(
+            !import_folder(&codex.join(".codex/skills/design"), &skills_dir, "design").unwrap()
+        );
+        assert!(!import_folder(&claude.join(".claude/skills/kept"), &skills_dir, "kept").unwrap());
+        let legacy = import_legacy_extensions(&old, &skills_dir);
         assert_eq!(legacy, ["legacy"]);
         assert_eq!(listing(&skills_dir, root), ["design/", "kept/", "legacy/"]);
         assert!(skills_dir.join("design/SKILL.md").is_file());
+    }
+}
+
+#[cfg(test)]
+mod reform_tests {
+    use super::*;
+    #[test]
+    fn yaml_frontmatter_understands_multiline_and_quoted_values() {
+        let text = "---\nname: 'review'\ndescription: >\n  First line\n  second line\n---\nbody";
+        assert_eq!(frontmatter_name(text).as_deref(), Some("review"));
+        assert_eq!(
+            frontmatter_field(text, "description:").as_deref(),
+            Some("First line second line")
+        );
+        assert_eq!(frontmatter_name("---\nname: '../outside'\n---"), None);
+    }
+    #[test]
+    fn codex_mcp_preserves_distinct_names_and_keeps_secrets_out_of_args() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = |name: &str| McpServer {
+            name: name.into(),
+            command: "tool".into(),
+            args: vec![],
+            env: std::collections::BTreeMap::from([("TOKEN".into(), "private".into())]),
+            url: None,
+        };
+        let result = launch(
+            EngineId::Codex,
+            directory.path(),
+            &[server("docs.web"), server("docs_web")],
+        )
+        .unwrap();
+        assert!(result.args.is_empty());
+        let config: toml::Table = toml::from_str(
+            &fs::read_to_string(directory.path().join(".codex/config.toml")).unwrap(),
+        )
+        .unwrap();
+        let servers = config["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(
+            servers["docs.web"]["env"]["TOKEN"].as_str(),
+            Some("private")
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_skill_links_are_rejected_before_copying() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "---\nname: linked\n---").unwrap();
+        std::os::unix::fs::symlink(&source, source.join("cycle")).unwrap();
+        let destination = directory.path().join("copy");
+        assert!(copy_dir(&source, &destination).is_err());
+        assert!(!destination.exists());
+        fs::remove_file(source.join("cycle")).unwrap();
+        let root_link = directory.path().join("root-link");
+        std::os::unix::fs::symlink(&source, &root_link).unwrap();
+        assert!(copy_dir(&root_link, &destination).is_err());
+        assert!(!destination.exists());
+    }
+}
+
+#[cfg(test)]
+mod catalog_read_tests {
+    use super::*;
+    #[test]
+    fn browsing_catalog_does_not_materialize_engine_homes() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("engine-home");
+        let settings = Customisation {
+            skills_dir: directory.path().join("skills"),
+            first_party: true,
+            ..Customisation::default()
+        };
+        let _ = skill_catalog(&[(EngineId::Claude, Some(home.clone()))], &settings).unwrap();
+        assert!(!home.exists());
+        assert!(!settings.skills_dir.exists());
+    }
+}
+
+#[cfg(test)]
+mod marker_budget_tests {
+    use super::*;
+    #[test]
+    fn oversized_copy_marker_does_not_read_unbounded_data() {
+        let folder = tempfile::tempdir().unwrap();
+        let link = folder.path().join("copy");
+        let target = folder.path().join("target");
+        fs::create_dir_all(&link).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let file = fs::File::create(link.join(COPY_MARKER)).unwrap();
+        file.set_len(64 * 1024 + 1).unwrap();
+        assert!(!copied_skill_matches(&link, &target));
+    }
+}
+
+#[cfg(test)]
+mod copied_reconciliation_tests {
+    use super::*;
+    #[test]
+    fn unchanged_real_copied_skill_keeps_files_and_timestamps_on_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let engine = dir.path().join("engine");
+        let copy = engine.join("skill");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: skill\ndescription: fixture\n---\nUse this skill.\n",
+        )
+        .unwrap();
+        copy_dir(&source, &copy).unwrap();
+        let (digest, _, _) = skills::measure(&source).unwrap();
+        fs::write(
+            copy.join(COPY_MARKER),
+            format!("{}\n{digest}", source.display()),
+        )
+        .unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12345);
+        for name in ["SKILL.md", COPY_MARKER] {
+            fs::File::options()
+                .write(true)
+                .open(copy.join(name))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(old))
+                .unwrap();
+        }
+        let wanted = BTreeMap::from([("skill".to_owned(), source.clone())]);
+        for _ in 0..3 {
+            sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
+        }
+        assert!(fs::symlink_metadata(&copy).unwrap().is_dir());
+        assert!(
+            !fs::symlink_metadata(&copy)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        for name in ["SKILL.md", COPY_MARKER] {
+            assert_eq!(
+                fs::metadata(copy.join(name)).unwrap().modified().unwrap(),
+                old,
+                "unchanged copied {name} must not be rewritten"
+            );
+        }
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: skill\ndescription: changed\n---\nChanged instructions.\n",
+        )
+        .unwrap();
+        assert!(!copied_skill_matches(&copy, &source));
+        sync_skills(&engine, &wanted, std::slice::from_ref(&source)).unwrap();
+        assert_eq!(
+            fs::read(copy.join("SKILL.md")).unwrap(),
+            fs::read(source.join("SKILL.md")).unwrap()
+        );
     }
 }

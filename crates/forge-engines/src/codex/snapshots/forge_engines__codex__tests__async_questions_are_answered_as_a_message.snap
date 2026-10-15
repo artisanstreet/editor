@@ -1,0 +1,239 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 197
+expression: "replay(\"async-questions\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "none",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "No questions.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "invalid Codex asynchronous questions: missing field `title`",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "broken",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "Broken.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-2",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex asynchronous questions require nonempty prompts and option labels",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "blank",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "Blank.",
+                ),
+                phase: Commentary,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "asks:questions",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: None,
+                            text: Inline(
+                                "Pick a colour\nfor the logo",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-2",
+                                        label: "Blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "1",
+                            header: None,
+                            text: Inline(
+                                "Size?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "asks",
+            parent: None,
+            status: Done,
+            kind: AssistantMessage {
+                text: Inline(
+                    "Which?",
+                ),
+                phase: Final,
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+    Event(
+        Item {
+            key: "asks:questions",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "0",
+                            header: None,
+                            text: Inline(
+                                "Pick a colour\nfor the logo",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-2",
+                                        label: "Blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "1",
+                            header: None,
+                            text: Inline(
+                                "Size?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                    ],
+                ),
+                answers: Some(
+                    Inline(
+                        [
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-1",
+                                        ],
+                                    ),
+                                },
+                            ),
+                            Some(
+                                Text {
+                                    text: "Large",
+                                },
+                            ),
+                        ],
+                    ),
+                ),
+                answer_text: None,
+            },
+        },
+    ),
+    Message(
+        "> Pick a colour\n> for the logo\n\nRed\n\n> Size?\n\nLarge",
+    ),
+]

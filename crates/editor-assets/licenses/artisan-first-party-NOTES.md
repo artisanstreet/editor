@@ -1,6 +1,6 @@
 # Artisan first-party artwork — provenance notes
 
-Scope: `modules/assets/svg/artisan/*` — `app-icon.svg`, `star.svg`,
+Scope: `crates/editor-assets/svg/artisan/*` — `app-icon.svg`, `star.svg`,
 `logo-gradient.svg`, `success-check.svg`, `wordmark-stacked.svg`.
 
 These are first-party Artisan product graphics:
@@ -23,11 +23,11 @@ These are first-party Artisan product graphics:
   the font itself is not vendored, only the outlined logo. Whether the
   typeface licence covers this logo use needs the same human attestation.
 
-Origin kind is recorded as `local` with `needs_review = true`: placement,
-naming, and first-party usage attest product ownership, but no in-tree
-statement predates this inventory, so human attestation is required before any
-external distribution claim. The repository's declared license for first-party
-work is BSD-3-Clause (Cargo workspace `license` field).
+These notes record historical source provenance. The current catalog is
+`crates/editor-assets/src/lib.rs`. First-party repository code and artwork are
+covered by the repository's Artisan Street Terms (AST) in `LICENSE.md`;
+third-party marks retain their individual notices. The historical typography
+note above does not establish a separate typeface licence.
 
 Third-party tool credit preserved verbatim from excluded sibling file
 `forge.svg`'s comment: "SVG created with Arrow, by QuiverAI

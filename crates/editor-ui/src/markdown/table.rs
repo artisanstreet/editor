@@ -6,35 +6,12 @@
 //! content is inline-only by grammar, so a cell is one span run and a table
 //! never nests inside another table.
 
-use std::ops::Range;
-
 use pulldown_cmark::Alignment;
+use std::ops::Range;
 
 use super::{Span, spans_text};
 
-/// Column alignment authored in a table's delimiter row.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum TableAlignment {
-    /// No alignment marker (`---`): the renderer's default, leading edge.
-    Unset,
-    /// `:---`
-    Left,
-    /// `:---:`
-    Center,
-    /// `---:`
-    Right,
-}
-
-impl From<Alignment> for TableAlignment {
-    fn from(alignment: Alignment) -> Self {
-        match alignment {
-            Alignment::None => Self::Unset,
-            Alignment::Left => Self::Left,
-            Alignment::Center => Self::Center,
-            Alignment::Right => Self::Right,
-        }
-    }
-}
+pub use artisan_markdown_index::TableAlignment;
 
 /// One table cell: flattened inline runs, empty for a blank cell.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]

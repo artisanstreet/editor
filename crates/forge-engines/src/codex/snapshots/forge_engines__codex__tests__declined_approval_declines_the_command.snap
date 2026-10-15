@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 125
 expression: "replay(\"decline\")"
 ---
 [
@@ -28,8 +29,15 @@ expression: "replay(\"decline\")"
     Event(
         Live {
             target: Reasoning,
-            text: "**Planning precise shell command usage**",
-            append: true,
+            text: "",
+            append: false,
+        },
+    ),
+    Event(
+        Live {
+            target: Reasoning,
+            text: "Planning precise shell command usage",
+            append: false,
         },
     ),
     Event(
@@ -38,7 +46,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -58,7 +68,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "I’m requesting permission to run the exact command `touch b.txt`.",
+                text: Inline(
+                    "I’m requesting permission to run the exact command `touch b.txt`.",
+                ),
                 phase: Commentary,
             },
         },
@@ -70,7 +82,9 @@ expression: "replay(\"decline\")"
             status: Running,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -90,7 +104,9 @@ expression: "replay(\"decline\")"
             status: AwaitingUser,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -102,13 +118,17 @@ expression: "replay(\"decline\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch b.txt",
+                            command: Inline(
+                                "touch b.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
+                            Inline(
+                                "May I run the exact requested command `touch b.txt`?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -129,7 +149,9 @@ expression: "replay(\"decline\")"
             status: Declined,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -141,13 +163,17 @@ expression: "replay(\"decline\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch b.txt",
+                            command: Inline(
+                                "touch b.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
+                            Inline(
+                                "May I run the exact requested command `touch b.txt`?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -178,7 +204,9 @@ expression: "replay(\"decline\")"
             status: Declined,
             kind: Tool {
                 tool: Shell {
-                    command: "touch b.txt",
+                    command: Inline(
+                        "touch b.txt",
+                    ),
                     cwd: Some(
                         "/work",
                     ),
@@ -190,13 +218,17 @@ expression: "replay(\"decline\")"
                 approval: Some(
                     Approval {
                         request: Command {
-                            command: "touch b.txt",
+                            command: Inline(
+                                "touch b.txt",
+                            ),
                             cwd: Some(
                                 "/work",
                             ),
                         },
                         reason: Some(
-                            "May I run the exact requested command `touch b.txt`?",
+                            Inline(
+                                "May I run the exact requested command `touch b.txt`?",
+                            ),
                         ),
                         options: [
                             AllowOnce,
@@ -238,7 +270,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Final,
             },
         },
@@ -258,7 +292,9 @@ expression: "replay(\"decline\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "declined",
+                text: Inline(
+                    "declined",
+                ),
                 phase: Final,
             },
         },

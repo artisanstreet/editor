@@ -10,6 +10,7 @@ anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
+editor-sources = { path = "../editor-sources" }
 gpui.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

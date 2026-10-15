@@ -1,13 +1,12 @@
 //! Ctrl+K: jump to a thread, a screen or a host.
 
-use editor_core::{Core, HostId, Screen, SettingsPage};
+use editor_core::{Core, Screen, SettingsPage};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
-use editor_ui::theme::DesktopTheme;
-use gpui::prelude::FluentBuilder as _;
+use editor_ui::theme::ActiveTheme as _;
+use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, Window, div, px,
+    IntoElement, KeyBinding, ParentElement as _, Render, Styled as _, Window, div, px,
 };
 
 gpui::actions!(palette, [Dismiss, Up, Down]);
@@ -35,10 +34,55 @@ struct Entry {
     screen: Screen,
 }
 
+// Sequences belong to one Forge. Across hosts, use activity time with a stable
+// identity tie-break; only these bounded candidate rows are materialized.
+type Recency = (
+    artisan_api::Timestamp,
+    editor_core::HostId,
+    artisan_api::ThreadId,
+);
+fn insert_thread(
+    entries: &mut Vec<(Recency, Entry)>,
+    thread: &artisan_api::Thread,
+    host: &editor_core::HostId,
+    detail: &str,
+    limit: usize,
+) {
+    let key = (thread.activity_at, host.clone(), thread.id.clone());
+    let index = entries.partition_point(|(existing, _)| existing > &key);
+    if index >= limit {
+        return;
+    }
+    entries.insert(
+        index,
+        (
+            key,
+            Entry {
+                label: thread
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Untitled thread".into()),
+                detail: detail.to_owned(),
+                screen: Screen::Thread {
+                    host: host.clone(),
+                    thread: thread.id.clone(),
+                },
+            },
+        ),
+    );
+    entries.truncate(limit);
+}
+
 pub struct Palette {
     core: Entity<Core>,
     query: Entity<TextEditor>,
     highlighted: usize,
+    entries: Vec<Entry>,
+    _hosts: Vec<gpui::Subscription>,
+    search: Option<Vec<Entry>>,
+    search_generation: u64,
+    search_task: gpui::Task<()>,
+    search_error: Option<String>,
 }
 
 impl EventEmitter<PaletteEvent> for Palette {}
@@ -49,18 +93,49 @@ impl Palette {
             cx.new(|cx| TextEditor::new("", "Search threads and commands", cx).single_line());
         cx.subscribe_in(&query, window, |this, _, event, _, cx| match event {
             TextEditorEvent::Changed => {
-                this.highlighted = 0;
+                this.start_search(cx);
+                this.refresh(cx);
                 cx.notify();
             }
             TextEditorEvent::Submitted => this.activate(cx),
         })
         .detach();
+        editor_ui::overlay::begin("command-palette", window, cx);
         window.focus(&query.read(cx).focus_handle(cx), cx);
-        Self {
+        let hosts: Vec<_> = core
+            .read(cx)
+            .hosts()
+            .map(|(_, host)| host.clone())
+            .collect();
+        let subscriptions = hosts
+            .iter()
+            .map(|host| {
+                cx.subscribe(host, |this, _, event: &editor_core::HostEvent, cx| {
+                    if matches!(
+                        event,
+                        editor_core::HostEvent::Changed
+                            | editor_core::HostEvent::Reset
+                            | editor_core::HostEvent::ThreadChanged { .. }
+                    ) {
+                        this.refresh(cx);
+                        cx.notify();
+                    }
+                })
+            })
+            .collect();
+        let mut palette = Self {
             core,
             query,
             highlighted: 0,
-        }
+            entries: Vec::new(),
+            _hosts: subscriptions,
+            search: None,
+            search_generation: 0,
+            search_task: gpui::Task::ready(()),
+            search_error: None,
+        };
+        palette.refresh(cx);
+        palette
     }
 
     fn entries(&self, cx: &App) -> Vec<Entry> {
@@ -79,12 +154,11 @@ impl Palette {
             });
         }
         for (label, page) in [
-            ("Settings", SettingsPage::Models),
+            ("Settings", SettingsPage::Appearance),
             ("Global prompt", SettingsPage::GlobalPrompt),
             ("Threads", SettingsPage::Threads),
             ("Appearance", SettingsPage::Appearance),
             ("Notifications", SettingsPage::Notifications),
-            ("Privacy", SettingsPage::Privacy),
             ("About", SettingsPage::About),
             ("Engines", SettingsPage::Engines),
             ("Skills and MCP servers", SettingsPage::Extensions),
@@ -96,7 +170,7 @@ impl Palette {
                 screen: Screen::Settings(page),
             });
         }
-        for (config, host) in core.hosts() {
+        for (config, _) in core.hosts() {
             if Some(&config.id) != active.as_ref() {
                 entries.push(Entry {
                     label: format!("Switch to {}", config.name),
@@ -107,41 +181,147 @@ impl Palette {
                     },
                 });
             }
-            let host_data = host.read(cx);
-            for thread in host_data.threads_by_activity(None) {
-                if thread.archived || thread.parent_thread_id.is_some() {
-                    continue;
+        }
+        entries.retain(|entry| {
+            query.is_empty()
+                || entry.label.to_lowercase().contains(&query)
+                || entry.detail.to_lowercase().contains(&query)
+        });
+        if let Some(search) = &self.search {
+            entries.extend(
+                search
+                    .iter()
+                    .filter(|candidate| {
+                        !entries.iter().any(|entry| entry.screen == candidate.screen)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            entries.truncate(SHOWN);
+        }
+        let room = SHOWN.saturating_sub(entries.len());
+        let mut recent = Vec::with_capacity(room + 1);
+        if room > 0 {
+            for (config, host) in core.hosts() {
+                let data = host.read(cx);
+                for thread in data
+                    .threads
+                    .values()
+                    .filter(|thread| !thread.archived && thread.parent_thread_id.is_none())
+                {
+                    if entries.iter().any(|entry| matches!(&entry.screen, Screen::Thread { host, thread: id } if host == &config.id && id == &thread.id)) {
+                        continue;
+                    }
+                    let label = thread.title.as_deref().unwrap_or("Untitled thread");
+                    let detail = data
+                        .projects
+                        .get(&thread.project_id)
+                        .map_or("", |project| project.name.as_str());
+                    if !query.is_empty()
+                        && !label.to_lowercase().contains(&query)
+                        && !detail.to_lowercase().contains(&query)
+                    {
+                        continue;
+                    }
+                    insert_thread(&mut recent, thread, &config.id, detail, room);
                 }
-                let project = host_data
-                    .projects
-                    .get(&thread.project_id)
-                    .map(|project| project.name.clone())
-                    .unwrap_or_default();
-                entries.push(Entry {
-                    label: thread
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Untitled thread".into()),
-                    detail: project,
-                    screen: Screen::Thread {
-                        host: HostId(config.id.0.clone()),
-                        thread: thread.id.clone(),
-                    },
-                });
             }
         }
-        if !query.is_empty() {
-            entries.retain(|entry| {
-                entry.label.to_lowercase().contains(&query)
-                    || entry.detail.to_lowercase().contains(&query)
-            });
-        }
+        entries.extend(recent.into_iter().map(|(_, entry)| entry));
         entries.truncate(SHOWN);
         entries
     }
 
+    fn start_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_task = gpui::Task::ready(());
+        self.search = None;
+        self.search_error = None;
+        let query = self.query.read(cx).text().trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        let generation = self.search_generation;
+        let hosts: Vec<_> = self
+            .core
+            .read(cx)
+            .hosts()
+            .filter(|(_, host)| host.read(cx).is_live())
+            .map(|(config, host)| {
+                (
+                    config.id.clone(),
+                    config.name.clone(),
+                    host.read(cx).client.clone(),
+                )
+            })
+            .collect();
+        if hosts.is_empty() {
+            self.search_error = Some("Connect to a Forge to search older threads.".into());
+            return;
+        }
+        self.search_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            let mut responses =
+                futures::stream::iter(hosts.into_iter().map(|(host, name, client)| {
+                    let query = query.clone();
+                    async move {
+                        let result = client
+                            .threads(&artisan_api::ThreadsQuery {
+                                query: Some(query),
+                                limit: Some(12),
+                                ..Default::default()
+                            })
+                            .await;
+                        (host, name, result)
+                    }
+                }))
+                .buffer_unordered(4);
+            let mut results = Vec::new();
+            let mut failures = 0;
+            while let Some((host, name, result)) = responses.next().await {
+                match result {
+                    Ok(page) => {
+                        for thread in page.threads {
+                            insert_thread(&mut results, &thread, &host, &name, SHOWN);
+                        }
+                    }
+                    Err(_) => failures += 1,
+                }
+                // Publish each Forge independently; one slow host does not hide other results.
+                let entries = results.iter().map(|(_, entry)| entry.clone()).collect();
+                if this
+                    .update(cx, |this, cx| {
+                        if this.search_generation != generation {
+                            return;
+                        }
+                        this.search = Some(entries);
+                        this.search_error = (failures > 0)
+                            .then(|| format!("Search could not reach {failures} Forge(s)."));
+                        this.refresh(cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    }
+    fn refresh(&mut self, cx: &App) {
+        let selected = self
+            .entries
+            .get(self.highlighted)
+            .map(|entry| entry.screen.clone());
+        self.entries = self.entries(cx);
+        self.highlighted = selected
+            .and_then(|screen| self.entries.iter().position(|entry| entry.screen == screen))
+            .unwrap_or(0);
+    }
+
     fn activate(&mut self, cx: &mut Context<Self>) {
-        if let Some(entry) = self.entries(cx).into_iter().nth(self.highlighted) {
+        if let Some(entry) = self.entries.get(self.highlighted).cloned() {
             self.core
                 .update(cx, |core, cx| core.navigate(entry.screen, cx));
         }
@@ -151,29 +331,20 @@ impl Palette {
 
 impl Render for Palette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = DesktopTheme::neutral_dark();
-        let entries = self.entries(cx);
+        let theme = *cx.theme();
+        let entries = self.entries.clone();
         self.highlighted = self.highlighted.min(entries.len().saturating_sub(1));
         let rows = entries.into_iter().enumerate().map(|(index, entry)| {
-            div()
-                .id(index)
-                .px(px(12.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .flex()
-                .gap(px(8.0))
-                .cursor_pointer()
-                .when(index == self.highlighted, |row| row.bg(theme.selected))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.highlighted = index;
-                    this.activate(cx);
+            editor_ui::action_row::ActionRow::new(index, theme, entry.label)
+                .secondary(entry.detail)
+                .selected(index == self.highlighted)
+                .on_activate(cx.listener(move |this, _, _, cx| {
+                    this.core
+                        .update(cx, |core, cx| core.navigate(entry.screen.clone(), cx));
+                    cx.emit(PaletteEvent::Dismissed);
                 }))
-                .child(div().flex_1().min_w(px(0.0)).truncate().child(entry.label))
-                .child(div().text_color(theme.secondary).child(entry.detail))
         });
-        // The backdrop dismisses; the card stops clicks from reaching it.
-        div()
-            .id("palette-backdrop")
+        let content = div()
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|_, _: &Dismiss, _, cx| cx.emit(PaletteEvent::Dismissed)))
             .on_action(cx.listener(|this, _: &Up, _, cx| {
@@ -181,34 +352,158 @@ impl Render for Palette {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Down, _, cx| {
-                this.highlighted += 1;
+                this.highlighted = (this.highlighted + 1).min(this.entries.len().saturating_sub(1));
                 cx.notify();
             }))
-            .on_click(cx.listener(|_, _, _, cx| cx.emit(PaletteEvent::Dismissed)))
-            .absolute()
-            .inset_0()
             .flex()
-            .justify_center()
-            .pt(px(96.0))
-            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.4))
-            .child(
-                div()
-                    .id("palette")
-                    .occlude()
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .w(px(560.0))
-                    .max_h(px(480.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .p(px(8.0))
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(theme.popover_line)
-                    .bg(theme.sidebar)
-                    .text_sm()
-                    .child(div().px(px(4.0)).pb(px(4.0)).child(self.query.clone()))
-                    .children(rows),
+            .flex_col()
+            .gap(px(4.0))
+            .child(self.query.clone())
+            .children(
+                self.search_error
+                    .clone()
+                    .map(|error| div().text_xs().child(error)),
             )
+            .children(rows);
+        editor_ui::dialog::Dialog::new(
+            "command-palette",
+            *cx.theme(),
+            "Search threads and commands",
+            content,
+        )
+        .on_dismiss({
+            let owner = cx.entity().downgrade();
+            move |_, _, cx| {
+                let _ = owner.update(cx, |_, cx| cx.emit(PaletteEvent::Dismissed));
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use artisan_api::{EngineConfig, EngineId, ProjectId, Thread, ThreadId};
+    use editor_core::HostId;
+
+    fn thread(id: &str, activity_at: i64, activity_seq: u64) -> Thread {
+        Thread {
+            id: ThreadId::from(id),
+            project_id: ProjectId::from("project"),
+            title: Some(format!("needle-{id}")),
+            config: EngineConfig::new(EngineId::Codex),
+            activity_seq,
+            activity_at,
+            read_seq: 0,
+            marked_unread: false,
+            settled_seq: 0,
+            seq: activity_seq,
+            created_at: 1,
+            updated_at: 999_999,
+            archived: false,
+            parent_thread_id: None,
+        }
+    }
+
+    #[test]
+    fn search_merge_uses_activity_time_and_stable_host_identity() {
+        let mut results = Vec::new();
+        let busy = HostId("busy".into());
+        let quiet = HostId("quiet".into());
+        insert_thread(&mut results, &thread("old", 100, 900_000), &busy, "Busy", 2);
+        insert_thread(&mut results, &thread("new", 200, 2), &quiet, "Quiet", 2);
+        insert_thread(
+            &mut results,
+            &thread("oldest", 50, 9_000_000),
+            &busy,
+            "Busy",
+            2,
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|(_, entry)| entry.label.as_str())
+                .collect::<Vec<_>>(),
+            ["needle-new", "needle-old"]
+        );
+        // Equal timestamps and IDs still have a total order across hosts.
+        insert_thread(
+            &mut results,
+            &thread("new", 200, 99_000_000),
+            &busy,
+            "Busy",
+            2,
+        );
+        assert_eq!(results[0].0.1, quiet);
+        assert_eq!(results[1].0.1, busy);
+    }
+
+    #[cfg(feature = "capture")]
+    #[gpui::test]
+    fn local_palette_recency_ignores_another_forges_sequence_range(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let core = cx.new(|cx| {
+            Core::new(
+                editor_core::EditorFiles {
+                    dir: dir.path().to_owned(),
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        let fingerprint = core.read_with(cx, |core, _| {
+            artisan_api::tls::fingerprint(
+                core.identity
+                    .as_ref()
+                    .unwrap()
+                    .certificate_der()
+                    .unwrap()
+                    .as_ref(),
+            )
+        });
+        for (host, item) in [
+            ("busy", thread("old", 100, 900_000)),
+            ("quiet", thread("new", 200, 2)),
+        ] {
+            let id = HostId(host.into());
+            core.update(cx, |core, cx| {
+                core.add_host(
+                    editor_core::HostConfig {
+                        id: id.clone(),
+                        name: host.into(),
+                        address: "127.0.0.1:1".into(),
+                        fingerprint: fingerprint.clone(),
+                        kind: editor_core::HostKind::Remote,
+                    },
+                    cx,
+                )
+                .unwrap()
+            });
+            let host = core.read_with(cx, |core, _| core.host(&id).unwrap().clone());
+            host.update(cx, |host, _| {
+                host.threads.insert(item.id.clone(), item);
+            });
+        }
+        let query = cx.new(|cx| TextEditor::new("needle", "", cx));
+        let palette = cx.new(|_| Palette {
+            core,
+            query,
+            highlighted: 0,
+            entries: Vec::new(),
+            _hosts: Vec::new(),
+            search: None,
+            search_generation: 0,
+            search_task: gpui::Task::ready(()),
+            search_error: None,
+        });
+        let labels = palette.read_with(cx, |palette, cx| {
+            palette
+                .entries(cx)
+                .into_iter()
+                .map(|entry| entry.label)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(labels, ["needle-new", "needle-old"]);
     }
 }

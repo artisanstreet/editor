@@ -6,6 +6,8 @@ version.workspace = true
 description = "The Editor's Forge client: hosts, pairing, the connection to each Forge, the store of what Forge sent, and navigation."
 
 [dependencies]
+ropey.workspace = true
+tempfile.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api", features = ["tls"] }
 dirs.workspace = true
@@ -14,14 +16,15 @@ gpui.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 serde.workspace = true
 serde_json.workspace = true
-statig.workspace = true
+sse-core.workspace = true
+tokio-util.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
 tracing.workspace = true
 
 [dev-dependencies]
+editor-ui = { path = "../editor-ui" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
-tempfile.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 
 [lints]

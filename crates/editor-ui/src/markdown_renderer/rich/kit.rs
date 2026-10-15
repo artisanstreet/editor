@@ -4,17 +4,15 @@
 //! code references, and number formatting live here once, so blocks read as
 //! one family and each kind's file holds only what is particular to it.
 
+use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use editor_assets::AssetId;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Div, ElementId, Entity, FontWeight, Hsla, IntoElement, ParentElement as _,
+    SharedString, Styled as _, Window, div, px,
 };
 use serde::Deserialize;
 
 use crate::asset_seam::asset_glyph;
-use crate::hover_card::hover_fill_style;
-use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens, ThemeMode};
 
 // ---------------------------------------------------------------------------
 // Tones and statuses
@@ -54,31 +52,24 @@ impl Tone {
 /// amber, rose, green, orange, cyan.
 const SERIES_HUES: [f32; 8] = [255.0, 300.0, 190.0, 80.0, 10.0, 150.0, 50.0, 220.0];
 
-/// The color of series `index`. Lightness follows the mode so series read
-/// against either canvas; past eight series the hues repeat lighter.
-pub(super) fn series_color(theme: &ArtisanTheme, index: usize) -> Oklch {
+/// The color of series `index`; past eight series the hues repeat lighter.
+pub(super) fn series_color(index: usize) -> Oklch {
     let hue = SERIES_HUES[index % SERIES_HUES.len()];
     #[expect(clippy::cast_precision_loss, reason = "the round count stays tiny")]
     let round = (index / SERIES_HUES.len()) as f32;
-    let lightness = match theme.mode {
-        ThemeMode::Dark => 0.72,
-        ThemeMode::Light => 0.6,
-    };
+    let lightness = 0.72;
     Oklch::new((lightness + round * 0.08).min(0.9), 0.15, hue)
 }
 
 /// A sequential ramp from the surface to the first series hue, `t` in 0..=1.
-pub(super) fn sequential_color(theme: &ArtisanTheme, t: f32) -> Oklch {
+pub(super) fn sequential_color(t: f32) -> Oklch {
     let t = t.clamp(0.0, 1.0);
-    let (from, to) = match theme.mode {
-        ThemeMode::Dark => (0.3, 0.78),
-        ThemeMode::Light => (0.95, 0.5),
-    };
+    let (from, to) = (0.3, 0.78);
     Oklch::new(from + (to - from) * t, 0.02 + 0.14 * t, SERIES_HUES[0])
 }
 
 /// A diverging ramp, `t` in -1..=1: rose below zero, blue above.
-pub(super) fn diverging_color(theme: &ArtisanTheme, t: f32) -> Oklch {
+pub(super) fn diverging_color(t: f32) -> Oklch {
     let t = t.clamp(-1.0, 1.0);
     let hue = if t < 0.0 {
         SERIES_HUES[4]
@@ -86,10 +77,7 @@ pub(super) fn diverging_color(theme: &ArtisanTheme, t: f32) -> Oklch {
         SERIES_HUES[0]
     };
     let strength = t.abs();
-    let (from, to) = match theme.mode {
-        ThemeMode::Dark => (0.3, 0.74),
-        ThemeMode::Light => (0.95, 0.55),
-    };
+    let (from, to) = (0.3, 0.74);
     Oklch::new(from + (to - from) * strength, 0.15 * strength, hue)
 }
 
@@ -99,7 +87,7 @@ pub(super) fn diverging_color(theme: &ArtisanTheme, t: f32) -> Oklch {
 /// A part's title: 14 px semibold foreground.
 pub(super) fn title(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(14.0))
+        .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(20.0))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.colors.foreground.to_paint())
@@ -109,7 +97,7 @@ pub(super) fn title(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div 
 /// Running text: 14 px on 22 px in the foreground.
 pub(super) fn body(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(14.0))
+        .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(22.0))
         .text_color(theme.colors.foreground.to_paint())
         .child(text.into())
@@ -118,7 +106,7 @@ pub(super) fn body(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
 /// Secondary text: 13 px on 20 px, muted.
 pub(super) fn muted(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(13.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(20.0))
         .text_color(theme.colors.muted_foreground.to_paint())
         .child(text.into())
@@ -127,7 +115,7 @@ pub(super) fn muted(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div 
 /// A small uppercase-free label: 12 px on 16 px, muted, medium weight.
 pub(super) fn label(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(12.0))
+        .text_size(TypographyTokens::size(TextStep::Xs))
         .line_height(px(16.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.colors.muted_foreground.to_paint())
@@ -139,7 +127,7 @@ pub(super) fn mono(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Div {
     div()
         .font_family(theme.typography.mono.family)
         .tracking(0.0)
-        .text_size(px(13.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(20.0))
         .text_color(theme.colors.foreground.to_paint())
         .child(text.into())
@@ -168,34 +156,6 @@ pub(super) fn hairline(theme: &ArtisanTheme) -> Hsla {
     theme.colors.foreground.with_alpha(0.1).to_paint()
 }
 
-/// A small pill: status, kind, or tag.
-pub(super) fn chip(theme: &ArtisanTheme, text: impl Into<SharedString>, tone: Tone) -> Div {
-    let color = tone.color(theme);
-    let (fg, bg) = if tone == Tone::Neutral {
-        (
-            theme.colors.foreground.to_paint(),
-            theme.colors.foreground.with_alpha(0.06).to_paint(),
-        )
-    } else {
-        (color.to_paint(), color.with_alpha(0.12).to_paint())
-    };
-    div()
-        .flex()
-        .flex_shrink_0()
-        .items_center()
-        .gap(px(4.0))
-        .h(px(20.0))
-        .px(px(8.0))
-        .rounded(px(10.0))
-        .bg(bg)
-        .text_size(px(12.0))
-        .line_height(px(16.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(fg)
-        .whitespace_nowrap()
-        .child(text.into())
-}
-
 /// A tinted glyph at `size` in `color`.
 pub(super) fn glyph(id: AssetId, size: f32, color: Hsla) -> AnyElement {
     div()
@@ -216,35 +176,6 @@ pub(super) fn keyed<T: 'static>(
     init: impl FnOnce() -> T,
 ) -> Entity<T> {
     window.use_keyed_state(id.into(), cx, |_, _| init())
-}
-
-/// One entry of the mode row under a block: the chosen mode in the
-/// foreground and semibold, the rest muted, every entry with the app's
-/// hover fill. The caller adds the click.
-pub(super) fn mode_entry(
-    theme: &ArtisanTheme,
-    id: ElementId,
-    label: impl Into<SharedString>,
-    selected: bool,
-) -> gpui::Stateful<Div> {
-    let theme = *theme;
-    div()
-        .id(id)
-        .px(px(8.0))
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .rounded(px(6.0))
-        .cursor_pointer()
-        .text_size(px(12.0))
-        .text_color(if selected {
-            theme.colors.foreground.to_paint()
-        } else {
-            theme.colors.muted_foreground.to_paint()
-        })
-        .when(selected, |entry| entry.font_weight(FontWeight::SEMIBOLD))
-        .hover(move |style| hover_fill_style(style, &theme, px(6.0)))
-        .child(label.into())
 }
 
 // ---------------------------------------------------------------------------
@@ -392,44 +323,12 @@ pub(super) fn with_unit(value: &str, unit: Option<&str>) -> String {
     }
 }
 
-/// Escapes a Markdown table cell.
-pub(super) fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
-}
-
-/// A Markdown table from a header and rows.
-pub(super) fn markdown_table(header: &[String], rows: &[Vec<String>]) -> String {
-    let mut out = String::new();
-    let line = |cells: &[String]| {
-        format!(
-            "| {} |\n",
-            cells
-                .iter()
-                .map(|text| cell(text))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        )
-    };
-    out.push_str(&line(header));
-    out.push('|');
-    out.push_str(&" --- |".repeat(header.len().max(1)));
-    out.push('\n');
-    for row in rows {
-        out.push_str(&line(row));
-    }
-    out
-}
-
-/// Deserializes a list into a shared slice, so frames clone it cheaply.
-pub(super) fn shared<'de, D, T>(deserializer: D) -> Result<std::rc::Rc<[T]>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Vec::<T>::deserialize(deserializer).map(std::rc::Rc::from)
-}
-
 /// The element id of one part of a view keyed under `id`.
 pub(super) fn part(id: &SharedString, part: impl std::fmt::Display) -> gpui::ElementId {
-    gpui::ElementId::Name(SharedString::from(format!("{id}-{part}")))
+    gpui::ElementId::Name(part_key(id, part))
+}
+
+/// String identity for loaders and controls requiring SharedString.
+pub(super) fn part_key(id: &SharedString, part: impl std::fmt::Display) -> SharedString {
+    SharedString::from(format!("{id}-{part}"))
 }

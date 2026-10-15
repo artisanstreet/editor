@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/claude.rs
+assertion_line: 732
 expression: "(events, outcome)"
 ---
 (
@@ -18,7 +19,9 @@ expression: "(events, outcome)"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -29,21 +32,21 @@ expression: "(events, outcome)"
             text: "ok",
             append: true,
         },
-        Item {
-            key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
-            parent: None,
-            status: Running,
-            kind: AssistantMessage {
-                text: "ok",
-                phase: Commentary,
+        Live {
+            target: Text {
+                key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
             },
+            text: "ok",
+            append: false,
         },
         Item {
             key: "msg_011Cfv3cuA5Z9RNcroi9XUyd:0",
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "ok",
+                text: Inline(
+                    "ok",
+                ),
                 phase: Final,
             },
         },

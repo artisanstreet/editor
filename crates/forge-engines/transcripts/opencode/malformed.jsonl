@@ -1,0 +1,8 @@
+{"id": "evt_001", "type": "session.next.prompt.admitted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
+{"id": "evt_002", "type": "session.next.prompted", "data": {"sessionID": "ses_root", "messageID": "msg_1"}}
+{broken-json
+null
+[]
+{}
+{"type": "server.connected", "data": {}}
+{"id": " ", "type": "server.connected", "data": {}}

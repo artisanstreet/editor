@@ -93,7 +93,7 @@ pub fn import(data_dir: &Path, from: Option<PathBuf>) -> Result<()> {
             let skills = forge_engines::import_legacy_extensions(
                 &old,
                 &data_dir.join("extensions").join("skills"),
-            )?;
+            );
             if !skills.is_empty() {
                 println!("Skills: {}", skills.join(", "));
             }
@@ -105,6 +105,37 @@ pub fn import(data_dir: &Path, from: Option<PathBuf>) -> Result<()> {
                 let names: Vec<String> = engines.iter().map(ToString::to_string).collect();
                 println!("Engines: {}", names.join(", "));
             }
+            anyhow::Ok(())
+        })
+}
+
+/// Explicit offline repair; taking the same data lock as Forge prevents any
+/// mutation of an active instance. Dry-run never opens the recovering Store.
+pub fn normalize(data_dir: &Path, dry_run: bool) -> Result<()> {
+    anyhow::ensure!(
+        data_dir.join("forge.sqlite3").is_file(),
+        "no Forge database at {}",
+        data_dir.display()
+    );
+    if dry_run {
+        let count = forge_store::legacy::inspect_agent_messages(data_dir)?;
+        println!(
+            "Would normalize {count} agent messages in {}",
+            data_dir.display()
+        );
+        return Ok(());
+    }
+    let _lock = forge_http::lock_data_dir(data_dir)
+        .context("the target Forge database must be offline for normalization")?;
+    tokio::runtime::Runtime::new()
+        .context("start the async runtime")?
+        .block_on(async {
+            let store = forge_store::Store::open(data_dir)?;
+            let count = forge_store::legacy::normalize_agent_messages(&store).await?;
+            println!(
+                "Normalized {count} agent messages in {}",
+                data_dir.display()
+            );
             anyhow::Ok(())
         })
 }

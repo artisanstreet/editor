@@ -1,17 +1,13 @@
-//! The first screen, the previous Editor's "Add a host" branch of
-//! `new_thread_surface_section`: the terminal emblem, the heading, what a
-//! host is, and the ways to add one. A Forge on this machine or in WSL
-//! pairs with one click (`ae forge pair --json` runs there); a remote one is
-//! pasted in Settings → Hosts.
+//! Pairing entry screen for local, WSL and remote Forges.
 
 use editor_core::{Core, LocalTarget, Screen, SettingsPage, hosts};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
-use editor_ui::theme::DesktopTheme;
+use editor_ui::theme::{ActiveTheme as _, ColorTokens};
 use gpui::{
     AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, px,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, px,
 };
 
 /// The heading under the emblem (`HOME_HEADLINE_TEXT_PX`).
@@ -21,31 +17,18 @@ const EMBLEM: f32 = 30.0;
 
 pub struct Home {
     core: Entity<Core>,
-    targets: Vec<LocalTarget>,
+    _targets: Subscription,
     pairing: Option<LocalTarget>,
     error: Option<String>,
 }
 
 impl Home {
     pub fn new(core: Entity<Core>, cx: &mut Context<Self>) -> Self {
-        if cfg!(windows) {
-            let distros = cx.background_executor().spawn(async { wsl_distros() });
-            cx.spawn(async move |this, cx| {
-                let distros = distros.await;
-                let _ = this.update(cx, |home, cx| {
-                    home.targets.extend(
-                        distros
-                            .into_iter()
-                            .map(|distro| LocalTarget::Wsl { distro }),
-                    );
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
+        core.update(cx, |core, cx| core.load_pairing_targets(false, cx));
+        let targets = cx.subscribe(&core, |_, _, _: &editor_core::CoreEvent, cx| cx.notify());
         Self {
             core,
-            targets: vec![LocalTarget::ThisMachine],
+            _targets: targets,
             pairing: None,
             error: None,
         }
@@ -58,6 +41,11 @@ impl Home {
         let (identity, device_name) = {
             let core = self.core.read(cx);
             (core.identity.clone(), core.device_name.clone())
+        };
+        let Some(identity) = identity else {
+            self.error = Some("This device's identity could not be loaded. Repair its configuration before pairing.".into());
+            cx.notify();
+            return;
         };
         self.pairing = Some(target.clone());
         self.error = None;
@@ -91,7 +79,7 @@ impl Home {
 
     fn button(
         &self,
-        theme: DesktopTheme,
+        desktop: &ColorTokens,
         id: SharedString,
         label: String,
         cx: &Context<Self>,
@@ -103,18 +91,25 @@ impl Home {
         let button = div()
             .id(id)
             .debug_selector(move || selector.clone())
+            .focusable()
+            .tab_index(0)
+            .role(gpui::Role::Button)
+            .aria_label(label.clone())
             .cursor_pointer()
             .px(px(16.0))
             .py(px(8.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(theme.line)
-            .text_color(theme.foreground)
+            .border_color(desktop.line.to_paint())
+            .text_color(desktop.workspace_foreground.to_paint())
             .child(label);
+
         match target {
-            Some(target) => {
-                button.on_click(cx.listener(move |home, _, _, cx| home.pair(target.clone(), cx)))
-            }
+            Some(target) => button.on_click(cx.listener(move |home, _, _, cx| {
+                if home.pairing.is_none() {
+                    home.pair(target.clone(), cx);
+                }
+            })),
             None => button.on_click(cx.listener(|home, _, _, cx| {
                 home.core.update(cx, |core, cx| {
                     core.navigate(Screen::Settings(SettingsPage::Hosts), cx)
@@ -127,18 +122,25 @@ impl Home {
 
 impl Render for Home {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = DesktopTheme::neutral_dark();
-        let mut buttons: Vec<AnyElement> = self
-            .targets
-            .iter()
+        let desktop = cx.theme().colors;
+        let targets = std::iter::once(LocalTarget::ThisMachine).chain(
+            self.core
+                .read(cx)
+                .pairing_targets()
+                .distros
+                .iter()
+                .cloned()
+                .map(|distro| LocalTarget::Wsl { distro }),
+        );
+        let mut buttons: Vec<AnyElement> = targets
             .enumerate()
             .map(|(index, target)| {
-                let label = match target {
+                let label = match &target {
                     LocalTarget::ThisMachine => "Use the Forge on this computer".to_owned(),
                     LocalTarget::Wsl { distro } => format!("Use the Forge in WSL: {distro}"),
                 };
                 self.button(
-                    theme,
+                    &desktop,
                     format!("pair-{index}").into(),
                     label,
                     cx,
@@ -146,8 +148,23 @@ impl Render for Home {
                 )
             })
             .collect();
+        if let Some(error) = self.core.read(cx).pairing_targets().error.clone() {
+            buttons.push(editor_ui::page::error_text(cx.theme(), error).into_any_element());
+            buttons.push(
+                editor_ui::button::Button::text(
+                    "retry-local-targets",
+                    *cx.theme(),
+                    "Retry WSL discovery",
+                )
+                .on_activate(cx.listener(|this, _, _, cx| {
+                    this.core
+                        .update(cx, |core, cx| core.load_pairing_targets(true, cx))
+                }))
+                .into_any_element(),
+            );
+        }
         buttons.push(self.button(
-            theme,
+            &desktop,
             "pair-remote".into(),
             "Pair a Forge on another machine".to_owned(),
             cx,
@@ -170,14 +187,14 @@ impl Render for Home {
                         div().mb(px(16.0)).child(
                             asset_glyph(AssetId::TABLER_TERMINAL_2)
                                 .size(px(EMBLEM))
-                                .text_color(theme.secondary),
+                                .text_color(desktop.workspace_secondary.to_paint()),
                         ),
                     )
                     .child(
                         div()
                             .text_size(px(HEADLINE))
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(theme.foreground)
+                            .text_color(desktop.workspace_foreground.to_paint())
                             .child("Add a host"),
                     )
                     .child(
@@ -185,7 +202,7 @@ impl Render for Home {
                             .mt(px(8.0))
                             .max_w(px(440.0))
                             .text_size(px(15.0))
-                            .text_color(theme.secondary)
+                            .text_color(desktop.workspace_secondary.to_paint())
                             .child(
                                 "Artisan works on a Forge host you trust. Use the Forge on this computer, or pair with one on another machine.",
                             ),
@@ -209,32 +226,4 @@ impl Render for Home {
                     })),
             )
     }
-}
-
-/// Installed WSL distributions. `wsl.exe -l -q` prints UTF-16.
-fn wsl_distros() -> Vec<String> {
-    let Ok(output) = std::process::Command::new("wsl.exe")
-        .args(["-l", "-q"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let units: Vec<u16> = output
-        .stdout
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-        .collect();
-    String::from_utf16_lossy(&units)
-        .lines()
-        .map(|line| {
-            line.trim_matches(|c: char| c.is_whitespace() || c == '\0')
-                .to_owned()
-        })
-        .filter(|line| !line.is_empty() && !line.starts_with("docker-desktop"))
-        .collect()
 }

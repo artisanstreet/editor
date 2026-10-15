@@ -19,7 +19,6 @@ use anyhow::{Context, Result, bail, ensure};
 use artisan_api::{EngineId, InstallState};
 use base64::Engine as _;
 use sha2::Digest as _;
-use statig::prelude::*;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -30,11 +29,6 @@ const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const PROGRESS_STEP_BYTES: u64 = 2 * 1024 * 1024;
 
 // ---------------------------------------------------------------- machine
-
-/// The install lifecycle of one engine. Holds only the version being
-/// installed and the one still serving; the owner publishes the state.
-#[derive(Default)]
-pub(crate) struct Install;
 
 #[derive(Debug)]
 pub(crate) enum Event {
@@ -61,126 +55,148 @@ pub(crate) enum Event {
     },
 }
 
-#[state_machine(initial = "State::absent()", state(derive(Debug, Clone, PartialEq)))]
-impl Install {
-    #[state]
-    fn absent(event: &Event) -> Outcome<State> {
-        match event {
-            Event::Loaded {
-                version: Some(version),
-            }
-            | Event::Done { version } => Transition(State::installed(version.clone(), None)),
-            Event::Start { version } => {
-                Transition(State::downloading(version.clone(), 0, None, None))
-            }
-            Event::Fail { message } => Transition(State::failed(message.clone(), None)),
-            _ => Handled,
-        }
+/// The install lifecycle retains the old serving version during a replacement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum State {
+    Absent {},
+    Installed {
+        version: String,
+        update: Option<String>,
+    },
+    Downloading {
+        version: String,
+        received: u64,
+        total: Option<u64>,
+        serving: Option<String>,
+    },
+    Verifying {
+        version: String,
+        serving: Option<String>,
+    },
+    Failed {
+        message: String,
+        serving: Option<String>,
+    },
+}
+
+pub(crate) struct Machine {
+    state: State,
+}
+
+impl Machine {
+    pub(crate) fn state(&self) -> &State {
+        &self.state
     }
 
-    #[state]
-    fn installed(
-        version: &mut String,
-        update: &mut Option<String>,
-        event: &Event,
-    ) -> Outcome<State> {
-        match event {
-            Event::Loaded { version: None } => Transition(State::absent()),
-            Event::Loaded {
-                version: Some(found),
+    pub(crate) fn handle(&mut self, event: &Event) {
+        let next = match (&mut self.state, event) {
+            (
+                State::Absent {},
+                Event::Loaded {
+                    version: Some(version),
+                }
+                | Event::Done { version },
+            ) => Some(State::Installed {
+                version: version.clone(),
+                update: None,
+            }),
+            (State::Absent {}, Event::Start { version }) => Some(State::Downloading {
+                version: version.clone(),
+                received: 0,
+                total: None,
+                serving: None,
+            }),
+            (State::Absent {}, Event::Fail { message }) => Some(State::Failed {
+                message: message.clone(),
+                serving: None,
+            }),
+            (State::Installed { .. }, Event::Loaded { version: None }) => Some(State::Absent {}),
+            (
+                State::Installed { version, .. },
+                Event::Loaded {
+                    version: Some(found),
+                }
+                | Event::Done { version: found },
+            ) if found != version => Some(State::Installed {
+                version: found.clone(),
+                update: None,
+            }),
+            (State::Installed { version, .. }, Event::Start { version: target }) => {
+                Some(State::Downloading {
+                    version: target.clone(),
+                    received: 0,
+                    total: None,
+                    serving: Some(version.clone()),
+                })
             }
-            | Event::Done { version: found }
-                if found != version =>
-            {
-                Transition(State::installed(found.clone(), None))
-            }
-            Event::Start { version: target } => Transition(State::downloading(
-                target.clone(),
-                0,
-                None,
-                Some(version.clone()),
-            )),
-            Event::Fail { message } => {
-                Transition(State::failed(message.clone(), Some(version.clone())))
-            }
-            Event::UpdateAvailable { version: newer } => {
+            (State::Installed { version, .. }, Event::Fail { message }) => Some(State::Failed {
+                message: message.clone(),
+                serving: Some(version.clone()),
+            }),
+            (State::Installed { version, update }, Event::UpdateAvailable { version: newer }) => {
                 *update = (newer != version).then(|| newer.clone());
-                Handled
+                None
             }
-            _ => Handled,
-        }
-    }
-
-    #[state(superstate = "busy")]
-    #[expect(
-        clippy::ptr_arg,
-        reason = "statig takes the state's field types from these parameters"
-    )]
-    fn downloading(
-        version: &mut String,
-        received: &mut u64,
-        total: &mut Option<u64>,
-        serving: &mut Option<String>,
-        event: &Event,
-    ) -> Outcome<State> {
-        match event {
-            Event::Progress {
-                received: now,
-                total: of,
-            } => {
+            (
+                State::Downloading {
+                    received, total, ..
+                },
+                Event::Progress {
+                    received: now,
+                    total: of,
+                },
+            ) => {
                 *received = *now;
                 *total = *of;
-                Handled
+                None
             }
-            Event::Downloaded => Transition(State::verifying(version.clone(), serving.clone())),
-            _ => Super,
-        }
-    }
-
-    #[state(superstate = "busy")]
-    fn verifying(
-        version: &mut String,
-        serving: &mut Option<String>,
-        event: &Event,
-    ) -> Outcome<State> {
-        let _ = (version, serving, event);
-        Super
-    }
-
-    /// Downloading or verifying: the old version (if any) keeps serving.
-    #[superstate]
-    fn busy(serving: &mut Option<String>, event: &Event) -> Outcome<State> {
-        match event {
-            Event::Done { version } => Transition(State::installed(version.clone(), None)),
-            Event::Fail { message } => Transition(State::failed(message.clone(), serving.clone())),
-            // A second install waits on the file lock, so a Start here is stale.
-            _ => Handled,
-        }
-    }
-
-    #[state]
-    fn failed(message: &mut String, serving: &mut Option<String>, event: &Event) -> Outcome<State> {
-        let _ = message;
-        match event {
-            Event::Start { version } => Transition(State::downloading(
-                version.clone(),
-                0,
-                None,
-                serving.clone(),
-            )),
-            Event::Loaded {
-                version: Some(version),
-            }
-            | Event::Done { version } => Transition(State::installed(version.clone(), None)),
-            _ => Handled,
+            (
+                State::Downloading {
+                    version, serving, ..
+                },
+                Event::Downloaded,
+            ) => Some(State::Verifying {
+                version: version.clone(),
+                serving: serving.clone(),
+            }),
+            (
+                State::Downloading { .. } | State::Verifying { .. } | State::Failed { .. },
+                Event::Done { version },
+            )
+            | (
+                State::Failed { .. },
+                Event::Loaded {
+                    version: Some(version),
+                },
+            ) => Some(State::Installed {
+                version: version.clone(),
+                update: None,
+            }),
+            (
+                State::Downloading { serving, .. } | State::Verifying { serving, .. },
+                Event::Fail { message },
+            ) => Some(State::Failed {
+                message: message.clone(),
+                serving: serving.clone(),
+            }),
+            (State::Failed { serving, .. }, Event::Start { version }) => Some(State::Downloading {
+                version: version.clone(),
+                received: 0,
+                total: None,
+                serving: serving.clone(),
+            }),
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.state = next;
         }
     }
 }
 
-pub(crate) type Machine = statig::blocking::StateMachine<Install>;
-
 pub(crate) fn machine() -> Machine {
-    Install.state_machine()
+    Machine {
+        state: State::Absent {},
+    }
 }
 
 pub(crate) fn view(state: &State) -> InstallState {
@@ -311,8 +327,8 @@ fn write_pointer(path: &Path, version: &str) -> Result<()> {
     fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
 }
 
-/// Makes `version` current, keeps the old current as previous and removes
-/// every other version. Call with the install lock held.
+/// Makes `version` current and keeps the old current as previous.
+/// Pruning belongs to the manager, which knows versions leased by live runs.
 pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result<()> {
     let dir = layout.engine_dir(engine);
     let current = layout.current(engine);
@@ -323,11 +339,29 @@ pub(crate) fn switch(layout: &Layout, engine: EngineId, version: &str) -> Result
         write_pointer(&dir.join("current"), version)?;
         tracing::info!(%engine, version, previous = current.as_deref(), "engine version switched");
     }
-    prune(layout, engine);
     Ok(())
 }
 
-fn prune(layout: &Layout, engine: EngineId) {
+/// One standard lock per engine; active use keeps all installed versions available.
+pub(crate) fn usage_lock(home: &Path) -> Result<fs::File> {
+    let dir = home.parent().context("engine home has no parent")?;
+    fs::create_dir_all(dir)?;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("usage.lock"))
+        .context("opening engine usage lock")
+}
+
+pub(crate) fn prune(layout: &Layout, engine: EngineId) {
+    let Ok(usage) = usage_lock(&layout.home(engine)) else {
+        return;
+    };
+    if fs2::FileExt::try_lock_exclusive(&usage).is_err() {
+        return;
+    }
     let keep = [layout.current(engine), layout.previous(engine)];
     let Ok(entries) = fs::read_dir(layout.versions(engine)) else {
         return;
@@ -641,6 +675,8 @@ pub(crate) async fn fetch(
             staging.clone(),
             layout.version_dir(engine, version),
         );
+        let switching = layout.clone();
+        let switching_version = version.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             unpack(artifact, &from, &to)?;
             if target.exists() {
@@ -648,11 +684,11 @@ pub(crate) async fn fetch(
                     .with_context(|| format!("removing {}", target.display()))?;
             }
             fs::rename(&to, &target)
-                .with_context(|| format!("moving {} into place", target.display()))
+                .with_context(|| format!("moving {} into place", target.display()))?;
+            switch(&switching, engine, &switching_version)
         })
         .await
-        .context("unpack task")??;
-        switch(layout, engine, version)
+        .context("unpack task")?
     }
     .await;
     let _ = fs::remove_file(&download);
@@ -728,7 +764,7 @@ fn verify(expected: &Expected, size: u64, digest: &[u8]) -> Result<()> {
                 size == *want,
                 "size {size} does not match the published {want}"
             );
-            let got: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            let got = hex::encode(digest);
             ensure!(
                 got == *hex,
                 "SHA-256 {got} does not match the published {hex}"
@@ -782,34 +818,6 @@ fn unpack(artifact: Artifact, download: &Path, dest: &Path) -> Result<()> {
                 }
             }
         }
-        Archive::Zip => {
-            let mut archive =
-                zip::ZipArchive::new(fs::File::open(download)?).context("reading the zip")?;
-            for index in 0..archive.len() {
-                let mut file = archive.by_index(index)?;
-                let path = file
-                    .enclosed_name()
-                    .with_context(|| format!("unsafe zip member {:?}", file.name()))?;
-                let Some(relative) = inside(&path, artifact.strip)? else {
-                    continue;
-                };
-                let to = dest.join(&relative);
-                if file.is_dir() {
-                    fs::create_dir_all(&to)?;
-                    continue;
-                }
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                io::copy(&mut file, &mut fs::File::create(&to)?)
-                    .with_context(|| format!("unpacking {}", relative.display()))?;
-                #[cfg(unix)]
-                if let Some(mode) = file.unix_mode() {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::set_permissions(&to, fs::Permissions::from_mode(mode & 0o777))?;
-                }
-            }
-        }
     }
     let executable = dest.join(artifact.entry);
     ensure!(
@@ -844,136 +852,16 @@ fn inside(path: &Path, strip: &str) -> Result<Option<PathBuf>> {
     Ok(Some(relative.to_path_buf()))
 }
 
-// ---------------------------------------------------------------- legacy import
-
-/// Brings engines installed by the old Forge (`<old data>/toolchain/<engine>/`)
-/// into this layout: the active version and the home, hard-linked where the
-/// filesystem allows. Engines that already have a `current` are left alone.
-pub(crate) async fn import_legacy(layout: &Layout, old_toolchain: &Path) -> Result<Vec<EngineId>> {
-    let mut imported = Vec::new();
-    for engine in EngineId::ALL {
-        let Some(artifact) = host_spec(engine).artifact else {
-            continue;
-        };
-        let old = old_toolchain.join(host_spec(engine).legacy_dir);
-        let Ok(state) = fs::read(old.join("state.json")) else {
-            continue;
-        };
-        let _lock = lock(layout, engine).await?;
-        if layout.current(engine).is_some() {
-            continue;
-        }
-        let state: serde_json::Value = serde_json::from_slice(&state)
-            .with_context(|| format!("parsing {}", old.join("state.json").display()))?;
-        let field = |name: &str| {
-            state
-                .pointer(&format!("/active/{name}"))
-                .and_then(serde_json::Value::as_str)
-        };
-        let (Some(directory), Some(version)) = (field("directory"), field("version")) else {
-            continue;
-        };
-        check_version(version)?;
-        let source = old.join("versions").join(directory);
-        if !source.join(artifact.entry).is_file() {
-            tracing::warn!(%engine, source = %source.display(), "old install has no {}", artifact.entry);
-            continue;
-        }
-        let (layout, version, old) = (layout.clone(), version.to_owned(), old.clone());
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let target = layout.version_dir(engine, &version);
-            if !target.exists() {
-                let staging = layout.versions(engine).join(format!(".staging-{version}"));
-                let _ = fs::remove_dir_all(&staging);
-                link_tree(&source, &staging)
-                    .with_context(|| format!("copying {}", source.display()))?;
-                fs::rename(&staging, &target)?;
-            }
-            let home = layout.home(engine);
-            if old.join("home").is_dir() && !home.exists() {
-                copy_home(&old.join("home"), &home)
-                    .with_context(|| format!("copying {}", old.join("home").display()))?;
-            }
-            switch(&layout, engine, &version)
-        })
-        .await
-        .context("import task")??;
-        tracing::info!(%engine, "imported the old install");
-        imported.push(engine);
-    }
-    Ok(imported)
-}
-
-/// Engines append to their session files and databases in place, so a
-/// hard-linked home would keep writing into the old Forge's files. Copy
-/// everything except toolchain caches, whose files are only ever replaced.
-fn copy_home(from: &Path, to: &Path) -> io::Result<()> {
-    const SHARED_CACHES: [&str; 4] = [".cargo", ".rustup", ".cache", ".npm"];
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        let shared = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| SHARED_CACHES.contains(&name));
-        if kind.is_dir() && shared {
-            link_tree(&source, &target)?;
-        } else if kind.is_dir() {
-            copy_tree(&source, &target)?;
-        } else if kind.is_symlink() {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
-        } else {
-            fs::copy(&source, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&source, &target)?;
-        } else if kind.is_symlink() {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
-        } else {
-            fs::copy(&source, &target)?;
-        }
-    }
-    Ok(())
-}
-
-fn link_tree(from: &Path, to: &Path) -> io::Result<()> {
-    fs::create_dir_all(to)?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            link_tree(&source, &target)?;
-        } else if kind.is_symlink() {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
-        } else if fs::hard_link(&source, &target).is_err() {
-            fs::copy(&source, &target)?;
-        }
-    }
-    Ok(())
-}
+#[cfg(feature = "legacy-import")]
+mod legacy;
+#[cfg(feature = "legacy-import")]
+pub(crate) use legacy::import_legacy;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Engines;
     use std::collections::HashMap;
-    use std::io::Write as _;
     use tokio::io::AsyncReadExt as _;
 
     /// Serves `files` over plain HTTP on localhost; returns the base URL.
@@ -1047,6 +935,37 @@ mod tests {
         names
     }
 
+    #[test]
+    fn an_independent_manager_cannot_prune_a_leased_binary() {
+        let data = tempfile::tempdir().unwrap();
+        let layout = Layout::new(data.path());
+        let engine = EngineId::Codex;
+        for version in ["0.150.0", "0.151.0", "0.152.0"] {
+            let binary = layout
+                .version_dir(engine, version)
+                .join(host_spec(engine).artifact.unwrap().entry);
+            fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            fs::write(binary, script(version)).unwrap();
+        }
+        switch(&layout, engine, "0.150.0").unwrap();
+        let forge = Engines::new(data.path());
+        let lease = forge.lease(engine).unwrap();
+        switch(&layout, engine, "0.151.0").unwrap();
+        switch(&layout, engine, "0.152.0").unwrap();
+        let cli_layout = Layout::new(data.path());
+        prune(&cli_layout, engine);
+        assert!(
+            lease.path().is_file(),
+            "another owner pruned the active binary"
+        );
+        drop(lease);
+        prune(&cli_layout, engine);
+        assert_eq!(
+            versions_on_disk(data.path(), engine),
+            ["0.151.0", "0.152.0"]
+        );
+    }
+
     #[tokio::test]
     async fn updates_swap_current_and_keep_one_previous() {
         let data = tempfile::tempdir().unwrap();
@@ -1081,7 +1000,11 @@ mod tests {
 
         let mut seen = Vec::new();
         while let Ok(status) = statuses.try_recv() {
-            seen.push(std::mem::discriminant(&status.install));
+            let install = match status {
+                crate::EngineChange::Full(status) => status.install,
+                crate::EngineChange::Install { install, .. } => install,
+            };
+            seen.push(std::mem::discriminant(&install));
         }
         for expected in [
             InstallState::Downloading {
@@ -1131,57 +1054,6 @@ mod tests {
         assert_eq!(
             Layout::new(data.path()).previous(engine).as_deref(),
             Some("0.152.0")
-        );
-    }
-
-    #[tokio::test]
-    async fn installs_from_a_zip() {
-        let data = tempfile::tempdir().unwrap();
-        let engine = EngineId::Grok;
-        let artifact = Artifact {
-            archive: Archive::Zip,
-            strip: "pkg/",
-            ..host_spec(engine).artifact.unwrap()
-        };
-        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
-        let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
-        zip.add_directory("pkg/lib/", options).unwrap();
-        zip.start_file("pkg/lib/helper.txt", options).unwrap();
-        zip.write_all(b"helper").unwrap();
-        zip.start_file(format!("pkg/{}", artifact.entry), options)
-            .unwrap();
-        zip.write_all(&script("1.0.60")).unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-        let hex = sha2::Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let size = bytes.len() as u64;
-        let base = serve(HashMap::from([("/grok.zip".to_owned(), bytes)])).await;
-
-        let engines = Engines::new(data.path());
-        let resolved = Resolved {
-            version: "1.0.60".into(),
-            url: format!("{base}/grok.zip"),
-            digest: Expected::Sha256 { hex, size },
-        };
-        engines
-            .install_resolved(engine, artifact, resolved)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            engines.status(engine).install,
-            InstallState::Installed {
-                version: "1.0.60".into(),
-                update: None
-            }
-        );
-        let binary = engines.binary(engine).unwrap();
-        assert!(fs::read_to_string(&binary).unwrap().contains("1.0.60"));
-        assert_eq!(
-            fs::read_to_string(binary.parent().unwrap().join("lib/helper.txt")).unwrap(),
-            "helper"
         );
     }
 
@@ -1264,6 +1136,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "legacy-import")]
     #[tokio::test]
     async fn imports_the_old_toolchain_layout() {
         let old = tempfile::tempdir().unwrap();
@@ -1309,5 +1182,99 @@ mod tests {
         );
         // Already imported: left alone.
         assert!(engines.import_legacy(old.path()).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{Event, State, machine};
+
+    #[test]
+    fn a_failed_replacement_keeps_the_serving_version_and_retry_replaces_it() {
+        let mut machine = machine();
+        machine.handle(&Event::Loaded {
+            version: Some("1".into()),
+        });
+        machine.handle(&Event::Start {
+            version: "2".into(),
+        });
+        // Disk probes and a stale second Start must not discard the active install.
+        machine.handle(&Event::Loaded { version: None });
+        machine.handle(&Event::Start {
+            version: "3".into(),
+        });
+        machine.handle(&Event::Progress {
+            received: 100,
+            total: Some(200),
+        });
+        assert_eq!(
+            machine.state(),
+            &State::Downloading {
+                version: "2".into(),
+                received: 100,
+                total: Some(200),
+                serving: Some("1".into()),
+            }
+        );
+        machine.handle(&Event::Downloaded);
+        machine.handle(&Event::Fail {
+            message: "checksum mismatch".into(),
+        });
+        assert_eq!(
+            machine.state(),
+            &State::Failed {
+                message: "checksum mismatch".into(),
+                serving: Some("1".into()),
+            }
+        );
+        machine.handle(&Event::Start {
+            version: "2".into(),
+        });
+        machine.handle(&Event::Done {
+            version: "2".into(),
+        });
+        assert_eq!(
+            machine.state(),
+            &State::Installed {
+                version: "2".into(),
+                update: None
+            }
+        );
+    }
+
+    #[test]
+    fn repeated_disk_or_completion_events_preserve_a_known_update() {
+        let mut machine = machine();
+        machine.handle(&Event::Loaded {
+            version: Some("1".into()),
+        });
+        machine.handle(&Event::UpdateAvailable {
+            version: "2".into(),
+        });
+        machine.handle(&Event::Done {
+            version: "1".into(),
+        });
+        machine.handle(&Event::Loaded {
+            version: Some("1".into()),
+        });
+        assert_eq!(
+            machine.state(),
+            &State::Installed {
+                version: "1".into(),
+                update: Some("2".into())
+            }
+        );
+        machine.handle(&Event::Loaded {
+            version: Some("2".into()),
+        });
+        assert_eq!(
+            machine.state(),
+            &State::Installed {
+                version: "2".into(),
+                update: None
+            }
+        );
+        machine.handle(&Event::Loaded { version: None });
+        assert_eq!(machine.state(), &State::Absent {});
     }
 }

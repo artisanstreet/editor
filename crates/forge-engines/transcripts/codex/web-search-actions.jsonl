@@ -1,0 +1,10 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "item/started", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "sparse", "query": "initial query", "action": null, "type": "webSearch"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "sparse", "query": "", "action": {"type": "other"}, "type": "webSearch"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "nested", "query": "   ", "action": {"type": "search", "query": null, "queries": ["first", "", "second"]}, "type": "webSearch"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "page", "query": "", "action": {"type": "openPage", "url": "https://example.test/page"}, "type": "webSearch"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "find", "query": "", "action": {"type": "findInPage", "url": null, "pattern": "needle"}, "type": "webSearch"}}}
+{"method": "error", "params": {"threadId": "root", "error": {"message": "Provider rejected the request"}, "willRetry": false}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "failed", "error": {"message": "Provider rejected the request"}}}}

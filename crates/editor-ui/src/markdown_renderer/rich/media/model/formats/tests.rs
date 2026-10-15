@@ -133,7 +133,7 @@ fn gltf_json(uri: Option<&str>, length: usize) -> String {
         "nodes": [{{"children": [1], "scale": [2, 2, 2]}}, {{"mesh": 0, "translation": [5, 0, 0]}}],
         "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}, "material": 0}}]}}],
         "materials": [{{"pbrMetallicRoughness": {{"baseColorFactor": [0.5, 0.25, 1, 1]}}}}],
-        "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"}}],
+        "accessors": [{{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]}}],
         "bufferViews": [{{"buffer": 0, "byteLength": {length}}}],
         "buffers": [{{"byteLength": {length}{uri}}}]}}"#
     )
@@ -160,7 +160,27 @@ fn glb(json: &str, binary: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(&u32::try_from(binary.len()).unwrap().to_le_bytes());
     bytes.extend_from_slice(b"BIN\0");
     bytes.extend_from_slice(binary);
+    let length = u32::try_from(bytes.len()).unwrap();
+    bytes[8..12].copy_from_slice(&length.to_le_bytes());
     bytes
+}
+
+#[test]
+fn malformed_glb_lengths_are_errors_without_library_underflow() {
+    let buffer = triangle_buffer();
+    let valid = glb(&gltf_json(None, buffer.len()), &buffer);
+    for length in [0u32, 1, 11, 12, u32::MAX] {
+        let mut bytes = valid.clone();
+        bytes[8..12].copy_from_slice(&length.to_le_bytes());
+        assert!(
+            parse(&bytes, Some(Format::Gltf), None)
+                .unwrap_err()
+                .contains("length")
+        );
+    }
+    for end in 4..12 {
+        assert!(parse(&valid[..end], Some(Format::Gltf), None).is_err());
+    }
 }
 
 #[test]
@@ -310,6 +330,9 @@ fn fbx_quad() -> Vec<u8> {
     fbx.node("GlobalSettings", &[], |w| {
         w.node("Properties70", &[], |w| {
             w.property("UpAxis", &[Value::Int(2)]);
+            // Historical authoring-axis metadata must not override the file's
+            // current geometry axes.
+            w.property("OriginalUpAxis", &[Value::Int(1)]);
         });
     });
     fbx.node("Objects", &[], |w| {
@@ -421,4 +444,38 @@ fn the_rasterizer_draws_the_model_on_a_transparent_frame() {
     // Seen from behind, the two-sided quad still draws.
     let behind = render(&parsed.mesh, &Camera::new(180.0, 0.0), &look, 64, 48, 1);
     assert_eq!(behind.pixels[(24 * 64 + 32) * 4 + 3], 255);
+}
+
+#[test]
+fn tiny_ply_headers_cannot_request_unbounded_empty_records() {
+    let bytes = b"ply\nformat ascii 1.0\nelement face 10000000\nend_header\n";
+    assert!(
+        parse(bytes, Some(Format::Ply), None)
+            .unwrap_err()
+            .contains("budget")
+    );
+}
+
+#[test]
+fn fbx_record_name_must_fit_inside_its_declared_end() {
+    let mut bytes = b"Kaydara FBX Binary  \0\x1a\0".to_vec();
+    bytes.extend_from_slice(&7400u32.to_le_bytes());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.push(1);
+    bytes.push(b'x');
+    assert!(parse(&bytes, Some(Format::Fbx), None).is_err());
+}
+
+#[test]
+fn renderer_capability_keeps_only_the_needed_geometry_representation() {
+    let gpu = super::parse_for_renderer(QUAD_OBJ.as_bytes(), None, None, true).unwrap();
+    assert_eq!(gpu.triangles, 2);
+    assert!(gpu.gpu.is_some());
+    assert!(gpu.mesh.positions.is_empty() && gpu.mesh.normals.is_empty());
+    let cpu = super::parse_for_renderer(QUAD_OBJ.as_bytes(), None, None, false).unwrap();
+    assert_eq!(cpu.triangles, 2);
+    assert!(cpu.gpu.is_none());
+    assert_eq!(cpu.mesh.triangles(), 2);
 }

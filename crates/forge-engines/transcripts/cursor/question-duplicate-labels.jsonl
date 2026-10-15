@@ -1,0 +1,4 @@
+{"dir": "note", "text": "synthesized from the ACP schema: shapes as Cursor sends them, values made up; two choices share a label"}
+{"dir": "out", "line": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s", "prompt": [{"type": "text", "text": "go"}]}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "id": 7, "method": "cursor/ask_question", "params": {"toolCallId": "question", "questions": [{"id": "q", "prompt": "Choose", "options": [{"id": "first", "label": "Same"}, {"id": "second", "label": "Same"}]}]}}}
+{"dir": "answer", "key": "question", "answer": {"type": "question", "answers": [{"kind": "choices", "ids": ["second"]}]}}

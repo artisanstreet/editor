@@ -1,9 +1,6 @@
-//! The Marketplace (master's `marketplace_screen`): every skill the active
-//! host's Forge keeps in the engines, the skills engines have on their own,
-//! and the global prompt.
-//!
-//! The screen renders Forge data and sends the user's choices to Forge;
-//! nothing here decides what an engine holds.
+//! Skills and the global prompt from the active Forge.
+//! This screen renders the shared HostData projections and sends user choices
+//! to Forge, which owns installation and adoption.
 
 #![forbid(unsafe_code)]
 
@@ -12,133 +9,137 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-use artisan_api::{CatalogSkill, GlobalPrompt};
-use editor_core::{Core, CoreEvent, HostId, Screen};
-use editor_ui::theme::{ArtisanTheme, ThemeMode};
-use gpui::{Context, Entity, FocusHandle, Subscription};
-use std::collections::BTreeSet;
+use artisan_api::SkillAction;
+use editor_core::{Core, CoreEvent, HostEvent, HostId, Screen};
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme};
+use gpui::{Context, Entity, ListAlignment, ListState, Subscription, px};
+use std::sync::Arc;
 
-/// Root selector of the Marketplace surface.
 pub const MARKETPLACE_SCREEN_SELECTOR: &str = "route-marketplace";
 
-/// The Marketplace surface.
 pub struct Marketplace {
     core: Entity<Core>,
     theme: ArtisanTheme,
-    focus: FocusHandle,
-    /// The host the catalog was listed for.
     host: Option<HostId>,
-    /// The host's skill catalog once Forge answered, or why it couldn't.
-    catalog: Option<Result<Vec<CatalogSkill>, String>>,
-    /// The global prompt and its state per engine, once Forge answered.
-    prompt: Option<GlobalPrompt>,
-    /// Skills with a change in flight; their controls are disabled.
-    pending: BTreeSet<String>,
-    /// The last refused change, shown above the sections.
+    generation: u64,
+    catalog: Option<Arc<Vec<artisan_api::CatalogSkill>>>,
+    entries: Vec<render::Entry>,
+    list: ListState,
+    pending: Option<String>,
     notice: Option<String>,
-    /// Whether the Marketplace was on screen at the last core change.
     shown: bool,
+    _host: Option<Subscription>,
     _core: Subscription,
 }
 
 impl Marketplace {
     pub fn new(core: Entity<Core>, cx: &mut Context<Self>) -> Self {
-        // Opening the Marketplace lists the skills again: a folder added on
-        // the host shows the next time it opens.
         let subscription = cx.subscribe(&core, |this, core, event: &CoreEvent, cx| {
-            let shown = matches!(core.read(cx).screen(), Screen::Marketplace);
-            if matches!(event, CoreEvent::ScreenChanged | CoreEvent::HostsChanged)
-                && shown
-                && !this.shown
-            {
-                this.host = None;
+            this.shown = matches!(core.read(cx).screen(), Screen::Marketplace);
+            if this.shown && matches!(event, CoreEvent::ScreenChanged | CoreEvent::HostsChanged) {
+                this.sync(cx);
+                cx.notify();
+            } else if !this.shown {
+                this._host = None;
             }
-            this.shown = shown;
-            cx.notify();
         });
         let shown = matches!(core.read(cx).screen(), Screen::Marketplace);
-        Self {
+        let mut page = Self {
             core,
-            theme: ArtisanTheme::for_mode(ThemeMode::Dark),
-            focus: cx.focus_handle(),
+            theme: *cx.theme(),
             host: None,
+            generation: 0,
             catalog: None,
-            prompt: None,
-            pending: BTreeSet::new(),
+            entries: vec![
+                render::Entry::Header,
+                render::Entry::Prompt,
+                render::Entry::Notices,
+            ],
+            list: ListState::new(3, ListAlignment::Top, px(256.0)),
+            pending: None,
             notice: None,
             shown,
+            _host: None,
             _core: subscription,
+        };
+        if shown {
+            page.sync(cx);
         }
+        page
     }
 
-    /// Lists the active host's catalog and prompt when the host changes.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let host = self.core.read(cx).active_host().cloned();
-        let id = host.as_ref().map(|host| host.read(cx).id.clone());
-        if self.host == id {
+        if !self.shown {
             return;
         }
-        self.host.clone_from(&id);
-        self.catalog = None;
-        self.prompt = None;
-        self.pending.clear();
-        self.notice = None;
+        let host = self.core.read(cx).active_host().cloned();
+        let id = host.as_ref().map(|host| host.read(cx).id.clone());
+        if self.host != id {
+            self.host = id;
+            self.generation += 1;
+            self.catalog = None;
+            self.entries.truncate(3);
+            self.list.reset(3);
+            self.pending = None;
+            self.notice = None;
+            self._host = None;
+        }
         let Some(host) = host else {
             return;
         };
-        let client = host.read(cx).client.clone();
-        cx.spawn(async move |this, cx| {
-            let catalog = client
-                .skill_catalog()
-                .await
-                .map_err(|error| format!("Couldn't list the skills: {error:#}"));
-            let prompt = client.global_prompt().await;
-            let _ = this.update(cx, |this, cx| {
-                if this.host == id {
-                    this.catalog = Some(catalog);
-                    match prompt {
-                        Ok(prompt) => this.prompt = Some(prompt),
-                        Err(error) => {
-                            this.notice =
-                                Some(format!("Couldn't read the global prompt: {error:#}"));
-                        }
-                    }
+        if self._host.is_none() {
+            self._host = Some(cx.subscribe(&host, |this, _, event: &HostEvent, cx| {
+                if matches!(event, HostEvent::Changed | HostEvent::Reset) {
+                    this.sync(cx);
                     cx.notify();
                 }
-            });
-        })
-        .detach();
+            }));
+        }
+        host.update(cx, |host, cx| {
+            host.load_skill_catalog(false, cx);
+            host.load_prompt(false, cx);
+        });
+        let catalog = host.read(cx).skill_catalog.clone();
+        if catalog.as_ref().map(Arc::as_ptr) != self.catalog.as_ref().map(Arc::as_ptr) {
+            self.entries =
+                render::entries(catalog.as_deref().map(Vec::as_slice).unwrap_or_default());
+            self.catalog = catalog;
+            self.list.reset(self.entries.len());
+        } else {
+            // Header/prompt/request states can resize without changing the skill catalog.
+            self.list.splice(0..3, 3);
+        }
     }
 
-    /// Turns a skill on or off (`enable`/`disable`) or adopts one (`adopt`)
-    /// and shows the catalog Forge answers with.
-    fn skill_action(&mut self, id: String, action: &'static str, cx: &mut Context<Self>) {
+    fn skill_action(&mut self, id: String, action: SkillAction, cx: &mut Context<Self>) {
+        if self.pending.is_some() {
+            return;
+        }
         let Some(host) = self.core.read(cx).active_host().cloned() else {
             return;
         };
-        let host_id = host.read(cx).id.clone();
+        let generation = self.generation;
         let client = host.read(cx).client.clone();
-        self.pending.insert(id.clone());
+        self.pending = Some(id.clone());
         self.notice = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = client.skill_action(&id, action).await;
             let _ = this.update(cx, |this, cx| {
-                this.pending.remove(&id);
-                if this.host.as_ref() != Some(&host_id) {
+                if this.generation != generation {
                     return;
                 }
+                this.pending = None;
                 match result {
-                    Ok(catalog) => this.catalog = Some(Ok(catalog)),
+                    Ok(_) => host.update(cx, |host, _| {
+                        host.invalidate_catalog();
+                    }),
                     Err(error) => {
-                        let verb = match action {
-                            "adopt" => "adopt",
-                            "enable" => "turn on",
-                            _ => "turn off",
-                        };
-                        this.notice = Some(format!("Couldn't {verb} the skill: {error:#}"));
+                        this.notice =
+                            Some(format!("Couldn't {} the skill: {error:#}", action.as_str()))
                     }
                 }
+                this.sync(cx);
                 cx.notify();
             });
         })

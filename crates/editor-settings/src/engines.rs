@@ -1,15 +1,14 @@
-//! One engine's page (`engine.svelte`, the previous Editor's
-//! `render_live_engine`): availability, installation, account and models.
-//! Progress arrives as `Engine` events in [`HostData::engines`]; nothing
-//! here polls. Usage lives in the profile menu, as before.
+//! Engine capabilities, installation, sign-in and model defaults reported by Forge.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
-use artisan_api::{EngineConfig, EngineId, EngineStatus, InstallState, Integrity, SignInState};
-use editor_core::HostData;
-use editor_ui::badge::{BadgeStyle, outline_badge};
+use artisan_api::{
+    EngineCommand, EngineConfig, EngineId, EngineStatus, InstallState, Integrity, SignInState,
+};
+use editor_core::{HostData, HostId};
+use editor_ui::badge::Badge;
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{PageBlock, card, error_text, header, row, section_shell};
 use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -17,13 +16,14 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 const DEFAULT_CONFIG_KEY: &str = "default_engine_config";
 
 pub(crate) struct EnginesForm {
-    /// The pasted sign-in code (Claude).
+    host: Option<HostId>,
+    generation: u64,
+    /// Pasted sign-in responses for engines advertising that capability.
     login_codes: HashMap<EngineId, Entity<TextEditor>>,
     /// Engines with a request in flight.
     busy: BTreeSet<EngineId>,
@@ -33,20 +33,33 @@ pub(crate) struct EnginesForm {
 }
 
 impl EnginesForm {
-    pub(crate) fn new(cx: &mut Context<Settings>) -> Self {
-        let field = |placeholder: &'static str, cx: &mut Context<Settings>| {
-            cx.new(|cx| TextEditor::new("", placeholder, cx).single_line())
-        };
-        let mut login_codes = HashMap::new();
-        for engine in EngineId::ALL {
-            login_codes.insert(engine, field("Paste the code", cx));
-        }
+    pub(crate) fn new(_cx: &mut Context<Settings>) -> Self {
         Self {
-            login_codes,
+            host: None,
+            generation: 0,
+            login_codes: HashMap::new(),
             busy: BTreeSet::new(),
             errors: HashMap::new(),
             choosing_version: HashSet::new(),
         }
+    }
+
+    pub(crate) fn sync(&mut self, host: Option<HostId>) {
+        if self.host == host {
+            return;
+        }
+        self.host = host;
+        self.generation += 1;
+        self.login_codes.clear();
+        self.busy.clear();
+        self.errors.clear();
+        self.choosing_version.clear();
+    }
+
+    pub(crate) fn prepare(&mut self, engine: EngineId, cx: &mut Context<Settings>) {
+        self.login_codes.entry(engine).or_insert_with(|| {
+            cx.new(|cx| TextEditor::new("", "Paste the code", cx).single_line())
+        });
     }
 
     pub(crate) fn clear_errors(&mut self) {
@@ -55,31 +68,37 @@ impl EnginesForm {
 }
 
 impl Settings {
-    fn engine_action(
-        &mut self,
-        engine: EngineId,
-        action: &'static str,
-        body: Value,
-        cx: &mut Context<Self>,
-    ) {
+    fn engine_action(&mut self, engine: EngineId, action: EngineCommand, cx: &mut Context<Self>) {
         let Some(host) = self.selected_host(cx) else {
             return;
         };
+        if self.engines.busy.contains(&engine) {
+            return;
+        }
+        let host_id = host.read(cx).id.clone();
+        let generation = self.engines.generation;
         let client = host.read(cx).client.clone();
         self.engines.errors.remove(&engine);
         self.engines.busy.insert(engine);
         cx.notify();
+        let action_label = action.as_str();
+        let action_verb = verb(&action);
+        #[cfg(test)]
+        let completion_gate = self.completion_gate.clone();
         cx.spawn(async move |this, cx| {
-            let result = client.engine_action(engine, action, body).await;
+            let result = client.engine_action(engine, &action).await;
+            #[cfg(test)]
+            if let Some(gate) = completion_gate { gate.wait().await; }
             let _ = this.update(cx, |this, cx| {
+                if this.engines.host.as_ref() != Some(&host_id) || this.engines.generation != generation { return; }
                 this.engines.busy.remove(&engine);
                 if let Err(error) = result {
-                    tracing::warn!(%engine, action, "engine action failed: {error:#}");
+                    tracing::warn!(%engine, action = action_label, "engine action failed: {error:#}");
                     this.engines.errors.insert(
                         engine,
                         format!(
                             "Couldn't {} {}: {error:#}",
-                            verb(action),
+                            action_verb,
                             page::engine_label(engine)
                         ),
                     );
@@ -104,12 +123,18 @@ impl Settings {
             return;
         }
         editor.update(cx, |editor, cx| editor.set_text("", cx));
-        self.engine_action(engine, "login-code", json!({ "code": code }), cx);
+        self.engine_action(engine, EngineCommand::LoginCode { code }, cx);
     }
 
     fn use_version(&mut self, engine: EngineId, version: &str, cx: &mut Context<Self>) {
         self.engines.choosing_version.remove(&engine);
-        self.engine_action(engine, "use", json!({ "version": version }), cx);
+        self.engine_action(
+            engine,
+            EngineCommand::Use {
+                version: version.to_owned(),
+            },
+            cx,
+        );
     }
 
     /// Opens or closes "Choose version"; opening asks Forge for the
@@ -120,7 +145,7 @@ impl Settings {
             return;
         }
         self.engines.choosing_version.insert(engine);
-        self.engine_action(engine, "versions", json!({}), cx);
+        self.engine_action(engine, EngineCommand::Versions {}, cx);
     }
 
     /// Makes `model` the model new threads on this host start with.
@@ -131,52 +156,49 @@ impl Settings {
         model: String,
         cx: &mut Context<Self>,
     ) {
+        if self.engines.busy.contains(&engine) {
+            return;
+        }
         let data = host.read(cx);
-        let mut config = data
-            .setting(DEFAULT_CONFIG_KEY)
-            .and_then(|value| serde_json::from_value::<EngineConfig>(value.clone()).ok())
-            .filter(|config| config.engine == engine)
-            .unwrap_or_else(|| EngineConfig::new(engine));
-        config.model = Some(model);
-        config.effort = None;
-        let client = data.client.clone();
-        let value = match serde_json::to_value(&config) {
-            Ok(value) => value,
-            Err(error) => {
-                self.engines.errors.insert(
-                    engine,
-                    format!("Couldn't encode the default model: {error}"),
-                );
-                return;
-            }
-        };
+        let (client, host_id) = (data.client.clone(), data.id.clone());
+        let generation = self.engines.generation;
+        self.engines.busy.insert(engine);
+        self.engines.errors.remove(&engine);
+        cx.notify();
         cx.spawn(async move |this, cx| {
-            if let Err(error) = client.set_setting(DEFAULT_CONFIG_KEY, &value).await {
-                let _ = this.update(cx, |this, cx| {
+            let result = client.set_default_model(engine, &model).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.engines.host.as_ref() != Some(&host_id)
+                    || this.engines.generation != generation
+                {
+                    return;
+                }
+                this.engines.busy.remove(&engine);
+                if let Err(error) = result {
                     this.engines.errors.insert(
                         engine,
                         format!("Couldn't save the default model: {error:#}"),
                     );
-                    cx.notify();
-                });
-            }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 }
 
-fn verb(action: &str) -> &'static str {
+fn verb(action: &EngineCommand) -> &'static str {
     match action {
-        "install" => "install",
-        "update" => "update",
-        "rollback" => "roll back",
-        "use" => "switch the version of",
-        "versions" => "list the published versions of",
-        "login" => "start signing in to",
-        "login-code" => "finish signing in to",
-        "cancel-login" => "cancel signing in to",
-        "logout" => "sign out of",
-        _ => "refresh",
+        EngineCommand::Install {} => "install",
+        EngineCommand::Update {} => "update",
+        EngineCommand::Rollback {} => "roll back",
+        EngineCommand::Use { .. } => "switch the version of",
+        EngineCommand::Versions {} => "list the published versions of",
+        EngineCommand::Login {} => "start signing in to",
+        EngineCommand::LoginCode { .. } => "finish signing in to",
+        EngineCommand::CancelLogin {} => "cancel signing in to",
+        EngineCommand::Logout {} => "sign out of",
+        EngineCommand::Refresh {} => "refresh",
     }
 }
 
@@ -227,8 +249,8 @@ pub(crate) fn render(
                 Some(
                     div()
                         .flex_shrink_0()
-                        .child(outline_badge(
-                            BadgeStyle::resolve(*theme),
+                        .child(Badge::new(
+                            *theme,
                             availability_badge(&status),
                         ))
                         .into_any_element(),
@@ -238,18 +260,14 @@ pub(crate) fn render(
         ],
     );
     page = page
-        .child(section_shell(
-            theme,
-            "availability",
-            "Availability",
-            None,
-            None,
-            availability,
-        ))
+        .child(
+            section_shell(theme, "Availability", None, None, availability)
+                .debug_selector("settings-section-availability"),
+        )
         .child(render_installation(settings, &status, busy, theme, cx))
         .child(render_account(settings, &status, busy, theme, cx));
     if let Some(error) = settings.engines.errors.get(&engine) {
-        page = page.child(error_text(theme, error.clone()).mt(px(12.0)));
+        page = page.child(div().mt(px(12.0)).child(error_text(theme, error.clone())));
     }
     page.child(render_models(
         host,
@@ -263,11 +281,6 @@ pub(crate) fn render(
 /// The badge beside Availability.
 fn availability_badge(status: &EngineStatus) -> &'static str {
     match (&status.install, &status.sign_in) {
-        (InstallState::Installed { .. }, SignInState::SignedIn { .. })
-            if status.engine == EngineId::Cursor =>
-        {
-            "Signed in"
-        }
         (InstallState::Installed { .. }, SignInState::SignedIn { .. }) => "Available",
         (InstallState::Installed { .. }, SignInState::SignedOut | SignInState::Failed { .. }) => {
             "Sign-in required"
@@ -286,23 +299,12 @@ fn text_action(
     on_click: impl Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
     let id = id.into();
-    let selector = id.to_string();
-    let action = div()
-        .id(id)
-        .debug_selector(move || selector.clone())
-        .p(px(4.0))
-        .text_sm()
-        .child(label.into());
-    if disabled {
-        action
-            .text_color(theme.colors.muted_foreground.to_paint())
-            .into_any_element()
-    } else {
-        action
-            .cursor_pointer()
-            .on_click(on_click)
-            .into_any_element()
-    }
+    editor_ui::button::Button::text(id.clone(), *theme, label)
+        .variant(ButtonVariant::Ghost)
+        .disabled(disabled)
+        .debug_selector(id)
+        .on_activate(on_click)
+        .into_any_element()
 }
 
 /// The Refresh action of Installation and Account.
@@ -318,19 +320,15 @@ fn refresh_action(
         if busy { "Checking\u{2026}" } else { "Refresh" },
         busy,
         theme,
-        cx.listener(move |this, _, _, cx| this.engine_action(engine, "refresh", json!({}), cx)),
+        cx.listener(move |this, _, _, cx| {
+            this.engine_action(engine, EngineCommand::Refresh {}, cx)
+        }),
     )
 }
 
 /// A band of muted copy inside a card.
 fn note(theme: &ArtisanTheme, text: impl Into<SharedString>) -> AnyElement {
-    div()
-        .w_full()
-        .py(px(12.0))
-        .text_sm()
-        .text_color(theme.colors.muted_foreground.to_paint())
-        .child(text.into())
-        .into_any_element()
+    editor_ui::page::note(theme, text).into_any_element()
 }
 
 /// The first band: the state in one foreground sentence.
@@ -387,7 +385,7 @@ fn render_installation(
     busy: bool,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let label = page::engine_label(engine);
     let mut blocks = vec![state_band(
@@ -407,7 +405,7 @@ fn render_installation(
                 ButtonVariant::Default,
                 busy,
                 cx.listener(move |this, _, _, cx| {
-                    this.engine_action(engine, "install", json!({}), cx);
+                    this.engine_action(engine, EngineCommand::Install {}, cx);
                 }),
             );
             blocks.push(
@@ -432,7 +430,7 @@ fn render_installation(
                     busy,
                     theme,
                     cx.listener(move |this, _, _, cx| {
-                        this.engine_action(engine, "update", json!({}), cx);
+                        this.engine_action(engine, EngineCommand::Update {}, cx);
                     }),
                 ));
             }
@@ -443,7 +441,7 @@ fn render_installation(
                     busy,
                     theme,
                     cx.listener(move |this, _, _, cx| {
-                        this.engine_action(engine, "rollback", json!({}), cx);
+                        this.engine_action(engine, EngineCommand::Rollback {}, cx);
                     }),
                 ))
                 .child(text_action(
@@ -492,7 +490,6 @@ fn render_installation(
     }
     section_shell(
         theme,
-        "installation",
         "Installation",
         None,
         Some(refresh_action(
@@ -504,6 +501,7 @@ fn render_installation(
         )),
         card(theme, blocks),
     )
+    .debug_selector("settings-section-installation")
 }
 
 /// How this engine's downloads are verified, the weaker guarantee said
@@ -536,7 +534,7 @@ fn version_list(
         .gap(px(2.0))
         .py(px(12.0))
         .debug_selector(|| "settings-engine-version-list".to_owned());
-    for entry in &status.versions {
+    for entry in status.versions.iter() {
         let mut marks = Vec::new();
         if entry.current {
             marks.push("current");
@@ -602,7 +600,7 @@ fn render_account(
     busy: bool,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let mut blocks = vec![state_band(
         theme,
@@ -626,7 +624,7 @@ fn render_account(
                         ButtonVariant::Default,
                         busy,
                         cx.listener(move |this, _, _, cx| {
-                            this.engine_action(engine, "login", json!({}), cx);
+                            this.engine_action(engine, EngineCommand::Login {}, cx);
                         }),
                     )),
                 )
@@ -645,14 +643,18 @@ fn render_account(
                         ButtonVariant::Outline,
                         busy,
                         cx.listener(move |this, _, _, cx| {
-                            this.engine_action(engine, "logout", json!({}), cx);
+                            this.engine_action(engine, EngineCommand::Logout {}, cx);
                         }),
                     )),
                 )
                 .into_any_element(),
             );
         }
-        SignInState::LoggingIn { url, code } => {
+        SignInState::LoggingIn {
+            url,
+            code,
+            accepts_code,
+        } => {
             let mut block = div().flex().flex_col().gap(px(8.0)).py(px(14.0));
             if let Some(url) = url {
                 let link = url.clone();
@@ -695,9 +697,8 @@ fn render_account(
                         .child(div().font_weight(FontWeight::SEMIBOLD).child(code.clone())),
                 );
             }
-            // Claude shows a code on the page that has to come back here.
-            if engine == EngineId::Claude
-                && let Some(field) = settings.engines.login_codes.get(&engine).cloned()
+            // The adapter declares whether this login accepts a returned code.
+            if *accepts_code && let Some(field) = settings.engines.login_codes.get(&engine).cloned()
             {
                 block = block.child(
                     div()
@@ -721,7 +722,7 @@ fn render_account(
                 ButtonVariant::Ghost,
                 false,
                 cx.listener(move |this, _, _, cx| {
-                    this.engine_action(engine, "cancel-login", json!({}), cx);
+                    this.engine_action(engine, EngineCommand::CancelLogin {}, cx);
                 }),
             )));
             blocks.push(block.into_any_element());
@@ -730,7 +731,6 @@ fn render_account(
     }
     section_shell(
         theme,
-        "account",
         "Account",
         None,
         Some(refresh_action(
@@ -742,6 +742,7 @@ fn render_account(
         )),
         card(theme, blocks),
     )
+    .debug_selector("settings-section-account")
 }
 
 fn render_models(
@@ -750,7 +751,7 @@ fn render_models(
     default_model: Option<&str>,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let label = page::engine_label(engine);
     let mut blocks = Vec::new();
@@ -771,12 +772,15 @@ fn render_models(
                 .into_any_element(),
         );
     } else {
-        for model in &status.models {
+        for model in status.models.iter() {
             let is_default = default_model == Some(model.id.as_str());
             let selector = format!("settings-engine-model-{}", model.id);
             let mut model_row = div()
                 .id(SharedString::from(selector.clone()))
                 .debug_selector(move || selector.clone())
+                .role(gpui::Role::Button)
+                .aria_label(model.id.clone())
+                .aria_selected(is_default)
                 .w_full()
                 .flex()
                 .flex_row()
@@ -804,19 +808,17 @@ fn render_models(
                         ),
                 );
             if is_default {
-                model_row = model_row.child(
-                    div()
-                        .flex_shrink_0()
-                        .child(outline_badge(BadgeStyle::resolve(*theme), "Default")),
-                );
+                model_row =
+                    model_row.child(div().flex_shrink_0().child(Badge::new(*theme, "Default")));
             } else {
                 let (host, id) = (host.clone(), model.id.clone());
-                model_row =
-                    model_row
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_default_model(&host, engine, id.clone(), cx);
-                        }));
+                model_row = model_row
+                    .focusable()
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_default_model(&host, engine, id.clone(), cx);
+                    }));
             }
             blocks.push(model_row.into_any_element());
         }
@@ -832,5 +834,51 @@ fn render_models(
                 .into_any_element(),
         );
     }
-    section_shell(theme, "models", "Models", None, None, card(theme, blocks))
+    section_shell(theme, "Models", None, None, card(theme, blocks))
+        .debug_selector("settings-section-models")
+}
+
+#[cfg(test)]
+mod delayed_action_tests {
+    use super::*;
+    use crate::tests::{CompletionGate, SettingsFixture, finish_gate, wait_gate};
+    use gpui::TestAppContext;
+    #[gpui::test]
+    fn old_engine_failure_cannot_clear_new_hosts_busy_or_error(cx: &mut TestAppContext) {
+        let fixture = SettingsFixture::new(cx);
+        let (settings, cx) = fixture.open(cx, editor_core::SettingsPage::Engines);
+        let gate = CompletionGate::new();
+        settings.update(cx, |settings, cx| {
+            settings.completion_gate = Some(gate.clone());
+            settings.engine_action(
+                EngineId::Claude,
+                EngineCommand::Use {
+                    version: "missing-test-version".into(),
+                },
+                cx,
+            );
+        });
+        wait_gate(cx, &gate);
+        fixture.select(1, editor_core::SettingsPage::Engines, cx);
+        settings.update(cx, |settings, _| {
+            settings.engines.busy.insert(EngineId::Claude);
+            settings
+                .engines
+                .errors
+                .insert(EngineId::Claude, "B owns this error".into());
+        });
+        finish_gate(cx, &gate);
+        settings.read_with(cx, |settings, _| {
+            assert_eq!(settings.engines.host.as_ref(), Some(&fixture.hosts[1]));
+            assert!(settings.engines.busy.contains(&EngineId::Claude));
+            assert_eq!(
+                settings
+                    .engines
+                    .errors
+                    .get(&EngineId::Claude)
+                    .map(String::as_str),
+                Some("B owns this error")
+            );
+        });
+    }
 }

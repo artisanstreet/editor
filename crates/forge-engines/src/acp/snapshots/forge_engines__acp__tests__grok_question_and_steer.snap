@@ -1,5 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 124
 expression: "replay(Profile::Grok, \"question-steer\")"
 ---
 [
@@ -29,34 +30,47 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             status: AwaitingUser,
             kind: Question {
                 blocking: false,
-                questions: [
-                    Question {
-                        id: "colour",
-                        header: Some(
-                            "Colour",
-                        ),
-                        text: "Colour",
-                        multi_select: false,
-                        options: [
-                            QuestionOption {
-                                label: "red",
-                                description: None,
-                            },
-                            QuestionOption {
-                                label: "blue",
-                                description: None,
-                            },
-                        ],
-                    },
-                    Question {
-                        id: "notes",
-                        header: None,
-                        text: "Anything else?",
-                        multi_select: false,
-                        options: [],
-                    },
-                ],
+                questions: Inline(
+                    [
+                        Question {
+                            id: "colour",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Colour",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "notes",
+                            header: None,
+                            text: Inline(
+                                "Anything else?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                    ],
+                ),
                 answers: None,
+                answer_text: None,
             },
         },
     ),
@@ -66,16 +80,22 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             parent: None,
             status: Running,
             kind: Plan {
-                steps: [
-                    PlanStep {
-                        text: "Ask for the colour",
-                        status: Done,
-                    },
-                    PlanStep {
-                        text: "Write notes.txt",
-                        status: InProgress,
-                    },
-                ],
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Ask for the colour",
+                            ),
+                            status: Done,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Write notes.txt",
+                            ),
+                            status: InProgress,
+                        },
+                    ],
+                ),
                 proposal: None,
                 approval: None,
             },
@@ -88,43 +108,62 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             status: Done,
             kind: Question {
                 blocking: false,
-                questions: [
-                    Question {
-                        id: "colour",
-                        header: Some(
-                            "Colour",
-                        ),
-                        text: "Colour",
-                        multi_select: false,
-                        options: [
-                            QuestionOption {
-                                label: "red",
-                                description: None,
-                            },
-                            QuestionOption {
-                                label: "blue",
-                                description: None,
-                            },
-                        ],
-                    },
-                    Question {
-                        id: "notes",
-                        header: None,
-                        text: "Anything else?",
-                        multi_select: false,
-                        options: [],
-                    },
-                ],
-                answers: Some(
+                questions: Inline(
                     [
-                        Some(
-                            [
-                                "blue",
-                            ],
-                        ),
-                        None,
+                        Question {
+                            id: "colour",
+                            header: Some(
+                                "Colour",
+                            ),
+                            text: Inline(
+                                "Colour",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "red",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "notes",
+                            header: None,
+                            text: Inline(
+                                "Anything else?",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
                     ],
                 ),
+                answers: Some(
+                    Inline(
+                        [
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-1",
+                                        ],
+                                    ),
+                                },
+                            ),
+                            None,
+                        ],
+                    ),
+                ),
+                answer_text: None,
             },
         },
     ),
@@ -137,7 +176,9 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -157,7 +198,9 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Writing the file now.",
+                text: Inline(
+                    "Writing the file now.",
+                ),
                 phase: Commentary,
             },
         },
@@ -169,15 +212,19 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             status: Running,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Add,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Add,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Write notes.txt",
@@ -195,15 +242,19 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             status: AwaitingUser,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Add,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Add,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Write notes.txt",
@@ -231,15 +282,19 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             status: Cancelled,
             kind: Tool {
                 tool: Edit {
-                    changes: [
-                        FileChange {
-                            path: "/tmp/scratch/notes.txt",
-                            op: Add,
-                            diff: Some(
-                                "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
-                            ),
-                        },
-                    ],
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Add,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
                 },
                 title: Some(
                     "Write notes.txt",
@@ -278,7 +333,9 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             parent: None,
             status: Running,
             kind: AssistantMessage {
-                text: "",
+                text: Inline(
+                    "",
+                ),
                 phase: Commentary,
             },
         },
@@ -298,7 +355,9 @@ expression: "replay(Profile::Grok, \"question-steer\")"
             parent: None,
             status: Done,
             kind: AssistantMessage {
-                text: "Red it is.",
+                text: Inline(
+                    "Red it is.",
+                ),
                 phase: Final,
             },
         },

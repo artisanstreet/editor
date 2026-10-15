@@ -1,8 +1,9 @@
 //! App-wide playback of local audio files linked in chat transcripts.
 //!
 //! One [`Player`] owns the app's single audio output and plays one track at a
-//! time. A track is decoded whole into memory on a background thread (see
-//! [`decode`]), then streamed to the platform output: `PulseAudio`'s native
+//! time. A maintained decoder feeds a bounded PCM queue on a background thread,
+//! so playback starts after one chunk and seeks never retain the full track.
+//! Platform output remains `PulseAudio`'s native
 //! protocol on Linux and the BSDs (`PipeWire` and `WSLg` serve it too), `cpal`
 //! on Windows and macOS.
 
@@ -10,6 +11,7 @@ mod decode;
 mod mix;
 mod output;
 mod state;
+mod stream;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -51,30 +53,32 @@ impl Player {
     /// Stops whatever plays, then decodes `path` on a background thread and plays it from the start.
     pub fn play(&self, path: &Path) {
         let path = path.to_path_buf();
-        self.start(path.clone(), move || decode::decode(&path));
+        self.start(path.clone(), move || decode::StreamDecoder::open(&path));
     }
 
     /// Stops whatever plays, then decodes `bytes`, an encoded audio file held
     /// in memory, and plays it from the start. `track` identifies it in
     /// [`Snapshot::track`] and hints its format by its extension.
     pub fn play_bytes(&self, track: &Path, bytes: Arc<[u8]>) {
-        let name = track.to_path_buf();
         self.start(track.to_path_buf(), move || {
-            decode::decode_bytes(&name, bytes)
+            decode::StreamDecoder::bytes(bytes)
         });
     }
 
     fn start(
         &self,
         track: PathBuf,
-        decode: impl FnOnce() -> Result<decode::Audio, String> + Send + 'static,
+        decode: impl FnOnce() -> Result<decode::StreamDecoder, String> + Send + 'static,
     ) {
         let shared = Arc::clone(&self.owner.shared);
         let generation = shared.lock().begin(track);
         let decoder_shared = Arc::clone(&shared);
         let spawned = thread::Builder::new()
             .name("artisan-audio-decode".to_owned())
-            .spawn(move || load(&decoder_shared, generation, decode()));
+            .spawn(move || match decode() {
+                Ok(decoder) => stream::play(decoder_shared, generation, decoder),
+                Err(error) => decoder_shared.lock().fail(generation, error),
+            });
         if let Err(error) = spawned {
             shared.lock().fail(
                 generation,
@@ -116,19 +120,6 @@ impl Default for Player {
     }
 }
 
-/// Unless a newer `play` or `stop` won meanwhile, opens the output for the
-/// decoded track.
-fn load(shared: &Arc<Shared>, generation: u64, decoded: Result<decode::Audio, String>) {
-    let mut inner = shared.lock();
-    let Some(format) = inner.loaded(generation, decoded) else {
-        return;
-    };
-    match output::Output::open(Arc::clone(shared), generation, format) {
-        Ok(output) => inner.attach(output),
-        Err(message) => inner.fail(generation, message),
-    }
-}
-
 /// What the player is doing, for rendering transport controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
@@ -138,7 +129,7 @@ pub struct Snapshot {
     pub state: PlaybackState,
     /// The playhead from the start of the track.
     pub position: Duration,
-    /// The track's length, once decoded.
+    /// The decoder's known track length, or measured EOF when available.
     pub duration: Option<Duration>,
 }
 
@@ -147,7 +138,7 @@ pub struct Snapshot {
 pub enum PlaybackState {
     /// Nothing is loaded.
     Idle,
-    /// The track is being decoded.
+    /// The track header and first audio chunk are being decoded.
     Loading,
     /// The track is audible.
     Playing,

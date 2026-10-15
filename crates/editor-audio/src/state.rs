@@ -6,12 +6,13 @@
 //! newer `play` or `stop` win over work still in flight for an older track.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::decode::Audio;
 use crate::mix;
 use crate::output::{Format, Output};
+use crate::stream::{PcmEvent, StreamState};
 use crate::{PlaybackState, Snapshot};
 
 /// The state shared by the player, the decoder thread and the output.
@@ -34,7 +35,9 @@ pub(crate) struct Inner {
     generation: u64,
     track: Option<PathBuf>,
     state: PlaybackState,
-    audio: Option<Arc<Audio>>,
+    audio: Option<Audio>,
+    stream: Option<StreamState>,
+    reset_phase: bool,
     /// The next frame the output reads.
     cursor: usize,
     /// The open output; dropping it ends the output thread and its stream.
@@ -48,6 +51,8 @@ impl Default for Inner {
             track: None,
             state: PlaybackState::Idle,
             audio: None,
+            stream: None,
+            reset_phase: false,
             cursor: 0,
             output: None,
         }
@@ -55,6 +60,10 @@ impl Default for Inner {
 }
 
 impl Inner {
+    pub(crate) fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
     /// Drops the current track and starts loading `track`, returning the
     /// generation its decode belongs to.
     pub(crate) fn begin(&mut self, track: PathBuf) -> u64 {
@@ -81,7 +90,7 @@ impl Inner {
                     rate: audio.rate,
                     title: self.track.as_deref().map(crate::decode::display_name),
                 };
-                self.audio = Some(Arc::new(audio));
+                self.audio = Some(audio);
                 self.cursor = 0;
                 self.state = PlaybackState::Playing;
                 Some(format)
@@ -91,6 +100,24 @@ impl Inner {
                 None
             }
         }
+    }
+
+    pub(crate) fn stream_ready(
+        &mut self,
+        generation: u64,
+        first: Audio,
+        stream: StreamState,
+    ) -> Option<Format> {
+        let format = self.loaded(generation, Ok(first))?;
+        self.stream = Some(stream);
+        Some(format)
+    }
+    pub(crate) fn take_seek(&mut self, generation: u64) -> Option<(u64, Duration)> {
+        if !self.is_current(generation) {
+            return None;
+        }
+        let stream = self.stream.as_mut()?;
+        stream.seek.take().map(|position| (stream.epoch, position))
     }
 
     /// Keeps the output opened for the current track.
@@ -106,13 +133,17 @@ impl Inner {
         }
         self.state = PlaybackState::Failed(message);
         self.audio = None;
+        self.stream = None;
+        self.reset_phase = false;
         self.cursor = 0;
         self.output = None;
     }
 
     /// Holds a playing track at its position.
     pub(crate) fn pause(&mut self) {
-        if self.state == PlaybackState::Playing {
+        if self.state == PlaybackState::Loading {
+            self.stop();
+        } else if self.state == PlaybackState::Playing {
             self.state = PlaybackState::Paused;
             self.sync_output();
         }
@@ -123,8 +154,13 @@ impl Inner {
         match self.state {
             PlaybackState::Paused => {}
             PlaybackState::Ended => {
-                self.cursor = 0;
-                self.flush_output();
+                if self.stream.is_some() {
+                    self.seek(Duration::ZERO);
+                } else {
+                    self.cursor = 0;
+                    self.flush_output();
+                }
+                self.reset_phase = true;
             }
             _ => return,
         }
@@ -135,18 +171,37 @@ impl Inner {
     /// Moves the playhead, clamped to the track's end. Seeking an ended track
     /// back into it leaves it paused there.
     pub(crate) fn seek(&mut self, position: Duration) {
-        let Some(audio) = &self.audio else {
-            return;
-        };
         if !matches!(
             self.state,
             PlaybackState::Playing | PlaybackState::Paused | PlaybackState::Ended
         ) {
             return;
         }
-        self.cursor = audio.frame_at(position);
-        if self.state == PlaybackState::Ended && self.cursor < audio.frames() {
-            self.state = PlaybackState::Paused;
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        self.reset_phase = true;
+        if let Some(stream) = &mut self.stream {
+            let position = stream
+                .duration
+                .map_or(position, |duration| position.min(duration));
+            stream.epoch = stream.epoch.wrapping_add(1);
+            stream.seek = Some(position);
+            stream.start = audio.absolute_frame_at(position);
+            stream.ended = false;
+            audio.samples.clear();
+            self.cursor = 0;
+            // Older buffered chunks cannot satisfy a newer seek.
+            while stream.pcm.try_recv().is_ok() {}
+            let _ = stream.signal.try_send(());
+            if self.state == PlaybackState::Ended {
+                self.state = PlaybackState::Paused;
+            }
+        } else {
+            self.cursor = audio.frame_at(position);
+            if self.state == PlaybackState::Ended && self.cursor < audio.frames() {
+                self.state = PlaybackState::Paused;
+            }
         }
         self.flush_output();
         self.sync_output();
@@ -162,11 +217,16 @@ impl Inner {
         Snapshot {
             track: self.track.clone(),
             state: self.state.clone(),
-            position: self
-                .audio
-                .as_ref()
-                .map_or(Duration::ZERO, |audio| audio.time_at(self.cursor)),
-            duration: self.audio.as_ref().map(|audio| audio.duration()),
+            position: self.audio.as_ref().map_or(Duration::ZERO, |audio| {
+                audio.time_at(
+                    self.cursor
+                        .saturating_add(self.stream.as_ref().map_or(0, |stream| stream.start)),
+                )
+            }),
+            duration: self.stream.as_ref().map_or_else(
+                || self.audio.as_ref().map(|audio| audio.duration()),
+                |stream| stream.duration,
+            ),
         }
     }
 
@@ -178,8 +238,9 @@ impl Inner {
     }
 
     /// Fills `out` for the output of `generation`: the track's next samples
-    /// while playing (see [`mix::render`]), silence otherwise. Marks the
+    /// while playing (see [`mix::render_mapped`]), silence otherwise. Marks the
     /// track ended once its last frame was read.
+    #[cfg(any(test, all(unix, not(target_os = "macos"))))]
     pub(crate) fn fill(
         &mut self,
         generation: u64,
@@ -188,18 +249,79 @@ impl Inner {
         step: f64,
         phase: &mut f64,
     ) {
-        let audio = match &self.audio {
-            Some(audio)
-                if generation == self.generation && self.state == PlaybackState::Playing =>
-            {
-                audio
-            }
-            _ => {
-                out.fill(0.0);
-                return;
-            }
+        self.fill_mapped(generation, out, out_channels, step, phase, |sample| sample);
+    }
+
+    pub(crate) fn fill_mapped<T: Copy>(
+        &mut self,
+        generation: u64,
+        out: &mut [T],
+        out_channels: usize,
+        step: f64,
+        phase: &mut f64,
+        convert: impl Fn(f32) -> T,
+    ) {
+        if generation != self.generation || self.state != PlaybackState::Playing {
+            out.fill(convert(0.0));
+            return;
+        }
+        if self.reset_phase {
+            *phase = 0.0;
+            self.reset_phase = false;
+        }
+        let Some(audio) = &mut self.audio else {
+            out.fill(convert(0.0));
+            return;
         };
-        if mix::render(audio, &mut self.cursor, phase, step, out, out_channels) {
+        let ended = if let Some(stream) = &mut self.stream {
+            // Two source frames permit interpolation. A wider resampling step
+            // may need more; the bounded producer queue caps this window.
+            let needed = step.ceil().max(1.0) as usize + 1;
+            for frame in out.chunks_mut(out_channels.max(1)) {
+                while audio.frames().saturating_sub(self.cursor) < needed && !stream.ended {
+                    match stream.pcm.try_recv() {
+                        Ok(PcmEvent::Data { epoch, samples }) if epoch == stream.epoch => {
+                            audio.samples.extend(samples)
+                        }
+                        Ok(PcmEvent::End { epoch }) if epoch == stream.epoch => {
+                            stream.ended = true;
+                            stream.duration =
+                                Some(audio.time_at(stream.start.saturating_add(audio.frames())));
+                        }
+                        Ok(_) => {}
+                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                            stream.ended = true;
+                        }
+                        Err(crossbeam_channel::TryRecvError::Empty) => break,
+                    }
+                }
+                mix::render_mapped(
+                    audio,
+                    &mut self.cursor,
+                    phase,
+                    step,
+                    frame,
+                    out_channels,
+                    &convert,
+                );
+            }
+            let ended = stream.ended && self.cursor >= audio.frames();
+            audio.samples.drain(..self.cursor * audio.channels);
+            stream.start = stream.start.saturating_add(self.cursor);
+            self.cursor = 0;
+            ended
+        } else {
+            mix::render_mapped(
+                audio,
+                &mut self.cursor,
+                phase,
+                step,
+                out,
+                out_channels,
+                convert,
+            )
+        };
+        if ended {
             self.state = PlaybackState::Ended;
             self.sync_output();
         }
@@ -210,6 +332,8 @@ impl Inner {
         self.track = None;
         self.state = PlaybackState::Idle;
         self.audio = None;
+        self.stream = None;
+        self.reset_phase = false;
         self.cursor = 0;
         self.output = None;
     }
@@ -366,5 +490,98 @@ mod tests {
                 duration: None,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn pausing_loading_invalidates_its_decoder_generation() {
+        let mut state = Inner::default();
+        let generation = state.begin(PathBuf::from("clip.wav"));
+        state.pause();
+        assert_eq!(state.snapshot().state, PlaybackState::Idle);
+        assert!(!state.is_current(generation));
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use crossbeam_channel::{Receiver, Sender, bounded};
+    fn streaming() -> (Inner, u64, Sender<PcmEvent>, Receiver<()>) {
+        let mut inner = Inner::default();
+        let generation = inner.begin(PathBuf::from("stream.wav"));
+        let (sender, pcm) = bounded(8);
+        let (signal, commands) = bounded(1);
+        let audio = Audio {
+            samples: [0.1, 0.2].into(),
+            channels: 1,
+            rate: 10,
+        };
+        inner
+            .stream_ready(
+                generation,
+                audio,
+                StreamState::new(pcm, signal, Some(Duration::from_secs(100))),
+            )
+            .unwrap();
+        (inner, generation, sender, commands)
+    }
+    #[test]
+    fn a_temporary_underrun_does_not_end_the_track() {
+        let (mut inner, generation, sender, _commands) = streaming();
+        let mut first = [0.0; 4];
+        inner.fill(generation, &mut first, 1, 1.0, &mut 0.0);
+        assert_eq!(first, [0.1, 0.2, 0.0, 0.0]);
+        assert_eq!(inner.snapshot().state, PlaybackState::Playing);
+        sender
+            .send(PcmEvent::Data {
+                epoch: 0,
+                samples: vec![0.3, 0.4],
+            })
+            .unwrap();
+        sender.send(PcmEvent::End { epoch: 0 }).unwrap();
+        let mut next = [0.0; 3];
+        inner.fill(generation, &mut next, 1, 1.0, &mut 0.0);
+        assert_eq!(next, [0.3, 0.4, 0.0]);
+        assert_eq!(inner.snapshot().state, PlaybackState::Ended);
+        assert_eq!(inner.snapshot().position, Duration::from_millis(400));
+        assert_eq!(inner.snapshot().duration, Some(Duration::from_millis(400)));
+    }
+    #[test]
+    fn seeks_coalesce_and_old_pcm_cannot_replace_the_new_position() {
+        let (mut inner, generation, sender, commands) = streaming();
+        inner.seek(Duration::from_secs(2));
+        inner.seek(Duration::from_secs(5));
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            inner.take_seek(generation),
+            Some((2, Duration::from_secs(5)))
+        );
+        sender
+            .send(PcmEvent::Data {
+                epoch: 0,
+                samples: vec![0.9, 0.9],
+            })
+            .unwrap();
+        sender
+            .send(PcmEvent::Data {
+                epoch: 2,
+                samples: vec![0.5, 0.6],
+            })
+            .unwrap();
+        let mut out = [0.0; 2];
+        inner.fill(generation, &mut out, 1, 1.0, &mut 0.0);
+        assert_eq!(out, [0.5, 0.6]);
+        assert_eq!(inner.snapshot().position, Duration::from_millis(5200));
+    }
+    #[test]
+    fn stopping_releases_both_bounded_channels() {
+        let (mut inner, _, sender, commands) = streaming();
+        inner.stop();
+        assert!(commands.recv().is_err());
+        assert!(sender.send(PcmEvent::End { epoch: 0 }).is_err());
     }
 }

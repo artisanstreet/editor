@@ -1,44 +1,25 @@
-//! Per-document presentation prepared once when a body enters the cache.
-//!
-//! A frame used to rebuild every inline presentation (flattened `String`,
-//! highlight `Vec`, links, bare-URL scan, citation split), copy every fence
-//! into a fresh `SharedString`, and format every element id, for every
-//! visible body. [`PreparedMarkdown`] holds all of that beside the parsed
-//! document instead, in a tree that mirrors the blocks:
-//!
-//! - inline text as a [`SharedString`] with theme-independent style chains,
-//!   so render only resolves colors, and memoizes the resolved runs until the
-//!   theme's resolved styles change;
-//! - fence display sources and validated token ranges;
-//! - every element id and debug selector, formatted once per parent
-//!   selector (see [`PreparedMarkdown::ids`]).
-//!
-//! Rich-link titles and favicons stay live: a leaf with openable links asks
-//! the title source about each destination on every render, exactly as the
-//! old flattener did (the probe is also what queues missing titles), and
-//! only re-flattens when an answer differs from the one it last prepared.
+//! Immutable semantic text/fence data and presentation topology.
+//! The worker prepares normalized payloads; publication installs UI-owned
+//! style memos and stable numeric ordinals. The parsed AST is not retained.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{HighlightStyle, RenderImage, SharedString, px};
+use gpui::{HighlightStyle, SharedString, px};
 
-use crate::markdown::{Block, CodeFence, CodeTokenKind, MarkdownDocument, Span, TableAlignment};
-use crate::markdown_cache::MarkdownWorkCounters;
-use crate::selectable_text::{InlineSwatch, TextRunOverride};
-use crate::theme::ArtisanTheme;
+use crate::markdown::{Block, CodeFence, CodeTokenKind, MarkdownDocument, TableAlignment};
+use crate::selectable_text::{InlineSwatch, SelectionLeaf, SelectionSource, TextRunOverride};
+use crate::theme::{ArtisanTheme, Oklch};
 
-use super::code_copy::CODE_COPY_SELECTOR_SUFFIX;
 use super::inline::{
-    FlatInline, InlineChannels, InlineLayer, flatten_inline_with_swatches, resolve_chain,
-    resolve_runs, split_trailing_citations,
+    FlatInline, InlineLayer, flatten_inline_with_swatches, resolve_chain, resolve_runs,
 };
 use super::rich::{self, RichFence};
 use super::{
-    BlockScope, InlineLink, NoRichLinkTitles, RichLinkTitleSource, block_gaps, code_token_style,
-    fence_display_source, item_marker, valid_code_range,
+    BlockScope, block_gaps, code_token_style, fence_display_source, item_marker, valid_code_range,
 };
 
 /// Index of one element id in a document's id table.
@@ -47,101 +28,462 @@ pub(super) type Slot = usize;
 /// Slot of the Markdown root selector (`{selector}-markdown`).
 pub(super) const ROOT_SLOT: Slot = 0;
 
-/// Distinct parent selectors whose id tables one document keeps. A body
-/// normally renders under one selector; a few identical short bodies (two
-/// "Done." replies) share one document under different selectors.
-const ID_TABLES_PER_DOCUMENT: usize = 4;
-
-/// A parsed document plus everything its render needs, prepared once.
+/// One normalized content revision and its UI style memos.
 #[derive(Debug)]
 pub(crate) struct PreparedMarkdown {
-    document: Rc<MarkdownDocument>,
     root: PreparedBlocks,
-    /// Element-id suffixes by slot, appended to the caller's selector.
-    suffixes: Box<[String]>,
-    /// Most recently used last.
-    ids: RefCell<Vec<(SharedString, Rc<[SharedString]>)>>,
-    counters: Rc<MarkdownWorkCounters>,
+    flow: Vec<FlowRow>,
+}
+
+/// CPU normalization returned by the bounded worker. UI publication moves
+/// owned arrays into presentation references and installs empty style memos.
+pub(super) struct PreparedParts {
+    inline: VecDeque<FlatInline>,
+    fences: VecDeque<PreparedFenceData>,
+}
+impl PreparedParts {
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.inline.capacity() * std::mem::size_of::<FlatInline>()
+            + self.fences.capacity() * std::mem::size_of::<PreparedFenceData>()
+            + self
+                .inline
+                .iter()
+                .map(|flat| {
+                    flat.source.capacity()
+                        + rich::budget::vector(&flat.runs)
+                        + rich::budget::vector(&flat.chains)
+                        + flat.chains.iter().map(rich::budget::vector).sum::<usize>()
+                        + rich::budget::vector(&flat.links)
+                        + flat
+                            .links
+                            .iter()
+                            .map(|link| link.destination.capacity())
+                            .sum::<usize>()
+                        + rich::budget::vector(&flat.code_ranges)
+                        + rich::budget::vector(&flat.colors)
+                        + flat
+                            .colors
+                            .iter()
+                            .map(|color| color.value.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self
+                .fences
+                .iter()
+                .map(PreparedFenceData::heap_bytes)
+                .sum::<usize>()
+    }
+    pub(super) fn new(document: &MarkdownDocument, renderer: Option<&gpui::SvgRenderer>) -> Self {
+        fn visit(
+            blocks: &[Block],
+            result: &mut PreparedParts,
+            renderer: Option<&gpui::SvgRenderer>,
+        ) {
+            for block in blocks {
+                match block {
+                    Block::Heading { spans, .. } | Block::Paragraph { spans, .. } => {
+                        result.inline.push_back(flatten_inline_with_swatches(spans))
+                    }
+                    Block::Code(fence) => result
+                        .fences
+                        .push_back(PreparedFenceData::new(fence, renderer)),
+                    Block::List { items, .. } => {
+                        for item in items {
+                            if item.blocks.is_empty() {
+                                result.inline.push_back(FlatInline::default());
+                            }
+                            visit(&item.blocks, result, renderer);
+                        }
+                    }
+                    Block::Table(table) => {
+                        for cells in std::iter::once(&table.header).chain(table.rows.iter()) {
+                            for cell in cells.iter().take(table.alignments.len()) {
+                                result
+                                    .inline
+                                    .push_back(flatten_inline_with_swatches(&cell.spans));
+                            }
+                        }
+                    }
+                    Block::Html { .. } => {}
+                }
+            }
+        }
+        let mut result = Self {
+            inline: VecDeque::new(),
+            fences: VecDeque::new(),
+        };
+        visit(document.blocks(), &mut result, renderer);
+        result
+    }
 }
 
 impl PreparedMarkdown {
-    /// Prepares `document`, flattening every inline run once.
-    pub(crate) fn new(document: Rc<MarkdownDocument>, counters: Rc<MarkdownWorkCounters>) -> Self {
+    #[cfg(test)]
+    fn new(document: MarkdownDocument) -> Self {
+        let parts = PreparedParts::new(&document, None);
+        Self::from_indexed_parts(&document, parts, None)
+    }
+    pub(super) fn from_indexed_parts(
+        document: &MarkdownDocument,
+        mut parts: PreparedParts,
+        style: Option<super::async_preparation::IndexedStyle>,
+    ) -> Self {
         let mut slots = SlotTable::default();
-        let root_slot = slots.push("-markdown".to_owned());
+        let root_slot = slots.push();
         debug_assert_eq!(
             root_slot, ROOT_SLOT,
             "the root selector takes the first slot"
         );
-        let root = prepare_blocks(
-            document.blocks(),
-            "-markdown",
-            BlockScope::Root,
-            &mut slots,
-            &counters,
-        );
-        Self {
-            document,
-            root,
-            suffixes: slots.suffixes.into_boxed_slice(),
-            ids: RefCell::new(Vec::new()),
-            counters,
+        let mut root = prepare_blocks(document.blocks(), BlockScope::Root, &mut slots, &mut parts);
+        if let Some(style) = &style
+            && let Some(header) = style.table_header
+            && let Some(block) = root.blocks.first_mut().and_then(Rc::get_mut)
+            && let PreparedKind::Table(table) = &mut block.kind
+        {
+            table.header_rows = usize::from(header);
+            table.trailing_border = style.table_continues;
+        }
+        let mut flow = flatten_flow(&root);
+        if let Some(style) = style
+            && let Some(row) = flow.first_mut()
+        {
+            row.indent = style.context.lists.len();
+            for (indent, level) in style.context.lists.iter().enumerate() {
+                if level.first {
+                    row.markers.push((
+                        indent,
+                        item_marker(
+                            level.number.is_some(),
+                            level.number.unwrap_or(1),
+                            0,
+                            level.task,
+                        )
+                        .into(),
+                        level.number.is_some(),
+                    ));
+                }
+            }
+            row.gap = style.context.spacing.iter().map(indexed_gap).sum();
+        }
+        Self { root, flow }
+    }
+
+    /// Actual owned container capacities and retained logical string payloads.
+    /// Theme memos reserve their maximum run arrays before lazy resolution.
+    pub(crate) fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.root.heap_bytes()
+            + rich::budget::vector(&self.flow)
+            + self
+                .flow
+                .iter()
+                .map(|row| {
+                    rich::budget::vector(&row.markers)
+                        + row
+                            .markers
+                            .iter()
+                            .map(|(_, marker, _)| marker.len())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn block_count(&self) -> usize {
+        self.flow.len()
+    }
+
+    pub(super) fn selection_source(
+        &self,
+        scope: &SharedString,
+        prefix: &[u64],
+    ) -> Rc<SelectionSource> {
+        let mut leaves = Vec::new();
+        collect_selection(&self.root, prefix, &mut leaves, "\n\n");
+        SelectionSource::new(scope.clone(), prefix.to_vec(), leaves)
+    }
+
+    pub(super) fn release_images(&self, cx: &mut gpui::App) {
+        for row in &self.flow {
+            if let FlowKind::Block(block) = &row.kind
+                && let PreparedKind::Code(code) = &block.kind
+                && let Some(diagram) = &code.fence.diagram
+            {
+                let image = diagram.image.clone();
+                cx.defer(move |cx| {
+                    cx.drop_image(image, None);
+                    // Other owners may still draw this image in cached scenes.
+                    cx.refresh_windows();
+                });
+            }
         }
     }
 
-    /// The parsed document this presentation was prepared from.
-    pub(crate) fn document(&self) -> &Rc<MarkdownDocument> {
-        &self.document
+    pub(super) fn flow(&self) -> &[FlowRow] {
+        &self.flow
     }
+}
 
-    pub(super) fn root(&self) -> &PreparedBlocks {
-        &self.root
-    }
-
-    pub(super) fn counters(&self) -> &MarkdownWorkCounters {
-        &self.counters
-    }
-
-    /// Returns this document's element ids under `selector`, formatting
-    /// them only the first time the selector is seen.
-    pub(super) fn ids(&self, selector: &SharedString) -> Rc<[SharedString]> {
-        let mut tables = self.ids.borrow_mut();
-        if let Some(index) = tables.iter().position(|(known, _)| known == selector) {
-            let entry = tables.remove(index);
-            let ids = Rc::clone(&entry.1);
-            tables.push(entry);
-            return ids;
+fn indexed_gap(spacing: &crate::markdown::LeafSpacing) -> f32 {
+    use crate::markdown::{BlockShape, LeafSpacing};
+    let shape = |shape: BlockShape| match shape {
+        BlockShape::Paragraph => Block::Paragraph {
+            spans: Vec::new(),
+            range: 0..0,
+        },
+        BlockShape::Heading(level) => Block::Heading {
+            level,
+            spans: Vec::new(),
+            range: 0..0,
+        },
+        BlockShape::Code => Block::Code(crate::markdown::CodeFence {
+            language: None,
+            closed: true,
+            source: String::new(),
+            tokens: None,
+            diagram: None,
+        }),
+        BlockShape::Html => Block::Html {
+            source: String::new(),
+        },
+        BlockShape::List => Block::List {
+            ordered: false,
+            start: None,
+            items: Vec::new(),
+            range: 0..0,
+        },
+        BlockShape::Table => Block::Table(crate::markdown::Table {
+            alignments: Vec::new(),
+            header: Vec::new(),
+            rows: Vec::new(),
+            range: 0..0,
+        }),
+    };
+    match spacing {
+        LeafSpacing::Item => crate::theme::ProseTypography::ITEM_GAP_PX,
+        LeafSpacing::Sibling { previous: None, .. } => 0.0,
+        LeafSpacing::Sibling {
+            previous: Some(previous),
+            current,
+            in_item,
+        } => {
+            let scope = if *in_item {
+                BlockScope::Item
+            } else {
+                BlockScope::Root
+            };
+            let bottom = super::block_margins(&shape(*previous), scope).1;
+            if matches!(previous, BlockShape::Heading(2..=4)) {
+                bottom
+            } else {
+                bottom.max(super::block_margins(&shape(*current), scope).0)
+            }
         }
-        let ids: Rc<[SharedString]> = self
-            .suffixes
-            .iter()
-            .map(|suffix| SharedString::from(format!("{selector}{suffix}")))
-            .collect();
-        if tables.len() >= ID_TABLES_PER_DOCUMENT {
-            tables.remove(0);
-        }
-        tables.push((selector.clone(), Rc::clone(&ids)));
-        ids
     }
+}
+
+fn collect_selection(
+    blocks: &PreparedBlocks,
+    prefix: &[u64],
+    output: &mut Vec<SelectionLeaf>,
+    separator: &'static str,
+) {
+    let leaf = |slot: Slot,
+                presentation: &LeafPresentation,
+                separator,
+                output: &mut Vec<SelectionLeaf>| {
+        let mut order = prefix.to_vec();
+        order.push(slot as u64);
+        output.push(SelectionLeaf {
+            order,
+            text: presentation.text.clone(),
+            separator,
+            copies: presentation.copies.clone(),
+        });
+    };
+    for block in &blocks.blocks {
+        match &block.kind {
+            PreparedKind::Heading { leaf: content, .. }
+            | PreparedKind::Paragraph { leaf: content } => {
+                leaf(block.selector, &content.base, separator, output)
+            }
+            PreparedKind::Html { id, source } => {
+                let mut order = prefix.to_vec();
+                order.push(*id as u64);
+                output.push(SelectionLeaf {
+                    order,
+                    text: source.clone(),
+                    separator: "\n",
+                    copies: Rc::from([]),
+                });
+            }
+            PreparedKind::Code(code) => {
+                // Rich controls have their own interaction; ordinary code participates in prose selection.
+                if code.fence.rich.is_none() && code.fence.diagram.is_none() {
+                    for (line, (range, text)) in code.fence.lines.iter().enumerate() {
+                        let mut order = prefix.to_vec();
+                        order.push(code.text as u64);
+                        order.push(line as u64);
+                        let copies = code
+                            .fence
+                            .colors
+                            .copies
+                            .iter()
+                            .filter(|&(copy, _text)| {
+                                copy.start >= range.start && copy.end <= range.end
+                            })
+                            .map(|(copy, text)| {
+                                (
+                                    copy.start - range.start..copy.end - range.start,
+                                    text.clone(),
+                                )
+                            })
+                            .collect();
+                        output.push(SelectionLeaf {
+                            order,
+                            text: text.clone(),
+                            separator: "\n",
+                            copies,
+                        });
+                    }
+                }
+            }
+            PreparedKind::List(list) => {
+                for item in &list.items {
+                    if let Some(content) = &item.empty {
+                        leaf(item.selector, &content.base, "\n", output);
+                    }
+                    collect_selection(&item.blocks, prefix, output, "\n");
+                }
+            }
+            PreparedKind::Table(table) => {
+                for row in &table.rows {
+                    for (column, cell) in row.iter().enumerate() {
+                        if let Some(content) = &cell.leaf {
+                            leaf(
+                                cell.selector,
+                                &content.base,
+                                if column == 0 { "\n" } else { "\t" },
+                                output,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One semantic row in the outer transcript list. Nested containers never
+/// force their descendants to construct in one visible row.
+#[derive(Debug)]
+pub(super) struct FlowRow {
+    pub(super) kind: FlowKind,
+    pub(super) indent: usize,
+    pub(super) markers: Vec<(usize, SharedString, bool)>,
+    pub(super) gap: f32,
+}
+#[derive(Debug)]
+pub(super) enum FlowKind {
+    Block(Rc<PreparedBlock>),
+    TableRow {
+        block: Rc<PreparedBlock>,
+        row: usize,
+    },
+    Empty {
+        leaf: PreparedLeaf,
+        slot: Slot,
+    },
+}
+fn flatten_flow(root: &PreparedBlocks) -> Vec<FlowRow> {
+    fn visit(blocks: &PreparedBlocks, indent: usize, output: &mut Vec<FlowRow>) {
+        for (index, block) in blocks.blocks.iter().enumerate() {
+            let start = output.len();
+            match &block.kind {
+                PreparedKind::List(list) => {
+                    for (item_index, item) in list.items.iter().enumerate() {
+                        let first = output.len();
+                        if let Some(leaf) = &item.empty {
+                            output.push(FlowRow {
+                                kind: FlowKind::Empty {
+                                    leaf: leaf.clone(),
+                                    slot: item.selector,
+                                },
+                                indent: indent + 1,
+                                markers: Vec::new(),
+                                gap: 0.0,
+                            });
+                        }
+                        visit(&item.blocks, indent + 1, output);
+                        if let Some(row) = output.get_mut(first) {
+                            row.markers
+                                .push((indent, item.marker.clone(), list.ordered));
+                            if item_index > 0 {
+                                row.gap += crate::theme::ProseTypography::ITEM_GAP_PX;
+                            }
+                        }
+                    }
+                }
+                PreparedKind::Table(table) => {
+                    for row in 0..table.rows.len() {
+                        output.push(FlowRow {
+                            kind: FlowKind::TableRow {
+                                block: block.clone(),
+                                row,
+                            },
+                            indent,
+                            markers: Vec::new(),
+                            gap: 0.0,
+                        });
+                    }
+                }
+                _ => output.push(FlowRow {
+                    kind: FlowKind::Block(block.clone()),
+                    indent,
+                    markers: Vec::new(),
+                    gap: 0.0,
+                }),
+            }
+            if let Some(row) = output.get_mut(start) {
+                row.gap += blocks.gaps.get(index).copied().unwrap_or_default();
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    visit(root, 0, &mut rows);
+    rows
 }
 
 #[derive(Default)]
 struct SlotTable {
-    suffixes: Vec<String>,
+    count: usize,
 }
 
 impl SlotTable {
-    fn push(&mut self, suffix: String) -> Slot {
-        self.suffixes.push(suffix);
-        self.suffixes.len() - 1
+    fn push(&mut self) -> Slot {
+        let slot = self.count;
+        self.count += 1;
+        slot
     }
 }
 
 /// One block sequence with its collapsed top gaps.
 #[derive(Debug)]
 pub(super) struct PreparedBlocks {
-    pub(super) blocks: Vec<PreparedBlock>,
+    pub(super) blocks: Vec<Rc<PreparedBlock>>,
     pub(super) gaps: Vec<f32>,
+}
+
+impl PreparedBlocks {
+    fn heap_bytes(&self) -> usize {
+        rich::budget::vector(&self.blocks)
+            + rich::budget::vector(&self.gaps)
+            + self
+                .blocks
+                .iter()
+                .map(|block| std::mem::size_of::<PreparedBlock>() + block.heap_bytes())
+                .sum::<usize>()
+    }
 }
 
 /// One prepared block: its own selector plus kind-specific data.
@@ -172,7 +514,6 @@ pub(super) struct PreparedCode {
 
 #[derive(Debug)]
 pub(super) struct PreparedList {
-    pub(super) list: Slot,
     pub(super) ordered: bool,
     pub(super) items: Vec<PreparedItem>,
 }
@@ -188,7 +529,8 @@ pub(super) struct PreparedItem {
 
 #[derive(Debug)]
 pub(super) struct PreparedTable {
-    pub(super) table: Slot,
+    pub(super) header_rows: usize,
+    pub(super) trailing_border: bool,
     /// One authored alignment per column.
     pub(super) alignments: Box<[TableAlignment]>,
     /// Header row first, then body rows; every row holds one cell per column.
@@ -198,22 +540,19 @@ pub(super) struct PreparedTable {
 #[derive(Debug)]
 pub(super) struct PreparedCell {
     pub(super) selector: Slot,
-    pub(super) content: Slot,
     /// `None` where the authored row is shorter than the header.
     pub(super) leaf: Option<PreparedLeaf>,
 }
 
 fn prepare_blocks(
     blocks: &[Block],
-    parent: &str,
     scope: BlockScope,
     slots: &mut SlotTable,
-    counters: &MarkdownWorkCounters,
+    parts: &mut PreparedParts,
 ) -> PreparedBlocks {
     let prepared = blocks
         .iter()
-        .enumerate()
-        .map(|(index, block)| prepare_block(index, block, parent, slots, counters))
+        .map(|block| prepare_block(block, slots, parts))
         .collect();
     PreparedBlocks {
         blocks: prepared,
@@ -222,35 +561,28 @@ fn prepare_blocks(
 }
 
 fn prepare_block(
-    index: usize,
     block: &Block,
-    parent: &str,
     slots: &mut SlotTable,
-    counters: &MarkdownWorkCounters,
-) -> PreparedBlock {
-    let own = format!("{parent}-block-{index}");
-    let selector = slots.push(own.clone());
+    parts: &mut PreparedParts,
+) -> Rc<PreparedBlock> {
+    let selector = slots.push();
     let kind = match block {
-        Block::Heading { level, spans, .. } => PreparedKind::Heading {
+        Block::Heading { level, .. } => PreparedKind::Heading {
             level: *level,
-            leaf: PreparedLeaf::new(spans, counters),
+            leaf: PreparedLeaf::new(parts),
         },
-        Block::Paragraph { spans, .. } => PreparedKind::Paragraph {
-            leaf: PreparedLeaf::new(spans, counters),
+        Block::Paragraph { .. } => PreparedKind::Paragraph {
+            leaf: PreparedLeaf::new(parts),
         },
-        Block::Code(fence) => {
-            let code_suffix = format!("{own}-code");
-            let copy_suffix = format!("{code_suffix}-{CODE_COPY_SELECTOR_SUFFIX}");
-            PreparedKind::Code(Box::new(PreparedCode {
-                code: slots.push(code_suffix.clone()),
-                text: slots.push(format!("{code_suffix}-text")),
-                copy_state: slots.push(format!("{copy_suffix}-state")),
-                copy: slots.push(copy_suffix),
-                fence: PreparedFence::new(fence),
-            }))
-        }
+        Block::Code(_) => PreparedKind::Code(Box::new(PreparedCode {
+            code: slots.push(),
+            text: slots.push(),
+            copy_state: slots.push(),
+            copy: slots.push(),
+            fence: PreparedFence::new(parts.fences.pop_front().expect("normalized code fence")),
+        })),
         Block::Html { source } => PreparedKind::Html {
-            id: slots.push(format!("{own}-html")),
+            id: slots.push(),
             source: SharedString::from(source.clone()),
         },
         Block::List {
@@ -263,218 +595,106 @@ fn prepare_block(
             let items = items
                 .iter()
                 .enumerate()
-                .map(|(position, item)| {
-                    let item_suffix = format!("{own}-item-{position}");
-                    PreparedItem {
-                        selector: slots.push(item_suffix.clone()),
-                        marker: SharedString::from(item_marker(
-                            *ordered, base, position, item.task,
-                        )),
-                        empty: item
-                            .blocks
-                            .is_empty()
-                            .then(|| PreparedLeaf::new(&[], counters)),
-                        blocks: prepare_blocks(
-                            &item.blocks,
-                            &item_suffix,
-                            BlockScope::Item,
-                            slots,
-                            counters,
-                        ),
-                    }
+                .map(|(position, item)| PreparedItem {
+                    selector: slots.push(),
+                    marker: SharedString::from(item_marker(*ordered, base, position, item.task)),
+                    empty: item.blocks.is_empty().then(|| PreparedLeaf::new(parts)),
+                    blocks: prepare_blocks(&item.blocks, BlockScope::Item, slots, parts),
                 })
                 .collect();
             PreparedKind::List(PreparedList {
-                list: slots.push(format!("{own}-list")),
                 ordered: *ordered,
                 items,
             })
         }
         Block::Table(table) => {
-            let table_suffix = format!("{own}-table");
             let columns = table.alignments.len();
             let rows = std::iter::once(&table.header)
                 .chain(table.rows.iter())
-                .enumerate()
-                .map(|(row_index, cells)| {
+                .map(|cells| {
                     (0..columns)
-                        .map(|column| {
-                            let cell_suffix = format!("{table_suffix}-r{row_index}-c{column}");
-                            PreparedCell {
-                                selector: slots.push(cell_suffix.clone()),
-                                content: slots.push(format!("{cell_suffix}-content")),
-                                leaf: cells
-                                    .get(column)
-                                    .map(|cell| PreparedLeaf::new(&cell.spans, counters)),
-                            }
+                        .map(|column| PreparedCell {
+                            selector: slots.push(),
+                            leaf: cells.get(column).map(|_| PreparedLeaf::new(parts)),
                         })
                         .collect()
                 })
                 .collect();
             PreparedKind::Table(PreparedTable {
-                table: slots.push(table_suffix),
+                header_rows: 1,
+                trailing_border: false,
                 alignments: table.alignments.clone().into_boxed_slice(),
                 rows,
             })
         }
     };
-    PreparedBlock { selector, kind }
+    Rc::new(PreparedBlock { selector, kind })
 }
 
-/// One openable destination the title source is consulted about.
-#[derive(Debug)]
-struct Probe {
-    destination: String,
-    /// Only HTTP(S) destinations resolve titles; `mailto:` only asks for a
-    /// favicon.
-    rich: bool,
+impl PreparedBlock {
+    fn heap_bytes(&self) -> usize {
+        match &self.kind {
+            PreparedKind::Heading { leaf, .. } | PreparedKind::Paragraph { leaf } => {
+                leaf.resident_bytes()
+            }
+            PreparedKind::Html { source, .. } => source.len(),
+            PreparedKind::Code(code) => {
+                std::mem::size_of::<PreparedCode>() + code.fence.heap_bytes()
+            }
+            PreparedKind::List(list) => {
+                rich::budget::vector(&list.items)
+                    + list
+                        .items
+                        .iter()
+                        .map(|item| {
+                            item.marker.len()
+                                + item.empty.as_ref().map_or(0, PreparedLeaf::resident_bytes)
+                                + item.blocks.heap_bytes()
+                        })
+                        .sum::<usize>()
+            }
+            PreparedKind::Table(table) => {
+                std::mem::size_of_val(table.alignments.as_ref())
+                    + rich::budget::vector(&table.rows)
+                    + table
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            rich::budget::vector(row)
+                                + row
+                                    .iter()
+                                    .filter_map(|cell| cell.leaf.as_ref())
+                                    .map(PreparedLeaf::resident_bytes)
+                                    .sum::<usize>()
+                        })
+                        .sum::<usize>()
+            }
+        }
+    }
 }
-
-/// What the title source answered about one destination this frame.
-struct ProbeAnswer {
-    title: Option<SharedString>,
-    favicon: Option<Arc<RenderImage>>,
-}
-
-/// The part of an answer that shapes the flattened presentation.
-#[derive(Debug, PartialEq)]
-struct ProbeKey {
-    title: Option<SharedString>,
-    has_favicon: bool,
-}
-
-/// The title answers a leaf was last flattened for, with that presentation.
-type TitledPresentation = (Box<[ProbeKey]>, Rc<LeafPresentation>);
 
 /// Resolved highlight runs plus inline-code run overrides.
 type ResolvedRuns = (Rc<[(Range<usize>, HighlightStyle)]>, Rc<[TextRunOverride]>);
 
-/// One inline leaf (paragraph, heading, table cell, or empty list item).
-#[derive(Debug)]
+/// A stable authored inline leaf. Fetched titles and favicons never alter
+/// its text, layout, byte offsets or clipboard content.
+#[derive(Clone, Debug)]
 pub(super) struct PreparedLeaf {
-    /// Presentation with no titles and no favicons: what every leaf without
-    /// resolved link metadata renders.
     base: Rc<LeafPresentation>,
-    probes: Box<[Probe]>,
-    /// Presentation for the most recent non-empty title answers.
-    titled: RefCell<Option<TitledPresentation>>,
 }
-
 impl PreparedLeaf {
-    fn new(spans: &[Span], counters: &MarkdownWorkCounters) -> Self {
-        counters.record_inline_flatten();
-        let flat = flatten_inline_with_swatches(spans, &NoRichLinkTitles);
-        let probes = flat
-            .probes
-            .iter()
-            .map(|destination| Probe {
-                rich: super::is_rich_link_destination(destination),
-                destination: destination.clone(),
-            })
-            .collect();
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<LeafPresentation>() + self.base.heap_bytes()
+    }
+    fn new(parts: &mut PreparedParts) -> Self {
         Self {
-            base: Rc::new(LeafPresentation::from_flat(flat)),
-            probes,
-            titled: RefCell::new(None),
+            base: Rc::new(LeafPresentation::from_flat(
+                parts.inline.pop_front().expect("normalized inline leaf"),
+            )),
         }
     }
-
-    /// Returns this frame's presentation plus favicon images by offset.
-    ///
-    /// `spans` are the leaf's own spans from the cached document; they are
-    /// only read when the title answers changed since the last flatten.
-    pub(super) fn presentation(
-        &self,
-        spans: &[Span],
-        titles: &dyn RichLinkTitleSource,
-        counters: &MarkdownWorkCounters,
-    ) -> (Rc<LeafPresentation>, Vec<(usize, Arc<RenderImage>)>) {
-        if self.probes.is_empty() {
-            return (Rc::clone(&self.base), Vec::new());
-        }
-        // Every frame asks about every destination, title before favicon,
-        // as the flattener always has: the title probe is what queues a
-        // missing title for resolution.
-        let answers = self
-            .probes
-            .iter()
-            .map(|probe| ProbeAnswer {
-                title: probe
-                    .rich
-                    .then(|| titles.resolved_title(&probe.destination))
-                    .flatten(),
-                favicon: titles.favicon(&probe.destination),
-            })
-            .collect::<Vec<_>>();
-        if answers
-            .iter()
-            .all(|answer| answer.title.is_none() && answer.favicon.is_none())
-        {
-            return (Rc::clone(&self.base), Vec::new());
-        }
-        let keys = answers
-            .iter()
-            .map(|answer| ProbeKey {
-                title: answer.title.clone(),
-                has_favicon: answer.favicon.is_some(),
-            })
-            .collect::<Box<[_]>>();
-        let presentation = {
-            let mut memo = self.titled.borrow_mut();
-            match memo.as_ref() {
-                Some((known, presentation)) if *known == keys => Rc::clone(presentation),
-                _ => {
-                    counters.record_inline_flatten();
-                    let replay = ReplayTitles {
-                        probes: &self.probes,
-                        answers: &answers,
-                    };
-                    let presentation = Rc::new(LeafPresentation::from_flat(
-                        flatten_inline_with_swatches(spans, &replay),
-                    ));
-                    *memo = Some((keys, Rc::clone(&presentation)));
-                    presentation
-                }
-            }
-        };
-        let icons = presentation
-            .icon_offsets
-            .iter()
-            .filter_map(|(offset, destination)| {
-                answer_for(&self.probes, &answers, destination)
-                    .and_then(|answer| answer.favicon.clone())
-                    .map(|image| (*offset, image))
-            })
-            .collect();
-        (presentation, icons)
-    }
-}
-
-fn answer_for<'a>(
-    probes: &[Probe],
-    answers: &'a [ProbeAnswer],
-    destination: &str,
-) -> Option<&'a ProbeAnswer> {
-    probes
-        .iter()
-        .position(|probe| probe.destination == destination)
-        .and_then(|index| answers.get(index))
-}
-
-/// Serves this frame's recorded answers to a re-flatten, so the live title
-/// source is asked exactly once per destination per frame.
-struct ReplayTitles<'a> {
-    probes: &'a [Probe],
-    answers: &'a [ProbeAnswer],
-}
-
-impl RichLinkTitleSource for ReplayTitles<'_> {
-    fn favicon(&self, destination: &str) -> Option<Arc<RenderImage>> {
-        answer_for(self.probes, self.answers, destination).and_then(|answer| answer.favicon.clone())
-    }
-
-    fn resolved_title(&self, destination: &str) -> Option<SharedString> {
-        answer_for(self.probes, self.answers, destination).and_then(|answer| answer.title.clone())
+    pub(super) fn presentation(&self) -> Rc<LeafPresentation> {
+        self.base.clone()
     }
 }
 
@@ -498,31 +718,42 @@ pub(super) struct LeafPresentation {
     /// What each swatch slot copies as in a text selection.
     pub(super) copies: Rc<[(Range<usize>, SharedString)]>,
     code_ranges: Box<[Range<usize>]>,
-    pub(super) icon_offsets: Box<[(usize, String)]>,
-    /// Trailing citation attributions, rendered as pills after the text.
-    pub(super) citations: Box<[InlineLink]>,
     resolved: RefCell<Option<ResolvedLeaf>>,
 }
 
 #[derive(Debug)]
 struct ResolvedLeaf {
-    styles: Box<[HighlightStyle]>,
-    mono_family: &'static str,
+    key: ([Oklch; 3], &'static str),
     highlights: Rc<[(Range<usize>, HighlightStyle)]>,
     overrides: Rc<[TextRunOverride]>,
 }
 
 impl LeafPresentation {
-    fn from_flat(mut flat: FlatInline) -> Self {
-        let citations = split_trailing_citations(InlineChannels {
-            source: &mut flat.source,
-            runs: &mut flat.runs,
-            links: &mut flat.links,
-            citation_links: &mut flat.citation_links,
-            code_ranges: &mut flat.code_ranges,
-            icon_offsets: &mut flat.icon_offsets,
-        });
-        // Colors past a stripped trailing citation left with it.
+    fn heap_bytes(&self) -> usize {
+        self.text.len()
+            + std::mem::size_of_val(self.runs.as_ref())
+            + std::mem::size_of_val(self.chains.as_ref())
+            + self
+                .chains
+                .iter()
+                .map(|chain| std::mem::size_of_val(chain.as_ref()))
+                .sum::<usize>()
+            + std::mem::size_of_val(self.link_ranges.as_ref())
+            + rich::budget::shared(&self.link_destinations)
+            + std::mem::size_of_val(self.color_ranges.as_ref())
+            + rich::budget::shared(&self.color_values)
+            + std::mem::size_of_val(self.swatches.as_ref())
+            + std::mem::size_of_val(self.copies.as_ref())
+            + self
+                .copies
+                .iter()
+                .map(|(_, text)| text.len())
+                .sum::<usize>()
+            + std::mem::size_of_val(self.code_ranges.as_ref())
+            + self.runs.len() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+            + self.code_ranges.len() * std::mem::size_of::<TextRunOverride>()
+    }
+    fn from_flat(flat: FlatInline) -> Self {
         let end = flat.source.len();
         let colors: Vec<_> = flat
             .colors
@@ -569,8 +800,6 @@ impl LeafPresentation {
                 .map(|link| SharedString::from(link.destination))
                 .collect(),
             code_ranges: flat.code_ranges.into_boxed_slice(),
-            icon_offsets: flat.icon_offsets.into_boxed_slice(),
-            citations: citations.into_boxed_slice(),
             resolved: RefCell::new(None),
         }
     }
@@ -582,15 +811,17 @@ impl LeafPresentation {
     /// allocates nothing.
     pub(super) fn resolved(&self, theme: &ArtisanTheme) -> ResolvedRuns {
         let mono_family = theme.typography.mono.family;
+        let key = (
+            [
+                theme.colors.foreground,
+                theme.colors.muted_foreground,
+                theme.colors.banner_info,
+            ],
+            mono_family,
+        );
         let mut memo = self.resolved.borrow_mut();
         if let Some(resolved) = memo.as_ref()
-            && resolved.mono_family == mono_family
-            && resolved.styles.len() == self.chains.len()
-            && self
-                .chains
-                .iter()
-                .zip(resolved.styles.iter())
-                .all(|(chain, style)| resolve_chain(chain, theme) == *style)
+            && resolved.key == key
         {
             return (
                 Rc::clone(&resolved.highlights),
@@ -616,8 +847,7 @@ impl LeafPresentation {
             })
             .collect();
         *memo = Some(ResolvedLeaf {
-            styles,
-            mono_family,
+            key,
             highlights: Rc::clone(&highlights),
             overrides: Rc::clone(&overrides),
         });
@@ -652,30 +882,39 @@ const ALL_KINDS: [CodeTokenKind; CODE_TOKEN_KINDS] = [
 
 /// One fence's display source and validated token ranges.
 #[derive(Debug)]
-pub(super) struct PreparedFence {
+pub(super) struct PreparedFenceData {
     /// The fence body as displayed (final line terminator dropped).
     pub(super) source: SharedString,
     /// Whether the displayed body spans more than one line.
     pub(super) multiline: bool,
     /// Whether the fence is a closed `mermaid` block, drawn as a diagram
     /// when its source renders.
-    pub(super) diagram: bool,
+    pub(super) diagram: Option<super::diagram::MermaidDiagram>,
     /// The rich block an `artisan-*` fence draws, parsed once here.
     pub(super) rich: Option<RichFence>,
-    /// The body as drawn: `source` with a swatch slot before each color
-    /// value, the way an editor decorates CSS colors. Token ranges address
-    /// this text; the copy action copies `source`.
-    pub(super) shown: SharedString,
+    /// Assembled display byte ranges and retained text per native code line.
+    pub(super) lines: Arc<[(Range<usize>, SharedString)]>,
     /// The fence's color values, their swatches, and what each slot copies
-    /// as, addressing `shown`.
+    /// as, addressing assembled display byte offsets.
     pub(super) colors: FenceColors,
     tokens: Box<[(Range<usize>, CodeTokenKind)]>,
+}
+
+#[derive(Debug)]
+pub(super) struct PreparedFence {
+    data: PreparedFenceData,
     resolved: RefCell<Option<ResolvedFence>>,
+}
+impl std::ops::Deref for PreparedFence {
+    type Target = PreparedFenceData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
 }
 
 #[derive(Debug)]
 struct ResolvedFence {
-    palette: [HighlightStyle; CODE_TOKEN_KINDS],
+    key: [Oklch; CODE_TOKEN_KINDS],
     highlights: Rc<[(Range<usize>, HighlightStyle)]>,
 }
 
@@ -700,9 +939,8 @@ fn decorate_colors(
         );
     }
     let slot = super::inline::SWATCH_SLOT;
-    let shift = |offset: usize| {
-        offset + slot.len() * colors.iter().filter(|color| color.start < offset).count()
-    };
+    let shift =
+        |offset: usize| offset + slot.len() * colors.partition_point(|color| color.start < offset);
     let mut shown = String::with_capacity(display.len() + slot.len() * colors.len());
     let mut ranges = Vec::new();
     let mut swatches = Vec::new();
@@ -742,17 +980,62 @@ fn decorate_colors(
     (SharedString::from(shown), colors, tokens)
 }
 
-/// Color values in a fence's drawn text, ready for the selectable text.
-#[derive(Debug, Default)]
-pub(super) struct FenceColors {
-    pub(super) ranges: Rc<[Range<usize>]>,
-    pub(super) values: Rc<[SharedString]>,
-    pub(super) swatches: Rc<[InlineSwatch]>,
-    pub(super) copies: Rc<[(Range<usize>, SharedString)]>,
+fn code_lines(text: &SharedString) -> Arc<[(Range<usize>, SharedString)]> {
+    let mut start = 0;
+    let mut lines = Vec::new();
+    for part in text.split_inclusive('\n') {
+        let end = start + part.trim_end_matches('\n').len();
+        lines.push((start..end, SharedString::from(text[start..end].to_owned())));
+        start += part.len();
+    }
+    if lines.is_empty() || text.ends_with('\n') {
+        lines.push((start..start, SharedString::default()));
+    }
+    lines.into()
 }
 
-impl PreparedFence {
-    fn new(fence: &CodeFence) -> Self {
+/// Color values in a fence's drawn text, ready for the selectable text.
+#[derive(Clone, Debug, Default)]
+pub(super) struct FenceColors {
+    pub(super) ranges: Arc<[Range<usize>]>,
+    pub(super) values: Arc<[SharedString]>,
+    pub(super) swatches: Arc<[InlineSwatch]>,
+    pub(super) copies: Arc<[(Range<usize>, SharedString)]>,
+}
+
+impl PreparedFenceData {
+    fn heap_bytes(&self) -> usize {
+        let rich = self.rich.as_ref().map_or(0, |rich| match rich {
+            RichFence::Ready(prepared) => prepared.resident_bytes(),
+            RichFence::Pending { kind } => kind.len(),
+            RichFence::Invalid { note } => note.len(),
+        });
+        self.source.len()
+            + std::mem::size_of_val(self.lines.as_ref())
+            + self.lines.iter().map(|(_, line)| line.len()).sum::<usize>()
+            + std::mem::size_of_val(self.tokens.as_ref())
+            + self.tokens.len() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+            + std::mem::size_of_val(self.colors.ranges.as_ref())
+            + rich::budget::shared(&self.colors.values)
+            + std::mem::size_of_val(self.colors.swatches.as_ref())
+            + std::mem::size_of_val(self.colors.copies.as_ref())
+            + self
+                .colors
+                .copies
+                .iter()
+                .map(|(_, text)| text.len())
+                .sum::<usize>()
+            + rich
+            + self.diagram.as_ref().map_or(0, |diagram| {
+                super::rich::image_resident_bytes(&diagram.image)
+            })
+    }
+    fn new(fence: &CodeFence, renderer: Option<&gpui::SvgRenderer>) -> Self {
+        let rich = rich::prepare(
+            fence.language.as_deref(),
+            fence_display_source(&fence.source),
+            fence.closed,
+        );
         let display = fence_display_source(&fence.source);
         let tokens: Vec<_> = fence
             .tokens
@@ -761,25 +1044,40 @@ impl PreparedFence {
             .iter()
             .filter_map(|token| valid_code_range(token, display))
             .collect();
-        let rich = rich::prepare(fence.language.as_deref(), display, fence.closed);
-        let diagram = fence.closed && fence.language.as_deref() == Some("mermaid");
+        let diagram = fence
+            .diagram
+            .as_ref()
+            .and_then(|svg| super::diagram::image(svg, renderer?.clone()));
         // Rich blocks and diagrams draw something else; plain code shows
         // its colors.
-        let starts = if rich.is_none() && !diagram {
+        let starts = if rich.is_none() && diagram.is_none() {
             let whole = 0..display.len();
             rich::color_ranges(display, std::slice::from_ref(&whole))
         } else {
             Vec::new()
         };
-        let (shown, colors, tokens) = decorate_colors(display, &starts, tokens);
+        let source = SharedString::from(display);
+        let (shown, colors, tokens) = if starts.is_empty() {
+            (source.clone(), FenceColors::default(), tokens)
+        } else {
+            decorate_colors(display, &starts, tokens)
+        };
         Self {
             multiline: display.contains('\n'),
             diagram,
             rich,
-            source: SharedString::from(display),
-            shown,
+            source,
+            lines: code_lines(&shown),
             colors,
             tokens: tokens.into_boxed_slice(),
+        }
+    }
+}
+
+impl PreparedFence {
+    fn new(data: PreparedFenceData) -> Self {
+        Self {
+            data,
             resolved: RefCell::new(None),
         }
     }
@@ -787,20 +1085,29 @@ impl PreparedFence {
     /// Token highlight runs for `theme`, reused while the kind palette
     /// resolves unchanged.
     pub(super) fn highlights(&self, theme: &ArtisanTheme) -> Rc<[(Range<usize>, HighlightStyle)]> {
-        let palette = ALL_KINDS.map(|kind| code_token_style(theme, kind));
+        let key = [
+            theme.colors.muted_foreground,
+            theme.colors.banner_success,
+            theme.colors.banner_warning,
+            theme.colors.accent_foreground,
+            theme.colors.primary,
+            theme.colors.question_to,
+            theme.colors.foreground,
+        ];
         let mut memo = self.resolved.borrow_mut();
         if let Some(resolved) = memo.as_ref()
-            && resolved.palette == palette
+            && resolved.key == key
         {
             return Rc::clone(&resolved.highlights);
         }
+        let palette = ALL_KINDS.map(|kind| code_token_style(theme, kind));
         let highlights: Rc<[_]> = self
             .tokens
             .iter()
             .map(|(range, kind)| (range.clone(), palette[kind_index(*kind)]))
             .collect();
         *memo = Some(ResolvedFence {
-            palette,
+            key,
             highlights: Rc::clone(&highlights),
         });
         highlights
@@ -809,8 +1116,64 @@ impl PreparedFence {
 
 #[cfg(test)]
 mod fence_color_tests {
-    use super::{CodeTokenKind, decorate_colors};
+    use super::*;
     use crate::markdown_renderer::inline::SWATCH_SLOT;
+
+    #[test]
+    fn nested_lists_and_tables_publish_independent_semantic_rows() {
+        let document = crate::markdown::MarkdownEngine::new()
+            .unwrap()
+            .parse_document("- first\n  - nested\n- last\n\n| a | b |\n| --- | --- |\n| x | y |\n")
+            .unwrap();
+        let prepared = PreparedMarkdown::new(document);
+        assert_eq!(prepared.block_count(), 5);
+        assert_eq!(
+            prepared
+                .flow
+                .iter()
+                .map(|row| row.indent)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 1, 0, 0]
+        );
+        assert!(matches!(
+            prepared.flow[3].kind,
+            FlowKind::TableRow { row: 0, .. }
+        ));
+        assert!(matches!(
+            prepared.flow[4].kind,
+            FlowKind::TableRow { row: 1, .. }
+        ));
+        let mut leaves = Vec::new();
+        collect_selection(&prepared.root, &[41], &mut leaves, "\n\n");
+        assert_eq!(
+            leaves
+                .iter()
+                .map(|leaf| leaf.text.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["first", "nested", "last", "a", "b", "x", "y"]
+        );
+        assert!(leaves.windows(2).all(|pair| pair[0].order < pair[1].order));
+        assert!(leaves.iter().all(|leaf| leaf.order[0] == 41));
+    }
+
+    #[test]
+    fn code_rows_preserve_empty_lines_and_byte_ranges() {
+        let source = SharedString::from("\né\n\n");
+        let lines = code_lines(&source);
+        assert_eq!(
+            lines
+                .iter()
+                .map(|(_, text)| text.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["", "é", "", ""]
+        );
+        assert!(
+            lines
+                .iter()
+                .all(|(range, text)| &source[range.clone()] == text.as_ref())
+        );
+        assert_eq!(lines[1].0, 1..3);
+    }
 
     #[test]
     fn a_fence_shows_a_swatch_before_each_color_and_tokens_follow() {

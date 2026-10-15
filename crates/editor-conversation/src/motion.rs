@@ -1,75 +1,23 @@
-//! Motion of a row's work (`conversation_surface/work_motion.rs`,
-//! `disclosure.rs` and `compaction_separator.rs`): disclosures that open
-//! and close their measured height, phrases that count like an odometer,
-//! the live header's entrance, entering rows and the compaction separator.
-//!
-//! Every animation belongs to one row view and runs only while what it
-//! shows is new: a row's first render and settled history paint at rest,
-//! so scrolling back or opening a thread never replays anything. Reduced
-//! motion paints every final state at once. Durations and curves are the
-//! transitions-dev tokens the old Editor used:
-//!
-//! - A disclosure opens and closes on the 250 ms smooth-out accordion
-//!   clock; the panel clips to the animated share of its measured height
-//!   while its content fades with it, and an interrupted flight reverses
-//!   from the fraction on screen.
-//! - A work row (a chain, prose, a card) enters by opening its height
-//!   (250 ms smooth-out) while its content fades in 80 ms later (250 ms
-//!   ease-out) and settles 4 px into place.
-//! - A phrase that keeps changing (a chain's "Ran 2 commands, read a file",
-//!   the "Working for 1m 4s" header) animates per word: a changed number
-//!   rolls like an odometer (500 ms, columns 40 ms apart), a word that grows
-//!   fades its new letters in, and a new word rises in with the text-swap
-//!   recipe (150 ms ease-in-out, 4 px, 2 px blur).
-//! - A header mounted while its run works enters after a 150 ms hold with
-//!   the text-swap recipe.
-//! - The compaction separator opens, draws its rules outward and lifts its
-//!   label in; settling, the word swaps and a highlight runs along the
-//!   rules.
-//!
-//! A row reveals strictly top to bottom through one reveal queue (master's
-//! `work_motion`): blocks render in paint order, and while something above
-//! still settles (prose with words left to reveal, or an entrance whose fade
-//! hasn't reached its midpoint) every block below waits. A waiting block
-//! paints nothing and starts no entrance clock; prose already showing words
-//! pauses where it is. So text never keeps streaming beside a tool call that
-//! arrived after it. Nothing waits outside full live motion.
-
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+//! Row entrances, counting labels, disclosure controls and compaction animate locally.
+//! Native ListState owns measurement, disclosure rows and scroll anchors.
 use editor_ui::motion::{MotionCurve, MotionDuration, MotionPlan, MotionPolicy, MotionRecipe};
 use gpui::{
     AnyElement, Div, Filter, FontFeatures, IntoElement, ParentElement as _, Pixels, SharedString,
     Styled as _, StyledText, div, px,
 };
-
-/// Row entrance: `--duration-very-slow` (texts reveal).
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 const ENTRANCE: Duration = Duration::from_millis(400);
-/// The row's height opening (`--duration-fast`).
-const ENTRANCE_GROW: Duration = MotionDuration::Fast.as_duration();
-/// The content's fade waits this long, so it fades into opened space.
-const ENTRANCE_FADE_DELAY: Duration = Duration::from_millis(80);
-/// The content's fade (`--duration-fast`).
-const ENTRANCE_FADE: Duration = MotionDuration::Fast.as_duration();
-/// The content's rise into place (`--distance-micro`).
 const ENTRANCE_RISE_PX: f32 = 4.0;
-/// Odometer roll of one digit column (`--duration-very-slow`).
 const ROLL: Duration = Duration::from_millis(500);
-/// Offset between neighbouring digit columns (`--duration-stagger`).
 const ROLL_STAGGER: Duration = Duration::from_millis(40);
-/// In-place word swap: `--duration-quick` (text swap).
 const SWAP: Duration = Duration::from_millis(150);
-/// In-place word swap rise: `--distance-micro`.
 const SWAP_RISE_PX: f32 = 4.0;
-/// In-place word swap blur: `--blur-small`.
 const SWAP_BLUR_PX: f32 = 2.0;
-/// The header entrance: a quick hold, then the text swap.
 const HEADER_HOLD: Duration = MotionDuration::Quick.as_duration();
-
 // The compaction separator.
 const COMPACTION_OPEN: Duration = Duration::from_millis(250);
 const COMPACTION_DRAW_DELAY: Duration = Duration::from_millis(150);
@@ -79,205 +27,62 @@ const COMPACTION_LABEL_RISE: Duration = Duration::from_millis(250);
 const COMPACTION_SWAP_HALF: Duration = Duration::from_millis(150);
 const COMPACTION_PULSE: Duration = Duration::from_millis(500);
 
-/// One row's motion, retained across its renders.
 #[derive(Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent per-frame flags; packing them would conflate them"
-)]
 pub(crate) struct WorkMotion {
-    /// Set after the row's first render: what it showed then never moves.
-    primed: bool,
-    /// Whether the row's run is live this frame.
     live: bool,
-    /// The reader's motion preference this frame.
     policy: Option<MotionPolicy>,
-    /// Whether anything still moves; the row then renders the next frame.
     animating: bool,
-    phrases: HashMap<String, PhraseState>,
-    /// When each row first painted while new, `None` at rest.
-    entrances: HashMap<String, Option<Instant>>,
-    /// Natural heights of rows mid-entrance, measured each frame.
-    entrance_heights: HashMap<String, Rc<Cell<Pixels>>>,
-    disclosures: HashMap<String, DisclosurePanel>,
-    compactions: HashMap<String, CompactionMotion>,
-    /// Whether the header first mounted while its run worked, and when.
-    header: Option<(bool, Instant)>,
-    /// Disclosures last painted folded, by selector.
-    folded: HashSet<String>,
-    /// Disclosures the reader just opened are rendering their rows: those
-    /// rows already happened, so they paint at rest.
-    opening: u32,
-    /// Something painted above is still settling this frame: what renders
-    /// next waits (the reveal queue).
     settling: bool,
+    entrance: Option<Option<Instant>>,
+    entrance_height: Rc<Cell<Pixels>>,
+    compactions: HashMap<String, CompactionMotion>,
+    phrases: HashMap<String, PhraseState>,
+    header: Option<(bool, Instant)>,
+    chevrons: HashMap<String, ChevronMotion>,
 }
-
 impl WorkMotion {
-    /// Starts one render.
     pub(crate) fn begin_frame(&mut self, live: bool, policy: MotionPolicy) {
         self.live = live;
         self.policy = Some(policy);
         self.animating = false;
         self.settling = false;
     }
-
-    /// Whether the reveal queue holds back what renders next this frame.
-    pub(crate) fn gate_closed(&self) -> bool {
-        self.settling && self.full_motion()
+    pub(crate) fn is_settling(&self) -> bool {
+        self.settling
     }
-
-    /// Something just rendered is still settling: what follows waits.
-    pub(crate) fn note_settling(&mut self) {
-        self.settling = true;
-    }
-
-    /// Whether the block keyed `key` waits behind the reveal queue this
-    /// frame. A waiting block must paint nothing and must not call
-    /// [`Self::entrance`], whose clock starts on its first call; frames keep
-    /// coming until it is released. A block already on screen never waits
-    /// again, so nothing painted disappears.
-    pub(crate) fn hold(&mut self, key: &str) -> bool {
-        if !self.gate_closed() || self.entrances.contains_key(key) {
-            return false;
-        }
-        self.animating = true;
-        true
-    }
-
-    /// Ends one render; returns whether the row must render the next frame.
     pub(crate) fn end_frame(&mut self) -> bool {
-        self.primed = true;
         self.animating
     }
-
     fn policy(&self) -> MotionPolicy {
         self.policy.unwrap_or(MotionPolicy::Full)
     }
-
-    /// New content of a live run under full motion moves.
-    fn full_motion(&self) -> bool {
-        self.primed && self.opening == 0 && self.live && self.policy() == MotionPolicy::Full
+    pub(crate) fn entrance_started(&self) -> bool {
+        self.entrance.is_some()
     }
 
-    /// Notes one disclosure before its rows render; returns whether the
-    /// reader just opened it. Its rows then paint at rest until
-    /// [`Self::end_disclosure`].
-    pub(crate) fn begin_disclosure(&mut self, selector: &str, mounted: bool) -> bool {
-        if !mounted {
-            self.folded.insert(selector.to_owned());
-            return false;
-        }
-        let opened = self.folded.remove(selector);
-        if opened {
-            self.opening += 1;
-        }
-        opened
-    }
-
-    pub(crate) fn end_disclosure(&mut self, opened: bool) {
-        if opened {
-            self.opening = self.opening.saturating_sub(1);
-        }
-    }
-
-    /// Samples one disclosure's open fraction once for its chevron, height
-    /// and opacity. A mount rests at its state; only a change of `open`
-    /// arms a flight, and reduced motion records it without one.
-    pub(crate) fn disclosure(&mut self, selector: &str, open: bool) -> DisclosureFrame {
-        let policy = self.policy();
-        let now = Instant::now();
-        let panel = self
-            .disclosures
-            .entry(selector.to_owned())
-            .or_insert_with(|| DisclosurePanel::new(open));
-        if panel.painted_open != open {
-            let from = panel.progress.clamp(0.0, 1.0);
-            panel.flight = match policy {
-                MotionPolicy::Full => Some(Flight {
-                    open,
-                    from,
-                    started: now,
-                    collapse_height: panel.content.get(),
-                }),
-                MotionPolicy::Reduced => None,
-            };
-            panel.painted_open = open;
-        }
-        let mut fraction = if open { 1.0 } else { 0.0 };
-        match (panel.flight, policy.resolve(MotionRecipe::AccordionExpand)) {
-            (Some(flight), MotionPlan::Animate(animation)) => {
-                let elapsed = now.saturating_duration_since(flight.started);
-                if elapsed >= animation.duration() {
-                    panel.flight = None;
-                } else {
-                    let eased = sample(animation.curve(), elapsed, animation.duration());
-                    fraction = flight.from + (flight.target() - flight.from) * eased;
-                }
-            }
-            (_, MotionPlan::Immediate) => panel.flight = None,
-            (None, _) => {}
-        }
-        panel.progress = fraction;
-        self.animating |= panel.flight.is_some();
-        DisclosureFrame {
-            fraction,
-            flight: panel.flight,
-            content: Rc::clone(&panel.content),
-            open,
-        }
-    }
-
-    /// The entrance of one row this frame, `None` at rest. A row enters when
-    /// it first paints after the row view's first render, or when its item
-    /// arrived while the thread was open (`fresh`): a row view made for new
-    /// work enters too.
-    pub(crate) fn entrance(&mut self, key: &str, fresh: bool) -> Option<Entrance> {
-        let animate = (self.primed || fresh)
-            && self.opening == 0
-            && self.live
-            && self.policy() == MotionPolicy::Full;
+    pub(crate) fn entrance(&mut self, _key: &str, fresh: bool) -> Option<Entrance> {
+        let animate = fresh && self.live && self.policy() == MotionPolicy::Full;
         let started = *self
-            .entrances
-            .entry(key.to_owned())
-            .or_insert_with(|| animate.then(Instant::now));
-        let elapsed = started
-            .map(|started| Instant::now().saturating_duration_since(started))
-            .filter(|elapsed| *elapsed < ENTRANCE && self.live);
-        let Some(elapsed) = elapsed else {
-            self.entrance_heights.remove(key);
+            .entrance
+            .get_or_insert_with(|| animate.then(Instant::now));
+        let elapsed = started?.elapsed();
+        if elapsed >= ENTRANCE || self.policy() != MotionPolicy::Full {
             return None;
-        };
-        self.animating = true;
-        let reveal = progress_of(
-            elapsed.saturating_sub(ENTRANCE_FADE_DELAY),
-            ENTRANCE_FADE,
-            MotionCurve::EaseOut,
-        );
-        // An entering block holds the queue until it is halfway in, so the
-        // blocks after it cascade rather than arrive at once.
-        if reveal < 0.5 {
-            self.settling = true;
         }
+        self.animating = true;
+        self.settling |= elapsed < Duration::from_millis(205);
         Some(Entrance {
-            grow: progress_of(elapsed, ENTRANCE_GROW, MotionCurve::SmoothOut),
-            reveal,
-            measured: Rc::clone(
-                self.entrance_heights
-                    .entry(key.to_owned())
-                    .or_insert_with(|| Rc::new(Cell::new(px(0.0)))),
+            grow: progress_of(elapsed, Duration::from_millis(250), MotionCurve::SmoothOut),
+            measured: self.entrance_height.clone(),
+            reveal: progress_of(
+                elapsed.saturating_sub(Duration::from_millis(80)),
+                Duration::from_millis(250),
+                MotionCurve::EaseOut,
             ),
         })
     }
-
-    /// The words of a changing phrase with their motion this frame, or
-    /// `None` (plain text) outside a live run and under reduced motion.
-    ///
-    /// While the run is live with full motion the phrase paints word by
-    /// word at rest too: switching to plain text between ticks would swap
-    /// two layouts that do not measure alike.
     pub(crate) fn phrase(&mut self, key: &str, text: &str) -> Option<Vec<PhraseWord>> {
-        let animate = self.full_motion();
+        let animate = self.policy() == MotionPolicy::Full;
         let words: Vec<String> = text.split(' ').map(str::to_owned).collect();
         let now = Instant::now();
         let state = self
@@ -348,9 +153,32 @@ impl WorkMotion {
         })
     }
 
-    /// Advances one compaction separator to this frame's phase. It enters
-    /// only when it appears new and running, under full motion; it settles
-    /// with motion only when watched while it ran.
+    /// Rotate from the fraction currently painted when a disclosure reverses.
+    pub(crate) fn chevron(&mut self, key: &str, open: bool) -> f32 {
+        let target = if open { 1.0 } else { 0.0 };
+        let motion = self
+            .chevrons
+            .entry(key.to_owned())
+            .or_insert(ChevronMotion {
+                from: target,
+                target,
+                started: Instant::now(),
+            });
+        let elapsed = motion.started.elapsed();
+        let progress = progress_of(elapsed, Duration::from_millis(250), MotionCurve::SmoothOut);
+        let current = motion.from + (motion.target - motion.from) * progress;
+        if motion.target != target {
+            motion.from = current;
+            motion.target = target;
+            motion.started = Instant::now();
+        }
+        if self.policy.unwrap_or(MotionPolicy::Full) != MotionPolicy::Full {
+            motion.from = target;
+            return target;
+        }
+        self.animating |= (current - target).abs() > 0.001;
+        current
+    }
     pub(crate) fn compaction(
         &mut self,
         key: &str,
@@ -368,99 +196,6 @@ impl WorkMotion {
         frame
     }
 }
-
-/// One disclosure transition: direction plus start fraction, on the
-/// 250 ms smooth-out accordion clock.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Flight {
-    open: bool,
-    /// The fraction on screen when it began, so an interrupted flight
-    /// reverses from there.
-    from: f32,
-    started: Instant,
-    /// A closing panel keeps its size whatever its rows do meanwhile.
-    collapse_height: f32,
-}
-
-impl Flight {
-    const fn target(self) -> f32 {
-        if self.open { 1.0 } else { 0.0 }
-    }
-}
-
-/// One disclosure's retained panel state.
-struct DisclosurePanel {
-    /// Intrinsic height of the mounted content, measured each paint.
-    content: Rc<Cell<f32>>,
-    painted_open: bool,
-    flight: Option<Flight>,
-    progress: f32,
-}
-
-impl DisclosurePanel {
-    fn new(open: bool) -> Self {
-        Self {
-            content: Rc::new(Cell::new(0.0)),
-            painted_open: open,
-            flight: None,
-            progress: if open { 1.0 } else { 0.0 },
-        }
-    }
-}
-
-/// One sample shared by a disclosure's chevron, height and opacity.
-pub(crate) struct DisclosureFrame {
-    pub fraction: f32,
-    flight: Option<Flight>,
-    content: Rc<Cell<f32>>,
-    open: bool,
-}
-
-impl DisclosureFrame {
-    /// Whether the content is painted: open, or closing still.
-    pub(crate) fn content_mounted(&self) -> bool {
-        self.open || self.flight.is_some()
-    }
-
-    /// Attaches the accordion panel to `root`: the content clipped to the
-    /// flight's share of its measured height and faded with it, or at rest.
-    pub(crate) fn panel(self, root: Div, content: Option<AnyElement>) -> Div {
-        let measured = Rc::clone(&self.content);
-        let panel = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .flex_shrink_0()
-            .on_children_prepainted(move |bounds, _, _| {
-                if let Some(bounds) = bounds.first() {
-                    measured.set(f32::from(bounds.size.height));
-                }
-            });
-        let content = match content.filter(|_| self.content_mounted()) {
-            Some(content) => div().w_full().min_w_0().flex_shrink_0().child(content),
-            None => return root.child(panel.h(px(0.0)).overflow_hidden()),
-        };
-        match self.flight {
-            Some(flight) => {
-                let full = if self.open {
-                    self.content.get()
-                } else {
-                    flight.collapse_height
-                };
-                root.child(
-                    panel
-                        .child(content.opacity(self.fraction))
-                        .overflow_hidden()
-                        .h(px(full * self.fraction)),
-                )
-            }
-            None => root.child(panel.child(content)),
-        }
-    }
-}
-
-/// One row's entrance this frame.
 pub(crate) struct Entrance {
     grow: f32,
     reveal: f32,
@@ -591,6 +326,12 @@ fn number_word(word: &str) -> Option<(&str, u64)> {
     }
     let (digits, suffix) = word.split_at(digits_end);
     Some((suffix, digits.parse().ok()?))
+}
+
+struct ChevronMotion {
+    from: f32,
+    target: f32,
+    started: Instant,
 }
 
 fn sample(curve: MotionCurve, elapsed: Duration, duration: Duration) -> f32 {
@@ -924,4 +665,183 @@ fn linear(elapsed: Duration, delay: Duration, duration: Duration) -> f32 {
 #[expect(clippy::cast_possible_truncation, reason = "progress stays in 0..=1")]
 pub(crate) fn eased(curve: MotionCurve, value: f32) -> f32 {
     curve.sample(f64::from(value)) as f32
+}
+
+/// Only mounted native rows participate in the top-to-bottom reveal queue.
+/// Offscreen cached rows expire rather than keeping visible work waiting.
+#[derive(Default)]
+pub(crate) struct RevealQueue {
+    rows: HashMap<crate::fold::RowKey, RevealGate>,
+}
+struct RevealGate {
+    order: (u64, u8, usize),
+    seen: Instant,
+    settling: bool,
+}
+impl RevealQueue {
+    pub(crate) fn begin(
+        &mut self,
+        key: crate::fold::RowKey,
+        order: (u64, u8, usize),
+        enabled: bool,
+    ) -> bool {
+        let now = Instant::now();
+        self.rows
+            .retain(|_, row| now.saturating_duration_since(row.seen) < Duration::from_millis(250));
+        let held = enabled
+            && self
+                .rows
+                .iter()
+                .any(|(other, row)| *other != key && row.order < order && row.settling);
+        self.rows
+            .entry(key)
+            .and_modify(|row| {
+                row.seen = now;
+                row.order = order;
+            })
+            .or_insert(RevealGate {
+                order,
+                seen: now,
+                settling: false,
+            });
+        held
+    }
+    pub(crate) fn frontier_key(&self) -> Option<crate::fold::RowKey> {
+        let now = Instant::now();
+        self.rows
+            .iter()
+            .filter(|(_, row)| {
+                row.settling && now.saturating_duration_since(row.seen) < Duration::from_millis(250)
+            })
+            .min_by_key(|(_, row)| row.order)
+            .map(|(key, _)| key.clone())
+    }
+    pub(crate) fn finish(&mut self, key: &crate::fold::RowKey, settling: bool) {
+        if let Some(row) = self.rows.get_mut(key) {
+            row.settling = settling;
+        }
+    }
+    pub(crate) fn remove(&mut self, key: &crate::fold::RowKey) {
+        self.rows.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod restored_motion_tests {
+    use super::*;
+    use crate::fold::RowKey;
+    #[test]
+    fn queue_holds_later_rows_but_releases_after_midpoint_or_eviction() {
+        let mut queue = RevealQueue::default();
+        let first = RowKey::Item(artisan_api::ItemId::new());
+        let next = RowKey::Item(artisan_api::ItemId::new());
+        assert!(!queue.begin(first.clone(), (1, 1, 0), true));
+        queue.finish(&first, true);
+        assert!(queue.begin(next.clone(), (2, 1, 0), true));
+        assert!(!queue.begin(next.clone(), (2, 1, 0), false));
+        queue.finish(&first, false);
+        assert!(!queue.begin(next.clone(), (2, 1, 0), true));
+        queue.finish(&first, true);
+        queue.rows.get_mut(&first).unwrap().seen = Instant::now() - Duration::from_secs(1);
+        assert!(!queue.begin(next, (2, 1, 0), true));
+        assert!(!queue.rows.contains_key(&first));
+    }
+    #[test]
+    fn phrase_counts_roll_and_new_words_enter() {
+        assert_eq!(
+            word_motion(Some("a"), "2"),
+            WordMotion::Roll {
+                from: "a".into(),
+                up: true
+            }
+        );
+        assert_eq!(
+            word_motion(Some("9s"), "10s"),
+            WordMotion::Roll {
+                from: "9s".into(),
+                up: true
+            }
+        );
+        assert_eq!(word_motion(Some("1m"), "1m"), WordMotion::Still);
+        assert_eq!(word_motion(None, "commands"), WordMotion::Enter);
+    }
+}
+
+/// First-seen live semantic ordinals. The loaded Item owns this record across
+/// native row eviction. Only observed visible source events admit fresh rows;
+/// page/index preparation alone establishes a history baseline.
+pub(crate) struct LiveBlockArrivals {
+    high_water: usize,
+    pending: bool,
+    fresh: HashMap<usize, Instant>,
+    pub(crate) seen: Instant,
+}
+impl LiveBlockArrivals {
+    pub(crate) fn is_fresh(&self, block: usize) -> bool {
+        self.fresh.contains_key(&block)
+    }
+    pub(crate) fn baseline(blocks: usize) -> Self {
+        Self {
+            high_water: blocks,
+            pending: false,
+            fresh: HashMap::new(),
+            seen: Instant::now(),
+        }
+    }
+    pub(crate) fn observed(&mut self) {
+        self.pending = true;
+        self.seen = Instant::now();
+    }
+    pub(crate) fn prepared(&mut self, blocks: usize, caught_up: bool, initially_fresh: bool) {
+        let now = Instant::now();
+        if self.pending || initially_fresh {
+            // At most the native owner cache's128 latest ordinals remain eligible.
+            for block in self.high_water.max(blocks.saturating_sub(128))..blocks {
+                self.fresh.insert(block, now);
+            }
+            while self.fresh.len() > 128 {
+                let oldest = *self.fresh.keys().min().unwrap();
+                self.fresh.remove(&oldest);
+            }
+        }
+        self.high_water = self.high_water.max(blocks);
+        if caught_up {
+            self.pending = false;
+        }
+        self.seen = now;
+    }
+    pub(crate) fn claim(&mut self, block: usize) -> bool {
+        self.fresh.remove(&block).is_some()
+    }
+}
+
+#[cfg(test)]
+mod live_block_arrival_tests {
+    use super::*;
+    #[test]
+    fn a_late_live_block_is_fresh_once_but_loading_and_remounts_are_history() {
+        let mut arrivals = LiveBlockArrivals::baseline(3);
+        arrivals.prepared(3, true, false);
+        assert!(!arrivals.claim(2));
+        arrivals.observed();
+        arrivals.prepared(4, true, false);
+        assert!(arrivals.claim(3));
+        assert!(!arrivals.claim(3));
+        arrivals.prepared(8, true, false);
+        assert!(
+            !arrivals.claim(7),
+            "index or page preparation is not a live event"
+        );
+    }
+    #[test]
+    fn intermediate_preparation_does_not_consume_a_newer_observed_update() {
+        let mut arrivals = LiveBlockArrivals::baseline(1);
+        arrivals.observed();
+        arrivals.prepared(2, false, false);
+        assert!(arrivals.claim(1));
+        arrivals.prepared(3, true, false);
+        assert!(arrivals.claim(2));
+        arrivals.prepared(4, true, false);
+        assert!(!arrivals.claim(3));
+    }
 }

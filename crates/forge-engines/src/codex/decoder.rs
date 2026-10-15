@@ -5,45 +5,57 @@
 //! `spawnAgent` call) and everything the child does is decoded the same way
 //! with `parent` set to that item. It also keeps the JSON-RPC bookkeeping:
 //! request ids, responses for the driver, and replies to Codex's own
-//! requests (approvals, questions). Shapes were captured from Codex 0.162.1
-//! (see `transcripts/codex`) and its generated app-server schema.
+//! requests (`requests`). Shapes were captured from Codex 0.162.1 (see
+//! `transcripts/codex`) and its generated app-server schema (`protocol`).
+//!
+//! Each line is parsed once into `protocol` types. What the decoder can't
+//! read is logged with its method and thread and skipped, except a turn's
+//! end, which the run waits for: an unreadable `turn/completed` fails it.
 
-use crate::{EngineEvent, LiveKind, Outcome};
-use artisan_api::{
-    Answer, Approval, ApprovalRequest, BlobHash, Decision, ErrorKind, FileChange, FileOp, ItemKind,
-    NoticeKind, Output, Phase, PlanStep, Question, QuestionOption, RunStatus, Status, StepStatus,
-    ToolKind, Usage,
+mod requests;
+
+use super::protocol::{
+    CallStatus, CodexError, CollabCall, CollabStatus, CollabTool, CompletedTurn, ExecutionStatus,
+    Frame, Item, MessagePhase, Notification, PatchKind, PlanEntry, PlanStatus, ThreadInfo,
+    ThreadStarted, TokenUsage, TurnStatus, UserInput,
 };
-use serde_json::{Map, Value, json};
+use crate::{EngineEvent, LiveKind, Outcome};
+use anyhow::Context as _;
+use artisan_api::{
+    AgentAction, ErrorKind, FileChange, FileOp, ItemKind, MessageDirection, NoticeKind, Output,
+    Phase, PlanStep, RunStatus, Status, StepStatus, TextContent, ToolKind, Usage,
+};
+use requests::{Approvals, Questions};
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// The key of the run's plan (`turn/plan/updated`); one per run.
 const PLAN_KEY: &str = "plan";
 
-/// What Codex answered to one of our requests.
-#[derive(Debug)]
-pub(crate) struct Response {
-    pub id: u64,
-    pub method: String,
-    pub result: Result<Value, String>,
-}
+/// Child frames held until Codex says which spawn they belong to.
+const DEFERRED_FRAMES: usize = 256;
+const DEFERRED_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) use crate::rpc::Response;
 
 #[derive(Default)]
 pub(crate) struct Decoder {
-    next_id: u64,
-    outbox: Vec<Value>,
-    requests: HashMap<u64, String>,
-    responses: Vec<Response>,
+    reasoning_summary: crate::reasoning::Summary,
+    rpc: crate::rpc::State,
+    citations: super::citations::Citations,
     root: Option<String>,
     /// Followed child threads → the `Agent` item their items belong to.
     children: HashMap<String, String>,
-    /// `spawnAgent` calls whose child thread isn't known yet, oldest first.
+    /// Spawn calls awaiting an explicit receiver thread relation.
     spawning: Vec<String>,
+    /// Frames of child threads not bound yet, with their line sizes.
+    deferred: HashMap<String, Vec<(Notification, usize)>>,
+    deferred_bytes: usize,
     /// Child thread → text of its last agent message, the agent's result.
-    child_replies: HashMap<String, String>,
+    child_replies: HashMap<String, TextContent>,
     items: HashMap<String, Tracked>,
-    /// Item key → the Codex request waiting for the user.
-    pending: HashMap<String, Pending>,
+    approvals: Approvals,
+    questions: Questions,
     turn: Option<String>,
     turn_end: Option<Outcome>,
     /// A user message reached the root turn and nothing ran after it yet.
@@ -64,52 +76,39 @@ struct Tracked {
     kind: ItemKind,
 }
 
-enum Pending {
-    Command {
-        rpc: Value,
-    },
-    FileChange {
-        rpc: Value,
-    },
-    Permissions {
-        rpc: Value,
-        requested: Value,
-    },
-    Question {
-        rpc: Value,
-        ids: Vec<String>,
-    },
-    /// Questions inside an agent message; the answer goes back as a message.
-    AsyncQuestion {
-        texts: Vec<String>,
-    },
-}
-
 /// Where a frame belongs: the root thread (`None`) or a child thread's
 /// agent item (`Some`).
 type Scope = Option<String>;
 
+/// What Codex's `thread/start`, `thread/resume` and `turn/start` answer.
+#[derive(serde::Deserialize)]
+struct Started {
+    thread: Option<StartedThread>,
+    model: Option<String>,
+    turn: Option<super::protocol::TurnId>,
+}
+
+#[derive(serde::Deserialize)]
+struct StartedThread {
+    id: String,
+}
+
 impl Decoder {
     /// Queues a request and returns its id.
     pub fn request(&mut self, method: &str, params: Value) -> u64 {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.requests.insert(id, method.to_owned());
-        self.outbox
-            .push(json!({ "id": id, "method": method, "params": params }));
-        id
+        self.rpc.request(method, params)
     }
 
     pub fn notify(&mut self, method: &str) {
-        self.outbox.push(json!({ "method": method }));
+        self.rpc.notify(method, None);
     }
 
     pub fn take_outbox(&mut self) -> Vec<Value> {
-        std::mem::take(&mut self.outbox)
+        std::mem::take(&mut self.rpc.outbox)
     }
 
     pub fn take_responses(&mut self) -> Vec<Response> {
-        std::mem::take(&mut self.responses)
+        std::mem::take(&mut self.rpc.responses)
     }
 
     /// How the root thread's last turn ended, once.
@@ -139,509 +138,763 @@ impl Decoder {
     }
 
     /// One line from Codex.
-    pub fn feed(&mut self, line: &str) -> Vec<EngineEvent> {
-        let Ok(message) = serde_json::from_str::<Value>(line) else {
-            tracing::warn!("Codex wrote a line that is not JSON");
-            return Vec::new();
-        };
+    pub fn feed(&mut self, line: &str) -> anyhow::Result<Vec<EngineEvent>> {
+        let frame: Frame = serde_json::from_str(line).context("decoding Codex protocol JSON")?;
         let mut out = Vec::new();
-        match (message["method"].as_str(), message.get("id")) {
-            (Some(method), Some(id)) => {
-                self.server_request(id.clone(), method, &message["params"], &mut out)
-            }
-            (Some(method), None) => self.notification(method, &message["params"], &mut out),
-            (None, Some(id)) => self.response(id, &message, &mut out),
-            (None, None) => {}
+        match (frame.method, frame.id) {
+            (Some(method), Some(rpc)) => self.server_request(rpc, &method, &frame.params, &mut out),
+            (Some(method), None) => match Notification::parse(&method, &frame.params) {
+                Ok(notice) => self.notification(notice, line.len(), &mut out),
+                // The run waits for its turn's end; one it can't read fails it.
+                Err(error) if method == "turn/completed" => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "reading Codex turn/completed of thread {:?}",
+                        frame.params["threadId"].as_str()
+                    )));
+                }
+                Err(error) => tracing::warn!(
+                    method,
+                    thread = frame.params["threadId"].as_str(),
+                    item = frame.params["item"]["id"].as_str(),
+                    %error,
+                    "skipping a Codex notification Artisan can't read"
+                ),
+            },
+            (None, Some(rpc)) => self.response(&rpc, frame.result, frame.error.as_ref(), &mut out),
+            (None, None) => anyhow::bail!("Codex protocol frame has neither a method nor an id"),
         }
-        out
+        let out = self.reasoning_summary.normalize(out, false);
+        let out = self.citations.normalize(out);
+        Ok(crate::retained::settle(self, out))
     }
 
-    fn response(&mut self, id: &Value, message: &Value, out: &mut Vec<EngineEvent>) {
-        let result = &message["result"];
-        // `thread/start` and `thread/resume` answer with the thread;
-        // `turn/start` with the turn.
-        if let Some(thread) = result["thread"]["id"].as_str() {
-            self.root = Some(thread.to_owned());
-            out.push(EngineEvent::Session {
-                id: thread.to_owned(),
-            });
-            if let Some(model) = str_at(result, "model") {
-                out.push(EngineEvent::Model {
-                    id: model.to_owned(),
-                });
-            }
-        }
-        if let Some(turn) = result["turn"]["id"].as_str() {
-            self.turn = Some(turn.to_owned());
-        }
-        let Some(id) = id.as_u64() else {
+    /// The user's answer to the approval or question on `key`.
+    pub fn answer(&mut self, key: &str, answer: &artisan_api::Answer) -> Vec<EngineEvent> {
+        let events = self.answer_raw(key, answer);
+        crate::retained::settle(self, events)
+    }
+
+    fn response(
+        &mut self,
+        rpc: &Value,
+        result: Option<Value>,
+        error: Option<&Value>,
+        out: &mut Vec<EngineEvent>,
+    ) {
+        let Some(response) = self.rpc.respond(rpc, result, error) else {
             return;
         };
-        let method = self.requests.remove(&id).unwrap_or_default();
-        let result = match message.get("error") {
-            Some(error) => Err(error["message"]
-                .as_str()
-                .map_or_else(|| error.to_string(), str::to_owned)),
-            None => Ok(result.clone()),
-        };
-        self.responses.push(Response { id, method, result });
+        // `thread/start` and `thread/resume` answer with the thread;
+        // `turn/start` with the turn.
+        if let Ok(value) = &response.result
+            && let Ok(started) = <Started as serde::Deserialize>::deserialize(value)
+        {
+            if let Some(thread) = started.thread {
+                out.push(EngineEvent::Session {
+                    id: thread.id.clone(),
+                });
+                self.root = Some(thread.id);
+                if let Some(model) = started.model {
+                    out.push(EngineEvent::Model { id: model });
+                }
+            }
+            if let Some(turn) = started.turn {
+                self.turn = Some(turn.id);
+            }
+        }
+        self.rpc.responses.push(response);
     }
 
-    /// The scope of a frame's `threadId`; `None` for threads we don't follow.
-    fn scope(&mut self, params: &Value) -> Option<Scope> {
-        let thread = params["threadId"].as_str()?;
+    /// The scope of a thread; `None` for threads we don't follow.
+    fn scope(&self, thread: &str) -> Option<Scope> {
         if self.root.as_deref() == Some(thread) {
             return Some(None);
         }
-        if let Some(agent) = self.children.get(thread) {
-            return Some(Some(agent.clone()));
-        }
-        // A child can speak before its `spawnAgent` call names it.
-        let agent = self.spawning.first()?.clone();
-        self.bind_child(thread, &agent);
-        Some(Some(agent))
+        self.children.get(thread).map(|agent| Some(agent.clone()))
     }
 
-    fn bind_child(&mut self, thread: &str, agent: &str) {
+    fn defer(&mut self, thread: String, notice: Notification, size: usize) {
+        let frames = self.deferred.values().map(Vec::len).sum::<usize>();
+        if self.deferred_bytes + size > DEFERRED_BYTES || frames >= DEFERRED_FRAMES {
+            let message =
+                "Codex omitted child spawn relations and exceeded the pending-event budget";
+            tracing::warn!(thread, frames, bytes = self.deferred_bytes, message);
+            self.turn_end = Some(Outcome::failed(message));
+            self.deferred.clear();
+            self.deferred_bytes = 0;
+            return;
+        }
+        self.deferred_bytes += size;
+        self.deferred
+            .entry(thread)
+            .or_default()
+            .push((notice, size));
+    }
+
+    fn bind_child(&mut self, thread: &str, agent: &str, out: &mut Vec<EngineEvent>) {
         self.spawning.retain(|key| key != agent);
         self.children.insert(thread.to_owned(), agent.to_owned());
+        for (notice, size) in self.deferred.remove(thread).into_iter().flatten() {
+            self.deferred_bytes = self.deferred_bytes.saturating_sub(size);
+            self.notification(notice, size, out);
+        }
     }
 
-    fn notification(&mut self, method: &str, params: &Value, out: &mut Vec<EngineEvent>) {
-        if method == "thread/started" {
-            self.thread_started(&params["thread"], out);
-            return;
-        }
-        if method == "thread/name/updated" {
-            if params["threadId"]
-                .as_str()
-                .is_some_and(|thread| self.root.as_deref() == Some(thread))
-                && let Some(title) = str_at(params, "threadName")
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-            {
-                out.push(EngineEvent::Title {
-                    title: title.to_owned(),
-                });
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per notification Codex sends, each short"
+    )]
+    fn notification(&mut self, notice: Notification, size: usize, out: &mut Vec<EngineEvent>) {
+        match notice {
+            Notification::ThreadStarted(ThreadStarted { thread }) => {
+                return self.thread_started(thread, size, out);
             }
-            return;
+            Notification::ThreadNameUpdated(update) => {
+                if self.root.as_deref() == Some(update.thread_id.as_str())
+                    && let Some(title) = update
+                        .thread_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                {
+                    out.push(EngineEvent::Title {
+                        title: title.to_owned(),
+                    });
+                }
+                return;
+            }
+            Notification::Unknown => return,
+            _ => {}
         }
-        let Some(scope) = self.scope(params) else {
+        let Some(thread) = notice.thread().map(str::to_owned) else {
             return;
         };
-        let item_key = || params["itemId"].as_str().unwrap_or_default().to_owned();
-        match method {
-            "turn/started" if scope.is_none() => {
-                self.turn = params["turn"]["id"].as_str().map(str::to_owned);
-                self.unanswered = false;
+        let Some(scope) = self.scope(&thread) else {
+            if !self.spawning.is_empty() {
+                self.defer(thread, notice, size);
             }
-            "turn/completed" => self.turn_completed(scope, params, out),
-            "item/started" => self.item(scope, &params["item"], false, out),
-            "item/completed" => self.item(scope, &params["item"], true, out),
-            "item/agentMessage/delta" | "item/plan/delta" => {
-                if let Some(delta) = str_at(params, "delta") {
-                    out.push(live(LiveKind::Text { key: item_key() }, delta));
+            return;
+        };
+        match notice {
+            Notification::TurnStarted(started) => {
+                if scope.is_none() {
+                    self.turn = Some(started.turn.id);
+                    self.unanswered = false;
                 }
             }
-            "item/reasoning/summaryTextDelta" if scope.is_none() => {
-                if let Some(delta) = str_at(params, "delta") {
-                    out.push(live(LiveKind::Reasoning, delta));
+            Notification::TurnCompleted(completed) => {
+                self.turn_completed(&thread, scope, &completed.turn, out);
+            }
+            Notification::ItemStarted(notice) => self.item(&thread, scope, notice.item, false, out),
+            Notification::ItemCompleted(notice) => {
+                self.item(&thread, scope, notice.item, true, out);
+            }
+            Notification::TextDelta(delta) => {
+                if let Some(text) = delta.text {
+                    let Some(key) = delta.item_id.filter(|key| !key.is_empty()) else {
+                        tracing::warn!(thread, "Codex text delta omitted itemId");
+                        return;
+                    };
+                    out.push(live(LiveKind::Text { key }, text));
                 }
             }
-            "item/reasoning/summaryPartAdded" if scope.is_none() => {
-                if params["summaryIndex"]
-                    .as_u64()
-                    .is_some_and(|index| index > 0)
+            Notification::ReasoningDelta(delta) => {
+                if scope.is_none()
+                    && let Some(text) = delta.text
                 {
-                    out.push(live(LiveKind::Reasoning, "\n\n"));
+                    out.push(live(LiveKind::Reasoning, text));
                 }
             }
-            "item/commandExecution/outputDelta" => {
-                if let Some(delta) = str_at(params, "delta") {
-                    out.push(live(LiveKind::Shell { key: item_key() }, delta));
+            Notification::ReasoningPart(part) if scope.is_none() => match part.summary_index {
+                Some(0) => out.push(EngineEvent::Live {
+                    target: LiveKind::Reasoning,
+                    text: String::new(),
+                    append: false,
+                }),
+                Some(_) => out.push(live(LiveKind::Reasoning, "\n\n".to_owned())),
+                None => tracing::warn!(thread, "Codex reasoning part omitted summaryIndex"),
+            },
+            Notification::OutputDelta(delta) => {
+                if let Some(text) = delta.text {
+                    let Some(key) = delta.item_id.filter(|key| !key.is_empty()) else {
+                        tracing::warn!(thread, "Codex output delta omitted itemId");
+                        return;
+                    };
+                    out.push(live(LiveKind::Shell { key }, text));
                 }
             }
-            "item/mcpToolCall/progress" => {
-                if let Some(message) = str_at(params, "message") {
+            Notification::McpProgress(progress) => {
+                if let Some(text) = progress.message {
+                    let Some(key) = progress.item_id.filter(|key| !key.is_empty()) else {
+                        tracing::warn!(thread, "Codex MCP progress omitted itemId");
+                        return;
+                    };
                     out.push(EngineEvent::Live {
-                        target: LiveKind::Progress { key: item_key() },
-                        text: message.to_owned(),
+                        target: LiveKind::Progress { key },
+                        text,
                         append: false,
                     });
                 }
             }
-            "turn/plan/updated" => self.plan(scope, params, out),
-            "thread/tokenUsage/updated" => {
-                self.token_usage(scope.is_none(), &params["tokenUsage"], out)
+            Notification::PlanUpdated(update) => self.plan(scope, &update.plan, out),
+            Notification::TokenUsageUpdated(update) => {
+                self.token_usage(scope.is_none(), &update.token_usage, out);
             }
-            "model/rerouted" => {
-                let to = str_at(params, "toModel").unwrap_or_default();
+            Notification::Rerouted(reroute) => {
+                if [&reroute.turn_id, &reroute.from_model, &reroute.to_model]
+                    .iter()
+                    .any(|value| value.trim().is_empty())
+                {
+                    tracing::warn!(thread, "skipping a Codex reroute with blank turn or models");
+                    return;
+                }
                 let text = format!(
-                    "Codex moved this turn from {} to {to} ({}).",
-                    str_at(params, "fromModel").unwrap_or("the chosen model"),
-                    str_at(params, "reason").unwrap_or("reroute"),
+                    "Codex moved this turn from {} to {} ({}).",
+                    reroute.from_model, reroute.to_model, reroute.reason
                 );
-                let key = format!("reroute:{}", str_at(params, "turnId").unwrap_or_default());
                 self.notice(
-                    key,
+                    &format!("reroute:{}", reroute.turn_id),
                     scope,
                     NoticeKind::Reroute {
-                        model: to.to_owned(),
+                        model: reroute.to_model,
                     },
                     text,
                     out,
                 );
             }
-            "model/safetyBuffering/updated" => {
-                let key = format!("safety:{}", str_at(params, "turnId").unwrap_or_default());
-                if params["showBufferingUi"].as_bool() == Some(true)
+            Notification::SafetyBuffering(buffering) => {
+                let key = format!("safety:{}", buffering.turn_id);
+                if buffering.show_buffering_ui
+                    && !buffering.turn_id.trim().is_empty()
                     && !self.items.contains_key(&key)
                 {
-                    let text = "Codex is holding this reply for a safety check.".to_owned();
-                    self.notice(key, scope, NoticeKind::Safety, text, out);
+                    self.notice(
+                        &key,
+                        scope,
+                        NoticeKind::Safety,
+                        "Codex is holding this reply for a safety check.",
+                        out,
+                    );
                 }
             }
-            "thread/goal/updated" => {
-                let goal = &params["goal"];
-                let state = str_at(goal, "status").unwrap_or("active").to_owned();
-                let text = str_at(goal, "objective").unwrap_or_default().to_owned();
-                if text.trim().is_empty() {
+            Notification::GoalUpdated(update) => {
+                if update.goal.objective.trim().is_empty() {
+                    tracing::warn!(thread, "skipping a Codex goal with a blank objective");
                     return;
                 }
                 self.notice(
-                    goal_key(scope.as_ref()),
+                    &goal_key(scope.as_ref()),
                     scope,
-                    NoticeKind::Goal { state },
-                    text,
+                    NoticeKind::Goal {
+                        state: update.goal.status,
+                    },
+                    update.goal.objective,
                     out,
                 );
             }
-            "thread/goal/cleared" => {
+            Notification::GoalCleared(_) => {
                 let key = goal_key(scope.as_ref());
                 // Codex clears at every turn, goal or not: only a goal this
                 // session showed is reported cleared.
                 let text = match self.items.get(&key).map(|item| &item.kind) {
-                    Some(ItemKind::Notice { text, .. }) if !text.trim().is_empty() => text.clone(),
+                    Some(ItemKind::Notice { text, .. }) if text.byte_len() > 0 => text.clone(),
                     _ => return,
                 };
-                self.notice(
-                    key,
-                    scope,
-                    NoticeKind::Goal {
-                        state: "cleared".to_owned(),
-                    },
-                    text,
-                    out,
-                );
+                let state = "cleared".to_owned();
+                self.notice(&key, scope, NoticeKind::Goal { state }, text, out);
             }
-            "error" => self.error(scope, params, out),
-            "warning" => {
-                if let Some(message) = str_at(params, "message") {
+            Notification::Error(notice) => {
+                let refused = notice.error.is_refusal();
+                let message = notice
+                    .error
+                    .message
+                    .unwrap_or_else(|| "Codex reported an error".to_owned());
+                if notice.will_retry {
+                    out.push(EngineEvent::Live {
+                        target: LiveKind::Status,
+                        text: format!("{message} Retrying…"),
+                        append: false,
+                    });
+                    return;
+                }
+                if scope.is_none() {
+                    self.last_error = Some(message.clone());
+                }
+                let kind = if refused {
+                    ErrorKind::Refusal
+                } else {
+                    ErrorKind::Api
+                };
+                self.error_item(scope, kind, &message, out);
+            }
+            Notification::Warning(warning) => {
+                if let Some(message) = warning.message {
                     self.notices += 1;
                     let key = format!("warning-{}", self.notices);
-                    self.notice(key, scope, NoticeKind::Info, message.to_owned(), out);
+                    self.notice(&key, scope, NoticeKind::Info, message, out);
                 }
             }
-            "serverRequest/resolved" => self.resolved(&params["requestId"], out),
-            _ => {}
+            Notification::RequestResolved(resolved) => self.resolved(&resolved.request_id, out),
+            Notification::ReasoningPart(_)
+            | Notification::ThreadStarted(_)
+            | Notification::ThreadNameUpdated(_)
+            | Notification::Unknown => {}
         }
     }
 
-    fn thread_started(&mut self, thread: &Value, out: &mut Vec<EngineEvent>) {
-        let (Some(id), Some(parent)) = (str_at(thread, "id"), str_at(thread, "parentThreadId"))
-        else {
+    fn thread_started(&mut self, thread: ThreadInfo, size: usize, out: &mut Vec<EngineEvent>) {
+        let Some(parent) = thread.parent_thread_id.clone() else {
             return;
         };
-        if self.root.as_deref() == Some(id) || self.children.contains_key(id) {
+        if self.root.as_deref() == Some(thread.id.as_str()) {
             return;
         }
-        let parent_scope = if self.root.as_deref() == Some(parent) {
-            None
-        } else if let Some(agent) = self.children.get(parent) {
-            Some(agent.clone())
-        } else {
+        if let Some(agent) = self.children.get(&thread.id).cloned() {
+            if let Some(tracked) = self.items.get_mut(&agent)
+                && let ItemKind::Agent { name, agent_id, .. } = &mut tracked.kind
+            {
+                let changed = agent_id.as_deref() != Some(thread.id.as_str())
+                    || name.is_none() && thread.agent_nickname.is_some();
+                *agent_id = Some(thread.id.clone());
+                if name.is_none() {
+                    name.clone_from(&thread.agent_nickname);
+                }
+                if changed {
+                    out.push(self.event(&agent));
+                }
+            }
+            return;
+        }
+        let Some(parent_scope) = self.scope(&parent) else {
             return;
         };
-        let name = str_at(thread, "agentNickname").map(str::to_owned);
-        // Prefer the spawn call that made it; otherwise the thread is its
-        // own agent item.
-        let agent = if let Some(agent) = self.spawning.first() {
-            agent.clone()
-        } else {
-            let kind = ItemKind::Agent {
-                name: None,
-                description: String::new(),
-                prompt: None,
-                agent_id: None,
-                background: false,
-                result: None,
-                label: None,
-            };
-            self.track(id.to_owned(), parent_scope, Status::Running, kind);
-            id.to_owned()
+        if !self.spawning.is_empty() {
+            let id = thread.id.clone();
+            self.defer(
+                id,
+                Notification::ThreadStarted(ThreadStarted { thread }),
+                size,
+            );
+            return;
+        }
+        // A child with no spawn call we saw is its own agent.
+        let agent = thread.id.clone();
+        let kind = ItemKind::Agent {
+            name: thread.agent_nickname,
+            description: TextContent::default(),
+            prompt: None,
+            agent_id: Some(thread.id.clone()),
+            context_used: None,
+            model: None,
+            background: false,
+            result: None,
+            label: None,
         };
-        self.bind_child(id, &agent);
-        if let Some(name) = name
-            && let Some(tracked) = self.items.get_mut(&agent)
-            && let ItemKind::Agent {
-                name: slot @ None, ..
-            } = &mut tracked.kind
+        self.track(agent.clone(), parent_scope, Status::Running, kind);
+        out.push(self.event(&agent));
+        self.bind_child(&thread.id, &agent, out);
+    }
+
+    fn turn_completed(
+        &mut self,
+        thread: &str,
+        scope: Scope,
+        turn: &CompletedTurn,
+        out: &mut Vec<EngineEvent>,
+    ) {
+        let message = turn.error.as_ref().and_then(|error| error.message.clone());
+        let Some(agent) = scope else {
+            self.turn = None;
+            let outcome = match turn.status {
+                TurnStatus::Interrupted => Outcome::cancelled(),
+                TurnStatus::Failed => {
+                    let refused = turn.error.as_ref().is_some_and(CodexError::is_refusal);
+                    let message = message.unwrap_or_else(|| "Codex failed this turn".to_owned());
+                    if self.last_error.as_deref() != Some(message.as_str()) {
+                        let kind = if refused {
+                            ErrorKind::Refusal
+                        } else {
+                            ErrorKind::Api
+                        };
+                        self.error_item(None, kind, &message, out);
+                    }
+                    Outcome {
+                        status: if refused {
+                            RunStatus::Refused
+                        } else {
+                            RunStatus::Failed
+                        },
+                        error: Some(message),
+                    }
+                }
+                TurnStatus::Completed => {
+                    self.stranded = std::mem::take(&mut self.unanswered);
+                    Outcome::done()
+                }
+            };
+            self.unanswered = false;
+            self.last_error = None;
+            self.turn_end = Some(outcome);
+            return;
+        };
+        let status = match turn.status {
+            TurnStatus::Interrupted => Status::Cancelled,
+            TurnStatus::Failed => Status::Failed,
+            TurnStatus::Completed => Status::Done,
+        };
+        let reply = self
+            .child_replies
+            .remove(thread)
+            .or_else(|| message.map(Into::into));
+        if let Some(tracked) = self.items.get_mut(&agent)
+            && let ItemKind::Agent { result, .. } = &mut tracked.kind
         {
-            *slot = Some(name);
+            if reply.is_some() {
+                *result = reply;
+            }
+            tracked.status = tracked.status.advance(status);
             out.push(self.event(&agent));
         }
     }
 
-    fn turn_completed(&mut self, scope: Scope, params: &Value, out: &mut Vec<EngineEvent>) {
-        let turn = &params["turn"];
-        let error = &turn["error"];
-        let message = str_at(error, "message").map(str::to_owned);
-        match scope {
-            None => {
-                self.turn = None;
-                let outcome = match str_at(turn, "status") {
-                    Some("interrupted") => Outcome::cancelled(),
-                    Some("failed") => {
-                        let refused = is_refusal(error);
-                        let message =
-                            message.unwrap_or_else(|| "Codex failed this turn".to_owned());
-                        if self.last_error.as_deref() != Some(message.as_str()) {
-                            self.error_item(
-                                None,
-                                if refused {
-                                    ErrorKind::Refusal
-                                } else {
-                                    ErrorKind::Api
-                                },
-                                &message,
-                                out,
-                            );
-                        }
-                        Outcome {
-                            status: if refused {
-                                RunStatus::Refused
-                            } else {
-                                RunStatus::Failed
-                            },
-                            error: Some(message),
-                        }
-                    }
-                    _ => {
-                        self.stranded = std::mem::take(&mut self.unanswered);
-                        Outcome::done()
-                    }
-                };
-                self.unanswered = false;
-                self.last_error = None;
-                self.turn_end = Some(outcome);
-            }
-            Some(agent) => {
-                let status = match str_at(turn, "status") {
-                    Some("interrupted") => Status::Cancelled,
-                    Some("failed") => Status::Failed,
-                    _ => Status::Done,
-                };
-                let thread = params["threadId"].as_str().unwrap_or_default();
-                let reply = self.child_replies.get(thread).cloned().or(message);
-                if let Some(tracked) = self.items.get_mut(&agent)
-                    && let ItemKind::Agent { result, .. } = &mut tracked.kind
-                {
-                    if reply.is_some() {
-                        *result = reply;
-                    }
-                    tracked.status = tracked.status.advance(status);
-                    out.push(self.event(&agent));
-                }
-            }
-        }
-    }
-
-    fn item(&mut self, scope: Scope, item: &Value, completed: bool, out: &mut Vec<EngineEvent>) {
-        let Some(key) = str_at(item, "id").map(str::to_owned) else {
-            return;
-        };
-        let item_type = str_at(item, "type").unwrap_or_default();
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per item type Codex sends, each short"
+    )]
+    fn item(
+        &mut self,
+        thread: &str,
+        scope: Scope,
+        item: Item,
+        completed: bool,
+        out: &mut Vec<EngineEvent>,
+    ) {
         if scope.is_none() {
-            match (item_type, completed) {
-                ("userMessage", true) => self.unanswered = true,
-                ("userMessage", false) | (_, true) => {}
+            match (&item, completed) {
+                (Item::UserMessage { .. }, true) => self.unanswered = true,
+                (Item::UserMessage { .. }, false) | (_, true) => {}
                 (_, false) => self.unanswered = false,
             }
         }
-        let settled = |done: bool| {
-            if completed && done {
-                Status::Done
-            } else {
-                Status::Running
-            }
+        let settled = if completed {
+            Status::Done
+        } else {
+            Status::Running
         };
-        let (status, kind) = match item_type {
-            "agentMessage" => {
-                let text = str_at(item, "text").unwrap_or_default().to_owned();
-                let phase = match str_at(item, "phase") {
-                    Some("commentary") => Phase::Commentary,
+        let (key, status, kind) = match item {
+            Item::AgentMessage {
+                id,
+                text,
+                phase,
+                questions,
+            } => {
+                let Some(text) = text else {
+                    tracing::warn!(thread, item = id, "Codex agentMessage omitted its text");
+                    return;
+                };
+                let phase = match phase {
+                    Some(MessagePhase::Commentary) => Phase::Commentary,
                     _ => Phase::Final,
                 };
                 if completed {
-                    self.remember_reply(scope.as_ref(), &text);
-                    self.async_questions(&key, scope.clone(), item, out);
+                    if scope.is_some() && !text.is_empty() {
+                        // Kept until the child's turn ends; Forge has the text.
+                        let mut reply = TextContent::from(text.as_str());
+                        forge_content::compact_text(&mut reply);
+                        self.child_replies.insert(thread.to_owned(), reply);
+                    }
+                    self.async_questions(&id, scope.clone(), questions, out);
                 }
-                (settled(true), ItemKind::AssistantMessage { text, phase })
+                let kind = ItemKind::AssistantMessage {
+                    text: text.into(),
+                    phase,
+                };
+                (id, settled, kind)
             }
-            "plan" => {
-                let text = str_at(item, "text").unwrap_or_default().to_owned();
-                (
-                    settled(true),
-                    ItemKind::AssistantMessage {
-                        text,
-                        phase: Phase::Final,
-                    },
-                )
+            Item::Plan { id, text } => {
+                let Some(text) = text else {
+                    tracing::warn!(thread, item = id, "Codex plan omitted its text");
+                    return;
+                };
+                let kind = ItemKind::AssistantMessage {
+                    text: text.into(),
+                    phase: Phase::Final,
+                };
+                (id, settled, kind)
             }
-            "userMessage" => {
+            Item::UserMessage { content, .. } => {
                 // Ours are stored by Forge. A child's first message is its
                 // task; keep it when the spawn call didn't carry one.
                 if let Some(agent) = &scope
                     && let Some(tracked) = self.items.get_mut(agent)
-                    && let ItemKind::Agent { description, .. } = &mut tracked.kind
-                    && description.is_empty()
+                    && let ItemKind::Agent { prompt: None, .. } = &tracked.kind
+                    && let Some(text) = user_text(content)
                 {
-                    *description = user_text(item);
+                    if let ItemKind::Agent { prompt, .. } = &mut tracked.kind {
+                        *prompt = Some(text.into());
+                    }
                     out.push(self.event(agent));
                 }
                 return;
             }
-            "commandExecution" => {
-                let status = match str_at(item, "status") {
-                    Some("completed") => Status::Done,
-                    Some("failed") => Status::Failed,
-                    Some("declined") => Status::Declined,
-                    _ => Status::Running,
+            Item::CommandExecution {
+                id,
+                status,
+                command,
+                cwd,
+                aggregated_output,
+                exit_code,
+            } => {
+                let Some(status) = execution_status(status) else {
+                    return;
+                };
+                let Some(command) = command.filter(|command| !command.trim().is_empty()) else {
+                    if completed {
+                        self.malformed(
+                            scope,
+                            &id,
+                            "Codex commandExecution omitted its command",
+                            out,
+                        );
+                    }
+                    return;
                 };
                 let tool = ToolKind::Shell {
-                    command: display_command(str_at(item, "command").unwrap_or_default()),
-                    cwd: str_at(item, "cwd").map(str::to_owned),
+                    command: display_command(&command).into(),
+                    cwd,
                     background: false,
                 };
-                let output = str_at(item, "aggregatedOutput")
+                let output = aggregated_output
                     .filter(|text| !text.is_empty())
-                    .map(Output::from_text);
-                let exit_code = item["exitCode"]
-                    .as_i64()
-                    .and_then(|code| i32::try_from(code).ok());
-                (status, self.tool_kind(&key, tool, output, exit_code))
-            }
-            "fileChange" => {
-                let status = match str_at(item, "status") {
-                    Some("completed") => Status::Done,
-                    Some("failed") => Status::Failed,
-                    Some("declined") => Status::Declined,
-                    _ => Status::Running,
-                };
-                let changes = item["changes"]
-                    .as_array()
-                    .map(|changes| changes.iter().filter_map(file_change).collect())
-                    .unwrap_or_default();
-                (
-                    status,
-                    self.tool_kind(&key, ToolKind::Edit { changes }, None, None),
-                )
-            }
-            "mcpToolCall" => {
-                let status = tool_status(item, completed);
-                let tool = ToolKind::Mcp {
-                    server: str_at(item, "server").unwrap_or_default().to_owned(),
-                    tool: str_at(item, "tool").unwrap_or_default().to_owned(),
-                    input: arguments(&item["arguments"]),
-                };
-                let output = str_at(&item["error"], "message")
-                    .map(str::to_owned)
-                    .or_else(|| content_text(&item["result"]["content"]))
                     .map(|text| Output::from_text(&text));
-                (status, self.tool_kind(&key, tool, output, None))
+                let exit_code = exit_code.and_then(|code| i32::try_from(code).ok());
+                let kind = self.tool_kind(&id, tool, output, exit_code);
+                (id, status, kind)
             }
-            "dynamicToolCall" => {
-                let status = if completed && item["success"].as_bool() == Some(false) {
-                    Status::Failed
-                } else {
-                    tool_status(item, completed)
+            Item::FileChange {
+                id,
+                status,
+                changes,
+            } => {
+                let Some(status) = execution_status(status) else {
+                    return;
                 };
-                let tool = ToolKind::Other {
-                    name: str_at(item, "tool").unwrap_or_default().to_owned(),
-                    input: arguments(&item["arguments"]),
+                let Some(changes) = changes else {
+                    if completed {
+                        self.malformed(scope, &id, "Codex fileChange omitted its changes", out);
+                    }
+                    return;
                 };
-                let output =
-                    content_text(&item["contentItems"]).map(|text| Output::from_text(&text));
-                (status, self.tool_kind(&key, tool, output, None))
+                if changes.iter().any(|change| change.path.trim().is_empty()) {
+                    if completed {
+                        let message = "Codex fileChange supplied an invalid file change";
+                        self.malformed(scope, &id, message, out);
+                    }
+                    return;
+                }
+                let changes = changes.into_iter().map(file_change).collect::<Vec<_>>();
+                let tool = ToolKind::Edit {
+                    changes: changes.into(),
+                };
+                let kind = self.tool_kind(&id, tool, None, None);
+                (id, status, kind)
             }
-            "webSearch" => {
-                let action = &item["action"];
-                let query = str_at(item, "query")
-                    .filter(|query| !query.is_empty())
-                    .or_else(|| str_at(action, "query"))
-                    .or_else(|| str_at(action, "url"))
-                    .unwrap_or_default()
-                    .to_owned();
-                (
-                    settled(true),
-                    self.tool_kind(&key, ToolKind::WebSearch { query }, None, None),
-                )
-            }
-            "imageView" => {
-                let path = str_at(item, "path").unwrap_or_default().to_owned();
-                (
-                    settled(true),
-                    self.tool_kind(&key, ToolKind::ViewImage { path }, None, None),
-                )
-            }
-            "imageGeneration" => {
-                let failed = !item["failure"].is_null()
-                    || matches!(
-                        str_at(item, "status"),
-                        Some("failed" | "error" | "cancelled")
+            Item::McpToolCall {
+                id,
+                status,
+                server,
+                tool,
+                arguments,
+                result,
+                error,
+            } => {
+                let Some(status) = call_status(status, None, completed) else {
+                    return;
+                };
+                let (Some(server), Some(tool)) = (
+                    server.filter(|value| !value.is_empty()),
+                    tool.filter(|value| !value.is_empty()),
+                ) else {
+                    tracing::warn!(
+                        thread,
+                        item = id,
+                        "Codex MCP call omitted server/tool identity"
                     );
-                let status = if completed && failed {
-                    Status::Failed
-                } else {
-                    settled(true)
+                    return;
                 };
-                // Codex saves the image itself; the path rides in `caption`
-                // until Forge reads it into a blob and fills `blob`.
-                let caption = str_at(item, "savedPath")
-                    .or_else(|| str_at(item, "revisedPrompt"))
-                    .map(str::to_owned);
-                (
-                    status,
-                    ItemKind::Image {
-                        blob: BlobHash(String::new()),
-                        caption,
-                    },
-                )
+                let output = error
+                    .and_then(|error| error.message)
+                    .or_else(|| {
+                        result.and_then(|result| crate::native::content_text(&result.content))
+                    })
+                    .map(|text| Output::from_text(&text));
+                let tool = ToolKind::Mcp {
+                    server,
+                    tool,
+                    input: arguments_text(arguments).map(Into::into),
+                };
+                let kind = self.tool_kind(&id, tool, output, None);
+                (id, status, kind)
             }
-            "contextCompaction" => {
-                let tokens_before = match self.items.get(&key).map(|tracked| &tracked.kind) {
+            Item::DynamicToolCall {
+                id,
+                status,
+                success,
+                tool,
+                arguments,
+                content_items,
+            } => {
+                // A question Codex asked through `requestUserInput` settles
+                // when the tool call behind it ends.
+                if matches!(
+                    self.items.get(&id).map(|tracked| &tracked.kind),
+                    Some(ItemKind::Question { .. })
+                ) {
+                    if completed && let Some(status) = call_status(status, success, completed) {
+                        self.questions.remove(&id);
+                        if let Some(tracked) = self.items.get_mut(&id) {
+                            let next = tracked.status.advance(status);
+                            if next != tracked.status {
+                                tracked.status = next;
+                                out.push(EngineEvent::Status {
+                                    key: id,
+                                    status: next,
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
+                let Some(status) = call_status(status, success, completed) else {
+                    return;
+                };
+                let Some(name) = tool.filter(|name| !name.trim().is_empty()) else {
+                    if completed {
+                        self.malformed(
+                            scope,
+                            &id,
+                            "Codex dynamicToolCall omitted its tool name",
+                            out,
+                        );
+                    }
+                    return;
+                };
+                let output = crate::native::content_text(&content_items)
+                    .map(|text| Output::from_text(&text));
+                let tool = ToolKind::Other {
+                    name,
+                    input: arguments_text(arguments).map(Into::into),
+                };
+                let kind = self.tool_kind(&id, tool, output, None);
+                (id, status, kind)
+            }
+            Item::WebSearch { id, query, action } => {
+                let known = match self.items.get(&id).map(|tracked| &tracked.kind) {
+                    Some(ItemKind::Tool {
+                        tool: ToolKind::WebSearch { query },
+                        ..
+                    }) => Some(query.clone()),
+                    _ => None,
+                };
+                let Some(query) = web_query(query, action).or(known) else {
+                    // Codex starts searches without metadata and can complete
+                    // an opaque action as query:"", action:{type:"other"}.
+                    // Neither is an execution failure: wait for a query, or
+                    // leave this optional card out.
+                    tracing::debug!(
+                        thread,
+                        item = id,
+                        completed,
+                        "Codex web action has no display metadata"
+                    );
+                    return;
+                };
+                let kind = self.tool_kind(&id, ToolKind::WebSearch { query }, None, None);
+                (id, settled, kind)
+            }
+            Item::ImageView { id, path } => {
+                let Some(path) = path.filter(|path| !path.trim().is_empty()) else {
+                    if completed {
+                        self.malformed(scope, &id, "Codex imageView omitted its path", out);
+                    }
+                    return;
+                };
+                let kind = self.tool_kind(&id, ToolKind::ViewImage { path }, None, None);
+                (id, settled, kind)
+            }
+            Item::ImageGeneration {
+                id,
+                saved_path,
+                revised_prompt,
+            } => {
+                if !completed {
+                    return;
+                }
+                if let Some(path) = saved_path.filter(|path| !path.is_empty()) {
+                    out.push(EngineEvent::Image {
+                        key: id,
+                        parent: scope,
+                        path: path.into(),
+                        caption: revised_prompt,
+                    });
+                } else {
+                    tracing::warn!(
+                        thread,
+                        item = id,
+                        "Codex completed image generation without an image path"
+                    );
+                }
+                return;
+            }
+            Item::ContextCompaction { id } => {
+                let tokens_before = match self.items.get(&id).map(|tracked| &tracked.kind) {
                     Some(ItemKind::Compaction { tokens_before, .. }) => *tokens_before,
                     _ => self.usage.context_used,
                 };
-                (
-                    settled(true),
-                    ItemKind::Compaction {
-                        tokens_before,
-                        tokens_after: None,
+                let kind = ItemKind::Compaction {
+                    tokens_before,
+                    tokens_after: None,
+                };
+                (id, settled, kind)
+            }
+            Item::CollabAgentToolCall(call) => return self.collab(scope, call, completed, out),
+            Item::Sleep { id, duration_ms } => {
+                let seconds = duration_ms.unwrap_or_default().div_ceil(1000);
+                let mut kind = self.tool_kind(
+                    &id,
+                    ToolKind::Other {
+                        name: "sleep".to_owned(),
+                        input: None,
                     },
-                )
+                    None,
+                    None,
+                );
+                if let ItemKind::Tool { title, .. } = &mut kind {
+                    *title = Some(format!("{seconds} s"));
+                }
+                (id, settled, kind)
             }
-            "collabAgentToolCall" => {
-                self.collab(key, scope, item, completed, out);
-                return;
-            }
-            _ => return,
+            Item::Unknown => return,
+        };
+        if key.is_empty() {
+            tracing::warn!(thread, "Codex item supplied an empty id");
+            return;
+        }
+        if completed {
+            // Codex ended the item; nothing it asked about it waits anymore.
+            self.approvals.remove(&key);
+            self.questions.remove(&key);
+        }
+        let status = if !completed && self.approvals.contains_key(&key) {
+            Status::AwaitingUser
+        } else {
+            status
         };
         self.track(key.clone(), scope, status, kind);
         out.push(self.event(&key));
     }
 
-    /// A tool kind for `key`, keeping an approval already on the item.
+    /// A tool kind for `key`, keeping the title and approval it has.
     fn tool_kind(
         &self,
         key: &str,
@@ -666,32 +919,62 @@ impl Decoder {
 
     fn collab(
         &mut self,
-        key: String,
         scope: Scope,
-        item: &Value,
+        call: CollabCall,
         completed: bool,
         out: &mut Vec<EngineEvent>,
     ) {
-        let receivers: Vec<&str> = item["receiverThreadIds"]
-            .as_array()
-            .map(|ids| ids.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if str_at(item, "tool") != Some("spawnAgent") {
+        let key = call.id;
+        if call.tool != CollabTool::SpawnAgent {
+            let status = match call.status {
+                CollabStatus::Failed => Status::Failed,
+                CollabStatus::Interrupted => Status::Cancelled,
+                _ if completed => Status::Done,
+                _ => Status::Running,
+            };
+            let mut waited: Vec<String> = call
+                .agents_states
+                .keys()
+                .filter(|thread| !call.receiver_thread_ids.contains(thread))
+                .cloned()
+                .collect();
+            waited.sort();
+            let mut addresses = call.receiver_thread_ids.clone();
+            addresses.extend(waited);
+            let tool = match call.tool {
+                CollabTool::Wait => Some(ToolKind::Agents {
+                    action: AgentAction::Wait,
+                    addresses,
+                    targets: Vec::new(),
+                }),
+                CollabTool::SendInput => addresses.first().map(|to| ToolKind::AgentMessage {
+                    recipient: to.clone(),
+                    target: None,
+                    summary: None,
+                    text: call.prompt.clone().unwrap_or_default().into(),
+                    direction: MessageDirection::Sent,
+                }),
+                CollabTool::SpawnAgent | CollabTool::Other => None,
+            };
+            if let Some(tool) = tool {
+                let kind = self.tool_kind(&key, tool, None, None);
+                self.track(key.clone(), scope.clone(), status, kind);
+                out.push(self.event(&key));
+            }
             // `wait` reports what the agents said; fill results we missed.
-            for (thread, state) in item["agentsStates"].as_object().into_iter().flatten() {
-                let Some(agent) = self.children.get(thread).cloned() else {
+            for (thread, state) in call.agents_states {
+                let (Some(agent), Some(message)) = (self.children.get(&thread), state.message)
+                else {
                     continue;
                 };
-                let Some(message) = str_at(state, "message") else {
-                    continue;
-                };
+                let agent = agent.clone();
                 if let Some(tracked) = self.items.get_mut(&agent)
                     && let ItemKind::Agent {
                         result: result @ None,
                         ..
                     } = &mut tracked.kind
                 {
-                    *result = Some(message.to_owned());
+                    *result = Some(message.into());
                     out.push(self.event(&agent));
                 }
             }
@@ -700,124 +983,64 @@ impl Decoder {
         if !self.items.contains_key(&key) {
             let kind = ItemKind::Agent {
                 name: None,
-                description: str_at(item, "prompt").unwrap_or_default().to_owned(),
-                prompt: None,
+                description: call.description.unwrap_or_default().into(),
+                prompt: call.prompt.map(Into::into),
                 agent_id: None,
+                context_used: None,
+                model: None,
                 background: false,
                 result: None,
                 label: None,
             };
             self.track(key.clone(), scope, Status::Running, kind);
-            if receivers.is_empty() {
+            if call.receiver_thread_ids.is_empty() {
                 self.spawning.push(key.clone());
             }
             out.push(self.event(&key));
         }
-        for thread in receivers {
-            if !self.children.contains_key(thread) {
-                self.bind_child(thread, &key);
+        for thread in call.receiver_thread_ids {
+            if !thread.trim().is_empty() && !self.children.contains_key(&thread) {
+                self.bind_child(&thread, &key, out);
             }
         }
-        if completed && str_at(item, "status") == Some("failed") {
+        let terminal = match call.status {
+            CollabStatus::Failed => Some(Status::Failed),
+            CollabStatus::Interrupted => Some(Status::Cancelled),
+            CollabStatus::InProgress | CollabStatus::Completed | CollabStatus::Unknown => None,
+        };
+        if let Some(status) = terminal.filter(|_| completed) {
             self.spawning.retain(|spawn| *spawn != key);
             if let Some(tracked) = self.items.get_mut(&key) {
-                tracked.status = tracked.status.advance(Status::Failed);
+                tracked.status = tracked.status.advance(status);
             }
             out.push(self.event(&key));
         }
     }
 
-    fn remember_reply(&mut self, scope: Option<&String>, text: &str) {
-        if let Some(agent) = scope
-            && let Some(thread) = self
-                .children
-                .iter()
-                .find(|(_, key)| *key == agent)
-                .map(|(thread, _)| thread.clone())
-            && !text.is_empty()
-        {
-            self.child_replies.insert(thread, text.to_owned());
-        }
-    }
-
-    /// An agent message may carry questions it doesn't wait for; answers
-    /// go back as the next user message.
-    fn async_questions(
-        &mut self,
-        key: &str,
-        scope: Scope,
-        item: &Value,
-        out: &mut Vec<EngineEvent>,
-    ) {
-        let Some(questions) = item["questions"]
-            .as_array()
-            .filter(|questions| !questions.is_empty())
-        else {
-            return;
+    fn plan(&mut self, scope: Scope, plan: &Value, out: &mut Vec<EngineEvent>) {
+        let entries = match <Vec<PlanEntry> as serde::Deserialize>::deserialize(plan) {
+            Ok(entries) if entries.iter().all(|entry| !entry.step.trim().is_empty()) => entries,
+            _ => {
+                self.error_item(
+                    scope,
+                    ErrorKind::Execution,
+                    "Codex supplied malformed plan steps",
+                    out,
+                );
+                return;
+            }
         };
-        let questions: Vec<Question> = questions
-            .iter()
-            .enumerate()
-            .filter_map(|(index, question)| {
-                Some(Question {
-                    id: index.to_string(),
-                    header: None,
-                    text: str_at(question, "title")?.to_owned(),
-                    multi_select: false,
-                    options: question["options"]
-                        .as_array()
-                        .map(|options| {
-                            options
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(|label| QuestionOption {
-                                    label: label.to_owned(),
-                                    description: None,
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                })
+        let steps = entries
+            .into_iter()
+            .map(|entry| PlanStep {
+                text: entry.step.into(),
+                status: match entry.status {
+                    PlanStatus::Pending => StepStatus::Pending,
+                    PlanStatus::InProgress => StepStatus::InProgress,
+                    PlanStatus::Completed => StepStatus::Done,
+                },
             })
-            .collect();
-        if questions.is_empty() {
-            return;
-        }
-        let key = format!("{key}:questions");
-        let texts = questions
-            .iter()
-            .map(|question| question.text.clone())
-            .collect();
-        self.pending
-            .insert(key.clone(), Pending::AsyncQuestion { texts });
-        let kind = ItemKind::Question {
-            blocking: false,
-            questions,
-            answers: None,
-        };
-        self.track(key.clone(), scope, Status::AwaitingUser, kind);
-        out.push(self.event(&key));
-    }
-
-    fn plan(&mut self, scope: Scope, params: &Value, out: &mut Vec<EngineEvent>) {
-        let steps: Vec<PlanStep> = params["plan"]
-            .as_array()
-            .map(|steps| {
-                steps
-                    .iter()
-                    .filter_map(|step| {
-                        Some(PlanStep {
-                            text: str_at(step, "step")?.to_owned(),
-                            status: match str_at(step, "status") {
-                                Some("completed") => StepStatus::Done,
-                                Some("inProgress") => StepStatus::InProgress,
-                                _ => StepStatus::Pending,
-                            },
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+            .collect::<Vec<_>>();
         let done = steps.iter().all(|step| step.status == StepStatus::Done);
         let key = scope.as_ref().map_or_else(
             || PLAN_KEY.to_owned(),
@@ -826,65 +1049,40 @@ impl Decoder {
         let status = if done { Status::Done } else { Status::Running };
         // A plan is replaced in place and may reopen.
         self.items.remove(&key);
-        self.track(
-            key.clone(),
-            scope,
-            status,
-            ItemKind::Plan {
-                steps,
-                proposal: None,
-                approval: None,
-            },
-        );
+        let kind = ItemKind::Plan {
+            steps: steps.into(),
+            proposal: None,
+            approval: None,
+        };
+        self.track(key.clone(), scope, status, kind);
         out.push(self.event(&key));
     }
 
-    fn token_usage(&mut self, root: bool, usage: &Value, out: &mut Vec<EngineEvent>) {
+    fn token_usage(&mut self, root: bool, usage: &TokenUsage, out: &mut Vec<EngineEvent>) {
         // `last` is one model call; `total` is the whole thread, history
         // included on resume, so the run sums `last`.
-        let last = &usage["last"];
-        let count = |field: &str| last[field].as_u64().unwrap_or_default();
-        let cached = count("cachedInputTokens");
-        self.usage.input += count("inputTokens").saturating_sub(cached);
+        let last = &usage.last;
+        let cached = last.cached_input_tokens;
+        self.usage.input += last.input_tokens.saturating_sub(cached);
         self.usage.cache_read += cached;
-        self.usage.output += count("outputTokens");
-        self.usage.reasoning += count("reasoningOutputTokens");
-        if let Some(written) = last["cacheWriteInputTokens"].as_u64() {
-            self.usage.cache_write = Some(self.usage.cache_write.unwrap_or_default() + written);
-        }
+        self.usage.output += last.output_tokens;
+        self.usage.reasoning += last.reasoning_output_tokens;
+        self.usage.cache_write =
+            Some(self.usage.cache_write.unwrap_or_default() + last.cache_write_input_tokens);
         if root {
-            if let Some(used) = last["totalTokens"].as_u64() {
-                self.usage.context_used = Some(used);
-            }
-            if let Some(window) = usage["modelContextWindow"].as_u64() {
+            self.usage.context_used = Some(last.total_tokens);
+            if let Some(window) = usage.model_context_window {
                 self.usage.context_window = Some(window);
             }
         }
         out.push(EngineEvent::Usage(self.usage.clone()));
     }
 
-    fn error(&mut self, scope: Scope, params: &Value, out: &mut Vec<EngineEvent>) {
-        let error = &params["error"];
-        let message = str_at(error, "message")
-            .unwrap_or("Codex reported an error")
-            .to_owned();
-        if params["willRetry"].as_bool() == Some(true) {
-            out.push(EngineEvent::Live {
-                target: LiveKind::Status,
-                text: format!("{message} Retrying…"),
-                append: false,
-            });
-            return;
-        }
-        let kind = if is_refusal(error) {
-            ErrorKind::Refusal
-        } else {
-            ErrorKind::Api
-        };
-        if scope.is_none() {
-            self.last_error = Some(message.clone());
-        }
-        self.error_item(scope, kind, &message, out);
+    /// A completed item Codex left a required field out of: an error the
+    /// user sees, never an empty card.
+    fn malformed(&mut self, scope: Scope, item: &str, message: &str, out: &mut Vec<EngineEvent>) {
+        tracing::warn!(item, message, "Codex sent a malformed item");
+        self.error_item(scope, ErrorKind::Execution, message, out);
     }
 
     fn error_item(
@@ -896,343 +1094,62 @@ impl Decoder {
     ) {
         self.notices += 1;
         let key = format!("error-{}", self.notices);
-        let retryable = false;
-        self.track(
-            key.clone(),
-            scope,
-            Status::Done,
-            ItemKind::Error {
-                kind,
-                message: message.to_owned(),
-                retryable,
-            },
-        );
+        let kind = ItemKind::Error {
+            kind,
+            message: message.to_owned().into(),
+            retryable: false,
+        };
+        self.track(key.clone(), scope, Status::Done, kind);
         out.push(self.event(&key));
     }
 
     fn notice(
         &mut self,
-        key: String,
-        scope: Scope,
-        kind: NoticeKind,
-        text: String,
-        out: &mut Vec<EngineEvent>,
-    ) {
-        self.items.remove(&key);
-        self.track(
-            key.clone(),
-            scope,
-            Status::Done,
-            ItemKind::Notice { kind, text },
-        );
-        out.push(self.event(&key));
-    }
-
-    // ------------------------------------------------------------ requests
-
-    fn server_request(
-        &mut self,
-        rpc: Value,
-        method: &str,
-        params: &Value,
-        out: &mut Vec<EngineEvent>,
-    ) {
-        let scope = self.scope(params);
-        let key = str_at(params, "itemId").map_or_else(|| format!("request-{rpc}"), str::to_owned);
-        match (method, scope) {
-            ("item/commandExecution/requestApproval", Some(scope)) => {
-                let command = display_command(str_at(params, "command").unwrap_or_default());
-                let cwd = str_at(params, "cwd").map(str::to_owned);
-                let request = if str_at(params, "kind") == Some("writeStdin") {
-                    ApprovalRequest::Action {
-                        description: format!("Send input to `{command}`"),
-                    }
-                } else {
-                    ApprovalRequest::Command {
-                        command: command.clone(),
-                        cwd: cwd.clone(),
-                    }
-                };
-                let tool = ToolKind::Shell {
-                    command,
-                    cwd,
-                    background: false,
-                };
-                self.ask(&key, scope, tool, request, params, out);
-                self.pending.insert(key, Pending::Command { rpc });
-            }
-            ("item/fileChange/requestApproval", Some(scope)) => {
-                let tool = ToolKind::Edit {
-                    changes: Vec::new(),
-                };
-                self.ask(&key, scope, tool, ApprovalRequest::FileChange, params, out);
-                self.pending.insert(key, Pending::FileChange { rpc });
-            }
-            ("item/permissions/requestApproval", Some(scope)) => {
-                let description = str_at(params, "reason").map_or_else(
-                    || format!("Grant more permissions: {}", params["permissions"]),
-                    str::to_owned,
-                );
-                let tool = ToolKind::Other {
-                    name: "permissions".to_owned(),
-                    input: Some(params["permissions"].to_string()),
-                };
-                self.ask(
-                    &key,
-                    scope,
-                    tool,
-                    ApprovalRequest::Action { description },
-                    params,
-                    out,
-                );
-                let requested = strip_nulls(&params["permissions"]);
-                self.pending
-                    .insert(key, Pending::Permissions { rpc, requested });
-            }
-            ("item/tool/requestUserInput", Some(scope)) => {
-                let questions: Vec<Question> = params["questions"]
-                    .as_array()
-                    .map(|questions| questions.iter().filter_map(question).collect())
-                    .unwrap_or_default();
-                let ids = questions
-                    .iter()
-                    .map(|question| question.id.clone())
-                    .collect();
-                let blocking = params["isBlocking"].as_bool().unwrap_or(true);
-                self.items.remove(&key);
-                self.track(
-                    key.clone(),
-                    scope,
-                    Status::AwaitingUser,
-                    ItemKind::Question {
-                        blocking,
-                        questions,
-                        answers: None,
-                    },
-                );
-                out.push(self.event(&key));
-                self.pending.insert(key, Pending::Question { rpc, ids });
-            }
-            ("mcpServer/elicitation/request", scope) => {
-                // Artisan has no form for MCP elicitation yet; say so and
-                // let the server go on without the input.
-                let server = str_at(params, "serverName").unwrap_or("An MCP server");
-                let text = format!(
-                    "{server} asked for input Artisan can't show yet: {}",
-                    str_at(params, "message").unwrap_or_default()
-                );
-                self.notices += 1;
-                if let Some(scope) = scope {
-                    self.notice(
-                        format!("elicitation-{}", self.notices),
-                        scope,
-                        NoticeKind::Info,
-                        text,
-                        out,
-                    );
-                }
-                self.reply(
-                    rpc,
-                    json!({ "action": "decline", "content": null, "_meta": null }),
-                );
-            }
-            (method, _) => {
-                tracing::debug!(method, "declining a Codex request Artisan doesn't serve");
-                self.outbox.push(json!({ "id": rpc, "error": { "code": -32601, "message": format!("Artisan does not handle {method}") } }));
-            }
-        }
-    }
-
-    /// Puts an approval on the item it gates (creating the item if Codex
-    /// asks before announcing it).
-    fn ask(
-        &mut self,
         key: &str,
         scope: Scope,
-        tool: ToolKind,
-        request: ApprovalRequest,
-        params: &Value,
+        kind: NoticeKind,
+        text: impl Into<TextContent>,
         out: &mut Vec<EngineEvent>,
     ) {
-        let approval = Approval {
-            request,
-            reason: str_at(params, "reason").map(str::to_owned),
-            // Codex lists fewer in `availableDecisions`, but takes all four
-            // (verified on 0.162.1: `decline` declines the call and
-            // `acceptForSession` skips the next identical prompt).
-            options: vec![
-                Decision::AllowOnce,
-                Decision::AllowAlways,
-                Decision::DenyOnce,
-                Decision::Cancelled,
-            ],
-            decision: None,
+        self.items.remove(key);
+        let kind = ItemKind::Notice {
+            kind,
+            text: text.into(),
         };
-        if let Some(tracked) = self.items.get_mut(key) {
-            if let ItemKind::Tool { approval: slot, .. } = &mut tracked.kind {
-                *slot = Some(approval);
-            }
-            tracked.status = tracked.status.advance(Status::AwaitingUser);
-        } else {
-            let kind = ItemKind::Tool {
-                tool,
-                title: None,
-                output: None,
-                exit_code: None,
-                approval: Some(approval),
-            };
-            self.track(key.to_owned(), scope, Status::AwaitingUser, kind);
-        }
+        self.track(key.to_owned(), scope, Status::Done, kind);
         out.push(self.event(key));
-    }
-
-    /// The user's answer to the approval or question on `key`.
-    pub fn answer(&mut self, key: &str, answer: &Answer) -> Vec<EngineEvent> {
-        let Some(pending) = self.pending.remove(key) else {
-            tracing::debug!(key, "an answer for a Codex item that isn't waiting");
-            return Vec::new();
-        };
-        match (pending, answer) {
-            (
-                Pending::Command { rpc } | Pending::FileChange { rpc },
-                Answer::Approval { decision },
-            ) => {
-                let reply = match decision {
-                    Decision::AllowOnce => "accept",
-                    Decision::AllowAlways => "acceptForSession",
-                    Decision::DenyOnce | Decision::DenyAlways => "decline",
-                    Decision::Cancelled => "cancel",
-                };
-                self.reply(rpc, json!({ "decision": reply }));
-                self.decided(key, *decision)
-            }
-            (Pending::Permissions { rpc, requested }, Answer::Approval { decision }) => {
-                let result = match decision {
-                    Decision::AllowOnce => json!({ "permissions": requested, "scope": "turn" }),
-                    Decision::AllowAlways => {
-                        json!({ "permissions": requested, "scope": "session" })
-                    }
-                    _ => json!({ "permissions": {}, "scope": "turn" }),
-                };
-                self.reply(rpc, result);
-                self.decided(key, *decision)
-            }
-            (Pending::Question { rpc, ids }, Answer::Question { answers }) => {
-                let mut map = Map::new();
-                for (id, answer) in ids.iter().zip(answers) {
-                    if let Some(answer) = answer.as_ref().filter(|answer| !answer.is_empty()) {
-                        map.insert(id.clone(), json!({ "answers": answer }));
-                    }
-                }
-                self.reply(rpc, json!({ "answers": map }));
-                self.answered(key, answers)
-            }
-            (Pending::AsyncQuestion { texts }, Answer::Question { answers }) => {
-                let parts: Vec<String> = texts
-                    .iter()
-                    .zip(answers)
-                    .filter_map(|(text, answer)| {
-                        let answer = answer.as_ref().filter(|answer| !answer.is_empty())?;
-                        let quoted: Vec<String> =
-                            text.lines().map(|line| format!("> {line}")).collect();
-                        Some(format!("{}\n\n{}", quoted.join("\n"), answer.join(", ")))
-                    })
-                    .collect();
-                if !parts.is_empty() {
-                    self.messages.push(parts.join("\n\n"));
-                }
-                self.answered(key, answers)
-            }
-            (pending, _) => {
-                tracing::warn!(key, "an answer of the wrong kind for a Codex request");
-                self.pending.insert(key.to_owned(), pending);
-                Vec::new()
-            }
-        }
-    }
-
-    fn decided(&mut self, key: &str, decision: Decision) -> Vec<EngineEvent> {
-        let Some(tracked) = self.items.get_mut(key) else {
-            return Vec::new();
-        };
-        if let ItemKind::Tool {
-            approval: Some(approval),
-            ..
-        } = &mut tracked.kind
-        {
-            approval.decision = Some(decision);
-        }
-        tracked.status = tracked.status.advance(match decision {
-            Decision::AllowOnce | Decision::AllowAlways => Status::Running,
-            Decision::DenyOnce | Decision::DenyAlways => Status::Declined,
-            Decision::Cancelled => Status::Cancelled,
-        });
-        vec![self.event(key)]
-    }
-
-    fn answered(&mut self, key: &str, given: &[Option<Vec<String>>]) -> Vec<EngineEvent> {
-        let Some(tracked) = self.items.get_mut(key) else {
-            return Vec::new();
-        };
-        if let ItemKind::Question { answers, .. } = &mut tracked.kind {
-            *answers = Some(given.to_vec());
-        }
-        tracked.status = tracked.status.advance(Status::Done);
-        vec![self.event(key)]
-    }
-
-    /// Codex settled a request without us (the turn ended, or it was
-    /// auto-reviewed): the item stops waiting.
-    fn resolved(&mut self, rpc: &Value, out: &mut Vec<EngineEvent>) {
-        let key = self
-            .pending
-            .iter()
-            .find_map(|(key, pending)| match pending {
-                Pending::Command { rpc: id }
-                | Pending::FileChange { rpc: id }
-                | Pending::Permissions { rpc: id, .. }
-                | Pending::Question { rpc: id, .. }
-                    if id == rpc =>
-                {
-                    Some(key.clone())
-                }
-                _ => None,
-            });
-        let Some(key) = key else { return };
-        self.pending.remove(&key);
-        if let Some(tracked) = self.items.get_mut(&key)
-            && tracked.status == Status::AwaitingUser
-        {
-            tracked.status = Status::Running;
-            out.push(self.event(&key));
-        }
-    }
-
-    fn reply(&mut self, rpc: Value, result: Value) {
-        self.outbox.push(json!({ "id": rpc, "result": result }));
     }
 
     /// Settles what is still open when the run ends: plans keep their
     /// steps, everything else stopped with the run.
     pub fn finish(&mut self) -> Vec<EngineEvent> {
-        self.pending.clear();
+        self.approvals.clear();
+        self.questions.clear();
         let mut keys: Vec<String> = self
             .items
             .iter()
-            .filter(|(_, tracked)| !tracked.status.is_terminal())
+            .filter(|(_, tracked)| {
+                !tracked.status.is_terminal()
+                    && !matches!(
+                        tracked.kind,
+                        ItemKind::Question {
+                            blocking: false,
+                            ..
+                        }
+                    )
+            })
             .map(|(key, _)| key.clone())
             .collect();
         keys.sort();
         keys.into_iter()
             .map(|key| {
-                let status = if matches!(self.items[&key].kind, ItemKind::Plan { .. }) {
+                let tracked = self.items.get_mut(&key).expect("collected above");
+                let status = if matches!(tracked.kind, ItemKind::Plan { .. }) {
                     Status::Done
                 } else {
                     Status::Cancelled
                 };
-                if let Some(tracked) = self.items.get_mut(&key) {
-                    tracked.status = status;
-                }
+                tracked.status = status;
                 EngineEvent::Status { key, status }
             })
             .collect()
@@ -1268,147 +1185,131 @@ impl Decoder {
     }
 }
 
-fn live(target: LiveKind, text: &str) -> EngineEvent {
-    EngineEvent::Live {
-        target,
-        text: text.to_owned(),
-        append: true,
+impl crate::retained::Retains for Decoder {
+    fn retained(&mut self, key: &str) -> Option<&mut ItemKind> {
+        self.items.get_mut(key).map(|tracked| &mut tracked.kind)
     }
 }
 
-fn str_at<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
-    value.get(field)?.as_str()
+fn live(target: LiveKind, text: String) -> EngineEvent {
+    EngineEvent::Live {
+        target,
+        text,
+        append: true,
+    }
 }
 
 fn goal_key(scope: Option<&String>) -> String {
     scope.map_or_else(|| "goal".to_owned(), |agent| format!("goal:{agent}"))
 }
 
-/// Policy blocks (`cyberPolicy`, `misalignmentPolicyViolation`, …).
-fn is_refusal(error: &Value) -> bool {
-    str_at(error, "codexErrorInfo")
-        .is_some_and(|code| code.ends_with("Policy") || code.ends_with("PolicyViolation"))
+/// A shell or patch item's status; `None` when Codex sent none we know.
+fn execution_status(status: Option<ExecutionStatus>) -> Option<Status> {
+    Some(match status? {
+        ExecutionStatus::InProgress => Status::Running,
+        ExecutionStatus::Completed => Status::Done,
+        ExecutionStatus::Failed => Status::Failed,
+        ExecutionStatus::Declined => Status::Declined,
+        ExecutionStatus::Unknown => return None,
+    })
 }
 
-fn tool_status(item: &Value, completed: bool) -> Status {
-    match str_at(item, "status") {
-        Some("failed") => Status::Failed,
-        Some("completed") => Status::Done,
-        _ if completed => Status::Done,
-        _ => Status::Running,
-    }
+/// An MCP or dynamic call's status: these have no `declined`, and a
+/// dynamic call that completed unsuccessfully failed.
+fn call_status(
+    status: Option<CallStatus>,
+    success: Option<bool>,
+    completed: bool,
+) -> Option<Status> {
+    let status = match status? {
+        CallStatus::InProgress => Status::Running,
+        CallStatus::Completed => Status::Done,
+        CallStatus::Failed => Status::Failed,
+        CallStatus::Unknown => return None,
+    };
+    Some(if completed && success == Some(false) {
+        Status::Failed
+    } else {
+        status
+    })
 }
 
-fn user_text(item: &Value) -> String {
-    item["content"]
-        .as_array()
-        .map(|parts| {
-            parts
+/// What a web action looked up: the first query or address it names.
+fn web_query(query: Option<String>, action: Option<super::protocol::WebAction>) -> Option<String> {
+    let action = action.unwrap_or(super::protocol::WebAction {
+        query: None,
+        url: None,
+        queries: Vec::new(),
+    });
+    [query, action.query, action.url]
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let queries: Vec<&str> = action
+                .queries
                 .iter()
-                .filter_map(|part| str_at(part, "text"))
-                .collect::<Vec<_>>()
-                .join("\n")
+                .filter_map(Value::as_str)
+                .filter(|query| !query.trim().is_empty())
+                .collect();
+            (!queries.is_empty()).then(|| queries.join("; "))
         })
-        .unwrap_or_default()
 }
 
-/// Tool arguments as compact JSON; nothing for an empty call.
-fn arguments(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::Object(map) if map.is_empty() => None,
-        Value::String(text) => Some(text.clone()),
-        other => Some(other.to_string()),
-    }
-}
-
-/// The text parts of MCP content (or dynamic tool output) joined.
-fn content_text(content: &Value) -> Option<String> {
-    let text: Vec<&str> = content
-        .as_array()?
-        .iter()
-        .filter_map(|part| str_at(part, "text"))
+/// A child's first message as text; images and mentions carry none.
+fn user_text(content: Vec<UserInput>) -> Option<String> {
+    let text: Vec<String> = content
+        .into_iter()
+        .filter_map(|part| match part {
+            UserInput::Text { text } => Some(text),
+            UserInput::Other => None,
+        })
         .collect();
     (!text.is_empty()).then(|| text.join("\n"))
 }
 
-fn file_change(change: &Value) -> Option<FileChange> {
-    let path = str_at(change, "path")?.to_owned();
-    let kind = &change["kind"];
-    let (path, op) = match str_at(kind, "type")? {
-        "add" => (path, FileOp::Add),
-        "delete" => (path, FileOp::Delete),
-        _ => match str_at(kind, "move_path") {
-            Some(to) => (to.to_owned(), FileOp::Move { from: path }),
-            None => (path, FileOp::Modify),
-        },
-    };
-    let diff = str_at(change, "diff")
-        .filter(|diff| !diff.is_empty())
-        .map(str::to_owned);
-    Some(FileChange { path, op, diff })
-}
-
-fn question(question: &Value) -> Option<Question> {
-    Some(Question {
-        id: str_at(question, "id")?.to_owned(),
-        header: str_at(question, "header")
-            .filter(|header| !header.is_empty())
-            .map(str::to_owned),
-        text: str_at(question, "question")?.to_owned(),
-        multi_select: false,
-        options: question["options"]
-            .as_array()
-            .map(|options| {
-                options
-                    .iter()
-                    .filter_map(|option| {
-                        Some(QuestionOption {
-                            label: str_at(option, "label")?.to_owned(),
-                            description: str_at(option, "description")
-                                .filter(|text| !text.is_empty())
-                                .map(str::to_owned),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    })
-}
-
-fn strip_nulls(value: &Value) -> Value {
+/// Tool arguments as compact JSON; nothing for an empty call.
+fn arguments_text(value: Value) -> Option<String> {
     match value {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .filter(|(_, value)| !value.is_null())
-                .map(|(key, value)| (key.clone(), strip_nulls(value)))
-                .collect(),
-        ),
-        other => other.clone(),
+        Value::Null => None,
+        Value::Object(map) if map.is_empty() => None,
+        Value::String(text) => Some(text),
+        other => Some(other.to_string()),
+    }
+}
+
+fn file_change(change: super::protocol::FileChange) -> FileChange {
+    let (path, op) = match change.kind {
+        PatchKind::Add => (change.path, FileOp::Add),
+        PatchKind::Delete => (change.path, FileOp::Delete),
+        PatchKind::Update {
+            move_path: Some(to),
+        } => (to, FileOp::Move { from: change.path }),
+        PatchKind::Update { move_path: None } => (change.path, FileOp::Modify),
+    };
+    FileChange {
+        path,
+        op,
+        diff: (!change.diff.is_empty()).then(|| change.diff.into()),
     }
 }
 
 /// The command as the model wrote it: Codex wraps it in `<shell> -lc '…'`.
 fn display_command(command: &str) -> String {
-    let unwrapped = command.split_once(' ').and_then(|(shell, rest)| {
-        let shell_name = shell.rsplit('/').next()?;
-        if !shell_name.ends_with("sh") {
-            return None;
-        }
-        rest.strip_prefix("-lc ")
-            .or_else(|| rest.strip_prefix("-c "))
-    });
-    let Some(inner) = unwrapped else {
+    let Some(words) = shlex::split(command) else {
         return command.to_owned();
     };
-    for quote in ['\'', '"'] {
-        if let Some(body) = inner
-            .strip_prefix(quote)
-            .and_then(|inner| inner.strip_suffix(quote))
-            && !body.contains(quote)
+    match words.as_slice() {
+        [shell, flag, script]
+            if matches!(
+                std::path::Path::new(shell)
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                Some("sh" | "bash" | "zsh" | "dash" | "fish")
+            ) && matches!(flag.as_str(), "-c" | "-lc") =>
         {
-            return body.to_owned();
+            script.clone()
         }
+        _ => command.to_owned(),
     }
-    inner.to_owned()
 }

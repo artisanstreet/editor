@@ -8,8 +8,9 @@
 //! which reads as a waterfall. Spans color by `group`, else by lane.
 //! `markers` draw labelled rules across every row.
 
-use std::fmt::Write as _;
-use std::rc::Rc;
+use crate::markdown_renderer::rich::budget;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _, SharedString};
 use serde::Deserialize;
@@ -83,9 +84,10 @@ pub(super) struct Marker {
 }
 
 /// The spans placed in rows over one time domain.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct Layout {
     pub(super) spans: Vec<Span>,
+    pub(super) row_spans: Vec<Vec<usize>>,
     pub(super) lanes: Vec<Lane>,
     pub(super) markers: Vec<Marker>,
     pub(super) rows: usize,
@@ -126,7 +128,10 @@ fn resolve(spec: &SpansSpec) -> Result<(Vec<Timed<'_>>, Vec<Marker>, bool), Stri
     for (index, span) in spec.spans.iter().enumerate() {
         let start = time(&span.start, &format!("spans[{index}].start"))?;
         let end = time(&span.end, &format!("spans[{index}].end"))?;
-        timed.push((span, start.min(end), start.max(end)));
+        if end < start {
+            return Err(format!("spans[{index}].end precedes its start"));
+        }
+        timed.push((span, start, end));
     }
     let markers = spec
         .markers
@@ -148,12 +153,20 @@ fn resolve(spec: &SpansSpec) -> Result<(Vec<Timed<'_>>, Vec<Marker>, bool), Stri
 /// without a lane among laned ones becomes a lane named by its label.
 fn place(timed: &[Timed<'_>]) -> Rows {
     fn lane_of(span: &SpanSpec) -> Option<&str> {
-        span.lane.as_deref().map(str::trim)
+        span.lane
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
     }
     let mut lane_names: Vec<&str> = Vec::new();
+    let mut lane_indices = HashMap::new();
     for (span, _, _) in timed {
-        if let Some(lane) = lane_of(span).filter(|lane| !lane_names.contains(lane)) {
-            lane_names.push(lane);
+        if let Some(lane) = lane_of(span) {
+            lane_indices.entry(lane).or_insert_with(|| {
+                let index = lane_names.len();
+                lane_names.push(lane);
+                index
+            });
         }
     }
     if lane_names.is_empty() {
@@ -170,11 +183,17 @@ fn place(timed: &[Timed<'_>]) -> Rows {
             .total_cmp(&timed[*b].1)
             .then(timed[*b].2.total_cmp(&timed[*a].2))
     });
-    let mut stack_ends: Vec<Vec<f64>> = vec![Vec::new(); lane_names.len()];
+    let mut lane_counts = vec![0; lane_names.len()];
+    for (span, _, _) in timed {
+        if let Some(lane) = lane_of(span).and_then(|name| lane_indices.get(name)) {
+            lane_counts[*lane] += 1;
+        }
+    }
+    let mut stack_ends: Vec<RowEnds> = lane_counts.into_iter().map(RowEnds::new).collect();
     let mut placed: Vec<(usize, Option<usize>)> = vec![(0, None); timed.len()];
     for index in order {
         let (span, start, end) = timed[index];
-        let lane = lane_of(span).and_then(|lane| lane_names.iter().position(|name| *name == lane));
+        let lane = lane_of(span).and_then(|lane| lane_indices.get(lane).copied());
         if let Some(lane) = lane {
             placed[index] = (stack(&mut stack_ends[lane], start, end), Some(lane));
         }
@@ -185,7 +204,7 @@ fn place(timed: &[Timed<'_>]) -> Rows {
         .map(|(name, ends)| Lane {
             name: SharedString::from((*name).to_owned()),
             first_row: 0,
-            rows: ends.len().max(1),
+            rows: ends.used.max(1),
         })
         .collect();
     for (index, (span, _, _)) in timed.iter().enumerate() {
@@ -212,13 +231,19 @@ fn place(timed: &[Timed<'_>]) -> Rows {
 
 impl Layout {
     fn from_spec(spec: &SpansSpec) -> Result<Self, String> {
+        if spec.spans.is_empty() {
+            return Err("needs at least one span".to_owned());
+        }
+        if spec.spans.len() > 512 {
+            return Err("preview supports at most 512 spans; summarize this trace".to_owned());
+        }
         let (timed, markers, dates) = resolve(spec)?;
         let Rows {
             placed,
             lanes,
             count,
         } = place(&timed);
-        let mut groups: Vec<&str> = Vec::new();
+        let mut groups: HashMap<&str, usize> = HashMap::new();
         let spans = timed
             .iter()
             .zip(&placed)
@@ -229,13 +254,8 @@ impl Layout {
                     .map(str::trim)
                     .filter(|group| !group.is_empty());
                 let group_color = group.map(|group| {
-                    groups
-                        .iter()
-                        .position(|seen| *seen == group)
-                        .unwrap_or_else(|| {
-                            groups.push(group);
-                            groups.len() - 1
-                        })
+                    let next = groups.len();
+                    *groups.entry(group).or_insert(next)
                 });
                 Span {
                     label: SharedString::from(span.label.trim().to_owned()),
@@ -248,14 +268,35 @@ impl Layout {
                 }
             })
             .collect::<Vec<_>>();
-        let domain = Domain::of(
+        let mut domain = Domain::of(
             spans
                 .iter()
                 .flat_map(|span| [span.start, span.end])
                 .chain(markers.iter().map(|marker| marker.at)),
         )
         .ok_or("needs at least one span")?;
+        if dates {
+            let lo = spans
+                .iter()
+                .map(|span| span.start)
+                .chain(markers.iter().map(|marker| marker.at))
+                .fold(f64::INFINITY, f64::min);
+            let hi = spans
+                .iter()
+                .map(|span| span.end)
+                .chain(markers.iter().map(|marker| marker.at))
+                .fold(f64::NEG_INFINITY, f64::max);
+            domain = Domain {
+                lo: lo - 0.5,
+                hi: hi + 0.5,
+            };
+        }
+        let mut row_spans = vec![Vec::new(); count];
+        for (index, span) in spans.iter().enumerate() {
+            row_spans[span.row].push(index);
+        }
         Ok(Self {
+            row_spans,
             spans,
             lanes,
             markers,
@@ -291,77 +332,128 @@ impl Layout {
     }
 }
 
-/// Puts `[start, end)` in the first row of `ends` free by `start`; returns
-/// the row.
-fn stack(ends: &mut Vec<f64>, start: f64, end: f64) -> usize {
-    if let Some(row) = ends.iter().position(|free| *free <= start) {
-        ends[row] = end;
-        row
-    } else {
-        ends.push(end);
-        ends.len() - 1
+/// A minimum tree finds the first reusable row in logarithmic time while
+/// preserving authored first-row placement. Unused leaves stay at infinity.
+struct RowEnds {
+    minimum: Vec<f64>,
+    leaves: usize,
+    used: usize,
+}
+impl RowEnds {
+    fn new(capacity: usize) -> Self {
+        let leaves = capacity.max(1).next_power_of_two();
+        Self {
+            minimum: vec![f64::INFINITY; leaves * 2],
+            leaves,
+            used: 0,
+        }
     }
+}
+fn stack(ends: &mut RowEnds, start: f64, end: f64) -> usize {
+    let row = if ends.minimum[1] <= start {
+        let mut branch = 1;
+        while branch < ends.leaves {
+            branch = branch * 2 + usize::from(ends.minimum[branch * 2] > start);
+        }
+        branch - ends.leaves
+    } else {
+        let row = ends.used;
+        ends.used += 1;
+        row
+    };
+    let mut branch = ends.leaves + row;
+    ends.minimum[branch] = end;
+    while branch > 1 {
+        branch /= 2;
+        ends.minimum[branch] = ends.minimum[branch * 2].min(ends.minimum[branch * 2 + 1]);
+    }
+    row
 }
 
 #[derive(Debug)]
 pub(super) struct Spans {
-    layout: Rc<Layout>,
+    layout: Arc<Layout>,
 }
 
-pub(super) fn parse(value: &Value) -> Result<Rc<dyn RichBlock>, String> {
+pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     let spec = spec::<SpansSpec>(value)?;
-    Ok(Rc::new(Spans {
-        layout: Rc::new(Layout::from_spec(&spec)?),
+    Ok(Arc::new(Spans {
+        layout: Arc::new(Layout::from_spec(&spec)?),
     }))
 }
 
 impl RichBlock for Spans {
+    fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + std::mem::size_of::<Layout>()
+            + budget::vector(&self.layout.row_spans)
+            + self
+                .layout
+                .row_spans
+                .iter()
+                .map(budget::vector)
+                .sum::<usize>()
+            + budget::vector(&self.layout.spans)
+            + self
+                .layout
+                .spans
+                .iter()
+                .map(|span| span.label.len() + span.group.as_ref().map_or(0, |group| group.len()))
+                .sum::<usize>()
+            + budget::vector(&self.layout.lanes)
+            + self
+                .layout
+                .lanes
+                .iter()
+                .map(|lane| lane.name.len())
+                .sum::<usize>()
+            + budget::vector(&self.layout.markers)
+            + self
+                .layout
+                .markers
+                .iter()
+                .map(|marker| marker.label.len())
+                .sum::<usize>()
+            + self.layout.unit.as_ref().map_or(0, |unit| unit.len())
+    }
+
     fn render(&self, cx: &BlockContext<'_>) -> AnyElement {
         view::SpansView {
             id: cx.key("spans"),
             theme: *cx.theme,
-            layout: Rc::clone(&self.layout),
+            layout: Arc::clone(&self.layout),
         }
         .into_any_element()
-    }
-
-    fn markdown(&self) -> String {
-        let layout = &self.layout;
-        let has_lanes = !layout.lanes.is_empty();
-        let mut header = vec!["Span".to_owned()];
-        if has_lanes {
-            header.push("Lane".to_owned());
-        }
-        header.extend(["Start".to_owned(), "End".to_owned(), "Length".to_owned()]);
-        let rows: Vec<Vec<String>> = layout
-            .spans
-            .iter()
-            .map(|span| {
-                let mut row = vec![span.label.to_string()];
-                if has_lanes {
-                    row.push(
-                        span.lane
-                            .map(|lane| layout.lanes[lane].name.to_string())
-                            .unwrap_or_default(),
-                    );
-                }
-                row.extend([
-                    layout.time(span.start),
-                    layout.time(span.end),
-                    layout.duration(span),
-                ]);
-                row
-            })
-            .collect();
-        let mut out = kit::markdown_table(&header, &rows);
-        for marker in &layout.markers {
-            let _ = write!(out, "\n_{}: {}_\n", layout.time(marker.at), marker.label);
-        }
-        out
     }
 }
 
 #[cfg(test)]
 pub(super) fn layout_for_tests(value: &Value) -> Result<Layout, String> {
     Layout::from_spec(&spec::<SpansSpec>(value)?)
+}
+
+#[cfg(test)]
+mod row_stack_tests {
+    use super::*;
+    #[test]
+    fn minimum_tree_preserves_first_available_row() {
+        let mut indexed = RowEnds::new(128);
+        let mut linear: Vec<f64> = Vec::new();
+        for index in 0..128 {
+            let start = (index / 3) as f64;
+            let end = start + (index % 7) as f64;
+            let expected = match linear.iter().position(|end| *end <= start) {
+                Some(row) => {
+                    linear[row] = end;
+                    row
+                }
+                None => {
+                    linear.push(end);
+                    linear.len() - 1
+                }
+            };
+            assert_eq!(stack(&mut indexed, start, end), expected);
+        }
+        assert_eq!(indexed.used, linear.len());
+    }
 }

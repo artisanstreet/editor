@@ -109,12 +109,10 @@ fn the_marketplace_lists_skills_turns_one_off_and_opens_the_prompt(cx: &mut Test
         .expect("the skill's switch");
     cx.simulate_click(switch.center(), gpui::Modifiers::none());
     wait(cx, "Forge to answer with the skill off", |cx| {
-        marketplace.read_with(cx, |marketplace, _| {
-            marketplace.catalog.as_ref().is_some_and(|catalog| {
-                catalog.as_ref().is_ok_and(|catalog| {
-                    catalog
-                        .iter()
-                        .any(|skill| skill.id == "local.pdf" && !skill.enabled)
+        marketplace.read_with(cx, |marketplace, cx| {
+            marketplace.core.read(cx).active_host().is_some_and(|host| {
+                host.read(cx).skill_catalog.as_ref().is_some_and(|catalog| {
+                    catalog.iter().any(|skill| skill.id == "local.pdf" && !skill.enabled)
                 })
             })
         })

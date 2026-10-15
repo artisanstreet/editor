@@ -42,16 +42,7 @@ pub fn normalize_prompt(text: &str) -> String {
 /// Lowercase hexadecimal SHA-256.
 #[must_use]
 pub fn prompt_digest(text: &str) -> String {
-    hex(&Sha256::digest(text.as_bytes()))
-}
-
-/// Lowercase hexadecimal.
-pub(super) fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes.iter().fold(String::new(), |mut text, byte| {
-        let _ = write!(text, "{byte:02x}");
-        text
-    })
+    hex::encode(Sha256::digest(text.as_bytes()))
 }
 
 fn record_path(home: &Path) -> PathBuf {
@@ -86,11 +77,26 @@ fn source(engine: EngineId, home: &Path) -> Option<(PathBuf, Vec<PathBuf>, PathB
 /// Reads an engine's global prompt; `None` for an engine without one.
 #[must_use]
 pub fn read_prompt_file(engine: EngineId, home: &Path) -> Option<PromptFile> {
-    let (read, _, prompt) = source(engine, home)?;
+    let (read, _, _) = source(engine, home)?;
     Some(PromptFile {
-        display: display(home, &prompt),
+        display: display(home, &read),
         text: read_text(&read)
             .map_err(|error| format!("Couldn't read {}: {error}.", read.display())),
+    })
+}
+
+/// Inspects the effective prompt without reconciling or writing any files.
+#[must_use]
+pub fn inspect_prompt(engine: EngineId, home: &Path, canonical: &str) -> Option<PromptApplied> {
+    let (read, overrides, _) = source(engine, home)?;
+    Some(match read_text(&read).map(Option::unwrap_or_default) {
+        Ok(text)
+            if overrides.is_empty() && normalize_prompt(&text) == normalize_prompt(canonical) =>
+        {
+            PromptApplied::Synced
+        }
+        Ok(text) => PromptApplied::Drifted(text),
+        Err(error) => PromptApplied::Failed(format!("Couldn't read {}: {error}.", read.display())),
     })
 }
 
@@ -175,4 +181,26 @@ fn back_up(path: &Path, backups: &Path, stamp: artisan_api::Timestamp) -> io::Re
         |name| name.to_string_lossy().into_owned(),
     );
     fs::copy(path, backups.join(format!("{name}.{stamp}"))).map(drop)
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+    #[test]
+    fn readonly_inspection_never_creates_or_reconciles_prompt_files() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            inspect_prompt(EngineId::Claude, home.path(), ""),
+            Some(PromptApplied::Synced)
+        ));
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+        let file = home.path().join(".claude/CLAUDE.md");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "external prompt").unwrap();
+        assert!(
+            matches!(inspect_prompt(EngineId::Claude, home.path(), "canonical"), Some(PromptApplied::Drifted(text)) if text == "external prompt")
+        );
+        assert_eq!(fs::read_to_string(file).unwrap(), "external prompt");
+        assert!(!home.path().join(".artisan").exists());
+    }
 }

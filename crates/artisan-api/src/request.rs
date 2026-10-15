@@ -13,16 +13,14 @@
 //! POST   /threads/{id}/messages              SendMessage → Item
 //! POST   /threads/{id}/cancel
 //! POST   /items/{id}/answer                  Answer
-//! PUT    /settings/{key}                     JSON value
 //! GET    /drafts/{scope}   PUT /drafts/{scope}   JSON value
 //! PUT    /blobs  (raw WebP bytes)            BlobRef
 //! GET    /blobs/{sha256}
 //! GET    /engines                            Vec<EngineStatus>
 //! POST   /engines/{engine}/install | /login | /logout | /refresh
 //! GET    /fs/list?path=                      DirListing
-//! GET    /links/title?url=                   LinkTitle
 //! GET    /skills/catalog | /prompt …         see `extensions`
-//! POST   /pair                               PairRequest → PairResponse (no client key needed)
+//! POST   /pair                               PairRequest → PairResponse (authorizes the TLS client certificate)
 //! ```
 
 use crate::{
@@ -39,16 +37,24 @@ pub struct State {
     pub protocol: u32,
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
+    #[serde(default)]
+    pub threads_next: Option<ThreadCursor>,
     /// Runs still live, plus the latest run of every thread.
     pub runs: Vec<Run>,
     pub settings: serde_json::Map<String, serde_json::Value>,
     pub engines: Vec<EngineStatus>,
-    /// Items waiting on the user (approvals, questions), across threads.
+    /// Pending interaction identities; bodies are fetched only for an opened thread.
     #[serde(default)]
-    pub waiting: Vec<Item>,
+    pub waiting: Vec<PendingItem>,
     /// The account Forge runs as, shown as the Editor's profile.
     #[serde(default)]
     pub account: Option<Account>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingItem {
+    pub id: ItemId,
+    pub thread_id: ThreadId,
 }
 
 /// The operating-system user Forge runs as, on its host.
@@ -113,8 +119,34 @@ pub struct ItemsQuery {
 pub struct ItemsPage {
     /// Ordered by `position`.
     pub items: Vec<Item>,
+    /// Canonical metadata for the runs represented by this page.
+    #[serde(default)]
+    pub runs: Vec<Run>,
     /// More items exist past the far end of this page.
     pub more: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadsQuery {
+    #[serde(default)]
+    pub archived: bool,
+    pub before_activity: Option<crate::Seq>,
+    pub before_id: Option<ThreadId>,
+    pub limit: Option<u32>,
+    pub query: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadCursor {
+    pub activity_seq: crate::Seq,
+    pub id: ThreadId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThreadsPage {
+    pub threads: Vec<Thread>,
+    pub runs: Vec<Run>,
+    pub next: Option<ThreadCursor>,
 }
 
 /// Starts a run when the thread is idle, steers the live run otherwise.
@@ -127,6 +159,33 @@ pub struct SendMessage {
     pub images: Vec<BlobHash>,
     /// Applies to the thread before the run starts.
     pub config: Option<EngineConfig>,
+    /// Clear this draft revision in the same transaction as accepting input.
+    #[serde(default)]
+    pub draft: Option<DraftRevision>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DraftSnapshot {
+    pub revision: u64,
+    pub body: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WriteDraft {
+    pub expected_revision: u64,
+    pub body: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftRevision {
+    pub scope: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DraftWriteResult {
+    pub saved: bool,
+    pub current: DraftSnapshot,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +196,7 @@ pub enum Answer {
     },
     /// One entry per question; `None` skips it.
     Question {
-        answers: Vec<Option<Vec<String>>>,
+        answers: Vec<Option<crate::QuestionAnswer>>,
     },
 }
 
@@ -167,38 +226,83 @@ pub struct DirListing {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirEntry {
     pub name: String,
+    /// Opaque path on Forge's host. Clients must not construct host paths.
+    pub path: String,
     pub is_dir: bool,
 }
 
-/// Asks for the title of an `http(s)` page, to show a link by name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkTitleQuery {
-    pub url: String,
+pub struct SettleThread {
+    pub observed_seq: crate::Seq,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkTitle {
-    pub url: String,
-    /// `None` when the page has no title or couldn't be fetched; the link
-    /// keeps its own label.
-    pub title: Option<String>,
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct InspectorSummary {
+    #[serde(default)]
+    pub goal: Option<ThreadGoal>,
+    #[serde(default)]
+    pub questions: Vec<ThreadQuestionnaire>,
+    pub revision: crate::Seq,
+    pub terminals: Vec<InspectorTerminal>,
+    pub agents: Vec<InspectorAgent>,
+    pub plan: crate::Collection<crate::PlanStep>,
+    /// Totals of edit operations, not a net working-tree diff.
+    pub edits: Option<EditTotals>,
 }
 
-/// Swaps public keys. The code (shown by `ae forge pair`) only confirms it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThreadGoal {
+    pub objective: crate::TextContent,
+    /// Bounded source-derived label for compact controls; full objective remains available.
+    pub summary: String,
+    pub state: ThreadGoalState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadGoalState {
+    Active,
+    Paused,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThreadQuestionnaire {
+    pub id: ItemId,
+    pub questions: crate::Collection<crate::Question>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InspectorTerminal {
+    pub id: ItemId,
+    pub command: crate::TextContent,
+    pub cwd: Option<String>,
+    pub status: crate::Status,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InspectorAgent {
+    pub id: ItemId,
+    pub label: String,
+    pub description: crate::TextContent,
+    pub status: crate::Status,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditTotals {
+    pub added: u64,
+    pub removed: u64,
+}
+
+/// Authorizes the TLS client certificate using a one-time pairing code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairRequest {
     pub code: String,
     pub device_name: String,
-    /// The Editor's certificate (DER, base64): the one this connection
-    /// presents.
-    pub public_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairResponse {
     pub device_id: crate::DeviceId,
-    /// Forge's public key, base64 DER SubjectPublicKeyInfo.
-    pub forge_public_key: String,
 }
 
 /// The one wire error.
