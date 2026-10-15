@@ -1,6 +1,7 @@
 //! The preview's policy controls and their glass dropdowns.
 
 use super::*;
+use editor_ui::hover_card::highlight_fill;
 
 /// One dropdown row: label, and the check on the chosen one.
 fn option_row(
@@ -177,6 +178,10 @@ impl Composer {
             .iter()
             .position(|option| option.selected)
             .unwrap_or(0);
+        let keyed = match self.picker.axis_cursor {
+            Some(AxisCursor::Keys(index)) => Some(index),
+            _ => None,
+        };
         let mut special_shown = false;
         for (index, option) in options.into_iter().enumerate() {
             if option.special && !special_shown {
@@ -204,6 +209,7 @@ impl Composer {
                     &theme,
                 )
                 .debug_selector(move || format!("composer-axis-{axis:?}-{index}"))
+                .when(keyed == Some(index), |row| highlight_fill(row, &theme))
                 .child(self.picker.axis_hover.row_probe(hover_id.clone()))
                 .when(self.picker.tooltip.pending() == Some(key.as_str()), |row| {
                     row.child(self.picker.tooltip_anchor.track())
@@ -213,7 +219,7 @@ impl Composer {
                         if this.axis != Some(axis) {
                             return;
                         }
-                        this.picker.axis_highlight = Some(index);
+                        this.picker.axis_cursor = Some(AxisCursor::Pointer(index));
                         this.picker.axis_hover.set_active(hover_id.clone());
                         if advisory.is_some() || description.is_some() {
                             this.begin_tooltip(
@@ -249,7 +255,7 @@ impl Composer {
             if keyboard_options.is_empty() {
                 return;
             }
-            let current = this.picker.axis_highlight.unwrap_or(chosen);
+            let current = this.picker.axis_cursor.map_or(chosen, AxisCursor::index);
             let next = match event.keystroke.key.as_str() {
                 "home" => 0,
                 "end" => keyboard_options.len() - 1,
@@ -272,8 +278,9 @@ impl Composer {
                 }
                 _ => return,
             };
-            this.picker.axis_highlight = Some(next);
-            this.picker.axis_hover.set_active(next.to_string());
+            // The keys' row wears the highlight; the hover pill stays
+            // with the pointer.
+            this.picker.axis_cursor = Some(AxisCursor::Keys(next));
             cx.stop_propagation();
             cx.notify();
         }))

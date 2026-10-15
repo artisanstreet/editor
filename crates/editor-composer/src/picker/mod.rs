@@ -238,6 +238,19 @@ struct AxisOption {
     apply: EngineConfig,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AxisCursor {
+    Pointer(usize),
+    Keys(usize),
+}
+impl AxisCursor {
+    fn index(self) -> usize {
+        match self {
+            Self::Pointer(index) | Self::Keys(index) => index,
+        }
+    }
+}
+
 /// The picker surfaces' retained motion: which menu and dropdown are
 /// painted (open, or playing their exit), the shared hover pills, the
 /// engine light and the delayed tooltip.
@@ -254,7 +267,10 @@ pub(crate) struct PickerState {
     axis: Rc<RefCell<MenuMotion>>,
     axis_settle: Option<Task<()>>,
     axis_focus: Option<gpui::FocusHandle>,
-    axis_highlight: Option<usize>,
+    /// Where arrow keys continue from in the open dropdown, and whether
+    /// the keys put it there (only then is it highlighted; the hover pill
+    /// stays with the pointer).
+    axis_cursor: Option<AxisCursor>,
     pub(super) model_scroll: gpui::UniformListScrollHandle,
     pub(super) model_glide: editor_ui::wheel_glide::WheelGlide,
     model_glide_scheduled: bool,
@@ -440,7 +456,7 @@ impl Composer {
         self.picker
             .axis_focus
             .get_or_insert_with(|| cx.focus_handle());
-        self.picker.axis_highlight = None;
+        self.picker.axis_cursor = None;
         self.axis = Some(axis);
         self.picker.pending_axis = None;
         self.picker.shown_axis = Some(axis);

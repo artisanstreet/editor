@@ -1,7 +1,7 @@
 //! Shared bounded raw-source viewer. Its selection scope is the loaded raw page,
 //! separate from a transcript's formatted semantic selection.
-use crate::{ContentWindow, ContentWindowEvent, ContentWindowState, HostData};
 use artisan_api::ContentRef;
+use editor_core::{ContentWindow, HostData, RangeState, RangeWindowEvent};
 use editor_ui::selectable_text::{SelectableText, SelectionSource, register_selection_source};
 use editor_ui::{button::Button, code_card::CodeCard, theme::ArtisanTheme};
 use gpui::{
@@ -33,7 +33,7 @@ impl ContentText {
         cx: &mut Context<Self>,
     ) -> Self {
         let window = cx.new(|cx| ContentWindow::new(host, source, cx));
-        let events = cx.subscribe(&window, |this, _, _: &ContentWindowEvent, cx| {
+        let events = cx.subscribe(&window, |this, _, _: &RangeWindowEvent, cx| {
             this.sync(cx);
             cx.notify();
         });
@@ -56,7 +56,9 @@ impl ContentText {
         self.window.read(cx).source()
     }
     pub fn set_theme(&mut self, theme: ArtisanTheme, cx: &mut Context<Self>) {
-        if self.theme == theme { return; }
+        if self.theme == theme {
+            return;
+        }
         self.theme = theme;
         cx.notify();
     }
@@ -68,7 +70,7 @@ impl ContentText {
         self.sync(cx);
     }
     fn sync(&mut self, cx: &mut Context<Self>) {
-        let ContentWindowState::Ready(page) = self.window.read(cx).state() else {
+        let RangeState::Ready(page) = self.window.read(cx).state() else {
             self.page = None;
             self.rows.clear();
             self.selection = None;
@@ -180,15 +182,15 @@ impl Render for ContentText {
         let theme = self.theme;
         let mut body = div().flex().flex_col().gap(theme.spacing.steps(1.0));
         match self.window.read(cx).state() {
-            ContentWindowState::Loading => body = body.child("Loading source…"),
-            ContentWindowState::Failed(error) => {
+            RangeState::Loading => body = body.child("Loading source…"),
+            RangeState::Failed(error) => {
                 body = body.child(error.clone()).child(
                     Button::text("source-retry", theme, "Retry").on_activate(cx.listener(
                         |this, _, _, cx| this.window.update(cx, |window, cx| window.retry(cx)),
                     )),
                 );
             }
-            ContentWindowState::Ready(page) => {
+            RangeState::Ready(page) => {
                 let start = page.start;
                 let end = page.end;
                 let total = page.total;

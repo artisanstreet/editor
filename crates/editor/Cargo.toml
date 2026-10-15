@@ -25,6 +25,7 @@ editor-ui = { path = "../editor-ui" }
 editor-composer = { path = "../editor-composer" }
 editor-conversation = { path = "../editor-conversation" }
 editor-core = { path = "../editor-core" }
+editor-sources = { path = "../editor-sources" }
 editor-inspector = { path = "../editor-inspector" }
 editor-marketplace = { path = "../editor-marketplace" }
 editor-settings = { path = "../editor-settings" }

@@ -88,15 +88,7 @@ fn failed(host: &Entity<HostData>, hash: &BlobHash, cx: &mut VisualTestContext) 
     })
 }
 fn cached_bytes(host: &HostData) -> usize {
-    host.images
-        .values()
-        .filter_map(|image| match image {
-            BlobImage::Ready(image) => {
-                Some(editor_ui::markdown_renderer::image_resident_bytes(image))
-            }
-            _ => None,
-        })
-        .sum()
+    host.images.kept_bytes()
 }
 
 #[gpui::test]
@@ -139,6 +131,11 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
             last: None,
         })
         .unwrap();
+    cx.update(|cx| {
+        cx.set_global(ImageDecoder(Arc::new(
+            editor_ui::markdown_renderer::decode_image_bytes,
+        )))
+    });
     let core = cx.new(|cx| Core::new(files, cx).unwrap());
     let a = cx.read(|cx| core.read(cx).host(&configs[0].id).unwrap().clone());
     let b = cx.read(|cx| core.read(cx).host(&configs[1].id).unwrap().clone());
@@ -180,17 +177,17 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
             host.load_image(blobs[0].hash.clone(), false, cx);
         }
         assert_eq!(
-            host.image_tasks.len(),
+            host.images.loads.len(),
             1,
             "same hash has one download/decode task"
         );
         for blob in &blobs[1..5] {
             host.load_image(blob.hash.clone(), false, cx);
         }
-        assert_eq!(host.image_tasks.len(), 4);
-        assert!(host.images.contains_key(&blobs[3].hash));
+        assert_eq!(host.images.loads.len(), 4);
+        assert!(host.images.kept.contains_key(&blobs[3].hash));
         assert!(
-            !host.images.contains_key(&blobs[4].hash),
+            !host.images.kept.contains_key(&blobs[4].hash),
             "admission leaves fifth hash retryable"
         );
     });
@@ -198,13 +195,10 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
         ready(&a, &blob.hash, cx);
     }
     let external = ready(&a, &blobs[0].hash, cx);
-    assert_eq!(
-        editor_ui::markdown_renderer::image_resident_bytes(&external),
-        16
-    );
+    assert_eq!(super::images::resident_bytes(&external), 16);
     cx.read(|cx| {
-        assert!(b.read(cx).images.is_empty());
-        assert!(b.read(cx).image_tasks.is_empty());
+        assert!(b.read(cx).images.kept.is_empty());
+        assert!(b.read(cx).images.loads.is_empty());
     });
     b.update(cx, |host, cx| host.load_image(same.hash.clone(), false, cx));
     let other_host = ready(&b, &same.hash, cx);
@@ -230,13 +224,13 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
             host.image(&supplied.hash),
             Some(BlobImage::Failed(_))
         ));
-        assert!(host.image_tasks.is_empty());
+        assert!(host.images.loads.is_empty());
         host.load_image(supplied.hash.clone(), true, cx);
         assert!(matches!(
             host.image(&supplied.hash),
             Some(BlobImage::Loading)
         ));
-        assert_eq!(host.image_tasks.len(), 1);
+        assert_eq!(host.images.loads.len(), 1);
     });
     ready(&b, &supplied.hash, cx);
     // Fill the first owner's cache, then touch the first entry to prove LRU.
@@ -248,7 +242,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
         host.load_image(blobs[0].hash.clone(), false, cx)
     });
     assert!(Arc::ptr_eq(&external, &ready(&a, &blobs[0].hash, cx)));
-    let oldest = cx.read(|cx| a.read(cx).image_order.front().unwrap().clone());
+    let oldest = cx.read(|cx| a.read(cx).images.order.front().unwrap().clone());
     assert_ne!(oldest, blobs[0].hash, "touched entry must not be oldest");
     scene.update(cx, |scene, cx| {
         scene.image = Some(external.clone());
@@ -279,10 +273,10 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     );
     cx.read(|cx| {
         let host = a.read(cx);
-        assert_eq!(host.images.len(), 32);
-        assert!(host.image_tasks.is_empty());
+        assert_eq!(host.images.kept.len(), 32);
+        assert!(host.images.loads.is_empty());
         assert!(
-            !host.images.contains_key(&oldest),
+            !host.images.kept.contains_key(&oldest),
             "oldest untouched entry evicted"
         );
         assert!(
@@ -304,7 +298,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     for blob in &blobs {
         a.update(cx, |host, cx| host.load_image(blob.hash.clone(), false, cx));
         retained_ready.push((blob.hash.clone(), ready(&a, &blob.hash, cx)));
-        cx.read(|cx| assert!(a.read(cx).images.len() <= 32));
+        cx.read(|cx| assert!(a.read(cx).images.kept.len() <= 32));
     }
     assert!(retained_ready.len() > 32);
     for _ in 0..20 {
@@ -317,17 +311,19 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
                 assert!(Arc::ptr_eq(&actual, expected));
             }
             assert!(
-                host.image_tasks.is_empty(),
+                host.images.loads.is_empty(),
                 "retained visible pixels must not redownload/decode"
             );
-            assert!(host.images.len() <= 32);
+            assert!(host.images.kept.len() <= 32);
         });
     }
     let released = cx.read(|cx| {
         retained_ready
             .iter()
             .position(|(hash, _)| {
-                hash != &blobs[0].hash && hash != &oldest && !a.read(cx).images.contains_key(hash)
+                hash != &blobs[0].hash
+                    && hash != &oldest
+                    && !a.read(cx).images.kept.contains_key(hash)
             })
             .unwrap()
     });
@@ -343,12 +339,12 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
             Some(BlobImage::Loading)
         ));
         assert_eq!(
-            host.image_tasks.len(),
+            host.images.loads.len(),
             1,
             "released weak entry permits fresh scrolling load"
         );
         assert!(
-            !host.retained_images.contains_key(&released_hash),
+            !host.images.retained.contains_key(&released_hash),
             "dead lookup metadata pruned on admission"
         );
     });
@@ -361,7 +357,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     for blob in &blobs[2..] {
         b.update(cx, |host, cx| host.load_image(blob.hash.clone(), false, cx));
         retained_failed.push((blob.hash.clone(), failed(&b, &blob.hash, cx)));
-        cx.read(|cx| assert!(b.read(cx).images.len() <= 32));
+        cx.read(|cx| assert!(b.read(cx).images.kept.len() <= 32));
     }
     assert!(retained_failed.len() > 32);
     for _ in 0..20 {
@@ -374,16 +370,16 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
                 assert!(Arc::ptr_eq(&actual, expected));
             }
             assert!(
-                host.image_tasks.is_empty(),
+                host.images.loads.is_empty(),
                 "retained failed tiles must not silently retry"
             );
-            assert!(host.images.len() <= 32);
+            assert!(host.images.kept.len() <= 32);
         });
     }
     let retry_index = cx.read(|cx| {
         retained_failed
             .iter()
-            .position(|(hash, _)| !b.read(cx).images.contains_key(hash))
+            .position(|(hash, _)| !b.read(cx).images.kept.contains_key(hash))
             .unwrap()
     });
     let retry_hash = retained_failed[retry_index].0.clone();
@@ -398,10 +394,10 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     assert_eq!(supplied.hash, retry_hash);
     b.update(cx, |host, cx| {
         host.load_image(retry_hash.clone(), true, cx);
-        assert_eq!(host.image_tasks.len(), 1);
+        assert_eq!(host.images.loads.len(), 1);
         assert!(matches!(host.image(&retry_hash), Some(BlobImage::Loading)));
         assert!(
-            !host.retained_images.contains_key(&retry_hash),
+            !host.images.retained.contains_key(&retry_hash),
             "explicit retry clears retained failure even while external error owner lives"
         );
     });
@@ -409,7 +405,7 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     let released = cx.read(|cx| {
         retained_failed
             .iter()
-            .position(|(hash, _)| hash != &retry_hash && !b.read(cx).images.contains_key(hash))
+            .position(|(hash, _)| hash != &retry_hash && !b.read(cx).images.kept.contains_key(hash))
             .unwrap()
     });
     let (released_hash, released_error) = retained_failed.remove(released);
@@ -418,12 +414,12 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     assert!(released_weak.upgrade().is_none());
     b.update(cx, |host, cx| {
         host.load_image(released_hash.clone(), false, cx);
-        assert_eq!(host.image_tasks.len(), 1);
+        assert_eq!(host.images.loads.len(), 1);
         assert!(matches!(
             host.image(&released_hash),
             Some(BlobImage::Loading)
         ));
-        assert!(!host.retained_images.contains_key(&released_hash));
+        assert!(!host.images.retained.contains_key(&released_hash));
     });
     failed(&b, &released_hash, cx);
 
@@ -436,34 +432,32 @@ fn paired_hosts_coalesce_bound_inflight_evict_and_reload_without_owning_external
     ).unwrap());
     let large_hash = BlobHash("external-budget-fixture".into());
     a.update(cx, |host, cx| {
-        for image in host.images.values() {
+        for image in host.images.kept.values() {
             if let BlobImage::Ready(image) = image {
                 cx.drop_image(image.clone(), None);
             }
         }
-        host.images.clear();
-        host.image_order.clear();
-        host.retained_images.clear();
+        host.images.kept.clear();
+        host.images.order.clear();
+        host.images.retained.clear();
         host.images
+            .kept
             .insert(large_hash.clone(), BlobImage::Ready(large.clone()));
-        host.image_order.push_back(large_hash.clone());
+        host.images.order.push_back(large_hash.clone());
         host.load_image(blobs[2].hash.clone(), false, cx);
     });
     ready(&a, &blobs[2].hash, cx);
     cx.read(|cx| {
         let host = a.read(cx);
-        assert!(!host.images.contains_key(&large_hash));
+        assert!(!host.images.kept.contains_key(&large_hash));
         assert_eq!(cached_bytes(host), 16);
-        assert!(host.image_tasks.is_empty());
+        assert!(host.images.loads.is_empty());
         assert!(
             b.read(cx).image(&same.hash).is_some(),
             "other host survives eviction"
         );
     });
-    assert_eq!(
-        editor_ui::markdown_renderer::image_resident_bytes(&large),
-        64 * 1024 * 1024
-    );
+    assert_eq!(super::images::resident_bytes(&large), 64 * 1024 * 1024);
     assert_eq!(
         large.as_bytes(0).unwrap().len(),
         64 * 1024 * 1024,

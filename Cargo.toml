@@ -13,6 +13,7 @@ members = [
     "crates/editor-inspector",
     "crates/editor-marketplace",
     "crates/editor-settings",
+    "crates/editor-sources",
     "crates/editor-sidebar",
     "crates/editor-ui",
     "crates/forge-content",

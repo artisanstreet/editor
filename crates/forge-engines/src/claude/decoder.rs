@@ -39,6 +39,9 @@ pub struct ClaudeDecoder {
     usage: Usage,
     refused: bool,
     result_seen: bool,
+    /// The main session is mid-turn: its own frames arrived since the last
+    /// `result`. Subagent frames don't count.
+    in_turn: bool,
     /// Background agents and workflows the CLI reports live, and the
     /// background work of agents (an agent waiting on its own shell is
     /// resumed when it ends): they report back into the session, so it must
@@ -101,6 +104,14 @@ impl ClaudeDecoder {
     fn feed_raw(&mut self, frame: &Value) -> Vec<EngineEvent> {
         let mut out = Vec::new();
         let parent = str_at(frame, "parent_tool_use_id").map(str::to_owned);
+        if parent.is_none()
+            && matches!(
+                str_at(frame, "type"),
+                Some("assistant" | "user" | "stream_event")
+            )
+        {
+            self.in_turn = true;
+        }
         match str_at(frame, "type").unwrap_or_default() {
             "system" => self.system(frame, &mut out),
             "stream_event" if parent.is_none() => self.stream_event(&frame["event"], &mut out),
@@ -283,6 +294,12 @@ impl ClaudeDecoder {
             "{} background task(s); agents waiting on their own work: {:?}",
             self.background, self.waiting_agents
         )
+    }
+
+    /// Whether the main session is mid-turn.
+    #[must_use]
+    pub fn in_turn(&self) -> bool {
+        self.in_turn
     }
 
     pub fn take_result_seen(&mut self) -> bool {
@@ -853,6 +870,7 @@ impl ClaudeDecoder {
 
     fn result(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
         self.result_seen = true;
+        self.in_turn = false;
         let usage = &frame["usage"];
         let count = |field: &str| usage[field].as_u64().unwrap_or_default();
         self.usage.input += count("input_tokens");

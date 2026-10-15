@@ -11,6 +11,7 @@ artisan-api = { path = "../artisan-api" }
 editor-ui = { path = "../editor-ui" }
 editor-composer = { path = "../editor-composer" }
 editor-core = { path = "../editor-core" }
+editor-sources = { path = "../editor-sources" }
 gpui.workspace = true
 ropey.workspace = true
 serde_json.workspace = true

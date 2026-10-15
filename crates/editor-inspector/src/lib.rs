@@ -37,8 +37,8 @@ pub struct Inspector {
     test_plan_presented: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
     error: Option<String>,
     dialog: Entity<TerminalDialog>,
-    source: Option<Entity<editor_core::ContentText>>,
-    plan: Option<Entity<editor_core::CollectionBrowser<artisan_api::PlanStep>>>,
+    source: Option<Entity<editor_sources::ContentText>>,
+    plan: Option<Entity<editor_sources::CollectionBrowser<artisan_api::PlanStep>>>,
     _subscriptions: [Subscription; 2],
 }
 impl Inspector {
@@ -369,7 +369,7 @@ impl Inspector {
                                 move |step: &artisan_api::PlanStep, index, _: &gpui::App| {
                                     #[cfg(test)]
                                     presented.borrow_mut().push(index);
-                                    editor_core::CollectionPreview {
+                                    editor_sources::CollectionPreview {
                                         label: match &step.text {
                                             artisan_api::TextContent::Inline(text) => format!(
                                                 "{}. {}",
@@ -388,7 +388,7 @@ impl Inspector {
                                 },
                             );
                             this.plan = Some(cx.new(|cx| {
-                                editor_core::CollectionBrowser::new(
+                                editor_sources::CollectionBrowser::new(
                                     host,
                                     source,
                                     "Checklist",
@@ -444,7 +444,7 @@ impl Inspector {
                                 move |this, _, _, cx| {
                                     if let Some((host, _)) = &this.host {
                                         this.source = Some(cx.new(|cx| {
-                                            editor_core::ContentText::new(
+                                            editor_sources::ContentText::new(
                                                 host,
                                                 source.clone(),
                                                 theme,

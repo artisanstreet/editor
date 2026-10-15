@@ -4,6 +4,7 @@ use super::super::{
     PlainBody, PlainText, PreparedText, Shared, StoredPreparedText, body_line, body_text,
 };
 use crate::content::{SourceField, SourceOwners, StoredText};
+use crate::fold::Slot;
 use crate::fold::TextSection;
 use artisan_api::{Item, ItemKind, NoticeKind, TextContent};
 use editor_ui::{AssetId, markdown_renderer::MarkdownBodyTone, selectable_text::SelectionSource};
@@ -22,7 +23,7 @@ impl TextPresenter<'_> {
         let ItemKind::AssistantMessage { text, .. } = &item.kind else {
             return div().into_any_element();
         };
-        self.prepared_text(item, "prose", text, MarkdownBodyTone::Foreground, block)
+        self.prepared_text(item, Slot::Prose, text, MarkdownBodyTone::Foreground, block)
     }
     pub(in crate::row) fn section(
         &self,
@@ -60,7 +61,7 @@ impl TextPresenter<'_> {
         };
         self.stored_formatted(
             item,
-            "prose",
+            Slot::Prose,
             source,
             block,
             MarkdownBodyTone::Foreground,
@@ -68,14 +69,14 @@ impl TextPresenter<'_> {
         )
     }
     pub(super) fn output(&self, item: &Item, text: &str) -> AnyElement {
-        self.plain_text(item, "output", text)
+        self.plain_text(item, Slot::Output, text)
     }
     pub(super) fn answer(&self, item: &Item) -> AnyElement {
         let Some(text) = SourceField::AnswerText.text(item) else {
             return div().into_any_element();
         };
         match text {
-            TextContent::Inline(text) => self.plain_text(item, "answer", text),
+            TextContent::Inline(text) => self.plain_text(item, Slot::Answer, text),
             TextContent::Stored(_) => self.content_text(item, SourceField::AnswerText),
         }
     }
@@ -107,7 +108,7 @@ impl TextPresenter<'_> {
     fn prepared_text(
         &self,
         item: &Item,
-        section: &'static str,
+        section: Slot,
         text: &TextContent,
         tone: MarkdownBodyTone,
         block: usize,
@@ -147,7 +148,7 @@ impl TextPresenter<'_> {
     fn stored_formatted(
         &self,
         item: &Item,
-        slot: &'static str,
+        slot: Slot,
         source: &artisan_api::ContentRef,
         block: usize,
         tone: MarkdownBodyTone,
@@ -164,7 +165,7 @@ impl TextPresenter<'_> {
             tone,
             literal: None,
             visual: None,
-            queue_key: (slot == "prose").then(|| {
+            queue_key: (slot == Slot::Prose).then(|| {
                 crate::fold::Row::ProseBlock {
                     id: item.id.clone(),
                     block,
@@ -177,12 +178,12 @@ impl TextPresenter<'_> {
         .into_any_element()
     }
 
-    fn plain_text(&self, item: &Item, slot: &'static str, text: &str) -> AnyElement {
+    fn plain_text(&self, item: &Item, slot: Slot, text: &str) -> AnyElement {
         let id = &item.id;
         let scope = self.shared.selection_scope.borrow().clone();
         let mut order =
             crate::fold::selection_order(self.shared.agent_scope.get(), item.position, slot);
-        order.push(if slot == "output" { 1 } else { 0 });
+        order.push(if slot == Slot::Output { 1 } else { 0 });
         let (text, source) = {
             let mut sources = self.shared.plain_sources.borrow_mut();
             let cached = sources.entry((id.clone(), slot)).or_insert_with(|| {

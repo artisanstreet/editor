@@ -15,12 +15,11 @@ use std::hash::{DefaultHasher, Hash, Hasher as _};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Row {
     /// An original native visual ordinal within one semantic source leaf.
-    /// Only the admitted source window is registered with the native list.
+    /// Only the window around the reader is registered with the native list.
     Projected {
         row: Box<Row>,
         visual: usize,
     },
-    User(ItemId),
     /// One contiguous stretch of work. Explicit transcript rows split stretches;
     /// steers stay inside their run's work. Only the first stretch carries its header.
     Work {
@@ -51,12 +50,17 @@ pub(crate) enum Row {
         block: usize,
         run: Option<RunId>,
     },
+    /// One block of a literal body (a user message, an agent's task or a
+    /// message to it, an error, an image caption). The fold emits block 0
+    /// for the whole body; publishing splits it into bounded blocks.
     PlainBlock {
         id: ItemId,
         section: PlainSection,
         block: usize,
     },
-    Reply(ItemId),
+    /// One prepared block of a reply. The fold emits block 0 for the whole
+    /// reply; publishing splits it once its blocks are known, and until
+    /// then that one row shows all of it.
     ProseBlock {
         id: ItemId,
         block: usize,
@@ -64,21 +68,60 @@ pub(crate) enum Row {
     /// An approval or a question.
     Prompt(ItemId),
     Compaction(ItemId),
-    Error(ItemId),
     Image(ItemId),
     /// Newer items exist below; reaching here loads them.
     Gap,
     /// The live run's status line, reasoning and stop button.
     Status(RunId),
-    /// A subagent's view: the task it was given, at the top…
-    AgentTask(ItemId),
-    /// …and what it reported back, at the end.
+    /// A subagent's view: what it reported back, at the end (its task is
+    /// a `PlainBlock` at the top, a message it got one where it arrived).
     AgentResult(ItemId),
-    /// A message the agent got while it worked (`SendMessage`), where it
-    /// arrived.
-    AgentMessage(ItemId),
     /// A live agent's status line: working (a tool runs) or thinking.
     AgentStatus(ItemId, bool),
+}
+
+/// One text body of an item, with its own source, preparation and rows:
+/// the reply's prose, a plain (literal) section or a formatted section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Slot {
+    Prose,
+    Plain(PlainSection),
+    Text(TextSection),
+    /// A tool's shown output and a question's answer: inline text only.
+    Output,
+    Answer,
+}
+impl Slot {
+    /// The body's text in `item`, if the item has it.
+    pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
+        match self {
+            Self::Prose => match &item.kind {
+                ItemKind::AssistantMessage { text, .. } => Some(text),
+                _ => None,
+            },
+            Self::Plain(section) => section.text(item),
+            Self::Text(section) => section.text(item),
+            Self::Output | Self::Answer => None,
+        }
+    }
+}
+/// The renderer's cache keys and element ids name the slot.
+impl std::fmt::Display for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Prose => "prose",
+            Self::Plain(PlainSection::User) => "user",
+            Self::Plain(PlainSection::AgentTask) => "agent-task",
+            Self::Plain(PlainSection::AgentMessage) => "agent-message",
+            Self::Plain(PlainSection::Error) => "error",
+            Self::Plain(PlainSection::ImageCaption) => "caption",
+            Self::Text(TextSection::Proposal) => "plan-proposal",
+            Self::Text(TextSection::AgentResult) => "result-view",
+            Self::Text(TextSection::Message) => "message",
+            Self::Output => "output",
+            Self::Answer => "answer",
+        })
+    }
 }
 
 /// Plain content stays literal while each native row has a bounded text body.
@@ -91,14 +134,8 @@ pub(crate) enum PlainSection {
     ImageCaption,
 }
 impl PlainSection {
-    pub(crate) fn slot(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::AgentTask => "agent-task",
-            Self::AgentMessage => "agent-message",
-            Self::Error => "error",
-            Self::ImageCaption => "caption",
-        }
+    pub(crate) fn slot(self) -> Slot {
+        Slot::Plain(self)
     }
     pub(crate) fn order(self) -> u64 {
         match self {
@@ -154,12 +191,12 @@ impl PlainSection {
 }
 /// Agent task/result metadata shares one Item position, so its scoped presentation
 /// order surrounds child Items. Root transcript ordering remains canonical.
-pub(crate) fn selection_order(agent_scope: bool, position: u64, slot: &str) -> Vec<u64> {
+pub(crate) fn selection_order(agent_scope: bool, position: u64, slot: Slot) -> Vec<u64> {
     if agent_scope {
         vec![
             match slot {
-                "agent-task" => 0,
-                "result-view" => 2,
+                Slot::Plain(PlainSection::AgentTask) => 0,
+                Slot::Text(TextSection::AgentResult) => 2,
                 _ => 1,
             },
             position,
@@ -203,12 +240,8 @@ pub(crate) enum TextSection {
     Message,
 }
 impl TextSection {
-    pub(crate) fn slot(self) -> &'static str {
-        match self {
-            Self::Proposal => "plan-proposal",
-            Self::AgentResult => "result-view",
-            Self::Message => "message",
-        }
+    pub(crate) fn slot(self) -> Slot {
+        Slot::Text(self)
     }
     pub(crate) fn text(self, item: &Item) -> Option<&artisan_api::TextContent> {
         match (self, &item.kind) {
@@ -268,16 +301,11 @@ impl Row {
             | Self::WorkEntry { id, .. }
             | Self::PlanStep { id, .. }
             | Self::TextBlock { id, .. }
-            | Self::User(id)
-            | Self::Reply(id)
             | Self::ProseBlock { id, .. }
             | Self::Prompt(id)
             | Self::Compaction(id)
-            | Self::Error(id)
             | Self::Image(id)
-            | Self::AgentTask(id)
-            | Self::AgentResult(id)
-            | Self::AgentMessage(id) => Some(id),
+            | Self::AgentResult(id) => Some(id),
             Self::Work { entries, .. } => entries.first(),
             Self::Chain { ids, .. } => ids.first(),
             Self::Gap | Self::Status(_) | Self::AgentStatus(..) => None,
@@ -323,7 +351,6 @@ impl Row {
             Self::ProseBlock { id, block } => RowKey::ProseBlock(id.clone(), *block),
             Self::Gap => RowKey::Gap,
             Self::Status(run) => RowKey::Status(run.clone()),
-            Self::AgentTask(id) => RowKey::AgentTask(id.clone()),
             Self::AgentResult(id) => RowKey::AgentResult(id.clone()),
             Self::AgentStatus(id, _) => RowKey::AgentStatus(id.clone()),
             other => RowKey::Item(other.anchor().cloned().unwrap_or_default()),
@@ -436,18 +463,29 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
         }
         if scope.is_some() && to_scope(item) {
             flush(&mut work, &mut rows);
-            rows.push(Row::AgentMessage(item.id.clone()));
+            rows.push(Row::PlainBlock {
+                id: item.id.clone(),
+                section: PlainSection::AgentMessage,
+                block: 0,
+            });
             continue;
         }
         let own_row = match &item.kind {
             // A steer belongs to the running turn: it sits in the work
             // where it was sent and folds with it.
             ItemKind::UserMessage { steer: true, .. } if item.run_id.is_some() => None,
-            ItemKind::UserMessage { .. } => Some(Row::User(item.id.clone())),
+            ItemKind::UserMessage { .. } => Some(Row::PlainBlock {
+                id: item.id.clone(),
+                section: PlainSection::User,
+                block: 0,
+            }),
             ItemKind::AssistantMessage {
                 phase: TextPhase::Final,
                 ..
-            } if scope.is_none() => Some(Row::Reply(item.id.clone())),
+            } if scope.is_none() => Some(Row::ProseBlock {
+                id: item.id.clone(),
+                block: 0,
+            }),
             ItemKind::Question { .. } => Some(Row::Prompt(item.id.clone())),
             ItemKind::Tool { .. } | ItemKind::Plan { .. }
                 if item.status == Status::AwaitingUser =>
@@ -455,7 +493,11 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
                 Some(Row::Prompt(item.id.clone()))
             }
             ItemKind::Compaction { .. } => Some(Row::Compaction(item.id.clone())),
-            ItemKind::Error { .. } => Some(Row::Error(item.id.clone())),
+            ItemKind::Error { .. } => Some(Row::PlainBlock {
+                id: item.id.clone(),
+                section: PlainSection::Error,
+                block: 0,
+            }),
             ItemKind::Image { .. } => Some(Row::Image(item.id.clone())),
             _ => None,
         };
@@ -508,7 +550,14 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
     }
     flush(&mut work, &mut rows);
     if let Some(agent) = scope {
-        rows.insert(0, Row::AgentTask(agent.clone()));
+        rows.insert(
+            0,
+            Row::PlainBlock {
+                id: agent.clone(),
+                section: PlainSection::AgentTask,
+                block: 0,
+            },
+        );
         if view
             .item(agent)
             .is_some_and(|item| item.status == Status::Running)
@@ -626,7 +675,9 @@ pub(crate) fn expanded(
                         let id = entries[index].clone();
                         index += 1;
                         match view.item(&id).map(|item| &item.kind) {
-                            Some(ItemKind::AssistantMessage { .. }) => emit(Row::Reply(id)),
+                            Some(ItemKind::AssistantMessage { .. }) => {
+                                emit(Row::ProseBlock { id, block: 0 });
+                            }
                             Some(ItemKind::Plan {
                                 steps, proposal, ..
                             }) => {
@@ -880,13 +931,9 @@ pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
                     | Row::TextBlock { .. }
                     | Row::ProseBlock { .. },
                 ) if run == previous_run => 8.0,
-                (Row::Work { .. }, Row::Reply(_) | Row::ProseBlock { .. }) => REPLY_SEAM,
+                (Row::Work { .. }, Row::ProseBlock { .. }) => REPLY_SEAM,
                 (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
                 (_, Row::Status(_)) => STATUS_GAP,
-                // A steer stays inside its run's turn.
-                (_, Row::User(_)) if run.is_some() && run == previous_run => BLOCK_GAP,
-                (_, Row::User(_)) => TURN_GAP,
-                (Row::User(_), _) => BLOCK_GAP,
                 _ if run.is_some() && previous_run.is_some() && run != previous_run => TURN_GAP,
                 _ => BLOCK_GAP,
             }
@@ -921,7 +968,7 @@ fn version(
                 .hash(&mut hasher);
             Vec::new()
         }
-        Row::AgentTask(id) | Row::AgentResult(id) | Row::AgentStatus(id, _) => {
+        Row::AgentResult(id) | Row::AgentStatus(id, _) => {
             view.item(id).map(|item| item.seq).hash(&mut hasher);
             Vec::new()
         }

@@ -78,12 +78,12 @@ pub(crate) struct QuestionnairePanel {
     /// Why the last answer failed, shown until the next attempt.
     error: Option<String>,
     drafts: HashMap<ItemId, AnswerDraft>,
-    source: Option<gpui::Entity<editor_core::ContentText>>,
+    source: Option<gpui::Entity<editor_sources::ContentText>>,
     payloads: HashMap<ItemId, Vec<Option<QuestionAnswer>>>,
     question_window: Option<gpui::Entity<editor_core::CollectionWindow<Question>>>,
     question_events: Option<gpui::Subscription>,
     question_owner: Option<ItemId>,
-    options: Option<gpui::Entity<editor_core::CollectionBrowser<artisan_api::QuestionOption>>>,
+    options: Option<gpui::Entity<editor_sources::CollectionBrowser<artisan_api::QuestionOption>>>,
     options_slot: Option<(ItemId, usize, artisan_api::CollectionRef)>,
 }
 
@@ -171,10 +171,11 @@ impl Composer {
         if self.questionnaire.question_owner.as_ref() != Some(&id) {
             let Some(host) = self.host(cx) else { return };
             let window = cx.new(|cx| editor_core::CollectionWindow::new(&host, source.clone(), cx));
-            self.questionnaire.question_events = Some(cx.subscribe(
-                &window,
-                |_, _, _: &editor_core::CollectionWindowEvent, cx| cx.notify(),
-            ));
+            self.questionnaire.question_events = Some(
+                cx.subscribe(&window, |_, _, _: &editor_core::RangeWindowEvent, cx| {
+                    cx.notify()
+                }),
+            );
             self.questionnaire.question_window = Some(window);
             self.questionnaire.question_owner = Some(id);
         }
@@ -214,7 +215,7 @@ impl Composer {
         let expected_item = item.clone();
         let present = std::rc::Rc::new(
             move |option: &artisan_api::QuestionOption, _, cx: &gpui::App| {
-                editor_core::CollectionPreview {
+                editor_sources::CollectionPreview {
                     label: option.label.clone().into(),
                     detail: option.description.clone(),
                     disabled: preview_owner
@@ -258,7 +259,7 @@ impl Composer {
             },
         );
         self.questionnaire.options = Some(cx.new(|cx| {
-            editor_core::CollectionBrowser::new(
+            editor_sources::CollectionBrowser::new(
                 &host,
                 source,
                 "Choices",
@@ -280,7 +281,7 @@ impl Composer {
             return;
         };
         self.questionnaire.source =
-            Some(cx.new(|cx| editor_core::ContentText::new(&host, source, theme, cx)));
+            Some(cx.new(|cx| editor_sources::ContentText::new(&host, source, theme, cx)));
         cx.notify();
     }
 
@@ -617,7 +618,7 @@ impl Composer {
             let error = window
                 .as_ref()
                 .and_then(|window| match window.read(cx).state() {
-                    editor_core::CollectionWindowState::Failed(error) => Some(error.clone()),
+                    editor_core::RangeState::Failed(error) => Some(error.clone()),
                     _ => None,
                 });
             let mut loading = div().child(error.unwrap_or_else(|| "Loading question…".into()));

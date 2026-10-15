@@ -85,7 +85,6 @@ impl HostData {
         page.loading = true;
         page.error = None;
         page.changed.clear();
-        let generation = self.generation;
         let started_seq = self
             .threads
             .values()
@@ -103,9 +102,6 @@ impl HostData {
         page.task = Some(cx.spawn(async move |this, cx| {
             let result = client.threads(&query).await;
             let _ = this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
                 let page = &mut this.thread_pages.pages[index];
                 page.loading = false;
                 page.loaded = true;
@@ -206,13 +202,9 @@ impl HostData {
     fn start_thread_lookup(&mut self, id: ThreadId, cx: &mut Context<Self>) {
         let key = id.clone();
         let client = self.client.clone();
-        let generation = self.generation;
         let task = cx.spawn(async move |this, cx| {
             let result = client.thread(&id).await;
             let _ = this.update(cx, |this, cx| {
-                if generation != this.generation {
-                    return;
-                }
                 this.thread_pages.direct.remove(&id);
                 match result {
                     Ok(thread) => {
@@ -303,7 +295,7 @@ impl HostData {
                 .filter(|(_, waiting)| !waiting.is_empty())
                 .map(|(id, _)| id.clone()),
         );
-        keep.extend(self.read_pending.keys().cloned());
+        keep.extend(self.read_acks.pending.keys().cloned());
         self.threads.retain(|id, _| keep.contains(id));
         self.runs
             .retain(|id, run| self.threads.contains_key(id) || run.status.is_live());

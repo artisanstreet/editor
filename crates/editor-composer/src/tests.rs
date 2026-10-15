@@ -143,6 +143,7 @@ impl Fixture {
             }))
             .unwrap()
             .id;
+        cx.update(editor_sources::init);
         let core = cx.new(|cx| Core::new(files, cx).unwrap());
         Self {
             core,
@@ -452,6 +453,7 @@ fn a_new_thread_starts_with_the_model_last_used(cx: &mut TestAppContext) {
 
     // The Editor restarts: a new Core reads the same files.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
+    vcx.update(|_, app| editor_sources::init(app));
     let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
     let (fresh, vcx) =
         cx.add_window_view(move |window, cx| Composer::new(core, target, window, cx));
@@ -525,6 +527,7 @@ fn a_starred_model_lists_first_and_stays_starred(cx: &mut TestAppContext) {
 
     // The Editor restarts: the star is in its settings.json.
     let files = forge.core.read_with(vcx, |core, _| core.files.clone());
+    vcx.update(|_, app| editor_sources::init(app));
     let core = vcx.update(|_, app| app.new(|cx| Core::new(files, cx).unwrap()));
     let favorites = core.read_with(vcx, |core, _| core.settings.get("model_favorites").cloned());
     assert_eq!(favorites, Some(serde_json::json!({ "claude": ["opus"] })));

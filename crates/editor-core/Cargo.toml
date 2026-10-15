@@ -7,7 +7,6 @@ description = "The Editor's Forge client: hosts, pairing, the connection to each
 
 [dependencies]
 ropey.workspace = true
-editor-ui = { path = "../editor-ui" }
 tempfile.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api", features = ["tls"] }
@@ -23,6 +22,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macr
 tracing.workspace = true
 
 [dev-dependencies]
+editor-ui = { path = "../editor-ui" }
 forge-http = { path = "../forge-http" }
 forge-store = { path = "../forge-store" }
 gpui = { workspace = true, features = ["test-support"] }

@@ -1,73 +1,49 @@
-//! What one Forge has told us. Updated only by its connection; every
-//! section reads from here.
+//! What one Forge has told us: projects, threads, runs, settings, engines,
+//! items waiting on the user and live text. Updated only by its connection;
+//! every section reads from here. Caches built from Forge reads (images,
+//! repositories, thread pages, the observed thread's summary) and the
+//! read-acknowledgement writer are separate pieces in their own modules,
+//! each owning its tasks.
 
+mod images;
 mod projections;
-pub use projections::ProjectionLoad;
-use ropey::Rope;
+mod read_acks;
+mod repositories;
 mod thread_pages;
 mod thread_summary;
+
+pub use images::{BlobImage, ImageDecoder};
+pub use projections::ProjectionLoad;
+pub use thread_pages::{ThreadPage, ThreadPageDirection};
+pub use thread_summary::ThreadSummary;
+
 use crate::client::ForgeClient;
 use crate::connection::{self, ConnectionStatus, Update};
 use crate::hosts::HostId;
 use artisan_api::{
-    Account, EngineId, EngineStatus, Event, Item, ItemId, LiveTarget, Project, ProjectId,
-    ProjectRepository, Run, Status, Thread, ThreadId,
+    Account, EngineId, EngineStatus, Event, Item, ItemId, LiveCoverage, LiveTarget, Project,
+    ProjectId, Run, Status, Thread, ThreadId,
 };
 use futures::StreamExt as _;
 use gpui::{Context, EventEmitter, Task};
+use images::ImageCache;
+use read_acks::ReadAcks;
+use repositories::RepositoryCache;
+use ropey::Rope;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use thread_pages::ThreadPages;
-pub use thread_pages::{ThreadPage, ThreadPageDirection};
 use thread_summary::ObservedSummary;
-pub use thread_summary::ThreadSummary;
 use tokio::sync::{Notify, watch};
 
-#[derive(Clone)]
-pub enum BlobImage {
-    Loading,
-    Ready(Arc<gpui::RenderImage>),
-    Failed(Arc<str>),
-}
-
-// A lookup never retains result bytes. Mounted rows/scenes can keep an evicted
-// immutable result alive; reusing it avoids HTTP/decode or failure retry loops.
-enum RetainedImage {
-    Ready(Weak<gpui::RenderImage>),
-    Failed(Weak<str>),
-}
-impl RetainedImage {
-    fn upgrade(&self) -> Option<BlobImage> {
-        match self {
-            Self::Ready(image) => image.upgrade().map(BlobImage::Ready),
-            Self::Failed(error) => error.upgrade().map(BlobImage::Failed),
-        }
-    }
-    fn alive(&self) -> bool {
-        match self {
-            Self::Ready(image) => image.strong_count() > 0,
-            Self::Failed(error) => error.strong_count() > 0,
-        }
-    }
-}
-
+/// One live text stream as last seen.
 #[derive(Clone)]
 pub struct LiveSnapshot {
+    /// Which stream this is: a target whose text was replaced rather than
+    /// appended to gets a new one.
     pub epoch: u64,
     pub text: Arc<Rope>,
-    pub coverage: artisan_api::LiveCoverage,
-}
-
-struct RepositoryEntry {
-    value: Option<ProjectRepository>,
-    checked: std::time::Instant,
-    failed: bool,
-}
-impl RepositoryEntry {
-    fn fresh(&self) -> bool {
-        let seconds = if self.failed { 5 } else { 2 };
-        self.checked.elapsed() < std::time::Duration::from_secs(seconds)
-    }
+    pub coverage: LiveCoverage,
 }
 
 pub struct HostData {
@@ -78,12 +54,12 @@ pub struct HostData {
     pub forge_version: Option<String>,
     pub projects: BTreeMap<ProjectId, Project>,
     pub threads: HashMap<ThreadId, Thread>,
-    thread_pages: ThreadPages,
-    summary: Option<ObservedSummary>,
-    summary_generation: u64,
     /// The latest run of each thread.
     pub runs: HashMap<ThreadId, Run>,
     pub settings: serde_json::Map<String, serde_json::Value>,
+    pub engines: BTreeMap<EngineId, EngineStatus>,
+    /// The account Forge runs as.
+    pub account: Option<Account>,
     /// Lazy canonical projections; forms keep only their unsaved edits.
     prompt_load: ProjectionLoad,
     catalog_load: ProjectionLoad,
@@ -91,33 +67,21 @@ pub struct HostData {
     pub prompt_revision: u64,
     pub catalog_revision: u64,
     pub skill_catalog: Option<Arc<Vec<artisan_api::CatalogSkill>>>,
-    pub engines: BTreeMap<EngineId, EngineStatus>,
-    /// The account Forge runs as.
-    pub account: Option<Account>,
-    /// What git said about each project, once asked (see
-    /// [`Self::load_repository`]); `None` outside a repository.
-    repositories: HashMap<ProjectId, RepositoryEntry>,
-    /// Repository reads in flight.
-    reading: HashMap<ProjectId, Task<()>>,
-    repository_order: std::collections::VecDeque<ProjectId>,
-    generation: u64,
     /// Items waiting on the user, by thread.
     waiting: HashMap<ThreadId, BTreeSet<ItemId>>,
-    /// Memory-only text of live runs.
-    live: HashMap<ThreadId, HashMap<LiveTarget, Arc<Rope>>>,
-    live_epochs: HashMap<ThreadId, HashMap<LiveTarget, (u64, artisan_api::LiveCoverage)>>,
-    live_epoch: u64,
+    /// Memory-only text of live runs, for the observed thread.
+    live: HashMap<ThreadId, HashMap<LiveTarget, LiveSnapshot>>,
+    /// The last stream number handed out.
+    live_streams: u64,
+    /// The thread on screen: its live text and summary are followed.
+    observed: watch::Sender<Option<ThreadId>>,
+    summary: Option<ObservedSummary>,
+    thread_pages: ThreadPages,
+    images: ImageCache,
+    repositories: RepositoryCache,
+    read_acks: ReadAcks,
     /// Cuts the connection's wait before its next attempt short.
     retry: Arc<Notify>,
-    observed: watch::Sender<Option<ThreadId>>,
-    read_pending: BTreeMap<ThreadId, artisan_api::Seq>,
-    /// Evidence from this observation, independent of mutable unread preferences.
-    read_observed: Option<artisan_api::Seq>,
-    read_writer: Option<Task<()>>,
-    images: HashMap<artisan_api::BlobHash, BlobImage>,
-    image_tasks: HashMap<artisan_api::BlobHash, Task<()>>,
-    retained_images: HashMap<artisan_api::BlobHash, RetainedImage>,
-    image_order: std::collections::VecDeque<artisan_api::BlobHash>,
     _follow: Task<()>,
     _connection: tokio_util::task::AbortOnDropHandle<()>,
 }
@@ -151,19 +115,7 @@ impl EventEmitter<HostEvent> for HostData {}
 impl HostData {
     /// Starts following the Forge behind `client`.
     pub fn new(id: HostId, name: String, client: ForgeClient, cx: &mut Context<Self>) -> Self {
-        cx.on_release(|host, cx| {
-            for (_, image) in host.images.drain() {
-                if let BlobImage::Ready(image) = image {
-                    cx.defer(move |cx| {
-                        cx.drop_image(image, None);
-                        // Other visible owners can retain these pixels after this owner
-                        // releases them. Invalidate cached scenes before they reuse a tile.
-                        cx.refresh_windows();
-                    });
-                }
-            }
-        })
-        .detach();
+        cx.on_release(|host, cx| host.images.release(cx)).detach();
         let (sender, mut receiver) = futures::channel::mpsc::channel(64);
         let retry = Arc::new(Notify::new());
         let (observed, observation) = watch::channel(None);
@@ -184,231 +136,39 @@ impl HostData {
             forge_version: None,
             projects: BTreeMap::new(),
             threads: HashMap::new(),
-            thread_pages: ThreadPages::default(),
-            summary: None,
-            summary_generation: 0,
             runs: HashMap::new(),
             settings: serde_json::Map::new(),
+            engines: BTreeMap::new(),
+            account: None,
             prompt_load: ProjectionLoad::default(),
             catalog_load: ProjectionLoad::default(),
             global_prompt: None,
             prompt_revision: 0,
             catalog_revision: 0,
             skill_catalog: None,
-            engines: BTreeMap::new(),
-            account: None,
-            repositories: HashMap::new(),
-            reading: HashMap::new(),
-            repository_order: std::collections::VecDeque::new(),
-            generation: 0,
             waiting: HashMap::new(),
             live: HashMap::new(),
-            live_epochs: HashMap::new(),
-            live_epoch: 0,
-            retry,
+            live_streams: 0,
             observed,
-            read_pending: BTreeMap::new(),
-            read_observed: None,
-            read_writer: None,
-            images: HashMap::new(),
-            image_tasks: HashMap::new(),
-            retained_images: HashMap::new(),
-            image_order: std::collections::VecDeque::new(),
+            summary: None,
+            thread_pages: ThreadPages::default(),
+            images: ImageCache::default(),
+            repositories: RepositoryCache::default(),
+            read_acks: ReadAcks::default(),
+            retry,
             _follow: follow,
             _connection: connection,
         }
     }
 
     pub fn image(&self, hash: &artisan_api::BlobHash) -> Option<BlobImage> {
-        self.images.get(hash).cloned().or_else(|| {
-            self.retained_images
-                .get(hash)
-                .and_then(RetainedImage::upgrade)
-        })
+        self.images.get(hash)
     }
 
+    /// Loads a blob image unless it is kept, loading or still shown; only
+    /// `retry` loads a failed one again.
     pub fn load_image(&mut self, hash: artisan_api::BlobHash, retry: bool, cx: &mut Context<Self>) {
-        self.retained_images.retain(|_, result| result.alive());
-        if retry && matches!(self.image(&hash), Some(BlobImage::Failed(_))) {
-            self.retained_images.remove(&hash);
-            self.images.remove(&hash);
-            self.image_order.retain(|old| old != &hash);
-        }
-        if matches!(self.images.get(&hash), Some(BlobImage::Ready(_))) {
-            self.image_order.retain(|old| old != &hash);
-            self.image_order.push_back(hash);
-            return;
-        }
-        if self.images.contains_key(&hash)
-            || self
-                .retained_images
-                .get(&hash)
-                .and_then(RetainedImage::upgrade)
-                .is_some()
-            || self.image_tasks.len() >= 4
-        {
-            return;
-        }
-        self.images.insert(hash.clone(), BlobImage::Loading);
-        let client = self.client.clone();
-        let renderer = cx.svg_renderer().clone();
-        let key = hash.clone();
-        let task = cx.spawn(async move |this, cx| {
-            let result = match client.blob(&hash).await {
-                Ok(bytes) => {
-                    cx.background_executor()
-                        .spawn(async move {
-                            editor_ui::markdown_renderer::decode_image_bytes(&bytes, renderer)
-                        })
-                        .await
-                }
-                Err(error) => Err(format!("{error:#}")),
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.image_tasks.remove(&hash);
-                this.retained_images.remove(&hash);
-                this.images.insert(
-                    hash.clone(),
-                    match result {
-                        Ok(image) => BlobImage::Ready(image),
-                        Err(error) => BlobImage::Failed(error.into()),
-                    },
-                );
-                this.image_order.push_back(hash);
-                while this.images.len() > 32
-                    || this
-                        .images
-                        .values()
-                        .filter_map(|image| match image {
-                            BlobImage::Ready(image) => {
-                                Some(editor_ui::markdown_renderer::image_resident_bytes(image))
-                            }
-                            _ => None,
-                        })
-                        .sum::<usize>()
-                        > 64 * 1024 * 1024
-                {
-                    let Some(oldest) = this.image_order.pop_front() else {
-                        break;
-                    };
-                    match this.images.remove(&oldest) {
-                        Some(BlobImage::Ready(image)) => {
-                            this.retained_images
-                                .insert(oldest, RetainedImage::Ready(Arc::downgrade(&image)));
-                            cx.defer(move |cx| {
-                                cx.drop_image(image, None);
-                                // Retained scenes need fresh GPU tiles for these shared pixels.
-                                cx.refresh_windows();
-                            });
-                        }
-                        Some(BlobImage::Failed(error)) => {
-                            this.retained_images
-                                .insert(oldest, RetainedImage::Failed(Arc::downgrade(&error)));
-                        }
-                        _ => {}
-                    }
-                }
-                this.retained_images.retain(|_, result| result.alive());
-                cx.emit(HostEvent::ImagesChanged);
-                cx.notify();
-            });
-        });
-        self.image_tasks.insert(key, task);
-    }
-
-    /// Coalesce actual visible activity into one owned, retryable writer.
-    pub fn acknowledge_read(
-        &mut self,
-        thread: ThreadId,
-        observed_seq: artisan_api::Seq,
-        cx: &mut Context<Self>,
-    ) {
-        if self.observed.borrow().as_ref() != Some(&thread) {
-            return;
-        }
-        let Some(summary) = self.threads.get(&thread) else {
-            return;
-        };
-        let seq = observed_seq.min(summary.activity_seq);
-        // Painting the same content again must not undo an explicit Mark Unread.
-        // Revisiting a thread starts a new observation; new activity may also advance it.
-        if !new_read_evidence(self.read_observed, seq) {
-            return;
-        }
-        // An offline connection can accumulate acknowledgements while navigating.
-        // Keep admission bounded and retry from the next visible frame when it drains.
-        if !self.read_pending.contains_key(&thread) && self.read_pending.len() >= 128 {
-            return;
-        }
-        self.read_observed = Some(seq);
-        if seq <= summary.read_seq && !summary.marked_unread {
-            return;
-        }
-        self.read_pending
-            .entry(thread)
-            .and_modify(|pending| *pending = (*pending).max(seq))
-            .or_insert(seq);
-        if self.read_writer.is_some() {
-            return;
-        }
-        let client = self.client.clone();
-        self.read_writer = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let next = this.update(cx, |host, _| {
-                    host.read_pending
-                        .first_key_value()
-                        .map(|(id, seq)| (id.clone(), *seq))
-                });
-                let Ok(Some((id, seq))) = next else {
-                    let _ = this.update(cx, |host, _| host.read_writer = None);
-                    break;
-                };
-                let result = client
-                    .update_thread(
-                        &id,
-                        &artisan_api::UpdateThread {
-                            read_seq: Some(seq),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
-                match result {
-                    Ok(thread) => {
-                        if this
-                            .update(cx, |host, cx| {
-                                if host
-                                    .read_pending
-                                    .get(&id)
-                                    .is_some_and(|pending| *pending <= seq)
-                                {
-                                    host.read_pending.remove(&id);
-                                }
-                                if host
-                                    .threads
-                                    .get(&id)
-                                    .is_none_or(|old| old.seq <= thread.seq)
-                                {
-                                    host.remember_thread(thread);
-                                    cx.emit(HostEvent::ThreadChanged {
-                                        thread_id: id.clone(),
-                                    });
-                                    cx.notify();
-                                }
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        tracing::debug!(%id, "read acknowledgement will retry: {error:#}");
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(1))
-                            .await;
-                    }
-                }
-            }
-        }));
+        self.images.load(hash, retry, &self.client, cx);
     }
 
     fn apply(&mut self, update: Update, cx: &mut Context<Self>) {
@@ -425,10 +185,8 @@ impl HostData {
                 cx.emit(HostEvent::Changed);
             }
             Update::State(state) => {
-                self.generation = self.generation.wrapping_add(1);
-                self.reading.clear();
+                // Everything read from the old state goes, with its reads.
                 self.repositories.clear();
-                self.repository_order.clear();
                 let state = *state;
                 self.forge_version = Some(state.forge_version);
                 self.projects = state
@@ -467,7 +225,6 @@ impl HostData {
                         .insert(item.id.clone());
                 }
                 self.live.clear();
-                self.live_epochs.clear();
                 self.prune_threads();
                 self.reset_thread_summary(cx);
                 cx.emit(HostEvent::Reset);
@@ -483,10 +240,8 @@ impl HostData {
         match event {
             Event::Hello { forge_version, .. } => self.forge_version = Some(forge_version),
             Event::Project { project } => {
-                // Metadata replacement cancels the old path's observation before publishing.
-                self.reading.remove(&project.id);
-                self.repositories.remove(&project.id);
-                self.repository_order.retain(|id| id != &project.id);
+                // New metadata cancels what was read about the old path.
+                self.repositories.forget(&project.id);
                 if project.removed {
                     self.projects.remove(&project.id);
                 } else {
@@ -502,7 +257,6 @@ impl HostData {
             Event::Run { run } => {
                 if !run.status.is_live() {
                     self.live.remove(&run.thread_id);
-                    self.live_epochs.remove(&run.thread_id);
                 }
                 let thread_id = run.thread_id.clone();
                 self.remember_run(run);
@@ -545,23 +299,6 @@ impl HostData {
                 cx.emit(HostEvent::Changed);
             }
             Event::Item { item } => {
-                if item.status.is_terminal() {
-                    if let Some(epochs) = self.live_epochs.get_mut(&item.thread_id) {
-                        for target in [
-                            LiveTarget::Text {
-                                item_id: item.id.clone(),
-                            },
-                            LiveTarget::Shell {
-                                item_id: item.id.clone(),
-                            },
-                            LiveTarget::Progress {
-                                item_id: item.id.clone(),
-                            },
-                        ] {
-                            epochs.remove(&target);
-                        }
-                    }
-                }
                 let waiting = self.waiting.entry(item.thread_id.clone()).or_default();
                 let changed = if item.status == Status::AwaitingUser {
                     waiting.insert(item.id.clone())
@@ -571,15 +308,19 @@ impl HostData {
                 if let Some(live) = self.live.get_mut(&item.thread_id)
                     && item.status.is_terminal()
                 {
-                    live.remove(&LiveTarget::Text {
-                        item_id: item.id.clone(),
-                    });
-                    live.remove(&LiveTarget::Shell {
-                        item_id: item.id.clone(),
-                    });
-                    live.remove(&LiveTarget::Progress {
-                        item_id: item.id.clone(),
-                    });
+                    for target in [
+                        LiveTarget::Text {
+                            item_id: item.id.clone(),
+                        },
+                        LiveTarget::Shell {
+                            item_id: item.id.clone(),
+                        },
+                        LiveTarget::Progress {
+                            item_id: item.id.clone(),
+                        },
+                    ] {
+                        live.remove(&target);
+                    }
                 }
                 if changed {
                     cx.emit(HostEvent::ThreadChanged {
@@ -613,39 +354,24 @@ impl HostData {
                 append,
                 coverage,
             } => {
-                if !append
-                    || !self
-                        .live
-                        .get(&thread_id)
-                        .is_some_and(|targets| targets.contains_key(&target))
-                {
-                    self.live_epoch = self
-                        .live_epoch
-                        .checked_add(1)
-                        .expect("live epoch exhausted");
-                    self.live_epochs
-                        .entry(thread_id.clone())
-                        .or_default()
-                        .insert(target.clone(), (self.live_epoch, coverage));
-                }
-                if let Some(value) = self
-                    .live_epochs
-                    .get_mut(&thread_id)
-                    .and_then(|targets| targets.get_mut(&target))
-                {
-                    value.1 = coverage;
-                }
-                let buffer = self
-                    .live
-                    .entry(thread_id.clone())
-                    .or_default()
-                    .entry(target.clone())
-                    .or_default();
-                if append {
-                    let end = buffer.len_chars();
-                    Arc::make_mut(buffer).insert(end, &text);
-                } else {
-                    *buffer = Arc::new(Rope::from_str(&text));
+                let streams = self.live.entry(thread_id.clone()).or_default();
+                match streams.get_mut(&target) {
+                    Some(stream) if append => {
+                        let end = stream.text.len_chars();
+                        Arc::make_mut(&mut stream.text).insert(end, &text);
+                        stream.coverage = coverage;
+                    }
+                    _ => {
+                        self.live_streams += 1;
+                        streams.insert(
+                            target.clone(),
+                            LiveSnapshot {
+                                epoch: self.live_streams,
+                                text: Arc::new(Rope::from_str(&text)),
+                                coverage,
+                            },
+                        );
+                    }
                 }
                 cx.emit(HostEvent::Live { thread_id, target });
             }
@@ -719,24 +445,19 @@ impl HostData {
             return;
         }
         self.live.retain(|id, _| Some(id) == thread.as_ref());
-        self.live_epochs.retain(|id, _| Some(id) == thread.as_ref());
         self.observed.send_replace(thread);
-        self.read_observed = None;
+        self.read_acks.observation_changed();
         self.reset_thread_summary(cx);
     }
 
     /// Live text for a target, if the run is still producing it.
     #[must_use]
     pub fn live(&self, thread: &ThreadId, target: &LiveTarget) -> Option<&Rope> {
-        self.live.get(thread)?.get(target).map(AsRef::as_ref)
+        Some(&self.live.get(thread)?.get(target)?.text)
     }
 
     pub fn live_snapshot(&self, thread: &ThreadId, target: &LiveTarget) -> Option<LiveSnapshot> {
-        Some(LiveSnapshot {
-            epoch: self.live_epochs.get(thread)?.get(target)?.0,
-            coverage: self.live_epochs.get(thread)?.get(target)?.1,
-            text: self.live.get(thread)?.get(target)?.clone(),
-        })
+        self.live.get(thread)?.get(target).cloned()
     }
 
     /// Every live target of a thread (reasoning, shells, streaming text).
@@ -744,10 +465,11 @@ impl HostData {
         &self,
         thread: &ThreadId,
     ) -> impl Iterator<Item = (&LiveTarget, &Arc<Rope>)> {
-        self.live
-            .get(thread)
-            .into_iter()
-            .flat_map(|targets| targets.iter().map(|(target, text)| (target, text)))
+        self.live.get(thread).into_iter().flat_map(|targets| {
+            targets
+                .iter()
+                .map(|(target, stream)| (target, &stream.text))
+        })
     }
 
     /// Threads of a project (or all), newest activity first.
@@ -771,93 +493,6 @@ impl HostData {
         self.settings.get(key)
     }
 
-    /// What git said about a project; `None` until read or outside a
-    /// repository.
-    #[must_use]
-    pub fn repository(&self, project: &ProjectId) -> Option<&ProjectRepository> {
-        self.repositories.get(project)?.value.as_ref()
-    }
-
-    /// Coalesces visible repository reads for two seconds. Failures retain the
-    /// last successful observation and back off for five seconds.
-    pub fn load_repository(&mut self, project: &ProjectId, refresh: bool, cx: &mut Context<Self>) {
-        let Some(project_seq) = self.projects.get(project).map(|project| project.seq) else {
-            return;
-        };
-        if !self.is_live() || self.reading.contains_key(project) || self.reading.len() >= 4 {
-            return;
-        }
-        if self.repositories.contains_key(project) {
-            self.repository_order.retain(|id| id != project);
-            self.repository_order.push_back(project.clone());
-        }
-        if !refresh
-            && self
-                .repositories
-                .get(project)
-                .is_some_and(RepositoryEntry::fresh)
-        {
-            return;
-        }
-        let client = self.client.clone();
-        let project = project.clone();
-        let key = project.clone();
-        let generation = self.generation;
-        let task = cx.spawn(async move |this, cx| {
-            let result = client.project_repository(&project).await;
-            let _ = this.update(cx, |host, cx| {
-                host.finish_repository(project, generation, project_seq, result, cx);
-            });
-        });
-        self.reading.insert(key, task);
-    }
-
-    fn finish_repository(
-        &mut self,
-        project: ProjectId,
-        generation: u64,
-        project_seq: artisan_api::Seq,
-        result: anyhow::Result<Option<ProjectRepository>>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.generation != generation
-            || self
-                .projects
-                .get(&project)
-                .is_none_or(|current| current.seq != project_seq)
-        {
-            return;
-        }
-        self.reading.remove(&project);
-        let failed = result.is_err();
-        let value = match result {
-            Ok(repository) => repository,
-            Err(error) => {
-                tracing::debug!(%project, "repository read failed: {error:#}");
-                self.repositories
-                    .get(&project)
-                    .and_then(|entry| entry.value.clone())
-            }
-        };
-        self.repositories.insert(
-            project.clone(),
-            RepositoryEntry {
-                value,
-                checked: std::time::Instant::now(),
-                failed,
-            },
-        );
-        self.repository_order.retain(|id| id != &project);
-        self.repository_order.push_back(project);
-        while self.repositories.len() > 128 {
-            if let Some(oldest) = self.repository_order.pop_front() {
-                self.repositories.remove(&oldest);
-            }
-        }
-        cx.emit(HostEvent::Changed);
-        cx.notify();
-    }
-
     /// Retries an offline connection now rather than after its backoff.
     pub fn retry_now(&self) {
         self.retry.notify_one();
@@ -866,27 +501,6 @@ impl HostData {
     #[must_use]
     pub fn is_live(&self) -> bool {
         self.status == ConnectionStatus::Live
-    }
-}
-
-/// Only new visible evidence can clear an explicit unread mark during an observation.
-fn new_read_evidence(previous: Option<artisan_api::Seq>, next: artisan_api::Seq) -> bool {
-    previous.is_none_or(|previous| next > previous)
-}
-
-#[cfg(test)]
-mod read_evidence_tests {
-    use super::new_read_evidence;
-
-    #[test]
-    fn repaint_cannot_clear_manual_unread_but_new_activity_and_revisit_can() {
-        assert!(new_read_evidence(None, 10));
-        // The unread preference may change after this paint, without new content.
-        assert!(!new_read_evidence(Some(10), 10));
-        assert!(!new_read_evidence(Some(10), 9));
-        assert!(new_read_evidence(Some(10), 11));
-        // Changing observations resets the evidence, allowing an intentional revisit.
-        assert!(new_read_evidence(None, 10));
     }
 }
 
@@ -968,140 +582,6 @@ mod install_delta_client_tests {
             assert!(Arc::ptr_eq(&prompt,host.global_prompt.as_ref().unwrap()));
             assert_eq!((host.prompt_revision,host.catalog_revision),revisions);
             assert_eq!(host.engines[&engine].sign_in,artisan_api::SignInState::SignedIn {account:Some("fixture@example.invalid".into())});
-        });
-    }
-}
-
-#[cfg(test)]
-mod repository_tests {
-    use super::*;
-    use gpui::{AppContext, Entity, TestAppContext};
-    use std::time::{Duration, Instant};
-
-    fn host(cx: &mut TestAppContext) -> Entity<HostData> {
-        let identity = artisan_api::tls::Identity::generate("repository-test").unwrap();
-        let fingerprint =
-            artisan_api::tls::fingerprint(identity.certificate_der().unwrap().as_ref());
-        let client = ForgeClient::new("127.0.0.1:1", &fingerprint, &identity).unwrap();
-        cx.new(|cx| {
-            let mut host =
-                HostData::new(HostId("repository-test".into()), "Test".into(), client, cx);
-            host._connection.abort();
-            host._follow = Task::ready(());
-            host.status = ConnectionStatus::Live;
-            host
-        })
-    }
-    fn project(seq: artisan_api::Seq) -> Project {
-        Project {
-            id: ProjectId::from("test-project"),
-            path: "/project".into(),
-            name: "Project".into(),
-            seq,
-            created_at: 0,
-            removed: false,
-        }
-    }
-    fn repository(branch: &str) -> ProjectRepository {
-        ProjectRepository {
-            branch: Some(branch.into()),
-            host: None,
-            web_url: None,
-            worktree: None,
-        }
-    }
-    #[gpui::test]
-    fn metadata_change_cancels_repository_read_and_rejects_its_late_result(
-        cx: &mut TestAppContext,
-    ) {
-        let host = host(cx);
-        host.update(cx, |host, cx| {
-            let old = project(1);
-            let id = old.id.clone();
-            host.apply_event(Event::Project { project: old }, Some(1), cx);
-            host.finish_repository(
-                id.clone(),
-                host.generation,
-                1,
-                Ok(Some(repository("old"))),
-                cx,
-            );
-            host.load_repository(&id, true, cx);
-            assert!(host.reading.contains_key(&id));
-            host.apply_event(
-                Event::Project {
-                    project: project(2),
-                },
-                Some(2),
-                cx,
-            );
-            assert!(!host.reading.contains_key(&id));
-            assert!(host.repository(&id).is_none());
-            host.finish_repository(
-                id.clone(),
-                host.generation,
-                1,
-                Ok(Some(repository("late-old"))),
-                cx,
-            );
-            assert!(host.repository(&id).is_none());
-            host.finish_repository(
-                id.clone(),
-                host.generation,
-                2,
-                Ok(Some(repository("current"))),
-                cx,
-            );
-            assert_eq!(
-                host.repository(&id).unwrap().branch.as_deref(),
-                Some("current")
-            );
-        });
-    }
-    #[gpui::test]
-    fn expired_repository_reads_coalesce_and_failure_preserves_last_observation(
-        cx: &mut TestAppContext,
-    ) {
-        let host = host(cx);
-        host.update(cx, |host, cx| {
-            let project = project(1);
-            let id = project.id.clone();
-            host.apply_event(Event::Project { project }, Some(1), cx);
-            host.finish_repository(
-                id.clone(),
-                host.generation,
-                1,
-                Ok(Some(repository("main"))),
-                cx,
-            );
-            host.load_repository(&id, false, cx);
-            assert!(
-                host.reading.is_empty(),
-                "fresh observation avoids another read"
-            );
-            host.repositories.get_mut(&id).unwrap().checked =
-                Instant::now() - Duration::from_secs(3);
-            host.load_repository(&id, false, cx);
-            host.load_repository(&id, false, cx);
-            assert_eq!(host.reading.len(), 1);
-            host.finish_repository(
-                id.clone(),
-                host.generation,
-                1,
-                Err(anyhow::anyhow!("refused")),
-                cx,
-            );
-            assert_eq!(
-                host.repository(&id).unwrap().branch.as_deref(),
-                Some("main")
-            );
-            host.load_repository(&id, false, cx);
-            assert!(host.reading.is_empty(), "failed refresh has a backoff");
-            assert_eq!(
-                host.repository_order.len(),
-                1,
-                "refresh does not accumulate LRU entries"
-            );
         });
     }
 }

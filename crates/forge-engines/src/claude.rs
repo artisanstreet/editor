@@ -36,7 +36,10 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 /// How long input stays open after the last background agent ends with no
 /// follow-up turn. The ending agent queues one whose frames arrive well
 /// inside this; it only bounds the case where none comes.
+#[cfg(not(test))]
 const SETTLED_INPUT_GRACE: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const SETTLED_INPUT_GRACE: Duration = Duration::from_millis(300);
 
 pub struct ClaudeHarness;
 
@@ -196,6 +199,8 @@ async fn drive(
                 }
                 // The last agent ended: its report starts a follow-up turn
                 // whose `result` closes input; failing that, the grace does.
+                // The grace never closes mid-turn: that turn may still start
+                // an agent, which the CLI would kill once input is closed.
                 if waiting_on_background && !decoder.background_running() && !settling {
                     engine.note(&format!(
                         "background work ended; input closes in {}s unless more starts ({})",
@@ -211,7 +216,11 @@ async fn drive(
             }
             () = &mut settle, if settling => {
                 settling = false;
-                if engine.stdin_open() && !decoder.awaiting_input() && !decoder.background_running() {
+                if engine.stdin_open()
+                    && !decoder.in_turn()
+                    && !decoder.awaiting_input()
+                    && !decoder.background_running()
+                {
                     engine.close_stdin(&format!(
                         "no background work for {}s ({})",
                         SETTLED_INPUT_GRACE.as_secs(),
@@ -638,6 +647,77 @@ cat > /dev/null
                 "the trace lacks {expected:?}:\n{trace}"
             );
         }
+    }
+
+    /// An agent's report starts a follow-up turn that outlasts the settle
+    /// grace and launches the next agent. Closing input mid-turn made the
+    /// CLI kill that agent ten minutes later.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn input_stays_open_through_a_long_turn_after_an_agent_reports() {
+        use crate::{Harness as _, Launch, RunIo, Turn, UserInput};
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("claude");
+        std::fs::write(
+            &fake,
+            r#"#!/usr/bin/env bash
+read -r line
+echo '{"type":"user","isReplay":true,"message":{"content":"go"}}'
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
+echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a1","task_type":"local_agent"}]}'
+echo '{"type":"result","subtype":"success","result":"started","usage":{}}'
+echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+echo '{"type":"assistant","message":{"id":"m2","role":"assistant","content":[{"type":"text","text":"Reading the report."}]}}'
+sleep 1
+read -r -t 0.05 rest; code=$?
+if [ "$code" -eq 1 ]; then
+  echo '{"type":"result","subtype":"error_during_execution","errors":["input closed mid-turn"],"usage":{}}'
+  exit 0
+fi
+echo '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"a2","task_type":"local_agent"}]}'
+echo '{"type":"result","subtype":"success","result":"launched the next agent","usage":{}}'
+echo '{"type":"system","subtype":"background_tasks_changed","tasks":[]}'
+echo '{"type":"result","subtype":"success","result":"agent reported","usage":{}}'
+cat > /dev/null
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("data/engines/claude/home");
+        std::fs::create_dir_all(&home).unwrap();
+        let turn = Turn {
+            trace_dir: None,
+            thread_id: artisan_api::ThreadId::from("thread"),
+            engine: artisan_api::EngineId::Claude,
+            binary: fake,
+            home,
+            cwd: dir.path().to_owned(),
+            config: artisan_api::EngineConfig::new(artisan_api::EngineId::Claude),
+            session_id: Some("s1".into()),
+            input: UserInput {
+                text: "go".into(),
+                ..UserInput::default()
+            },
+            launch: Launch::default(),
+        };
+        let (_steers, inbox) = tokio::sync::mpsc::channel(8);
+        let (events, mut received) = tokio::sync::mpsc::channel(256);
+        let drain = tokio::spawn(async move { while received.recv().await.is_some() {} });
+        let io = RunIo {
+            inbox,
+            events,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        };
+        // The grace (300 ms under test) elapses during the turn's 1 s pause.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            super::ClaudeHarness.run(turn, io),
+        )
+        .await
+        .expect("the run ends once the second agent reported");
+        drain.abort();
+        assert_eq!(outcome.status, artisan_api::RunStatus::Done, "{outcome:?}");
     }
 
     /// Fast mode is Claude's `fastMode` setting, given for this run only.

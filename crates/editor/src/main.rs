@@ -91,6 +91,7 @@ fn main() {
                 tracing::warn!("using system fonts; the bundled ones didn't load: {error}");
             }
             editor_ui::theme::install(cx);
+            editor_sources::init(cx);
             bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {

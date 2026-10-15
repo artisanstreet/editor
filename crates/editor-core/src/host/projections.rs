@@ -25,14 +25,11 @@ impl HostData {
         }
         self.prompt_load.loading = true;
         self.prompt_load.error = None;
-        let (client, generation, revision) =
-            (self.client.clone(), self.generation, self.prompt_revision);
+        // The task is the read: invalidating the prompt drops it.
+        let client = self.client.clone();
         self.prompt_load.task = Some(cx.spawn(async move |this, cx| {
             let result = client.global_prompt().await;
             let _ = this.update(cx, |this, cx| {
-                if this.generation != generation || this.prompt_revision != revision {
-                    return;
-                }
                 this.prompt_load = ProjectionLoad::default();
                 match result {
                     Ok(prompt) => {
@@ -72,14 +69,11 @@ impl HostData {
         }
         self.catalog_load.loading = true;
         self.catalog_load.error = None;
-        let (client, generation, revision) =
-            (self.client.clone(), self.generation, self.catalog_revision);
+        // The task is the read: invalidating the catalog drops it.
+        let client = self.client.clone();
         self.catalog_load.task = Some(cx.spawn(async move |this, cx| {
             let result = client.skill_catalog().await;
             let _ = this.update(cx, |this, cx| {
-                if this.generation != generation || this.catalog_revision != revision {
-                    return;
-                }
                 this.catalog_load = ProjectionLoad::default();
                 match result {
                     Ok(catalog) => this.remember_skill_catalog(catalog, cx),

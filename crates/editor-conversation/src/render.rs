@@ -4,6 +4,7 @@
 //! composer, and the turn navigator on the right edge.
 
 use crate::fold::Row;
+use crate::fold::Slot;
 use crate::row::{COLUMN, GUTTER, RowView};
 use crate::viewport::Input;
 use crate::{Conversation, wants_older};
@@ -22,7 +23,7 @@ use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Context, FontWeight,
     InteractiveElement as _, IntoElement, MouseMoveEvent, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, list,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, canvas, div, list,
     prelude::FluentBuilder as _, px, rgb, svg,
 };
 use std::collections::HashSet;
@@ -66,7 +67,7 @@ impl Render for Conversation {
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_started.set(Some(std::time::Instant::now()));
-        self.sync_reveal_admission(cx);
+        self.sync_reveal(cx);
         if self.advance_disclosures(cx) {
             window.request_animation_frame();
         }
@@ -417,16 +418,13 @@ impl Conversation {
         // A collapsed latest page can be shorter than the native viewport.
         // Admit one bounded page of initial leeway before the reader scrolls.
         let last_body_ready = self
-            .rows
+            .revealed_rows()
             .iter()
             .rev()
             .find_map(|(row, _)| {
                 matches!(
                     row,
-                    Row::Reply(_)
-                        | Row::ProseBlock { .. }
-                        | Row::TextBlock { .. }
-                        | Row::PlainBlock { .. }
+                    Row::ProseBlock { .. } | Row::TextBlock { .. } | Row::PlainBlock { .. }
                 )
                 .then(|| self.read_evidence(row, cx).is_some())
             })
@@ -478,15 +476,13 @@ impl Conversation {
     pub(super) fn row_element(
         &mut self,
         index: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some((definition, _)) = self.rows.get(index).cloned() else {
             return div().into_any_element();
         };
-        // A zero-height queue must not force the native list to construct every
-        // later source owner merely to fill its viewport. Keep those descriptors
-        // cheap until the single active native frontier releases them.
+        // A disclosure's members wait, empty, until its flight clips them.
         let group_deferred = !self
             .shared
             .disclosure_fractions
@@ -500,38 +496,21 @@ impl Conversation {
                 .disclosure_clips
                 .borrow()
                 .contains_key(&definition.key());
-        let bypass = matches!(
-            definition.semantic(),
-            Row::User(_)
-                | Row::Work { .. }
-                | Row::PlainBlock {
-                    section: crate::fold::PlainSection::User,
-                    ..
-                }
-        );
-        let queue_deferred = !bypass
-            && self
-                .shared
-                .reveal_queue
-                .borrow()
-                .frontier_key()
-                .and_then(|key| self.row_context.key_rows.get(&key).copied())
-                .is_some_and(|frontier| index > frontier);
-        if queue_deferred {
-            // A detached scroll can discover a new frontier during this native
-            // layout pass, after structural admission ran. One temporary native
-            // viewport fills the remainder, bounding that pass to one deferred
-            // descriptor. The next root render removes it via the keyed splice;
-            // it owns no source, measured row metric, or persistent tail height.
-            return div()
-                .h(window.viewport_size().height.max(px(1.0)))
-                .into_any_element();
+        if self.behind_reveal(index, &definition) {
+            // Waits, hidden, for the content before it to reveal; the last
+            // row still keeps the end space under the transcript.
+            let end = if index + 1 == self.rows.len() {
+                self.row_context.end_space
+            } else {
+                0.0
+            };
+            return div().h(px(end)).into_any_element();
         }
         if group_deferred {
             return div().into_any_element();
         }
-        let images = self.row_images(&definition, cx);
         if self.row_views.get(index).is_some_and(Option::is_none) {
+            let images = self.row_images(&definition, cx);
             let context = &self.row_context;
             let model = self.model(
                 &definition,
@@ -539,7 +518,7 @@ impl Conversation {
                     .run()
                     .and_then(|run| context.runs.get(run))
                     .cloned(),
-                images.clone(),
+                images,
                 context.now,
                 context.gaps.get(index).copied().unwrap_or_default(),
                 if index + 1 == self.rows.len() {
@@ -552,21 +531,22 @@ impl Conversation {
             let shared = self.shared.clone();
             let version = context.versions.get(index).copied().unwrap_or_default();
             self.row_views[index] = Some(cx.new(|_| RowView::new(model, version, shared)));
+            self.touch_row_cache(index, true);
+        } else {
+            self.touch_row_cache(index, false);
         }
-        self.row_cache_order.retain(|cached| *cached != index);
-        self.row_cache_order.push_back(index);
-        while self.row_cache_order.len() > 128 {
-            if let Some(oldest) = self.row_cache_order.pop_front() {
-                self.row_views[oldest] = None;
-            }
-        }
-        self.prune_literal_sources();
         let Some(row) = self.row_views.get(index).and_then(Clone::clone) else {
             return div().into_any_element();
         };
-        row.update(cx, |row, cx| row.set_images(images, cx));
         let evidence_row = row.downgrade();
-        let content = row.into_any_element();
+        // Drawn from cache at its measured height; fresh only while its
+        // content changed or its motion runs.
+        let content = match row.read(cx).cached_height() {
+            Some(height) => row
+                .cached(StyleRefinement::default().w_full().h(height))
+                .into_any_element(),
+            None => row.into_any_element(),
+        };
         let observed = self
             .read_evidence(&definition, cx)
             .map(|seq| (self.open.clone(), definition.key(), seq));
@@ -731,10 +711,7 @@ impl Conversation {
         Some((key, start))
     }
 
-    fn source_window_prefetch(
-        &self,
-        row: &Row,
-    ) -> Option<(artisan_api::ItemId, &'static str, u64, usize)> {
+    fn source_window_prefetch(&self, row: &Row) -> Option<(artisan_api::ItemId, Slot, u64, usize)> {
         if let Some(visual) = row.visual() {
             let states = self.shared.native_windows.borrow();
             let state = states.get(&row.semantic().key())?;
@@ -745,7 +722,7 @@ impl Conversation {
         let native_key = row.key();
         let row = row.semantic();
         let (id, slot, block) = match row {
-            Row::ProseBlock { id, block } => (id, "prose", *block),
+            Row::ProseBlock { id, block } => (id, Slot::Prose, *block),
             Row::TextBlock {
                 id, section, block, ..
             } => (id, section.slot(), *block),
@@ -816,7 +793,7 @@ impl Conversation {
         let id = row.anchor()?;
         let item = view.item(id)?;
         let stored = match row {
-            Row::Reply(_) | Row::ProseBlock { .. } => matches!(
+            Row::ProseBlock { .. } => matches!(
                 &item.kind,
                 ItemKind::AssistantMessage {
                     text: artisan_api::TextContent::Stored(_),
@@ -835,7 +812,7 @@ impl Conversation {
             && view.live.contains_key(&artisan_api::LiveTarget::Text {
                 item_id: id.clone(),
             })
-            && matches!(row, Row::Reply(_) | Row::ProseBlock { .. });
+            && matches!(row, Row::ProseBlock { .. });
         if stored && !current_live {
             let (slot, block, reference) = match row {
                 Row::ProseBlock { block, .. } => {
@@ -846,7 +823,7 @@ impl Conversation {
                     else {
                         return None;
                     };
-                    ("prose", *block, reference)
+                    (Slot::Prose, *block, reference)
                 }
                 Row::TextBlock { section, block, .. } => {
                     let artisan_api::TextContent::Stored(reference) = section.text(item)? else {
@@ -942,7 +919,7 @@ impl Conversation {
                     self.shared
                         .sources
                         .borrow()
-                        .get(&(id.clone(), "prose"))
+                        .get(&(id.clone(), Slot::Prose))
                         .is_some_and(|(seq, source)| {
                             *seq == item.seq
                                 && self.shared.markdown.is_source_prepared(&key, source)
@@ -1026,8 +1003,7 @@ impl Conversation {
         let mut markers = Vec::new();
         for (index, (row, _)) in self.rows.iter().enumerate() {
             let id = match row.semantic() {
-                Row::User(id)
-                | Row::PlainBlock {
+                Row::PlainBlock {
                     id,
                     section: crate::fold::PlainSection::User,
                     ..
@@ -1277,7 +1253,7 @@ impl Conversation {
                                 canvas(
                                     |_, _, _| {},
                                     move |bounds, (), window, cx| {
-                                        if let Some(surface) = *probe_surface.borrow() {
+                                        if let Some(surface) = probe_surface.get() {
                                             if probe_hover.borrow_mut().measure(
                                                 &probe_id,
                                                 HoverRect::within(bounds, surface),
@@ -1296,7 +1272,6 @@ impl Conversation {
         })
         .h(px(height))
         .w_full();
-        let surface = self.navigator_hover_surface.clone();
         let content = div()
             .relative()
             .p(px(NAVIGATOR_PAD_PX))
@@ -1309,16 +1284,7 @@ impl Conversation {
                 reduce_motion,
             ))
             .child(rows)
-            .child(
-                canvas(
-                    |_, _, _| {},
-                    move |bounds, (), _, _| {
-                        *surface.borrow_mut() = Some(bounds);
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+            .child(self.navigator_hover_surface.record());
         let card = div()
             .w(px(NAVIGATOR_MENU_WIDTH_PX))
             .child(glass_navigator_card(&theme, content));

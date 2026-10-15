@@ -1786,6 +1786,7 @@ dependencies = [
  "editor-marketplace",
  "editor-settings",
  "editor-sidebar",
+ "editor-sources",
  "editor-ui",
  "file-rotate",
  "futures",
@@ -1822,6 +1823,7 @@ dependencies = [
  "artisan-api",
  "artisan-mentions",
  "editor-core",
+ "editor-sources",
  "editor-ui",
  "forge-engines",
  "forge-http",
@@ -1846,6 +1848,7 @@ dependencies = [
  "axum",
  "editor-composer",
  "editor-core",
+ "editor-sources",
  "editor-ui",
  "forge-engines",
  "forge-http",
@@ -1891,6 +1894,7 @@ dependencies = [
  "artisan-api",
  "editor-conversation",
  "editor-core",
+ "editor-sources",
  "editor-ui",
  "forge-http",
  "forge-store",
@@ -1949,6 +1953,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "editor-sources"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "artisan-api",
+ "editor-core",
+ "editor-ui",
+ "gpui-ce",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

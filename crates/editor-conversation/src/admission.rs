@@ -1,25 +1,28 @@
-//! The native list registers only rows admitted by current reveal/disclosure
-//! frontiers. Canonical fold/source windows remain unchanged and are refolded
-//! when a frontier releases; user steers keep their own immediate native rows.
+//! Reveal never decides which rows exist. Fresh content reveals in order:
+//! rows past the reveal frontier (the first fresh row still revealing) are
+//! drawn hidden at zero height, without a view, so a burst of arrivals
+//! does not prepare every later body at once. When the frontier moves, the
+//! list measures only the rows it passed again; nothing refolds. User
+//! steers and work headers never wait.
 use crate::{
     Conversation,
-    fold::{PlainSection, Row},
+    fold::{PlainSection, Row, RowKey},
 };
 use gpui::{App, Context};
 
 fn immediate(row: &Row) -> bool {
     matches!(
         row.semantic(),
-        Row::User(_)
-            | Row::Work { .. }
+        Row::Work { .. }
             | Row::PlainBlock {
                 section: PlainSection::User,
                 ..
             }
     )
 }
+
 impl Conversation {
-    fn speculative_reveal_visible(&self, key: &crate::fold::RowKey) -> bool {
+    fn speculative_reveal_visible(&self, key: &RowKey) -> bool {
         if self
             .view
             .as_ref()
@@ -35,108 +38,137 @@ impl Conversation {
         })
     }
 
-    pub(crate) fn sync_reveal_admission(&mut self, cx: &mut Context<Self>) {
-        let frontier = self.shared.reveal_queue.borrow().frontier_key();
-        // The structural pass may have admitted a fresh leaf before its async
-        // source is ready. Keep that one row registered until it can present;
-        // otherwise idle source loading would repeatedly refold the transcript.
-        if !cx.reduce_motion()
-            && frontier.is_none()
-            && self.admitted_frontier.as_ref().is_some_and(|key| {
-                self.speculative_reveal_visible(key)
-                    && self.row_context.key_rows.get(key).is_some_and(|index| {
-                        self.row_views
-                            .get(*index)
-                            .and_then(Option::as_ref)
-                            .is_none_or(|row| row.read(cx).awaiting_reveal_admission())
-                    })
+    /// Whether the speculative frontier's row has yet to start revealing.
+    fn awaiting(&self, key: &RowKey, cx: &App) -> bool {
+        self.speculative_reveal_visible(key)
+            && self.row_context.key_rows.get(key).is_some_and(|index| {
+                self.row_views
+                    .get(*index)
+                    .and_then(Option::as_ref)
+                    .is_none_or(|row| row.read(cx).awaiting_reveal_admission())
             })
-        {
+    }
+
+    /// The first fresh row that has not presented yet, chosen before the
+    /// list lays out: a first frame then builds only that row and the
+    /// immediate ones, never every later body.
+    fn speculative_frontier(&self, cx: &App) -> Option<RowKey> {
+        if cx.reduce_motion() {
+            return None;
+        }
+        self.rows
+            .iter()
+            .find(|(row, _)| {
+                if immediate(row) {
+                    return false;
+                }
+                let key = row.key();
+                if !self.speculative_reveal_visible(&key) {
+                    return false;
+                }
+                if let Some(owner) = self
+                    .row_context
+                    .key_rows
+                    .get(&key)
+                    .and_then(|index| self.row_views.get(*index))
+                    .and_then(Option::as_ref)
+                {
+                    return owner.read(cx).awaiting_reveal_admission();
+                }
+                let fresh = |id| {
+                    self.view
+                        .as_ref()
+                        .and_then(|view| view.ui.get(id))
+                        .is_some_and(crate::thread::ItemUi::fresh)
+                };
+                match row.semantic() {
+                    Row::ProseBlock { id, block } => {
+                        let block = *block;
+                        self.shared
+                            .prose_arrivals
+                            .borrow()
+                            .get(id)
+                            .map_or_else(|| fresh(id), |arrival| arrival.is_fresh(block))
+                    }
+                    Row::WorkEntry { .. } | Row::Chain { .. } | Row::Prompt(_) | Row::Image(_) => {
+                        row.anchor().is_some_and(fresh)
+                    }
+                    _ => false,
+                }
+            })
+            .map(|(row, _)| row.key())
+    }
+
+    /// Follows the reveal queue's frontier, once per frame before layout.
+    pub(crate) fn sync_reveal(&mut self, cx: &mut Context<Self>) {
+        let queued = self.shared.reveal_queue.borrow().frontier_key();
+        if queued == self.reveal_frontier {
             return;
         }
-        if frontier != self.admitted_frontier && (frontier.is_some() || self.reveal_rows_deferred) {
-            self.rebuild(cx);
-        }
+        let frontier = match queued {
+            Some(key) => Some(key),
+            None => {
+                // The queue drained, or a chosen row has yet to present.
+                let Some(current) = self.reveal_frontier.clone() else {
+                    return;
+                };
+                if !cx.reduce_motion() && self.awaiting(&current, cx) {
+                    return;
+                }
+                self.speculative_frontier(cx)
+            }
+        };
+        self.set_reveal_frontier(frontier);
     }
-    pub(crate) fn admit_native_rows(&mut self, rows: Vec<(Row, u64)>, cx: &App) -> Vec<(Row, u64)> {
+
+    /// After the rows are published: the queue's frontier, else the first
+    /// fresh row.
+    pub(crate) fn publish_reveal(&mut self, cx: &App) {
         let frontier = self
             .shared
             .reveal_queue
             .borrow()
             .frontier_key()
-            .or_else(|| {
-                if cx.reduce_motion() {
-                    return None;
-                }
-                // Admit the first not-yet-presented live leaf BEFORE ListState's
-                // layout pass. A zero-height first frame can then visit only that
-                // frontier and immediate steers, never every future descriptor.
-                rows.iter()
-                    .find(|(row, _)| {
-                        if immediate(row) {
-                            return false;
-                        }
-                        let key = row.key();
-                        if !self.speculative_reveal_visible(&key) {
-                            return false;
-                        }
-                        if let Some(owner) = self
-                            .row_context
-                            .key_rows
-                            .get(&key)
-                            .and_then(|index| self.row_views.get(*index))
-                            .and_then(Option::as_ref)
-                        {
-                            return owner.read(cx).awaiting_reveal_admission();
-                        }
-                        match row.semantic() {
-                            Row::Reply(id) | Row::ProseBlock { id, .. } => {
-                                let block = match row.semantic() {
-                                    Row::ProseBlock { block, .. } => *block,
-                                    _ => 0,
-                                };
-                                self.shared.prose_arrivals.borrow().get(id).map_or_else(
-                                    || {
-                                        self.view
-                                            .as_ref()
-                                            .and_then(|view| view.ui.get(id))
-                                            .is_some_and(crate::thread::ItemUi::fresh)
-                                    },
-                                    |arrival| arrival.is_fresh(block),
-                                )
-                            }
-                            Row::WorkEntry { .. }
-                            | Row::Chain { .. }
-                            | Row::Prompt(_)
-                            | Row::Error(_)
-                            | Row::Image(_) => row.anchor().is_some_and(|id| {
-                                self.view
-                                    .as_ref()
-                                    .and_then(|view| view.ui.get(id))
-                                    .is_some_and(crate::thread::ItemUi::fresh)
-                            }),
-                            _ => false,
-                        }
-                    })
-                    .map(|(row, _)| row.key())
-            });
-        // Once per structural refold, not once per native row or animation frame.
-        let limit = frontier
+            .or_else(|| self.speculative_frontier(cx));
+        self.set_reveal_frontier(frontier);
+    }
+
+    fn set_reveal_frontier(&mut self, frontier: Option<RowKey>) {
+        if frontier == self.reveal_frontier {
+            return;
+        }
+        let index = |key: &Option<RowKey>| {
+            key.as_ref()
+                .and_then(|key| self.row_context.key_rows.get(key).copied())
+                .unwrap_or(self.rows.len())
+        };
+        let from = index(&self.reveal_frontier).min(index(&frontier)) + 1;
+        self.reveal_frontier = frontier;
+        if from < self.rows.len() {
+            self.list.remeasure_items(from..self.rows.len());
+        }
+    }
+
+    /// Whether the row at `index` waits, hidden, behind the reveal frontier.
+    pub(crate) fn behind_reveal(&self, index: usize, row: &Row) -> bool {
+        if immediate(row) {
+            return false;
+        }
+        let queued = self.shared.reveal_queue.borrow().frontier_key();
+        queued
             .as_ref()
-            .and_then(|key| rows.iter().position(|(row, _)| row.key() == *key));
-        self.admitted_frontier = limit.and(frontier);
-        self.reveal_rows_deferred = false;
-        rows.into_iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                let queued = limit.is_some_and(|limit| index > limit) && !immediate(&entry.0);
-                self.reveal_rows_deferred |= queued;
-                let disclosed = self
-                    .disclosures
-                    .iter()
-                    .all(|(header, flight)| flight.admits(header, &entry.0));
-                (!queued && disclosed).then_some(entry)
-            })
-            .collect()
+            .or(self.reveal_frontier.as_ref())
+            .and_then(|key| self.row_context.key_rows.get(key))
+            .is_some_and(|frontier| index > *frontier)
+    }
+
+    /// The rows a reader can see now: up to the reveal frontier.
+    pub(crate) fn revealed_rows(&self) -> &[(Row, u64)] {
+        let end = self
+            .reveal_frontier
+            .as_ref()
+            .and_then(|key| self.row_context.key_rows.get(key))
+            .map_or(self.rows.len(), |index| index + 1);
+        &self.rows[..end.min(self.rows.len())]
     }
 }

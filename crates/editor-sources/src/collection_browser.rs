@@ -1,9 +1,8 @@
 //! A shared native viewport for canonical collections. Descriptor counts never
 //! allocate a Vec of all row descriptors. Source and field identity fence actions.
-use crate::{
-    CollectionWindow, CollectionWindowEvent, CollectionWindowState, ContentText, HostData,
-};
+use crate::ContentText;
 use artisan_api::{CollectionRange, CollectionRef, TextContent};
+use editor_core::{CollectionWindow, HostData, RangeState, RangeWindowEvent};
 use editor_ui::{
     action_row::ActionRow,
     button::Button,
@@ -25,7 +24,7 @@ pub struct CollectionPreview {
 }
 pub type CollectionPresenter<T> = Rc<dyn Fn(&T, u64, &App) -> CollectionPreview>;
 pub type CollectionActivation<T> = Rc<dyn Fn(&T, u64, &mut App)>;
-pub struct CollectionBrowser<T> {
+pub struct CollectionBrowser<T: serde::de::DeserializeOwned + Send + 'static> {
     host: gpui::WeakEntity<HostData>,
     window: Entity<CollectionWindow<T>>,
     theme: ArtisanTheme,
@@ -54,7 +53,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> CollectionBrowser<T> {
         cx: &mut Context<Self>,
     ) -> Self {
         let window = cx.new(|cx| CollectionWindow::new(host, source, cx));
-        let events = cx.subscribe(&window, |_, _, _: &CollectionWindowEvent, cx| cx.notify());
+        let events = cx.subscribe(&window, |_, _, _: &RangeWindowEvent, cx| cx.notify());
         Self {
             host: host.downgrade(),
             window,
@@ -321,7 +320,7 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> Render for CollectionBrows
                 .w_full(),
             );
         }
-        if let CollectionWindowState::Failed(error) = self.window.read(cx).state() {
+        if let RangeState::Failed(error) = self.window.read(cx).state() {
             body = body.child(error.clone()).child(
                 Button::text("collection-retry", self.theme, "Retry").on_activate(cx.listener(
                     |this, _, _, cx| this.window.update(cx, |window, cx| window.retry(cx)),

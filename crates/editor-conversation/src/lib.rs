@@ -33,7 +33,7 @@ use editor_ui::markdown_renderer::MarkdownRenderer;
 use editor_ui::theme::ActiveTheme as _;
 use editor_ui::theme::ArtisanTheme;
 use editor_ui::wheel_glide::WheelGlide;
-use fold::{Row, RowKey};
+use fold::{Row, RowKey, Slot};
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FollowMode, ListAlignment, ListOffset,
     ListState, ScrollWheelEvent, SharedString, Subscription, Task, Window, px,
@@ -56,6 +56,9 @@ const READ_AHEAD_PX: f32 = 1200.0;
 /// must reach past the read-ahead: a row not laid out measures zero, and
 /// read-ahead would never be satisfied.
 const OVERDRAW_PX: f32 = 1600.0;
+
+/// Row views kept mounted, most recently shown first out.
+const ROW_VIEWS: usize = 128;
 
 /// Whether the view is close enough to the oldest loaded row to read on.
 pub(crate) fn wants_older(list: &ListState) -> bool {
@@ -116,13 +119,19 @@ pub struct Conversation {
     agent: Option<ItemId>,
     open: Option<(HostId, ThreadId)>,
     view: Option<ThreadView>,
-    /// The folded rows and, in the same order, their views.
+    /// The last fold of the items, run and toggles, before text bodies
+    /// split into blocks, with each run's summary.
+    folded: (
+        Vec<(Row, u64)>,
+        HashMap<artisan_api::RunId, fold::RunSummary>,
+    ),
+    /// The published rows and, in the same order, their views.
     rows: Vec<(Row, u64)>,
     row_views: Vec<Option<Entity<RowView>>>,
     row_context: RowContext,
     disclosures: HashMap<RowKey, disclosure::Flight>,
-    admitted_frontier: Option<RowKey>,
-    reveal_rows_deferred: bool,
+    /// The row fresh content reveals up to; later rows wait hidden.
+    reveal_frontier: Option<RowKey>,
     row_cache_order: std::collections::VecDeque<usize>,
     list: ListState,
     composer: Option<Entity<Composer>>,
@@ -137,7 +146,7 @@ pub struct Conversation {
     /// The pointer is over the turn navigator (rail or menu).
     navigator_hovered: bool,
     navigator_hover: Rc<RefCell<editor_ui::picker_motion::SlidingHoverState>>,
-    navigator_hover_surface: Rc<RefCell<Option<gpui::Bounds<gpui::Pixels>>>>,
+    navigator_hover_surface: editor_ui::measure::Measured,
     /// Rebuilt only when transcript rows change; labels retain bounded first lines.
     navigator_markers: Option<Arc<[render::Marker]>>,
     navigator_labels: HashMap<ItemId, (artisan_api::Seq, SharedString)>,
@@ -147,16 +156,10 @@ pub struct Conversation {
     /// Whether a tick was active last frame: the first one placed does not
     /// ease in.
     navigator_had_active: bool,
-    /// Invalidates page responses across host/thread reopen and stream reset.
-    open_generation: u64,
+    /// The page being read. Reopening, closing or a stream reset drops it,
+    /// so a reply for another scope never lands.
     page_task: Option<Task<()>>,
-    #[cfg(test)]
-    page_completion_gate: Option<(
-        Arc<std::sync::atomic::AtomicBool>,
-        futures::channel::oneshot::Receiver<bool>,
-    )>,
-    #[cfg(test)]
-    page_requests: usize,
+    /// The open agent's ancestry being read; dropped like `page_task`.
     agent_task: Option<Task<()>>,
     /// When this frame's render began; its paint reports a slow frame.
     frame_started: Rc<std::cell::Cell<Option<std::time::Instant>>>,
@@ -235,12 +238,12 @@ impl Conversation {
             agent: None,
             open: None,
             view: None,
+            folded: Default::default(),
             rows: Vec::new(),
             row_views: Vec::new(),
             row_context: RowContext::default(),
             disclosures: HashMap::new(),
-            admitted_frontier: None,
-            reveal_rows_deferred: false,
+            reveal_frontier: None,
             row_cache_order: std::collections::VecDeque::new(),
             list,
             composer: None,
@@ -251,17 +254,12 @@ impl Conversation {
             composer_height: 0.0,
             navigator_hovered: false,
             navigator_hover: Rc::default(),
-            navigator_hover_surface: Rc::default(),
+            navigator_hover_surface: editor_ui::measure::Measured::default(),
             navigator_markers: None,
             navigator_labels: HashMap::new(),
             navigator_ticks: HashMap::new(),
             navigator_had_active: false,
-            open_generation: 0,
             page_task: None,
-            #[cfg(test)]
-            page_completion_gate: None,
-            #[cfg(test)]
-            page_requests: 0,
             agent_task: None,
             frame_started: Rc::default(),
             glide: WheelGlide::default(),
@@ -381,7 +379,6 @@ impl Conversation {
         if self.agent == agent {
             return;
         }
-        self.open_generation = self.open_generation.wrapping_add(1);
         self.page_task = None;
         self.agent_task = None;
         self.load_error = None;
@@ -392,8 +389,7 @@ impl Conversation {
         self.shared.prose_shapes.borrow_mut().clear();
         self.shared.prose_arrivals.borrow_mut().clear();
         self.disclosures.clear();
-        self.admitted_frontier = None;
-        self.reveal_rows_deferred = false;
+        self.reveal_frontier = None;
         self.shared.disclosure_clips.borrow_mut().clear();
         self.shared.disclosure_hidden.borrow_mut().clear();
         self.shared.disclosure_fractions.borrow_mut().clear();
@@ -415,7 +411,6 @@ impl Conversation {
         if let (Some(agent), Some(host), Some(view)) = (agent, self.host(cx), self.view.as_ref()) {
             let client = host.read(cx).client.clone();
             let thread = view.thread.clone();
-            let generation = self.open_generation;
             let effects = effects.take().unwrap_or_default();
             let open = self.open.clone();
             let requested_agent = agent.clone();
@@ -451,10 +446,7 @@ impl Conversation {
                     error = Some("Agent ancestry exceeds 16 levels".to_owned());
                 }
                 let _ = this.update(cx, |this, cx| {
-                    if this.open_generation != generation
-                        || this.open != open
-                        || this.agent.as_ref() != Some(&requested_agent)
-                    {
+                    if this.open != open || this.agent.as_ref() != Some(&requested_agent) {
                         return;
                     }
                     this.agent_task = None;
@@ -583,7 +575,6 @@ impl Conversation {
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
-        self.open_generation = self.open_generation.wrapping_add(1);
         self.page_task = None;
         self.agent_task = None;
         self.release_selection(cx);
@@ -593,8 +584,7 @@ impl Conversation {
         self.shared.prose_shapes.borrow_mut().clear();
         self.shared.prose_arrivals.borrow_mut().clear();
         self.disclosures.clear();
-        self.admitted_frontier = None;
-        self.reveal_rows_deferred = false;
+        self.reveal_frontier = None;
         self.shared.disclosure_clips.borrow_mut().clear();
         self.shared.disclosure_hidden.borrow_mut().clear();
         self.shared.disclosure_fractions.borrow_mut().clear();
@@ -701,7 +691,7 @@ impl Conversation {
                     self.sync_questionnaires(cx);
                 }
             }
-            HostEvent::ImagesChanged => self.rebuild(cx),
+            HostEvent::ImagesChanged => self.reexpand(cx),
             HostEvent::Live { thread_id, target } => {
                 if *thread_id == thread {
                     let text = host
@@ -727,7 +717,6 @@ impl Conversation {
             HostEvent::EngineInstall { .. } => {}
             HostEvent::Changed => cx.notify(),
             HostEvent::Reset => {
-                self.open_generation = self.open_generation.wrapping_add(1);
                 self.page_task = None;
                 self.list.set_follow_mode(FollowMode::Tail);
                 let effects = view.reset();
@@ -790,31 +779,14 @@ impl Conversation {
         let thread = view.thread.clone();
         let query = thread::query(fetch, thread::PAGE);
         let open = self.open.clone();
-        let generation = self.open_generation;
         let agent = self.agent.clone();
-        #[cfg(test)]
-        let completion_gate = {
-            self.page_requests += 1;
-            self.page_completion_gate.take()
-        };
         self.page_task = Some(cx.spawn(async move |this, cx| {
             let result = match agent.as_ref() {
                 Some(agent) => client.agent_items(&thread, agent, &query).await,
                 None => client.items(&thread, &query).await,
             };
-            #[cfg(test)]
-            let result = if let Some((arrived, release)) = completion_gate {
-                arrived.store(true, std::sync::atomic::Ordering::Release);
-                if release.await.unwrap_or(false) {
-                    Err(anyhow::anyhow!("injected page failure"))
-                } else {
-                    result
-                }
-            } else {
-                result
-            };
             let _ = this.update(cx, |this, cx| {
-                if this.open_generation != generation || this.open != open {
+                if this.open != open {
                     return;
                 }
                 let Some(view) = this.view.as_mut().filter(|view| view.thread == thread) else {
@@ -960,7 +932,7 @@ impl Conversation {
                                 .shared
                                 .stored_sources
                                 .borrow()
-                                .contains_key(&(id.clone(), "prose"))
+                                .contains_key(&(id.clone(), Slot::Prose))
                     }
                     Row::TextBlock {
                         id, section, block, ..
@@ -975,6 +947,9 @@ impl Conversation {
                     _ => false,
                 }
         });
+        // The gap row loads what is below it as soon as it shows.
+        let gap_shown = matches!(self.revealed_rows().last(), Some((Row::Gap, _)))
+            && self.list.item_is_below_viewport(self.rows.len() - 1) == Some(false);
         let Some(view) = self.view.as_mut() else {
             return;
         };
@@ -983,9 +958,6 @@ impl Conversation {
         if wants_older(&self.list) && !source_prefix {
             inputs.push(Input::TopReached);
         }
-        // The gap row loads what is below it as soon as it shows.
-        let gap_shown = matches!(self.rows.last(), Some((Row::Gap, _)))
-            && self.list.item_is_below_viewport(self.rows.len() - 1) == Some(false);
         if at_end || gap_shown {
             inputs.push(Input::BottomReached);
         } else if let Some(anchor) = self
@@ -1150,7 +1122,7 @@ impl Conversation {
             .window
             .len();
         if changed || registered != desired {
-            self.rebuild(cx);
+            self.reexpand(cx);
         } else if newly_painted {
             if let Row::PlainBlock { id, section, block } = row.semantic() {
                 self.source_leaf_ready(id, section.slot(), *block, cx);
@@ -1200,7 +1172,26 @@ impl Conversation {
         }
     }
 
-    pub(crate) fn prune_literal_sources(&self) {
+    /// Marks a row's view most recently shown, evicting the least recent
+    /// beyond the bound. Literal source selections follow the mounted rows.
+    pub(crate) fn touch_row_cache(&mut self, index: usize, created: bool) {
+        if self.row_cache_order.back() != Some(&index) {
+            self.row_cache_order.retain(|cached| *cached != index);
+            self.row_cache_order.push_back(index);
+        }
+        let mut evicted = false;
+        while self.row_cache_order.len() > ROW_VIEWS {
+            if let Some(oldest) = self.row_cache_order.pop_front() {
+                self.row_views[oldest] = None;
+                evicted = true;
+            }
+        }
+        if created || evicted {
+            self.prune_literal_sources();
+        }
+    }
+
+    fn prune_literal_sources(&self) {
         let live: HashSet<_> = self
             .row_cache_order
             .iter()
@@ -1248,13 +1239,13 @@ impl Conversation {
             .painted
             .retain(|ordinal| state.window.contains(ordinal));
         drop(windows);
-        self.rebuild(cx);
+        self.reexpand(cx);
     }
 
     pub(crate) fn source_leaf_ready(
         &mut self,
         id: &ItemId,
-        slot: &str,
+        slot: Slot,
         block: usize,
         cx: &mut Context<Self>,
     ) {
@@ -1263,7 +1254,7 @@ impl Conversation {
             // every sibling makes source preparation repeatedly churn the
             // bounded native row cache while measuring a long message.
             let current = match self.rows[*index].0.semantic() {
-                Row::ProseBlock { block: ordinal, .. } => slot == "prose" && *ordinal == block,
+                Row::ProseBlock { block: ordinal, .. } => slot == Slot::Prose && *ordinal == block,
                 Row::TextBlock {
                     section,
                     block: ordinal,
@@ -1280,7 +1271,7 @@ impl Conversation {
                 continue;
             }
             if let Some(row) = self.row_views.get(*index).and_then(Option::as_ref) {
-                row.update(cx, |_, cx| cx.notify());
+                row.update(cx, |row, cx| row.refresh(cx));
                 self.list.remeasure_items(*index..*index + 1);
             }
         }
@@ -1290,7 +1281,7 @@ impl Conversation {
     pub(crate) fn source_window_edge(
         &mut self,
         id: ItemId,
-        slot: &'static str,
+        slot: Slot,
         revision: u64,
         offset: usize,
         cx: &mut Context<Self>,
@@ -1307,33 +1298,7 @@ impl Conversation {
         let Some(item) = self.view.as_ref().and_then(|view| view.item(&id)) else {
             return;
         };
-        let current = if slot == "prose" {
-            match &item.kind {
-                ItemKind::AssistantMessage { text, .. } => Some(text),
-                _ => None,
-            }
-        } else {
-            [
-                fold::TextSection::Proposal,
-                fold::TextSection::AgentResult,
-                fold::TextSection::Message,
-            ]
-            .into_iter()
-            .find(|section| section.slot() == slot)
-            .and_then(|section| section.text(item))
-            .or_else(|| {
-                [
-                    fold::PlainSection::User,
-                    fold::PlainSection::AgentTask,
-                    fold::PlainSection::AgentMessage,
-                    fold::PlainSection::Error,
-                    fold::PlainSection::ImageCaption,
-                ]
-                .into_iter()
-                .find(|section| section.slot() == slot)
-                .and_then(|section| section.text(item))
-            })
-        };
+        let current = slot.text(item);
         if source.revision() != revision
             || !current.is_some_and(|text| {
                 matches!(text,
@@ -1364,7 +1329,7 @@ impl Conversation {
                 .stored_sources
                 .borrow_mut()
                 .insert((id, slot), source);
-            self.rebuild(cx);
+            self.reexpand(cx);
         }
     }
 
@@ -1435,16 +1400,10 @@ impl Conversation {
                 // Consume their token so evicting and remounting cannot replay it.
                 if let Some(arrival) = arrivals.get_mut(id) {
                     for index in self.row_context.item_rows.get(id).into_iter().flatten() {
-                        if self.row_views.get(*index).is_some_and(Option::is_some) {
-                            match self.rows[*index].0.semantic() {
-                                Row::Reply(_) => {
-                                    arrival.claim(0);
-                                }
-                                Row::ProseBlock { block, .. } => {
-                                    arrival.claim(*block);
-                                }
-                                _ => {}
-                            }
+                        if self.row_views.get(*index).is_some_and(Option::is_some)
+                            && let Row::ProseBlock { block, .. } = self.rows[*index].0.semantic()
+                        {
+                            arrival.claim(*block);
                         }
                     }
                 }
@@ -1457,7 +1416,7 @@ impl Conversation {
             .filter(|index| matches!(self.rows[**index].0, Row::ProseBlock { .. }))
             .count();
         if current_blocks != blocks {
-            self.rebuild(cx);
+            self.reexpand(cx);
             return;
         }
         self.shared
@@ -1466,18 +1425,17 @@ impl Conversation {
             .insert(id.clone(), (blocks, prepared.revision()));
         for index in indices.into_iter().flatten() {
             if let Some(row) = self.row_views.get(*index).and_then(Option::as_ref) {
-                row.update(cx, |_, cx| cx.notify());
+                row.update(cx, |row, cx| row.refresh(cx));
                 self.list.remeasure_items(*index..*index + 1);
             }
         }
         cx.notify();
     }
 
-    /// Refolds the rows, hands changed rows their new model, and tells the
-    /// list which rows came and went. Unchanged rows stay cached.
+    /// Folds the items, run and UI toggles into the transcript's rows,
+    /// then publishes them (see [`Self::reexpand`]).
     fn rebuild(&mut self, cx: &mut Context<Self>) {
         let run = self.run(cx);
-        let now = artisan_api::now();
         let folded = self
             .view
             .as_ref()
@@ -1531,178 +1489,68 @@ impl Conversation {
             .as_ref()
             .map(|view| fold::expanded(view, rows.clone(), &runs))
             .unwrap_or(rows);
-        let rows: Vec<_> = rows
+        self.folded = (rows, runs);
+        self.sync_goal(cx);
+        self.sync_questionnaires(cx);
+        let live = run.is_some_and(|run| run.status.is_live());
+        if live && self.clock.is_none() {
+            self.clock = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(Duration::from_secs(1)).await;
+                    if this
+                        .update(cx, |this, cx| {
+                            let now = artisan_api::now();
+                            this.row_context.now = now;
+                            for row in this.row_views.iter().flatten() {
+                                row.update(cx, |row, cx| row.tick_header(now, cx));
+                            }
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        } else if !live {
+            self.clock = None;
+        }
+        self.reexpand(cx);
+    }
+
+    /// Publishes the folded rows with each text body split into its
+    /// prepared blocks and native windows: hands changed rows their new
+    /// model and tells the list which rows came and went. Unchanged rows
+    /// keep their views and stay cached. Source preparation and native
+    /// window moves call this alone; they never refold.
+    pub(crate) fn reexpand(&mut self, cx: &mut Context<Self>) {
+        let run = self.run(cx);
+        let rows: Vec<_> = self
+            .folded
+            .0
+            .clone()
             .into_iter()
-            .flat_map(|(row, version)| {
-                let formatted = match &row {
-                    Row::Reply(id) => Some((id, "prose", None)),
-                    Row::TextBlock { id, section, .. } => Some((id, section.slot(), Some(*section))),
-                    _ => None,
-                };
-                if let Some((id, slot, section)) = formatted {
-                    if let Some(index) = self.shared.stored_sources.borrow().get(&(id.clone(), slot)) {
-                        let current = self.view.as_ref().and_then(|view| view.item(id)).and_then(|item| {
-                            if let Some(section) = section { section.text(item) } else {
-                                match &item.kind { ItemKind::AssistantMessage { text, .. } => Some(text), _ => None }
-                            }
-                        });
-                        if !(section.is_none() && self.view.as_ref().is_some_and(|view| view.item(id).is_some_and(|item| item.status == artisan_api::Status::Running) && view.live.contains_key(&artisan_api::LiveTarget::Text { item_id: id.clone() }))) && current.is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(reference) if reference == index.source_ref())) {
-                            let mut hasher = DefaultHasher::new();
-                            version.hash(&mut hasher);
-                            index.revision().hash(&mut hasher);
-                            let version = hasher.finish();
-                            // An empty semantic document still keeps its item wrapper.
-                            let loaded = index.loaded_range();
-                            if loaded.is_empty() { return vec![(row, version)]; }
-                            return loaded.map(|block| {
-                                let row = if let Some(section) = section {
-                                    let Row::TextBlock { run, .. } = &row else { unreachable!() };
-                                    Row::TextBlock { id: id.clone(), section, run: run.clone(), block }
-                                } else { Row::ProseBlock { id: id.clone(), block } };
-                                (row, version)
-                            }).collect::<Vec<_>>();
-                        }
-                    }
-                }
-                let uses_stored = formatted.is_some_and(|(id, _, section)| self.view.as_ref().and_then(|view| view.item(id)).is_some_and(|item| {
-                    let stored = if let Some(section) = section { section.text(item).is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(_))) }
-                        else { matches!(&item.kind, ItemKind::AssistantMessage { text: artisan_api::TextContent::Stored(_), .. }) };
-                    stored && !(section.is_none() && item.status == artisan_api::Status::Running && self.view.as_ref().is_some_and(|view| view.live.contains_key(&artisan_api::LiveTarget::Text { item_id: id.clone() })))
-                }));
-                if uses_stored { return vec![(row, version)]; }
-                if let Row::Reply(id) = &row {
-                    if let Some(prepared) =
-                        self.shared.markdown.prepared_source(&id.to_string().into())
-                    {
-                        self.shared.prose_shapes.borrow_mut().insert(
-                            id.clone(),
-                            (prepared.block_count().max(1), prepared.revision()),
-                        );
-                    }
-                    if let Some((blocks, revision)) =
-                        self.shared.prose_shapes.borrow().get(id).copied()
-                    {
-                        let mut hasher = DefaultHasher::new();
-                        version.hash(&mut hasher);
-                        revision.hash(&mut hasher);
-                        let version = hasher.finish();
-                        return (0..blocks)
-                            .map(|block| {
-                                (
-                                    Row::ProseBlock {
-                                        id: id.clone(),
-                                        block,
-                                    },
-                                    version,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                    }
-                }
-                if let Row::TextBlock {
-                    id, section, run, ..
-                } = &row
-                {
-                    let key: gpui::SharedString = format!("{id}:{}", section.slot()).into();
-                    if let Some(prepared) = self.shared.markdown.prepared_source(&key) {
-                        let mut hasher = DefaultHasher::new();
-                        version.hash(&mut hasher);
-                        prepared.revision().hash(&mut hasher);
-                        let version = hasher.finish();
-                        return (0..prepared.block_count().max(1))
-                            .map(|block| {
-                                (
-                                    Row::TextBlock {
-                                        id: id.clone(),
-                                        section: *section,
-                                        run: run.clone(),
-                                        block,
-                                    },
-                                    version,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                    }
-                }
-                if let Row::Image(id) = &row {
-                    if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)).filter(|item| matches!(&item.kind, ItemKind::Image { caption: Some(text), .. } if text.byte_len() > 0)) {
-                        let blocks = self.shared.prepare_plain(item, fold::PlainSection::ImageCaption);
-                        let mut rows = vec![(row.clone(), version)];
-                        rows.extend((0..blocks).map(|block| (Row::PlainBlock { id: id.clone(), section: fold::PlainSection::ImageCaption, block }, version)));
-                        return rows;
-                    }
-                }
-                if let Row::Image(id) = &row {
-                    if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
-                        let section = fold::PlainSection::ImageCaption;
-                        if let Some(text) = section.text(item) {
-                            let mut result = vec![(row.clone(), version)];
-                            let range = if let artisan_api::TextContent::Stored(reference) = text {
-                                self.shared.stored_sources.borrow().get(&(id.clone(), section.slot()))
-                                    .filter(|source| source.source_ref() == reference
-                                        && source.format() == artisan_api::SourceIndexFormat::Literal
-                                       )
-                                    .map_or(0..1, |source| source.loaded_range())
-                            } else { 0..self.shared.prepare_plain(item, section) };
-                            result.extend(range.map(|block| (Row::PlainBlock { id: id.clone(), section, block }, version)));
-                            return result;
-                        }
-                    }
-                }
-                let plain = match &row {
-                    Row::User(id) => Some((id, fold::PlainSection::User)),
-                    Row::AgentTask(id) => Some((id, fold::PlainSection::AgentTask)),
-                    Row::AgentMessage(id) => Some((id, fold::PlainSection::AgentMessage)),
-                    Row::Error(id) => Some((id, fold::PlainSection::Error)),
-                    Row::WorkEntry { id, .. }
-                        if self
-                            .view
-                            .as_ref()
-                            .and_then(|view| view.item(id))
-                            .is_some_and(|item| {
-                                matches!(item.kind, ItemKind::UserMessage { .. })
-                            }) =>
-                    {
-                        Some((id, fold::PlainSection::User))
-                    }
-                    _ => None,
-                };
-                if let Some((id, section)) = plain {
-                    if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
-                        if let Some(artisan_api::TextContent::Stored(reference)) = section.text(item) {
-                            let sources = self.shared.stored_sources.borrow();
-                            if let Some(source) = sources.get(&(id.clone(), section.slot()))
-                                .filter(|source| source.source_ref() == reference
-                                    && source.format() == artisan_api::SourceIndexFormat::Literal
-                                   ) {
-                                let mut hasher = DefaultHasher::new();
-                                version.hash(&mut hasher); source.revision().hash(&mut hasher);
-                                let version = hasher.finish();
-                                return source.loaded_range().map(|block| (Row::PlainBlock {
-                                    id: id.clone(), section, block,
-                                }, version)).collect::<Vec<_>>();
-                            }
-                            return vec![(Row::PlainBlock { id: id.clone(), section, block: 0 }, version)];
-                        }
-                        let blocks = self.shared.prepare_plain(item, section);
-                        return (0..blocks)
-                            .map(|block| {
-                                (
-                                    Row::PlainBlock {
-                                        id: id.clone(),
-                                        section,
-                                        block,
-                                    },
-                                    version,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                    }
-                }
-                vec![(row, version)]
-            })
+            .flat_map(|(row, version)| self.expand_row(row, version))
             .collect();
         let rows = self.retain_disclosure_rows(rows);
+        self.prune_sources(&rows);
+        let rows = self.project_native_windows(rows);
+        self.index_disclosure_rows(&rows);
+        // A disclosure in flight keeps its group to the rows it measured.
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(row, _)| {
+                self.disclosures
+                    .iter()
+                    .all(|(header, flight)| flight.admits(header, row))
+            })
+            .collect();
+        self.publish(rows, run, cx);
+    }
+
+    /// Source state follows the published rows: literal selections and
+    /// page frontiers of sources no longer shown, and native windows of
+    /// leaves that changed, go.
+    fn prune_sources(&self, rows: &[(Row, u64)]) {
         // Mounted source owners retain raw allocation permits only while the
         // exact indexed page is resident. Descriptor count never allocates a
         // complete-source selection registry.
@@ -1720,17 +1568,7 @@ impl Conversation {
                     })
                     && self.view.as_ref().is_some_and(|view| {
                         view.item(id).is_some_and(|item| {
-                            [
-                                fold::PlainSection::User,
-                                fold::PlainSection::AgentTask,
-                                fold::PlainSection::AgentMessage,
-                                fold::PlainSection::Error,
-                                fold::PlainSection::ImageCaption,
-                            ]
-                            .into_iter()
-                            .find(|section| section.slot() == *slot)
-                            .and_then(|section| section.text(item))
-                            .is_some_and(|text| {
+                            slot.text(item).is_some_and(|text| {
                                 matches!(text, artisan_api::TextContent::Stored(reference)
                         if reference == &entry.leaf.source_ref)
                             })
@@ -1775,8 +1613,12 @@ impl Conversation {
                             })
                     })
             });
-        let rows: Vec<_> = rows
-            .into_iter()
+    }
+
+    /// A literal leaf too long for one native row shows as its window of
+    /// visual rows.
+    fn project_native_windows(&self, rows: Vec<(Row, u64)>) -> Vec<(Row, u64)> {
+        rows.into_iter()
             .flat_map(|(row, version)| {
                 let windows = self.shared.native_windows.borrow();
                 let Some(state) = windows.get(&row.key()) else {
@@ -1799,9 +1641,14 @@ impl Conversation {
                     })
                     .collect::<Vec<_>>()
             })
-            .collect();
-        self.index_disclosure_rows(&rows);
-        let rows = self.admit_native_rows(rows, cx);
+            .collect()
+    }
+
+    /// Hands changed rows their new model, tells the list which rows came
+    /// and went, and indexes the rows. Unchanged rows keep their views.
+    fn publish(&mut self, rows: Vec<(Row, u64)>, run: Option<Run>, cx: &mut Context<Self>) {
+        let now = artisan_api::now();
+        let runs = self.folded.1.clone();
         let old_keys: Vec<RowKey> = self.rows.iter().map(|(row, _)| row.key()).collect();
         let new_keys: Vec<RowKey> = rows.iter().map(|(row, _)| row.key()).collect();
         splice(&self.list, &old_keys, &new_keys);
@@ -1905,31 +1752,247 @@ impl Conversation {
             now,
             end_space,
         };
-        self.sync_goal(cx);
-        self.sync_questionnaires(cx);
-        let live = run.is_some_and(|run| run.status.is_live());
-        if live && self.clock.is_none() {
-            self.clock = Some(cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(Duration::from_secs(1)).await;
-                    if this
-                        .update(cx, |this, cx| {
-                            let now = artisan_api::now();
-                            this.row_context.now = now;
-                            for row in this.row_views.iter().flatten() {
-                                row.update(cx, |row, cx| row.tick_header(now, cx));
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }));
-        } else if !live {
-            self.clock = None;
-        }
+        self.publish_reveal(cx);
         cx.notify();
+    }
+
+    /// One folded row as published: a text body becomes one row per
+    /// prepared block (or per loaded leaf of a stored source).
+    fn expand_row(&self, row: Row, version: u64) -> Vec<(Row, u64)> {
+        let formatted = match &row {
+            Row::ProseBlock { id, .. } => Some((id, Slot::Prose, None)),
+            Row::TextBlock { id, section, .. } => Some((id, section.slot(), Some(*section))),
+            _ => None,
+        };
+        if let Some((id, slot, section)) = formatted {
+            if let Some(index) = self.shared.stored_sources.borrow().get(&(id.clone(), slot)) {
+                let current = self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.item(id))
+                    .and_then(|item| {
+                        if let Some(section) = section {
+                            section.text(item)
+                        } else {
+                            match &item.kind {
+                                ItemKind::AssistantMessage { text, .. } => Some(text),
+                                _ => None,
+                            }
+                        }
+                    });
+                if !(section.is_none() && self.view.as_ref().is_some_and(|view| view.item(id).is_some_and(|item| item.status == artisan_api::Status::Running) && view.live.contains_key(&artisan_api::LiveTarget::Text { item_id: id.clone() }))) && current.is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(reference) if reference == index.source_ref())) {
+                            let mut hasher = DefaultHasher::new();
+                            version.hash(&mut hasher);
+                            index.revision().hash(&mut hasher);
+                            let version = hasher.finish();
+                            // An empty semantic document still keeps its item wrapper.
+                            let loaded = index.loaded_range();
+                            if loaded.is_empty() { return vec![(row, version)]; }
+                            return loaded.map(|block| {
+                                let row = if let Some(section) = section {
+                                    let Row::TextBlock { run, .. } = &row else { unreachable!() };
+                                    Row::TextBlock { id: id.clone(), section, run: run.clone(), block }
+                                } else { Row::ProseBlock { id: id.clone(), block } };
+                                (row, version)
+                            }).collect::<Vec<_>>();
+                        }
+            }
+        }
+        let uses_stored = formatted.is_some_and(|(id, _, section)| {
+            self.view
+                .as_ref()
+                .and_then(|view| view.item(id))
+                .is_some_and(|item| {
+                    let stored = if let Some(section) = section {
+                        section
+                            .text(item)
+                            .is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(_)))
+                    } else {
+                        matches!(
+                            &item.kind,
+                            ItemKind::AssistantMessage {
+                                text: artisan_api::TextContent::Stored(_),
+                                ..
+                            }
+                        )
+                    };
+                    stored
+                        && !(section.is_none()
+                            && item.status == artisan_api::Status::Running
+                            && self.view.as_ref().is_some_and(|view| {
+                                view.live.contains_key(&artisan_api::LiveTarget::Text {
+                                    item_id: id.clone(),
+                                })
+                            }))
+                })
+        });
+        if uses_stored {
+            return vec![(row, version)];
+        }
+        if let Row::ProseBlock { id, .. } = &row {
+            if let Some(prepared) = self.shared.markdown.prepared_source(&id.to_string().into()) {
+                self.shared.prose_shapes.borrow_mut().insert(
+                    id.clone(),
+                    (prepared.block_count().max(1), prepared.revision()),
+                );
+            }
+            if let Some((blocks, revision)) = self.shared.prose_shapes.borrow().get(id).copied() {
+                let mut hasher = DefaultHasher::new();
+                version.hash(&mut hasher);
+                revision.hash(&mut hasher);
+                let version = hasher.finish();
+                return (0..blocks)
+                    .map(|block| {
+                        (
+                            Row::ProseBlock {
+                                id: id.clone(),
+                                block,
+                            },
+                            version,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            }
+        }
+        if let Row::TextBlock {
+            id, section, run, ..
+        } = &row
+        {
+            let key: gpui::SharedString = format!("{id}:{}", section.slot()).into();
+            if let Some(prepared) = self.shared.markdown.prepared_source(&key) {
+                let mut hasher = DefaultHasher::new();
+                version.hash(&mut hasher);
+                prepared.revision().hash(&mut hasher);
+                let version = hasher.finish();
+                return (0..prepared.block_count().max(1))
+                    .map(|block| {
+                        (
+                            Row::TextBlock {
+                                id: id.clone(),
+                                section: *section,
+                                run: run.clone(),
+                                block,
+                            },
+                            version,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            }
+        }
+        if let Row::Image(id) = &row {
+            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)).filter(|item| matches!(&item.kind, ItemKind::Image { caption: Some(text), .. } if text.byte_len() > 0)) {
+                        let blocks = self.shared.prepare_plain(item, fold::PlainSection::ImageCaption);
+                        let mut rows = vec![(row.clone(), version)];
+                        rows.extend((0..blocks).map(|block| (Row::PlainBlock { id: id.clone(), section: fold::PlainSection::ImageCaption, block }, version)));
+                        return rows;
+                    }
+        }
+        if let Row::Image(id) = &row {
+            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
+                let section = fold::PlainSection::ImageCaption;
+                if let Some(text) = section.text(item) {
+                    let mut result = vec![(row.clone(), version)];
+                    let range = if let artisan_api::TextContent::Stored(reference) = text {
+                        self.shared
+                            .stored_sources
+                            .borrow()
+                            .get(&(id.clone(), section.slot()))
+                            .filter(|source| {
+                                source.source_ref() == reference
+                                    && source.format() == artisan_api::SourceIndexFormat::Literal
+                            })
+                            .map_or(0..1, |source| source.loaded_range())
+                    } else {
+                        0..self.shared.prepare_plain(item, section)
+                    };
+                    result.extend(range.map(|block| {
+                        (
+                            Row::PlainBlock {
+                                id: id.clone(),
+                                section,
+                                block,
+                            },
+                            version,
+                        )
+                    }));
+                    return result;
+                }
+            }
+        }
+        let plain = match &row {
+            Row::PlainBlock {
+                id,
+                section:
+                    section @ (fold::PlainSection::User
+                    | fold::PlainSection::AgentTask
+                    | fold::PlainSection::AgentMessage
+                    | fold::PlainSection::Error),
+                ..
+            } => Some((id, *section)),
+            Row::WorkEntry { id, .. }
+                if self
+                    .view
+                    .as_ref()
+                    .and_then(|view| view.item(id))
+                    .is_some_and(|item| matches!(item.kind, ItemKind::UserMessage { .. })) =>
+            {
+                Some((id, fold::PlainSection::User))
+            }
+            _ => None,
+        };
+        if let Some((id, section)) = plain {
+            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
+                if let Some(artisan_api::TextContent::Stored(reference)) = section.text(item) {
+                    let sources = self.shared.stored_sources.borrow();
+                    if let Some(source) =
+                        sources.get(&(id.clone(), section.slot())).filter(|source| {
+                            source.source_ref() == reference
+                                && source.format() == artisan_api::SourceIndexFormat::Literal
+                        })
+                    {
+                        let mut hasher = DefaultHasher::new();
+                        version.hash(&mut hasher);
+                        source.revision().hash(&mut hasher);
+                        let version = hasher.finish();
+                        return source
+                            .loaded_range()
+                            .map(|block| {
+                                (
+                                    Row::PlainBlock {
+                                        id: id.clone(),
+                                        section,
+                                        block,
+                                    },
+                                    version,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                    }
+                    return vec![(
+                        Row::PlainBlock {
+                            id: id.clone(),
+                            section,
+                            block: 0,
+                        },
+                        version,
+                    )];
+                }
+                let blocks = self.shared.prepare_plain(item, section);
+                return (0..blocks)
+                    .map(|block| {
+                        (
+                            Row::PlainBlock {
+                                id: id.clone(),
+                                section,
+                                block,
+                            },
+                            version,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            }
+        }
+        vec![(row, version)]
     }
 
     /// A snapshot of what one row shows.
@@ -2120,7 +2183,7 @@ impl Conversation {
     fn composer_measured(&mut self, height: f32, cx: &mut Context<Self>) {
         if (height - self.composer_height).abs() >= 0.5 {
             self.composer_height = height;
-            self.rebuild(cx);
+            self.reexpand(cx);
         }
     }
 
@@ -2185,8 +2248,7 @@ fn agent_names(view: &ThreadView) -> HashMap<ItemId, String> {
         .collect()
 }
 
-/// Subagent items under their Agent item, by id.
-
+/// Tells the list which rows came and went between two key orders.
 fn splice(list: &ListState, old: &[RowKey], new: &[RowKey]) {
     let old_set: HashSet<&RowKey> = old.iter().collect();
     let new_set: HashSet<&RowKey> = new.iter().collect();

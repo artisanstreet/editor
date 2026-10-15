@@ -9,7 +9,9 @@ use gpui::{
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 pub(crate) type SourceOwners = Rc<
-    RefCell<HashMap<(ItemId, SourceField), (ArtisanTheme, gpui::Entity<editor_core::ContentText>)>>,
+    RefCell<
+        HashMap<(ItemId, SourceField), (ArtisanTheme, gpui::Entity<editor_sources::ContentText>)>,
+    >,
 >;
 
 /// A source field has stable identity across Item revisions. Changes replace
@@ -32,13 +34,13 @@ pub(crate) enum SourceField {
     ApprovalReason,
 }
 impl SourceField {
-    pub(crate) fn for_text_slot(slot: &str) -> Self {
+    pub(crate) fn of_slot(slot: crate::fold::Slot) -> Self {
         match slot {
-            "prose" => Self::Prose,
-            "plan-proposal" => Self::Text(TextSection::Proposal),
-            "result-view" => Self::Text(TextSection::AgentResult),
-            "message" => Self::Text(TextSection::Message),
-            _ => unreachable!("unknown authored text section"),
+            crate::fold::Slot::Prose => Self::Prose,
+            crate::fold::Slot::Plain(section) => Self::Plain(section),
+            crate::fold::Slot::Text(section) => Self::Text(section),
+            crate::fold::Slot::Output => Self::Output,
+            crate::fold::Slot::Answer => Self::AnswerText,
         }
     }
     pub(crate) fn text<'a>(&self, item: &'a Item) -> Option<&'a TextContent> {
@@ -140,7 +142,7 @@ impl RenderOnce for StoredText {
             (
                 self.theme,
                 cx.new(|cx| {
-                    editor_core::ContentText::new(&host, self.source.clone(), self.theme, cx)
+                    editor_sources::ContentText::new(&host, self.source.clone(), self.theme, cx)
                 }),
             )
         });

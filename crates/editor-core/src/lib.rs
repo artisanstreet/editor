@@ -7,12 +7,11 @@
 
 mod client;
 mod connection;
-mod content_text;
-mod content_window;
 mod host;
 pub mod hosts;
 pub mod media_http;
 mod pairing_targets;
+mod range_window;
 mod resident;
 pub mod runtime;
 mod screen;
@@ -21,13 +20,14 @@ pub use resident::{CollectionBytes, ResidentBytes};
 
 pub use client::ForgeClient;
 pub use connection::ConnectionStatus;
-pub use content_text::ContentText;
-pub use content_window::{ContentWindow, ContentWindowEvent, ContentWindowState};
 pub use host::{
-    BlobImage, HostData, HostEvent, LiveSnapshot, ProjectionLoad, ThreadPage, ThreadPageDirection,
-    ThreadSummary,
+    BlobImage, HostData, HostEvent, ImageDecoder, LiveSnapshot, ProjectionLoad, ThreadPage,
+    ThreadPageDirection, ThreadSummary,
 };
 pub use hosts::{EditorFiles, EditorSettings, HostConfig, HostId, HostKind, LocalTarget};
+pub use range_window::{
+    CollectionWindow, ContentWindow, RangePage, RangeState, RangeWindow, RangeWindowEvent,
+};
 pub use ropey::Rope;
 pub use screen::{Screen, SettingsPage};
 
@@ -287,11 +287,3 @@ fn device_name() -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Artisan Editor".to_owned())
 }
-
-mod collection_window;
-pub use collection_window::{CollectionWindow, CollectionWindowEvent, CollectionWindowState};
-
-mod collection_browser;
-pub use collection_browser::{
-    CollectionActivation, CollectionBrowser, CollectionPresenter, CollectionPreview,
-};

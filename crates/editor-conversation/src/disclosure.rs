@@ -240,7 +240,7 @@ impl Conversation {
             }
         }
         if refold {
-            self.rebuild(cx);
+            self.reexpand(cx);
         }
         // A flight temporarily owns cached metrics for evicted descendants.
         // Release only that bounded set when the flight ends; idle frames scan nothing.

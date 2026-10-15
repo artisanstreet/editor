@@ -4,7 +4,8 @@ use artisan_api::{
     Collection, CollectionRef, FileChange, Item, ItemId, ItemKind, PlanStep, Question, StepStatus,
     TextContent, ToolKind,
 };
-use editor_core::{CollectionBrowser, CollectionPresenter, CollectionPreview, HostData};
+use editor_core::HostData;
+use editor_sources::{CollectionBrowser, CollectionPresenter, CollectionPreview};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     App, AppContext as _, Entity, EntityId, IntoElement, ParentElement as _, RenderOnce,

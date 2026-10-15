@@ -8,7 +8,7 @@ use presenters::{Action, Actions};
 use crate::Conversation;
 use crate::activity;
 use crate::content::{SourceField, SourceOwners, StoredText};
-use crate::fold::{PlainSection, Row, RunSummary, TextSection};
+use crate::fold::{PlainSection, Row, RunSummary, Slot, TextSection};
 use crate::motion::{
     CompactionPhase, WorkMotion, eased, header_entering, phrase_or_text, tabular_figures,
     with_entrance,
@@ -53,8 +53,10 @@ const LIVE_OUTPUT_TAIL: usize = 8 * 1024;
 
 pub(crate) use editor_core::BlobImage as Blob;
 
-/// What every row shares: renderer, theme, and the conversation it
-/// sends actions to.
+/// What every row shares: renderer, theme, the conversation it sends
+/// actions to, and per-body source state keyed by item and [`Slot`]. The
+/// conversation owns it and prunes it as items and rows go; rows read it
+/// and fill the preparation caches as they first paint a body.
 pub(crate) struct Shared {
     pub markdown: Rc<MarkdownRenderer>,
     pub reveal_queue: RefCell<crate::motion::RevealQueue>,
@@ -66,19 +68,23 @@ pub(crate) struct Shared {
     pub theme: ArtisanTheme,
     pub conversation: WeakEntity<Conversation>,
     /// Immutable body revisions shared by every block row of an Item.
-    pub sources: RefCell<HashMap<(ItemId, &'static str), (artisan_api::Seq, Arc<str>)>>,
-    pub stored_sources:
-        RefCell<HashMap<(ItemId, &'static str), editor_ui::markdown_renderer::StoredSource>>,
+    pub sources: RefCell<HashMap<BodyKey, (artisan_api::Seq, Arc<str>)>>,
+    pub stored_sources: RefCell<HashMap<BodyKey, editor_ui::markdown_renderer::StoredSource>>,
     pub prose_shapes: RefCell<HashMap<ItemId, (usize, u64)>>,
     pub selection_scope: RefCell<SharedString>,
     pub agent_scope: Cell<bool>,
-    pub plain_sources: RefCell<HashMap<(ItemId, &'static str), PlainBody>>,
+    pub plain_sources: RefCell<HashMap<BodyKey, PlainBody>>,
     pub native_windows: RefCell<HashMap<crate::fold::RowKey, NativeBodyWindow>>,
-    pub source_frontiers: RefCell<
-        HashMap<(ItemId, &'static str), (artisan_api::ContentRef, crate::fold::RowKey, bool)>,
-    >,
-    pub literal_sources: RefCell<HashMap<(ItemId, &'static str, usize), LiteralSelection>>,
+    pub source_frontiers: RefCell<HashMap<BodyKey, SourceFrontier>>,
+    pub literal_sources: RefCell<HashMap<(ItemId, Slot, usize), LiteralSelection>>,
 }
+
+/// One text body of one item.
+pub(crate) type BodyKey = (ItemId, Slot);
+/// The source a stored body's page moved for, the row at the top of the
+/// view then, and whether it moved toward the end: a page change must not
+/// undo itself while that row stays on top.
+pub(crate) type SourceFrontier = (artisan_api::ContentRef, crate::fold::RowKey, bool);
 
 pub(crate) const NATIVE_BODY_WINDOW: usize = 64;
 pub(crate) struct NativeBodyWindow {
@@ -220,7 +226,7 @@ impl RenderOnce for PreparedText {
             self.shared
                 .markdown
                 .prepare_source(self.key.clone(), self.source, cx, move |cx| {
-                    let _ = conversation.update(cx, Conversation::rebuild);
+                    let _ = conversation.update(cx, Conversation::reexpand);
                 });
         let prepared = match preparation {
             editor_ui::markdown_renderer::MarkdownPreparation::Ready(prepared) => Some(prepared),
@@ -273,7 +279,7 @@ struct StoredPreparedText {
     host: Option<WeakEntity<editor_core::HostData>>,
     owners: SourceOwners,
     id: ItemId,
-    slot: &'static str,
+    slot: Slot,
     order: Vec<u64>,
     block: usize,
     tone: MarkdownBodyTone,
@@ -340,7 +346,7 @@ impl RenderOnce for StoredPreparedText {
                     index_fetcher,
                     cx,
                     move |cx| {
-                        let _ = owner.update(cx, Conversation::rebuild);
+                        let _ = owner.update(cx, Conversation::reexpand);
                     },
                 )
             },
@@ -361,7 +367,7 @@ impl RenderOnce for StoredPreparedText {
                         host: Some(host.downgrade()),
                         source: self.source.clone(),
                         theme: self.shared.theme,
-                        key: (self.id.clone(), SourceField::for_text_slot(self.slot)),
+                        key: (self.id.clone(), SourceField::of_slot(self.slot)),
                         owners: self.owners.clone(),
                     })
                     .into_any_element();
@@ -378,7 +384,7 @@ impl RenderOnce for StoredPreparedText {
         if changed {
             let owner = self.shared.conversation.clone();
             cx.defer(move |cx| {
-                let _ = owner.update(cx, Conversation::rebuild);
+                let _ = owner.update(cx, Conversation::reexpand);
             });
         }
         if self.block >= index.block_count() {
@@ -561,7 +567,7 @@ impl RenderOnce for StoredPreparedText {
                         host: Some(host.downgrade()),
                         source: self.source.clone(),
                         theme: self.shared.theme,
-                        key: (self.id.clone(), SourceField::for_text_slot(self.slot)),
+                        key: (self.id.clone(), SourceField::of_slot(self.slot)),
                         owners: self.owners.clone(),
                     })
                     .into_any_element();
@@ -641,14 +647,8 @@ impl Drop for RowView {
 impl RowView {
     pub(crate) fn awaiting_reveal_admission(&self) -> bool {
         match self.model.row.semantic() {
-            Row::Reply(_) | Row::ProseBlock { .. } => {
-                self.prose_fresh && !self.prose_reveal.has_presented()
-            }
-            Row::WorkEntry { .. }
-            | Row::Chain { .. }
-            | Row::Prompt(_)
-            | Row::Error(_)
-            | Row::Image(_) => {
+            Row::ProseBlock { .. } => self.prose_fresh && !self.prose_reveal.has_presented(),
+            Row::WorkEntry { .. } | Row::Chain { .. } | Row::Prompt(_) | Row::Image(_) => {
                 !self.motion.entrance_started()
                     && self
                         .model
@@ -706,11 +706,8 @@ impl RowView {
     }
     pub(crate) fn new(model: RowModel, version: u64, shared: Rc<Shared>) -> Self {
         let prose_fresh = match model.row.semantic() {
-            Row::Reply(id) | Row::ProseBlock { id, .. } => {
-                let block = match model.row.semantic() {
-                    Row::ProseBlock { block, .. } => *block,
-                    _ => 0,
-                };
+            Row::ProseBlock { id, block } => {
+                let block = *block;
                 shared.prose_arrivals.borrow_mut().get_mut(id).map_or_else(
                     || model.ui.get(id).is_some_and(ItemUi::fresh),
                     |arrival| arrival.claim(block),
@@ -737,7 +734,20 @@ impl RowView {
     pub(crate) fn disclosure_finished(&mut self, cx: &mut Context<Self>) {
         self.animating =
             self.motion.end_frame() || self.prose_reveal.is_animating() || self.queue_held;
+        self.refresh(cx);
+    }
+
+    /// What it shows changed outside its model (a source finished
+    /// preparing): draw it fresh, and measure it again.
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.reported_height.set(None);
         cx.notify();
+    }
+
+    /// The height to draw this row from cache at: known, and no motion
+    /// running.
+    pub(crate) fn cached_height(&self) -> Option<gpui::Pixels> {
+        self.reported_height.get().filter(|_| !self.animating)
     }
 
     pub(crate) fn ready_to_read(&self) -> bool {
@@ -771,23 +781,7 @@ impl RowView {
         self.collections.reconcile(&model.items, cx);
         self.model = model;
         self.version = version;
-        cx.notify();
-    }
-
-    pub(crate) fn set_images(&mut self, images: HashMap<BlobHash, Blob>, cx: &mut Context<Self>) {
-        let same = images.len() == self.model.images.len()
-            && images
-                .iter()
-                .all(|(hash, image)| match (image, self.model.images.get(hash)) {
-                    (Blob::Loading, Some(Blob::Loading)) => true,
-                    (Blob::Failed(a), Some(Blob::Failed(b))) => a == b,
-                    (Blob::Ready(a), Some(Blob::Ready(b))) => Arc::ptr_eq(a, b),
-                    _ => false,
-                });
-        if !same {
-            self.model.images = images;
-            cx.notify();
-        }
+        self.refresh(cx);
     }
 
     pub(crate) fn tick_header(&mut self, now: Timestamp, cx: &mut Context<Self>) {
@@ -798,7 +792,7 @@ impl RowView {
             )
         {
             self.model.now = now;
-            cx.notify();
+            self.refresh(cx);
         }
     }
 
@@ -818,7 +812,7 @@ impl RowView {
         } else {
             self.model.live.remove(target);
         }
-        cx.notify();
+        self.refresh(cx);
     }
 
     fn item(&self, id: &ItemId) -> Option<&Item> {
@@ -1039,13 +1033,10 @@ impl RowView {
         .into_any_element()
     }
 
-    /// A prepared block range. The renderer owns parsing; the native list owns visibility.
-    fn prose(
-        &mut self,
-        id: &ItemId,
-        range: Option<std::ops::Range<usize>>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// One prepared block of a reply, or all of it while its blocks are
+    /// not known yet. The renderer owns parsing; the native list owns
+    /// visibility.
+    fn prose(&mut self, id: &ItemId, block: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(item) = self.model.items.get(id).cloned() else {
             return div().into_any_element();
         };
@@ -1083,11 +1074,9 @@ impl RowView {
         });
         if live.is_none() {
             if let TextContent::Stored(_) = text {
-                return self.text().stored_reply(
-                    &item,
-                    range.as_ref().map_or(0, |range| range.start),
-                    self.prose_reveal.clone(),
-                );
+                return self
+                    .text()
+                    .stored_reply(&item, block, self.prose_reveal.clone());
             }
         }
         let source = if live.is_none() {
@@ -1096,7 +1085,7 @@ impl RowView {
             };
             let mut sources = self.shared.sources.borrow_mut();
             let cached = sources
-                .entry((id.clone(), "prose"))
+                .entry((id.clone(), Slot::Prose))
                 .or_insert_with(|| (item.seq, Arc::from(text.as_str())));
             if cached.0 != item.seq && cached.1.as_ref() != text.as_str() {
                 cached.1 = Arc::from(text.as_str());
@@ -1147,9 +1136,14 @@ impl RowView {
             .set_selection_prefix(crate::fold::selection_order(
                 self.shared.agent_scope.get(),
                 item.position,
-                "prose",
+                Slot::Prose,
             ));
-        let range = range.unwrap_or(0..prepared.block_count());
+        let split = self.shared.prose_shapes.borrow().contains_key(id);
+        let range = if split {
+            block..block + 1
+        } else {
+            0..prepared.block_count()
+        };
         let last = range.end >= prepared.block_count();
         let theme = self.theme();
         let content = self.shared.markdown.render_prepared_revealing_range(
@@ -1632,8 +1626,7 @@ impl Render for RowView {
         let key = row.key();
         let bypass = matches!(
             row.semantic(),
-            Row::User(_)
-                | Row::Work { .. }
+            Row::Work { .. }
                 | Row::PlainBlock {
                     section: PlainSection::User,
                     ..
@@ -1665,9 +1658,7 @@ impl Render for RowView {
             Some(div().into_any_element())
         } else {
             match &row {
-                Row::User(id) => Some(self.plain_block(id, PlainSection::User, 0, None)),
-                Row::Reply(id) => Some(self.prose(id, None, cx)),
-                Row::ProseBlock { id, block } => Some(self.prose(id, Some(*block..*block + 1), cx)),
+                Row::ProseBlock { id, block } => Some(self.prose(id, *block, cx)),
                 Row::Work {
                     run,
                     segment,
@@ -1721,12 +1712,6 @@ impl Render for RowView {
                     Some(self.entering(id, card))
                 }
                 Row::Compaction(id) => Some(self.compaction_row(id)),
-                Row::Error(id) => {
-                    let alert = self
-                        .item(id)
-                        .map_or_else(|| div().into_any_element(), |item| self.error_alert(item));
-                    Some(self.entering(id, alert))
-                }
                 Row::Image(id) => {
                     let image = self.item(id).map_or_else(
                         || div().into_any_element(),
@@ -1750,14 +1735,10 @@ impl Render for RowView {
                         .into_any_element(),
                 ),
                 Row::Status(run) => self.status_row(run),
-                Row::AgentTask(id) => Some(self.plain_block(id, PlainSection::AgentTask, 0, None)),
                 Row::AgentResult(id) => Some(self.item(id).map_or_else(
                     || div().into_any_element(),
                     |item| self.text().section(item, TextSection::AgentResult, 0),
                 )),
-                Row::AgentMessage(id) => {
-                    Some(self.plain_block(id, PlainSection::AgentMessage, 0, None))
-                }
                 Row::AgentStatus(_, working) => self.agent().agent_status_row(*working),
             }
         };

@@ -11,6 +11,7 @@ artisan-api = { path = "../artisan-api" }
 artisan-mentions = { path = "../artisan-mentions" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
+editor-sources = { path = "../editor-sources" }
 gpui.workspace = true
 futures.workspace = true
 image = { workspace = true, features = ["gif", "jpeg", "png", "webp", "bmp"] }

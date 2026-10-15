@@ -54,12 +54,11 @@ impl HostData {
         let minimum = state.minimum_revision;
         let client = self.client.clone();
         let thread = thread.clone();
-        let generation = self.generation;
-        let observation = self.summary_generation;
+        // The task is the request: a new observation or connection drops it.
         state.task = Some(cx.spawn(async move |this, cx| {
             let result = client.inspector(&thread).await;
             let _ = this.update(cx, |this, cx| {
-                this.finish_thread_summary(thread, generation, observation, minimum, result, cx);
+                this.finish_thread_summary(thread, minimum, result, cx);
             });
         }));
         cx.emit(HostEvent::ThreadSummaryChanged {
@@ -71,15 +70,10 @@ impl HostData {
     fn finish_thread_summary(
         &mut self,
         thread: ThreadId,
-        generation: u64,
-        observation: u64,
         minimum: Seq,
         result: anyhow::Result<InspectorSummary>,
         cx: &mut Context<Self>,
     ) {
-        if self.generation != generation || self.summary_generation != observation {
-            return;
-        }
         let Some(summary) = self
             .summary
             .as_mut()
@@ -124,7 +118,6 @@ impl HostData {
     }
 
     pub(super) fn reset_thread_summary(&mut self, cx: &mut Context<Self>) {
-        self.summary_generation = self.summary_generation.wrapping_add(1);
         self.summary = self
             .observed
             .borrow()
@@ -142,7 +135,6 @@ impl HostData {
     }
 
     pub(super) fn summary_connection_changed(&mut self, live: bool, cx: &mut Context<Self>) {
-        self.summary_generation = self.summary_generation.wrapping_add(1);
         let Some(summary) = self.summary.as_mut() else {
             return;
         };
@@ -295,8 +287,6 @@ mod tests {
             let mut host = HostData::new(crate::HostId("test".into()), "test".into(), client, cx);
             host._connection.abort();
             host._follow = gpui::Task::ready(());
-            host.generation = 3;
-            host.summary_generation = 7;
             host.summary = Some(ObservedSummary {
                 thread: "current".into(),
                 state: ThreadSummary {
@@ -308,15 +298,13 @@ mod tests {
         })
     }
     #[gpui::test]
-    fn a_late_summary_cannot_replace_a_new_observation_or_newer_revision(
+    fn a_summary_for_another_thread_or_older_revision_does_not_replace_the_current_one(
         cx: &mut gpui::TestAppContext,
     ) {
         let host = host(cx);
         host.update(cx, |host, cx| {
             host.finish_thread_summary(
                 "current".into(),
-                3,
-                7,
                 20,
                 Ok(InspectorSummary {
                     revision: 20,
@@ -334,31 +322,7 @@ mod tests {
                 20
             );
             host.finish_thread_summary(
-                "current".into(),
-                3,
-                6,
-                20,
-                Ok(InspectorSummary {
-                    revision: 99,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            host.finish_thread_summary(
-                "current".into(),
-                2,
-                7,
-                20,
-                Ok(InspectorSummary {
-                    revision: 99,
-                    ..Default::default()
-                }),
-                cx,
-            );
-            host.finish_thread_summary(
                 "previous".into(),
-                3,
-                7,
                 20,
                 Ok(InspectorSummary {
                     revision: 99,
@@ -377,8 +341,6 @@ mod tests {
             );
             host.finish_thread_summary(
                 "current".into(),
-                3,
-                7,
                 20,
                 Ok(InspectorSummary {
                     revision: 19,
@@ -397,8 +359,6 @@ mod tests {
         host.update(cx, |host, cx| {
             host.finish_thread_summary(
                 "current".into(),
-                3,
-                7,
                 20,
                 Err(anyhow::anyhow!("temporary read failure")),
                 cx,
@@ -409,8 +369,6 @@ mod tests {
             // The same production completion path receives the explicit retry's reply.
             host.finish_thread_summary(
                 "current".into(),
-                3,
-                7,
                 20,
                 Ok(InspectorSummary {
                     revision: 21,

@@ -28,10 +28,11 @@ forge
 editor
   editor-ui            theme, components, text editor, markdown  → editor-assets, editor-audio
   editor-core          Forge client per host, connection, HostData, Screen         → api
+  editor-sources       viewers for stored sources (raw text, collections)          → core, editor-ui
   editor-sidebar       projects, thread inbox, history, host switcher               → core, editor-ui
-  editor-composer      draft, WebP attachments, model picker, send/steer            → core, editor-ui
-  editor-conversation  the open thread: item window, viewport, pure render         → core, editor-ui, composer
-  editor-inspector     shells, agents, changed files, context/usage                 → core, editor-ui, conversation
+  editor-composer      draft, WebP attachments, model picker, send/steer            → core, sources, editor-ui
+  editor-conversation  the open thread: item window, viewport, pure render         → core, sources, editor-ui, composer
+  editor-inspector     shells, agents, changed files, context/usage                 → core, sources, editor-ui, conversation
   editor-settings      preferences, engines, skills/MCP/prompt, hosts & devices     → core, editor-ui
   editor (bin)         window, titlebar, layout, palette, notices, first pairing    → all
 ```

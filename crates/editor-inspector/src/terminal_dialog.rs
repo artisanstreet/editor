@@ -101,8 +101,8 @@ struct Job {
     shell: ShellScreen,
     source: Option<(Option<u64>, usize, u64)>,
     unverified: bool,
-    command_source: Option<gpui::Entity<editor_core::ContentText>>,
-    output_source: Option<gpui::Entity<editor_core::ContentText>>,
+    command_source: Option<gpui::Entity<editor_sources::ContentText>>,
+    output_source: Option<gpui::Entity<editor_sources::ContentText>>,
 }
 impl Job {
     fn missing(&self) -> bool {
@@ -412,7 +412,7 @@ impl TerminalDialog {
                     .is_none_or(|view| view.read(cx).source(cx) != source)
                 {
                     job.command_source = Some(cx.new(|cx| {
-                        editor_core::ContentText::new(&host, source.clone(), *cx.theme(), cx)
+                        editor_sources::ContentText::new(&host, source.clone(), *cx.theme(), cx)
                     }));
                 }
             }
@@ -434,7 +434,7 @@ impl TerminalDialog {
                 .is_none_or(|view| view.read(cx).source(cx) != source)
             {
                 job.output_source = Some(cx.new(|cx| {
-                    editor_core::ContentText::new(&host, source.clone(), *cx.theme(), cx)
+                    editor_sources::ContentText::new(&host, source.clone(), *cx.theme(), cx)
                 }));
             }
             job.unverified = false;
