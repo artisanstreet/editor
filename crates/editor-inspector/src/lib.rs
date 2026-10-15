@@ -7,8 +7,8 @@ use editor_core::{Core, CoreEvent, HostData, HostEvent, HostId};
 use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens};
 use editor_ui::{AssetId, button::Button, terminal_text::TerminalScreen, theme::ArtisanTheme};
 use gpui::{
-    Animation, AnimationExt as _, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ListAlignment, ListState, ParentElement as _, Render, SharedString,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ListAlignment,
+    ListState, ParentElement as _, PulseExt as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
 use std::sync::Arc;
@@ -294,13 +294,11 @@ impl Inspector {
                 };
                 let dot = div().size(px(6.0)).rounded_full().bg(color.to_paint());
                 let dot = if agent.status == Status::Running && !cx.reduce_motion() {
-                    dot.with_animation(
+                    // Breathes on the GPU, so the inspector never re-renders for it.
+                    dot.with_pulse(
                         ("inspector-agent", *index),
-                        Animation::new(std::time::Duration::from_millis(1600)).repeat(),
-                        |dot, progress| {
-                            let swing = (progress * std::f32::consts::TAU).cos().mul_add(0.5, 0.5);
-                            dot.opacity(0.4 + 0.6 * swing)
-                        },
+                        std::time::Duration::from_millis(1600),
+                        0.4,
                     )
                     .into_any_element()
                 } else {

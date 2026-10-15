@@ -15,10 +15,9 @@ use editor_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::RenderImage;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, InteractiveElement as _, IntoElement,
-    MouseButton, ObjectFit, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, WeakEntity, Window, div, img,
-    px,
+    AnyElement, Context, InteractiveElement as _, IntoElement, MouseButton, ObjectFit,
+    ParentElement as _, PulseExt as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, StyledImage as _, WeakEntity, Window, div, img, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -254,16 +253,9 @@ impl Render for ThreadRow {
                     .rounded_full()
                     .bg(tone.to_paint());
                 if data.state == RowState::Working && !reduced {
-                    row.child(dot.with_animation(
-                        "working-pulse",
-                        Animation::new(WORKING_PULSE).repeat(),
-                        |dot, progress| {
-                            let swing = (progress * std::f32::consts::TAU).cos().mul_add(0.5, 0.5);
-                            dot.opacity(
-                                WORKING_PULSE_FLOOR + (1.0 - WORKING_PULSE_FLOOR) * swing,
-                            )
-                        },
-                    ))
+                    // The GPU breathes the dot: frames re-present the scene
+                    // instead of rebuilding the sidebar.
+                    row.child(dot.with_pulse("working-pulse", WORKING_PULSE, WORKING_PULSE_FLOOR))
                 } else {
                     row.child(dot)
                 }

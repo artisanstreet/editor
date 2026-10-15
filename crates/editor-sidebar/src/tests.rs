@@ -349,6 +349,51 @@ fn collapsed_history_has_no_retained_rows_and_expanding_renders_a_window(cx: &mu
         .unwrap();
 }
 
+/// A working thread's dot breathes on the GPU, so the sidebar stops asking
+/// for frames: a running agent must not keep a CPU core busy redrawing it.
+#[gpui::test]
+fn a_working_thread_breathes_without_redrawing_the_sidebar(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    setup
+        .window
+        .update(cx, |sidebar, _, cx| {
+            sidebar._host = None;
+            sidebar.host = None;
+            sidebar.lists = crate::list::Lists {
+                inbox: vec![crate::list::RowData {
+                    id: ThreadId::from("working".to_owned()),
+                    title: "Working thread".into(),
+                    subtitle: "Project".into(),
+                    project: setup.project.clone(),
+                    state: crate::list::RowState::Working,
+                    selected: false,
+                    settleable: false,
+                }],
+                history: Vec::new(),
+                next_tick: None,
+            };
+            sidebar.rebuild_entries();
+            cx.notify();
+        })
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(setup.window.into(), cx);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("sidebar-thread-working").is_some());
+    // Outlast the sidebar's opening transitions, which run on the wall clock,
+    // then let a few frames run: an endless animation would keep asking.
+    std::thread::sleep(Duration::from_millis(400));
+    for _ in 0..3 {
+        cx.simulate_frame(setup.window.into());
+        cx.run_until_parked();
+    }
+    cx.update(|window, _| {
+        assert!(
+            !window.awaits_next_frame(),
+            "the working dot must animate without asking for new frames"
+        );
+    });
+}
+
 #[gpui::test]
 fn summary_pages_evict_history_and_direct_navigation_keeps_its_metadata(cx: &mut TestAppContext) {
     let setup = Setup::new(cx);

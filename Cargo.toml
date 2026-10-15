@@ -63,8 +63,8 @@ fs2 = "=0.4.3"
 futures = { version = "=0.3.34", default-features = false, features = ["executor", "std"] }
 gethostname = "=1.1.0"
 getrandom = { version = "=0.4.3", default-features = false }
-gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "f82ca3fe86540bc1d96acd1e295fefe4e8e7529e" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "f82ca3fe86540bc1d96acd1e295fefe4e8e7529e", features = ["cosmic-text"] }
+gpui = { package = "gpui-ce", git = "https://github.com/artisanstreet/gpui-ce", rev = "bbb193ad36346fa74475ec5b9c4152943fcc07e5" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/artisanstreet/gpui-ce", rev = "bbb193ad36346fa74475ec5b9c4152943fcc07e5", features = ["cosmic-text"] }
 hyper = { version = "=1.11.0", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 ufbx = "=0.11.3"
