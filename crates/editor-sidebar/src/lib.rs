@@ -668,17 +668,17 @@ impl Sidebar {
             else {
                 continue;
             };
-            if let Some(entry) = self.icons.get(project) {
-                if entry.project_seq == project_seq {
-                    if let Some(hash) = &entry.hash {
-                        let hash = hash.clone();
-                        host.update(cx, |host, cx| host.load_image(hash, false, cx));
-                    }
-                    self.icon_order.retain(|id| id != project);
-                    self.icon_order.push_back(project.clone());
-                    if entry.fresh(now) {
-                        continue;
-                    }
+            if let Some(entry) = self.icons.get(project)
+                && entry.project_seq == project_seq
+            {
+                if let Some(hash) = &entry.hash {
+                    let hash = hash.clone();
+                    host.update(cx, |host, cx| host.load_image(hash, false, cx));
+                }
+                self.icon_order.retain(|id| id != project);
+                self.icon_order.push_back(project.clone());
+                if entry.fresh(now) {
+                    continue;
                 }
             }
             if self.icon_tasks.contains_key(project) || self.icon_tasks.len() >= 4 {

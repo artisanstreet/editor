@@ -200,7 +200,7 @@ fn next_with_breaks(text: &str, offset: usize, behavior: WordBehavior, breaks: &
     }
     let skips = behavior == WordBehavior::SkipSpaces;
     let mut punctuation: Option<usize> = None;
-    let mut runner = following(&breaks, offset);
+    let mut runner = following(breaks, offset);
     while let Some(at) = runner {
         let next = char_at(text, at);
         let previous = char_before(text, at);
@@ -217,7 +217,7 @@ fn next_with_breaks(text: &str, offset: usize, behavior: WordBehavior, breaks: &
             if skips && punctuation.is_none() && previous.is_some_and(is_blink_whitespace) {
                 punctuation = Some(at);
             }
-            runner = following(&breaks, at);
+            runner = following(breaks, at);
             continue;
         }
         if let Some(pending) = pending {
@@ -232,7 +232,7 @@ fn next_with_breaks(text: &str, offset: usize, behavior: WordBehavior, breaks: &
                 return skip_whitespace(text, at, behavior);
             }
         }
-        runner = following(&breaks, at);
+        runner = following(breaks, at);
     }
     text.len()
 }
@@ -243,7 +243,7 @@ fn previous_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> usize {
         return 0;
     }
     let mut punctuation: Option<usize> = None;
-    let mut runner = preceding(&breaks, offset);
+    let mut runner = preceding(breaks, offset);
     while let Some(at) = runner {
         let next = char_at(text, at);
         if let Some(next) = next
@@ -253,7 +253,7 @@ fn previous_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> usize {
                 return at;
             }
             punctuation = Some(at);
-            runner = preceding(&breaks, at);
+            runner = preceding(breaks, at);
             continue;
         }
         if let Some(punctuation) = punctuation {
@@ -262,7 +262,7 @@ fn previous_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> usize {
         if next.is_some_and(is_word_break) {
             return at;
         }
-        runner = preceding(&breaks, at);
+        runner = preceding(breaks, at);
     }
     0
 }
@@ -279,7 +279,7 @@ fn word_range_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> Range<
     let offset = floor_char_boundary(text, offset);
     let at_line_end = char_at(text, offset).is_none_or(is_line_break);
     if at_line_end {
-        let start = preceding(&breaks, offset).unwrap_or(offset);
+        let start = preceding(breaks, offset).unwrap_or(offset);
         // A line break is never a word of its own.
         if char_at(text, start).is_some_and(is_line_break) {
             return offset..offset;
@@ -290,7 +290,7 @@ fn word_range_with_breaks(text: &str, offset: usize, breaks: &[usize]) -> Range<
         .partition_point(|value| *value <= offset)
         .checked_sub(1)
         .map_or(0, |index| breaks[index]);
-    let end = following(&breaks, offset).unwrap_or(text.len());
+    let end = following(breaks, offset).unwrap_or(text.len());
     start..end
 }
 
@@ -376,8 +376,6 @@ impl SelectionUnit {
             Self::Character | Self::Paragraph => self.range_at(text, offset),
         }
     }
-
-
 }
 
 /// The nearest character boundary at or before `offset`.
@@ -566,5 +564,4 @@ mod tests {
         assert_eq!(SelectionUnit::from_click_count(3), SelectionUnit::Paragraph);
         assert_eq!(SelectionUnit::from_click_count(4), SelectionUnit::Paragraph);
     }
-
 }

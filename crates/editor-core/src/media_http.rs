@@ -73,7 +73,7 @@ mod tests {
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut request = [0; 2048];
-            socket.read(&mut request).unwrap();
+            let _ = socket.read(&mut request).unwrap();
             write!(
                 socket,
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

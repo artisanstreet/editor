@@ -978,7 +978,7 @@ impl Composer {
         Some(Submission {
             message: SendMessage {
                 id: ItemId::new(),
-                text: text.into(),
+                text,
                 images,
                 config,
                 draft: None,
@@ -1446,23 +1446,10 @@ impl Render for Composer {
     }
 }
 
-#[cfg(test)]
-mod tests;
-
 fn preview_fits(retained: usize, incoming: usize) -> bool {
     retained
         .checked_add(incoming)
         .is_some_and(|total| total <= 128 * 1024 * 1024)
-}
-#[cfg(test)]
-mod preview_budget_tests {
-    #[test]
-    fn restored_and_encoded_previews_share_aggregate_admission() {
-        let budget = 128 * 1024 * 1024;
-        assert!(super::preview_fits(budget - 1, 1));
-        assert!(!super::preview_fits(budget - 1, 2));
-        assert!(!super::preview_fits(usize::MAX, 1));
-    }
 }
 
 /// GPUI's image atlas is independent of the decoded Arc's lifetime.
@@ -1474,5 +1461,19 @@ fn release_preview(image: Option<Arc<RenderImage>>, cx: &mut App) {
             // releases them. Invalidate cached scenes before they reuse a tile.
             cx.refresh_windows();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod preview_budget_tests {
+    #[test]
+    fn restored_and_encoded_previews_share_aggregate_admission() {
+        let budget = 128 * 1024 * 1024;
+        assert!(super::preview_fits(budget - 1, 1));
+        assert!(!super::preview_fits(budget - 1, 2));
+        assert!(!super::preview_fits(usize::MAX, 1));
     }
 }

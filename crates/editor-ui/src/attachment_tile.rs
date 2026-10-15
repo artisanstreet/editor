@@ -17,6 +17,7 @@ use std::{
 };
 
 type Action = Box<dyn Fn(&mut Window, &mut App)>;
+type Visible = Box<dyn Fn(&mut App)>;
 #[derive(IntoElement)]
 pub struct AttachmentTile {
     id: SharedString,
@@ -29,7 +30,7 @@ pub struct AttachmentTile {
     removable: bool,
     remove: Option<Action>,
     retry: Option<Action>,
-    visible: Option<Box<dyn Fn(&mut App)>>,
+    visible: Option<Visible>,
 }
 impl AttachmentTile {
     pub fn new(

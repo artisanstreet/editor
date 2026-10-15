@@ -366,10 +366,10 @@ impl Perform for Grid {
             let col = self.col;
             let cells = self.current_line().cells_mut();
             let end = col.min(cells.len());
-            if let Some(cell) = cells[..end].iter_mut().rev().find(|cell| cell.ch != '\0') {
-                if cell.combining.len() < MAX_COMBINING_PER_CELL {
-                    cell.combining.push(ch);
-                }
+            if let Some(cell) = cells[..end].iter_mut().rev().find(|cell| cell.ch != '\0')
+                && cell.combining.len() < MAX_COMBINING_PER_CELL
+            {
+                cell.combining.push(ch);
             }
             return;
         }

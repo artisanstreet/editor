@@ -639,7 +639,7 @@ impl SignIn {
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(engine = %this.engine, error = %error, "logout unavailable")
+                            tracing::warn!(engine = %this.engine, error = %error, "logout unavailable");
                         }
                     }
                     this.probe_snapshot(binary, generation, lease).await;

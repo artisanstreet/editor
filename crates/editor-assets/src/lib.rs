@@ -227,10 +227,13 @@ pub struct Asset {
     pub source: &'static str,
 }
 
+/// Width and height parsed from an asset's `viewBox`.
+type Dimensions = (f32, f32);
+
 impl Asset {
     /// Intrinsic catalog dimensions, parsed once rather than during painting.
-    pub fn intrinsic_dimensions(self) -> Option<(f32, f32)> {
-        static DIMENSIONS: std::sync::OnceLock<Box<[Option<(f32, f32)>]>> =
+    pub fn intrinsic_dimensions(self) -> Option<Dimensions> {
+        static DIMENSIONS: std::sync::OnceLock<Box<[Option<Dimensions>]>> =
             std::sync::OnceLock::new();
         DIMENSIONS.get_or_init(|| {
             ALL.iter()

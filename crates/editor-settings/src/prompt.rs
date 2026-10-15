@@ -20,8 +20,6 @@ use gpui::{
 #[cfg(test)]
 pub(crate) const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 
-/// Lines of a candidate or edited text shown before it is cut.
-
 pub(crate) struct PromptForm {
     pub(crate) editor: Entity<TextEditor>,
     /// The host the page was loaded from.

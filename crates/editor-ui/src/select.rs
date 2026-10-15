@@ -324,10 +324,10 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                     cx.notify();
                     true
                 });
-                if let Some(value) = commit {
-                    if let Some(change) = &change {
-                        change(value, None, window, cx);
-                    }
+                if let Some(value) = commit
+                    && let Some(change) = &change
+                {
+                    change(value, None, window, cx);
                 }
                 if handled {
                     window.prevent_default();

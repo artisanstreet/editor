@@ -421,8 +421,9 @@ pub fn tooltip(
     })
     .into()
 }
+type TooltipContent = Box<dyn Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyElement>;
 struct Tooltip {
-    content: Box<dyn Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyElement>,
+    content: TooltipContent,
 }
 impl gpui::Render for Tooltip {
     fn render(

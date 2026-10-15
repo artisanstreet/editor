@@ -17,6 +17,8 @@ use gpui::{
 };
 use std::{cell::Cell, rc::Rc, sync::Arc};
 use std::{collections::HashMap, time::Duration};
+
+type Close = Rc<dyn Fn(&mut gpui::App)>;
 pub(crate) struct Account {
     core: Entity<Core>,
     host: Option<Entity<HostData>>,
@@ -28,7 +30,7 @@ pub(crate) struct Account {
     host_origin: Rc<Cell<Bounds<Pixels>>>,
     submenu_bounds: Measured,
     avatars: HashMap<String, Arc<Image>>,
-    close: Option<Rc<dyn Fn(&mut gpui::App)>>,
+    close: Option<Close>,
     usage_height: Pixels,
     error: Option<String>,
     #[cfg(test)]

@@ -254,23 +254,23 @@ impl Inspector {
                     "Edit operations" => (AssetId::TABLER_FILE_DIFF, "Changes"),
                     _ => (AssetId::TABLER_FOLDER, *label),
                 };
-                if label == "Changes" {
-                    if let Some(edits) = &self.summary.edits {
-                        return row
-                            .child(inspector_glyph(&theme, icon))
-                            .child(div().flex_1().child(label))
-                            .child(
-                                div()
-                                    .text_color(gpui::rgb(0x34d399))
-                                    .child(format!("+{}", edits.added)),
-                            )
-                            .child(
-                                div()
-                                    .text_color(gpui::rgb(0xf87171))
-                                    .child(format!("−{}", edits.removed)),
-                            )
-                            .into_any_element();
-                    }
+                if label == "Changes"
+                    && let Some(edits) = &self.summary.edits
+                {
+                    return row
+                        .child(inspector_glyph(&theme, icon))
+                        .child(div().flex_1().child(label))
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(0x34d399))
+                                .child(format!("+{}", edits.added)),
+                        )
+                        .child(
+                            div()
+                                .text_color(gpui::rgb(0xf87171))
+                                .child(format!("−{}", edits.removed)),
+                        )
+                        .into_any_element();
                 }
                 row.child(inspector_glyph(&theme, icon))
                     .child(div().flex_1().child(label))

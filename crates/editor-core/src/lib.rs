@@ -175,10 +175,10 @@ impl Core {
     }
 
     pub fn navigate(&mut self, screen: Screen, cx: &mut Context<Self>) {
-        if let Screen::Thread { host, thread } = &screen {
-            if let Some(host) = self.host(host).cloned() {
-                host.update(cx, |host, cx| host.ensure_thread(thread, cx));
-            }
+        if let Screen::Thread { host, thread } = &screen
+            && let Some(host) = self.host(host).cloned()
+        {
+            host.update(cx, |host, cx| host.ensure_thread(thread, cx));
         }
         if screen == self.screen {
             return;
@@ -204,10 +204,10 @@ impl Core {
 
     pub fn go_back(&mut self, cx: &mut Context<Self>) {
         if let Some(screen) = self.back.pop() {
-            if let Screen::Thread { host, thread } = &screen {
-                if let Some(host) = self.host(host).cloned() {
-                    host.update(cx, |host, cx| host.ensure_thread(thread, cx));
-                }
+            if let Screen::Thread { host, thread } = &screen
+                && let Some(host) = self.host(host).cloned()
+            {
+                host.update(cx, |host, cx| host.ensure_thread(thread, cx));
             }
             self.screen = screen;
             cx.emit(CoreEvent::ScreenChanged);

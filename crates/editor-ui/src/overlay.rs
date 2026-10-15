@@ -85,10 +85,8 @@ pub fn dismiss(id: &str, window: &mut Window, cx: &mut App) {
         host.windows.remove(&window_id);
     }
     release_image(removed.image, cx);
-    if was_top {
-        if let Some(opener) = removed.opener {
-            opener.focus(window, cx);
-        }
+    if was_top && let Some(opener) = removed.opener {
+        opener.focus(window, cx);
     }
     window.refresh();
 }

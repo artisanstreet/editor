@@ -609,20 +609,20 @@ fn paint_silhouette(
     if let Some(right) = strip {
         paint_strip_blur(bounds, tab_width, radius, right, material.blur, window);
         if let Some(path) = &paths.strip {
-            window.paint_path(translated(path, bounds.origin), material.strip.clone());
-            window.paint_path(translated(path, bounds.origin), material.highlight.clone());
+            window.paint_path(translated(path, bounds.origin), material.strip);
+            window.paint_path(translated(path, bounds.origin), material.highlight);
         }
     }
     if let Some(path) = &paths.well {
         window.paint_path(translated(path, bounds.origin), material.well);
     }
     if let Some(path) = &paths.shell {
-        window.paint_path(translated(path, bounds.origin), material.shell.clone());
-        window.paint_path(translated(path, bounds.origin), material.highlight.clone());
+        window.paint_path(translated(path, bounds.origin), material.shell);
+        window.paint_path(translated(path, bounds.origin), material.highlight);
     }
     if let Some(path) = &paths.edge {
         window.paint_path(translated(path, bounds.origin), material.ring);
-        window.paint_path(translated(path, bounds.origin), material.top_light.clone());
+        window.paint_path(translated(path, bounds.origin), material.top_light);
     }
     if let Some(right) = strip {
         paint_strip_card_edge(

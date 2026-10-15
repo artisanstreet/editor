@@ -223,10 +223,8 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                             })
                     })
                     .on_click(move |_, window, cx| {
-                        if !disabled {
-                            if let Some(change) = &click_change {
-                                change(value.clone(), window, cx);
-                            }
+                        if !disabled && let Some(change) = &click_change {
+                            change(value.clone(), window, cx);
                         }
                     })
                     .on_key_down(move |event, window, cx| {

@@ -538,7 +538,7 @@ impl Render for SliderGallery {
             .disabled(self.disabled)
             .debug_selector("gallery-slider"),
         );
-        crate::slider::Slider::follow_drag(root, &[self.slider.clone()])
+        crate::slider::Slider::follow_drag(root, std::slice::from_ref(&self.slider))
     }
 }
 #[gpui::test]

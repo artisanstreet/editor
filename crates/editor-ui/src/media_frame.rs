@@ -8,6 +8,7 @@ use gpui::{
 };
 
 type Activation = Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type Visible = Box<dyn Fn(&mut App)>;
 enum Size {
     Aspect(f32),
     Attachment,
@@ -26,7 +27,7 @@ pub struct MediaFrame {
     selector: Option<SharedString>,
     activation: Option<(SharedString, Activation)>,
     error: bool,
-    visible: Option<Box<dyn Fn(&mut App)>>,
+    visible: Option<Visible>,
 }
 impl MediaFrame {
     /// Sent attachments keep the original 96px transcript thumbnail recipe.

@@ -17,13 +17,15 @@ use gpui::{
 };
 use std::rc::Rc;
 
+type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
+
 #[derive(IntoElement)]
 pub struct Popover {
     id: SharedString,
     label: SharedString,
     position: Point<Pixels>,
     content: AnyElement,
-    dismiss: Rc<dyn Fn(&mut Window, &mut App)>,
+    dismiss: Dismiss,
     menu_padding: Pixels,
     quiet_glass: bool,
 }
@@ -64,7 +66,7 @@ impl RenderOnce for Popover {
         let root_id = self.id.clone();
         let id = self.id;
         let dismiss = self.dismiss;
-        let close: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| {
+        let close: Dismiss = Rc::new(move |window, cx| {
             overlay::dismiss(&id, window, cx);
             dismiss(window, cx);
         });

@@ -10,10 +10,9 @@ fn main() {
     if let Ok(output) = std::process::Command::new("git")
         .args(["symbolic-ref", "-q", "HEAD"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            watch_git_path(String::from_utf8_lossy(&output.stdout).trim());
-        }
+        watch_git_path(String::from_utf8_lossy(&output.stdout).trim());
     }
     let commit = std::env::var("EDITOR_COMMIT")
         .ok()
@@ -42,12 +41,11 @@ fn watch_git_path(name: &str) {
     if let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "--git-path", name])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            println!(
-                "cargo:rerun-if-changed={}",
-                String::from_utf8_lossy(&output.stdout).trim()
-            );
-        }
+        println!(
+            "cargo:rerun-if-changed={}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
     }
 }

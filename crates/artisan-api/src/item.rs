@@ -148,16 +148,30 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolKind {
-    /// A message to another agent or session.
+    /// A message between this thread's agents, or with another session.
     AgentMessage {
-        /// The engine's address for the recipient (Claude's `to`).
+        /// The engine's address for the other side: who it went to (Claude's
+        /// `to`), or who sent it when it came in.
         recipient: String,
-        /// The thread's `Agent` item the message went to, when the recipient
-        /// is one; Forge resolves it from the address.
+        /// The thread's `Agent` item on the other side, when it is one; Forge
+        /// resolves it from the address.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<ItemId>,
         summary: Option<String>,
         text: TextContent,
+        #[serde(default, skip_serializing_if = "MessageDirection::is_sent")]
+        direction: MessageDirection,
+    },
+    /// Work on agents or background jobs as a whole: listing, waiting for or
+    /// stopping them.
+    Agents {
+        action: AgentAction,
+        /// The engine's addresses for the agents or jobs it acted on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        addresses: Vec<String>,
+        /// The thread's `Agent` items among them; Forge resolves them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        targets: Vec<ItemId>,
     },
     Shell {
         command: TextContent,
@@ -197,6 +211,32 @@ pub enum ToolKind {
         #[serde(default)]
         input: Option<TextContent>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageDirection {
+    #[default]
+    Sent,
+    /// Came in from another agent or session.
+    Received,
+    /// A subagent's report to whoever started it.
+    Report,
+}
+
+impl MessageDirection {
+    #[must_use]
+    pub fn is_sent(&self) -> bool {
+        *self == Self::Sent
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAction {
+    List,
+    Wait,
+    Stop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

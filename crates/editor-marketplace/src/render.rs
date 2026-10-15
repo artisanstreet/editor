@@ -60,10 +60,10 @@ pub(crate) fn entries(catalog: &[artisan_api::CatalogSkill]) -> Vec<Entry> {
             continue;
         }
         entries.push(Entry::Group { title, intro });
-        if rows.is_empty() {
-            if let Some(text) = empty {
-                entries.push(Entry::Empty(text));
-            }
+        if rows.is_empty()
+            && let Some(text) = empty
+        {
+            entries.push(Entry::Empty(text));
         }
         let count = rows.len();
         entries.extend(

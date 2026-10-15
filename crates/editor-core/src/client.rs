@@ -710,6 +710,12 @@ pub(crate) async fn read_body(response: reqwest::Response, limit: usize) -> Resu
     Ok(bytes)
 }
 
+fn source_ranges() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
+    static RANGES: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    RANGES.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,10 +816,4 @@ mod tests {
         let error = decode_state(bytes).unwrap_err();
         assert!(error.downcast_ref::<serde_json::Error>().is_some());
     }
-}
-
-fn source_ranges() -> &'static std::sync::Arc<tokio::sync::Semaphore> {
-    static RANGES: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-        std::sync::OnceLock::new();
-    RANGES.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)))
 }

@@ -128,6 +128,7 @@ fn parse_legacy_agent_message(input: &str) -> Option<ToolKind> {
         target: None,
         summary: field("summary"),
         text: (field("message").unwrap_or_default()).into(),
+        direction: artisan_api::MessageDirection::Sent,
     })
 }
 

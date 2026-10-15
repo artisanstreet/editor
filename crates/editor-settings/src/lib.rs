@@ -135,14 +135,13 @@ impl Settings {
         self.engines
             .sync(host.as_ref().map(|host| host.read(cx).id.clone()));
         if self.page(cx) == SettingsPage::Threads {
-            if let Some(host) = &host {
-                if !host.read(cx).thread_page(true).loaded
-                    && !host.read(cx).thread_page(true).loading
-                {
-                    host.update(cx, |host, cx| {
-                        host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx)
-                    });
-                }
+            if let Some(host) = &host
+                && !host.read(cx).thread_page(true).loaded
+                && !host.read(cx).thread_page(true).loading
+            {
+                host.update(cx, |host, cx| {
+                    host.load_threads(true, editor_core::ThreadPageDirection::Latest, cx)
+                });
             }
             self.archive.sync(host.as_ref(), cx);
         }

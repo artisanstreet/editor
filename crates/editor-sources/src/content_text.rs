@@ -131,9 +131,8 @@ impl ContentText {
         self.error = None;
         self.action = Some(cx.spawn(async move |this, cx| {
             let result = async {
-                match picker.await?? {
-                    Some(path) => client.export_content(&source, path).await?,
-                    None => {}
+                if let Some(path) = picker.await?? {
+                    client.export_content(&source, path).await?;
                 }
                 Ok::<_, anyhow::Error>(())
             }

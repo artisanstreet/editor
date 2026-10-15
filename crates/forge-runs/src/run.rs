@@ -459,6 +459,21 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             {
                 *target = store.agent_by_address(&thread_id, recipient).await?;
             }
+            if let ItemKind::Tool {
+                tool:
+                    ToolKind::Agents {
+                        addresses, targets, ..
+                    },
+                ..
+            } = &mut kind
+                && targets.is_empty()
+            {
+                for address in addresses.iter() {
+                    if let Some(agent) = store.agent_by_address(&thread_id, address).await? {
+                        targets.push(agent);
+                    }
+                }
+            }
             let parent_id = match parent {
                 Some(parent) => Some(parent_of(store, run, items, &parent).await?),
                 None => None,

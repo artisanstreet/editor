@@ -2,7 +2,7 @@
 
 use super::decoder::str_at;
 use artisan_api::{
-    FileChange, FileOp, PlanStep, Question, QuestionOption, SearchMode, StepStatus, ToolKind,
+    AgentAction, FileChange, FileOp, MessageDirection, PlanStep, Question, QuestionOption, SearchMode, StepStatus, ToolKind,
 };
 use serde_json::Value;
 
@@ -83,8 +83,35 @@ pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
                 target: None,
                 summary: optional("summary").filter(|summary| !summary.trim().is_empty()),
                 text: (text("message")).into(),
+                direction: MessageDirection::Sent,
             }
         }
+        "SubagentHandback" => ToolKind::AgentMessage {
+            recipient: "main".to_owned(),
+            target: None,
+            summary: None,
+            text: (text("message")).into(),
+            direction: MessageDirection::Report,
+        },
+        "ListAgents" => ToolKind::Agents {
+            action: AgentAction::List,
+            addresses: Vec::new(),
+            targets: Vec::new(),
+        },
+        // An agent's id or a background shell's; Forge finds the agent.
+        "TaskStop" | "KillShell" => ToolKind::Agents {
+            action: AgentAction::Stop,
+            addresses: optional("task_id")
+                .or_else(|| optional("shell_id"))
+                .into_iter()
+                .collect(),
+            targets: Vec::new(),
+        },
+        "Monitor" => ToolKind::Shell {
+            command: (text("command")).into(),
+            cwd: None,
+            background: true,
+        },
         _ => {
             let input = (!input.is_null()).then(|| input.to_string());
             match name
@@ -110,7 +137,7 @@ pub(super) fn validate_input(name: &str, input: &Value) -> Result<(), String> {
         return Err("Claude tool omitted its name".into());
     }
     let fields: &[(&str, bool)] = match name {
-        "Bash" | "PowerShell" => &[("command", false)],
+        "Bash" | "PowerShell" | "Monitor" => &[("command", false)],
         "Read" | "MultiEdit" => &[("file_path", false)],
         "Edit" => &[
             ("file_path", false),
@@ -123,6 +150,7 @@ pub(super) fn validate_input(name: &str, input: &Value) -> Result<(), String> {
         "WebFetch" => &[("url", false)],
         "WebSearch" => &[("query", false)],
         "SendMessage" => &[("to", false), ("message", false)],
+        "SubagentHandback" => &[("message", false)],
         "Task" | "Agent" => &[("prompt", false), ("description", false)],
         _ => &[],
     };

@@ -807,7 +807,7 @@ async fn engine_action(
                         engines.refresh(engine).await;
                     }
                     Err(error) => {
-                        tracing::warn!(%engine, action = label, "engine command failed: {error:#}")
+                        tracing::warn!(%engine, action = label, "engine command failed: {error:#}");
                     }
                 }
             });
