@@ -422,7 +422,7 @@ async fn explicit_agent_message_repair_preserves_identity_and_is_idempotent() {
         Some("native-send")
     );
     assert!(
-        matches!(repaired.kind, ItemKind::Tool { tool: ToolKind::AgentMessage { recipient, target: None, summary, text}, exit_code: Some(0), .. } if recipient == "uds:/tmp/session" && summary.as_deref() == Some("Update") && text.inline() == Some("Hello"))
+        matches!(repaired.kind, ItemKind::Tool { tool: ToolKind::AgentMessage { recipient, target: None, summary, text, ..}, exit_code: Some(0), .. } if recipient == "uds:/tmp/session" && summary.as_deref() == Some("Update") && text.inline() == Some("Hello"))
     );
     let head = store.head();
     assert_eq!(legacy::normalize_agent_messages(&store).await.unwrap(), 0);

@@ -1,7 +1,7 @@
 use artisan_api::{
     BlobHash, CreateProject, CreateThread, EngineConfig, EngineId, Event, Item, ItemId, ItemKind,
-    ItemsQuery, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus, Status, ThreadId,
-    ToolKind, Usage, now,
+    ItemsQuery, MessageDirection, Permissions, Phase, ProjectId, Question, Run, RunId, RunStatus,
+    Status, ThreadId, ToolKind, Usage, now,
 };
 use forge_store::{BlobRejected, NewItem, Store};
 use std::path::{Path, PathBuf};
@@ -1276,6 +1276,7 @@ async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
             target: Some(owner.id.clone()),
             summary: None,
             text: "hello".into(),
+            direction: MessageDirection::Sent,
         },
         title: None,
         output: None,
