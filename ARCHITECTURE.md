@@ -72,8 +72,8 @@ takes the next seq in the writer thread and is published in commit order.
   gets `Reset` and refetches `/state`.
 - `GET /threads/:id/items?before|after|limit` → pages of a thread.
 
-The Editor's connection (`editor-core/src/connection.rs`) is a statig
-machine: disconnected → connecting → live → backoff → retrying, resuming from
+The Editor's connection (`editor-core/src/connection.rs`) is a plain state
+enum: disconnected → connecting → live → backoff → retrying, resuming from
 its last seq after any drop. `HostData` holds what that Forge sent;
 sections read it and subscribe to `HostEvent`.
 
@@ -114,7 +114,7 @@ Adapters are tested with recorded transcripts
 (`forge-engines/transcripts/<engine>/*.jsonl`) and insta snapshots.
 
 Engines install into `<data>/engines/<engine>/versions/<v>` with `current`
-and `previous` (statig `Install` machine); each runs with its own `HOME`
+and `previous` (an `Install` state enum); each runs with its own `HOME`
 under `<data>/engines/<engine>/home`. Skills (`<data>/extensions/skills`),
 MCP servers and the global prompt (settings `mcp_servers`, `global_prompt`)
 are materialised into each engine's own config format at launch.
@@ -142,16 +142,19 @@ No central command enum; the binary only lays sections out.
 
 The conversation keeps one copy of the open thread: a window of items keyed
 by position, upserted from events; live text from `HostData`; UI state per
-item. The **Viewport** statig machine (Following ⇄ Reading → Jumping) decides
-which range stays loaded and fetches pages at the edges. Render is a pure
-function of those three. Run phase and disclosure are computed, not stored.
+item. The **Viewport** (Following ⇄ Reading → Jumping; inputs in, effects
+out) decides which range stays loaded and fetches pages at the edges. Body
+text is prepared by `Bodies`, which the conversation owns; rows draw a
+prepared `Body` set on them and are cached views. Render is a pure function
+of those. Run phase and disclosure are computed, not stored.
 
 ## State machines
 
-statig, only for real lifecycles with transitions that matter:
-Forge connection (editor-core), engine Install (forge-engines), Viewport
-(conversation), Attachment and Send (composer). Everything else is data plus
-derived functions.
+Plain `enum State` plus a transition function, only for real lifecycles with
+transitions that matter: Forge connection (editor-core), engine Install
+(forge-engines), Viewport (conversation), Attachment (composer). No state
+machine library. Everything else is data plus derived functions; stale async
+work is cancelled by dropping its task, not fenced with generation counters.
 
 ## Files
 
