@@ -1,6 +1,7 @@
 //! Forge-owned directory browsing is identical for every paired host.
 use artisan_api::{CreateProject, DirListing, Project, ProjectId};
 use editor_core::ForgeClient;
+use editor_ui::theme::{RadiusStep, RadiusTokens};
 use editor_ui::{
     AssetId,
     asset_seam::asset_glyph,
@@ -218,7 +219,7 @@ impl Render for FolderPicker {
                                 .items_center()
                                 .gap(px(8.0))
                                 .px(px(8.0))
-                                .rounded(px(6.0))
+                                .rounded(RadiusTokens::value(RadiusStep::Sm))
                                 .when(!busy, |row| {
                                     row.cursor_pointer()
                                         .hover(move |style| style.bg(theme.colors.muted.to_paint()))
@@ -277,7 +278,7 @@ impl Render for FolderPicker {
                         .px(px(12.0))
                         .flex()
                         .items_center()
-                        .rounded(px(8.0))
+                        .rounded(RadiusTokens::value(RadiusStep::Md))
                         .bg(theme.colors.primary.to_paint())
                         .text_color(theme.colors.primary_foreground.to_paint())
                         .when(!can_add, |button| button.opacity(0.5))

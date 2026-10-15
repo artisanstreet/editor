@@ -32,7 +32,8 @@ impl RenderOnce for Card {
         let theme = self.theme;
         let style = CardStyle::resolve(theme);
         let padding = style.content_horizontal_padding;
-        let mut root = compact_card(style).w_full().py(px(0.0));
+        // Divided bands meet at their hairlines: no gap, no outer padding.
+        let mut root = compact_card(style).w_full().gap(px(0.0)).py(px(0.0));
         if !self.divided {
             root = root.py(padding);
         }

@@ -19,6 +19,7 @@ pub use goal_strip::{ComposerGoal, ComposerGoalState};
 pub use questionnaire::ComposerQuestionnaire;
 
 use editor_ui::text_editor::{PastedFiles, TextEditor, TextEditorEvent};
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme, TextStep, TypographyTokens};
 
 use anyhow::Context as _;
 use artisan_api::{
@@ -31,7 +32,6 @@ use editor_ui::AssetId;
 use editor_ui::button::{Button, ButtonShape, ButtonVariant};
 use editor_ui::glass::ComposerFrame;
 use editor_ui::tab_card::{TabCard, TabCardStrip};
-use editor_ui::theme::ArtisanTheme;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderImage, SharedString,
@@ -1280,10 +1280,10 @@ impl Render for Composer {
         reason = "one GPUI builder stacks the card, its tab, the error line and the picker tooltip in visual order"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         self.viewport_width = f32::from(window.viewport_size().width);
         self.viewport_height = f32::from(window.viewport_size().height);
-        let desktop = theme.workspace;
+        let desktop = theme.colors;
         // Each time the draft empties again, the next phrase shows.
         let placeholder_visible = !self.has_text && self.attachments.is_empty();
         if let Some(answer) = self.answer_placeholder(cx) {
@@ -1319,7 +1319,7 @@ impl Render for Composer {
             .items_center()
             .justify_between()
             .gap(px(8.0))
-            .text_color(desktop.secondary)
+            .text_color(desktop.workspace_secondary.to_paint())
             .child(
                 div()
                     .flex()
@@ -1350,7 +1350,7 @@ impl Render for Composer {
                 )
             }));
         // Open agent questions extend the card upward, above the editor.
-        if let Some(panel) = self.render_questionnaires(desktop, cx) {
+        if let Some(panel) = self.render_questionnaires(&desktop, cx) {
             card = card.child(panel);
         }
         if !self.writing_answer() && !self.attachments.is_empty() {
@@ -1358,7 +1358,7 @@ impl Render for Composer {
         }
         card = card.child(self.editor.clone());
         // The mention menu hangs above the card at its full width.
-        if let Some(menu) = self.render_mention_menu(window, desktop, cx) {
+        if let Some(menu) = self.render_mention_menu(window, &desktop, cx) {
             card = card.child(menu);
         }
         card = card.child(controls);
@@ -1371,7 +1371,7 @@ impl Render for Composer {
             .child(ComposerFrame::new(theme, card));
 
         // The tab frames only the card; the goal grows out of it.
-        let card = match self.render_tab(&theme, desktop, cx) {
+        let card = match self.render_tab(&theme, &desktop, cx) {
             Some(tab) => {
                 let mut moving = false;
                 let strip = self
@@ -1400,7 +1400,7 @@ impl Render for Composer {
             shell = shell.child(
                 div()
                     .px(px(12.0))
-                    .text_size(px(13.0))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .text_color(theme.colors.destructive.to_paint())
                     .child(error),
             );

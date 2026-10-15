@@ -12,6 +12,8 @@ legacy-import = []
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+artisan-mentions = { path = "../artisan-mentions" }
+forge-content = { path = "../forge-content" }
 base64.workspace = true
 chrono.workspace = true
 vte.workspace = true

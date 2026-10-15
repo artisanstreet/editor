@@ -65,7 +65,6 @@ impl RequestPresenter<'_> {
                 (approval.as_ref(), files)
             }
             ItemKind::Plan { approval, .. } => (approval.as_ref(), Vec::new()),
-            ItemKind::Approval { approval, .. } => (Some(approval), Vec::new()),
             _ => (None, Vec::new()),
         };
         let Some(approval) = approval else {

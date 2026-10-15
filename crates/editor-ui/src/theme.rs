@@ -1,4 +1,4 @@
-//! Typed application theme, resolved once per mode. OKLCH source colors retain cached GPUI paint values.
+//! Typed application theme, resolved once. OKLCH source colors retain cached GPUI paint values.
 
 use std::sync::OnceLock;
 
@@ -89,6 +89,33 @@ impl Oklch {
         match self.paint {
             Some((source, paint)) if source == [self.l, self.c, self.h, self.a] => paint,
             _ => srgb_to_hsla(self.to_srgb()),
+        }
+    }
+
+    /// An opaque sRGB colour (`0xRRGGBB`) as its OKLCH source value. Paint
+    /// keeps the exact sRGB bytes, so native chrome renders the hex as given.
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "each sRGB channel is a masked byte, so the conversion is exact"
+    )]
+    pub fn from_srgb_hex(hex: u32) -> Self {
+        let channel = |shift: u32| ((hex >> shift) & 0xff) as f32 / 255.0;
+        let srgb = SrgbComponents {
+            r: channel(16),
+            g: channel(8),
+            b: channel(0),
+            a: 1.0,
+        };
+        let oklch = color::AlphaColor::<color::Srgb>::new([srgb.r, srgb.g, srgb.b, srgb.a])
+            .convert::<color::Oklch>()
+            .components;
+        Self {
+            l: oklch[0],
+            c: oklch[1],
+            h: oklch[2],
+            a: oklch[3],
+            paint: Some((oklch, srgb_to_hsla(srgb))),
         }
     }
 
@@ -290,17 +317,7 @@ impl SurfaceStep {
     }
 }
 
-/// Light or dark presentation; dark is the default.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub enum ThemeMode {
-    /// Light presentation.
-    Light,
-    /// Dark presentation and the application default.
-    #[default]
-    Dark,
-}
-
-/// Semantic colors resolved for the selected mode.
+/// Semantic colors, including the native workspace chrome roles.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorTokens {
     /// `--background`.
@@ -308,7 +325,7 @@ pub struct ColorTokens {
     /// `--foreground-base`, the pure ramp endpoint text color derives from.
     pub foreground_base: Oklch,
     /// `--foreground`: `color-mix(in oklch, base 90%, background)` resolved
-    /// per CSS Color 4 powerless-hue rules (see `ArtisanTheme::for_mode`).
+    /// per CSS Color 4 powerless-hue rules (see `ArtisanTheme::colors`).
     pub foreground: Oklch,
     /// `--foreground-extra`.
     pub foreground_extra: Oklch,
@@ -370,6 +387,32 @@ pub struct ColorTokens {
     pub ring: Oklch,
     /// `--chart-1` … `--chart-5` (:44–48 / :295–299).
     pub charts: [Oklch; 5],
+    /// Native titlebar and outer chrome background (`#0a0a0a`).
+    pub chrome: Oklch,
+    /// Main workspace background (`#0a0a0a`).
+    pub workspace: Oklch,
+    /// Sidebar and composer surface (`#111111`).
+    pub sidebar: Oklch,
+    /// Workspace hairline rules (`#292929`).
+    pub line: Oklch,
+    /// Workspace primary text (`#ededed`).
+    pub workspace_foreground: Oklch,
+    /// Workspace secondary text (`#a1a1a1`).
+    pub workspace_secondary: Oklch,
+    /// Selected row background (`#242424`).
+    pub selected: Oklch,
+    /// Primary action background (`#ededed`).
+    pub primary_action: Oklch,
+    /// Primary action foreground (`#0a0a0a`).
+    pub primary_action_foreground: Oklch,
+    /// Search and composer input surface (`#171717`).
+    pub field: Oklch,
+    /// Input border (`#333333`).
+    pub field_line: Oklch,
+    /// Search result surface border (`#383838`).
+    pub popover_line: Oklch,
+    /// Keyboard shortcut capsule border (`#3a3a3a`).
+    pub shortcut_line: Oklch,
 }
 
 /// Font families and text sizes shared by application components.
@@ -387,6 +430,53 @@ pub struct TypographyTokens {
     pub editor_text_desktop: Pixels,
     /// Labels, group headings, shortcuts: `text-xs`, 12 px.
     pub label_text: Pixels,
+}
+
+/// The text-size ramp: 10, 11, 12, 12.5, 13, 14, 15, 16, 18, 20 and 22 px.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum TextStep {
+    /// 10 px: glass badges and code annotations.
+    X3s,
+    /// 11 px.
+    X2s,
+    /// `text-xs`, 12 px: labels, captions and tooltips.
+    Xs,
+    /// 12.5 px: terminal output.
+    Terminal,
+    /// 13 px: compact chrome (tabs, card captions).
+    XsMid,
+    /// `text-sm`, 14 px: controls and rows.
+    Sm,
+    /// 15 px.
+    SmMid,
+    /// `text-base`, 16 px.
+    Base,
+    /// `text-lg`, 18 px.
+    Lg,
+    /// `text-xl`, 20 px: page titles.
+    Xl,
+    /// 22 px: stat values.
+    X2l,
+}
+
+impl TypographyTokens {
+    /// The exact pixel size of a text step.
+    #[must_use]
+    pub const fn size(step: TextStep) -> Pixels {
+        match step {
+            TextStep::X3s => px(10.0),
+            TextStep::X2s => px(11.0),
+            TextStep::Xs => px(12.0),
+            TextStep::Terminal => px(12.5),
+            TextStep::XsMid => px(13.0),
+            TextStep::Sm => px(14.0),
+            TextStep::SmMid => px(15.0),
+            TextStep::Base => px(16.0),
+            TextStep::Lg => px(18.0),
+            TextStep::Xl => px(20.0),
+            TextStep::X2l => px(22.0),
+        }
+    }
 }
 
 /// A bundled font family.
@@ -538,9 +628,16 @@ impl SpacingTokens {
     }
 }
 
-/// Shared corner radii: 4, 6, 8, 10, 14, 18, 22 and 26 px.
+/// Shared corner radii: the 4–26 px ramp, with the hairline steps below it
+/// and the half steps between its larger values.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum RadiusStep {
+    /// 1 px: chart bars and hairline marks.
+    X3s,
+    /// 2 px: thin bars and carets.
+    X2s,
+    /// 3 px: small image marks.
+    X2sMid,
     /// `--radius-xs` — 4 px.
     Xs,
     /// `--radius-sm` — 6 px.
@@ -549,10 +646,16 @@ pub enum RadiusStep {
     Md,
     /// `--radius-lg` — 10 px.
     Lg,
+    /// 12 px: menu rows.
+    LgMid,
     /// `--radius-xl` — 14 px.
     Xl,
+    /// 16 px.
+    XlMid,
     /// `--radius-2xl` — 18 px.
     X2l,
+    /// 20 px.
+    X2lMid,
     /// `--radius-3xl` — 22 px.
     X3l,
     /// `--radius-4xl` — 26 px.
@@ -571,12 +674,18 @@ impl RadiusTokens {
     #[must_use]
     pub const fn value(step: RadiusStep) -> Pixels {
         match step {
+            RadiusStep::X3s => px(1.0),
+            RadiusStep::X2s => px(2.0),
+            RadiusStep::X2sMid => px(3.0),
             RadiusStep::Xs => px(4.0),
             RadiusStep::Sm => px(6.0),
             RadiusStep::Md => px(8.0),
             RadiusStep::Lg => px(10.0),
+            RadiusStep::LgMid => px(12.0),
             RadiusStep::Xl => px(14.0),
+            RadiusStep::XlMid => px(16.0),
             RadiusStep::X2l => px(18.0),
+            RadiusStep::X2lMid => px(20.0),
             RadiusStep::X3l => px(22.0),
             RadiusStep::X4l => px(26.0),
         }
@@ -673,16 +782,12 @@ pub struct InteractionTokens {
     pub hover_fill_bottom: Oklch,
 }
 
-/// The complete Artisan theme, selected explicitly by mode and composed from
-/// typed token groups. Values only: nothing here registers globals, observes
-/// windows, or renders widgets.
+/// The complete Artisan theme, composed from typed token groups. The app
+/// installs it once as a GPUI global ([`install`]); everything reads it
+/// through [`ActiveTheme::theme`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArtisanTheme {
-    /// The mode this theme was built for.
-    pub mode: ThemeMode,
-    /// Native workspace roles resolved with the selected theme.
-    pub workspace: WorkspaceColors,
-    /// Semantic colors for [`Self::mode`].
+    /// Semantic and workspace colors.
     pub colors: ColorTokens,
     /// Font families and text sizes.
     pub typography: TypographyTokens,
@@ -690,40 +795,54 @@ pub struct ArtisanTheme {
     pub spacing: SpacingTokens,
     /// The corner ramp and nested-radius arithmetic.
     pub radius: RadiusTokens,
-    /// Card and menu shadows for this mode.
+    /// Card and menu shadows.
     pub elevation: ElevationTokens,
     /// Shared control sizes.
     pub density: DensityTokens,
-    /// Focus, selection, and hover-fill treatments for this mode.
+    /// Focus, selection, and hover-fill treatments.
     pub interaction: InteractionTokens,
 }
 
+impl gpui::Global for ArtisanTheme {}
+
+/// Installs the application theme. The app calls this once at startup.
+pub fn install(cx: &mut gpui::App) {
+    cx.set_global(ArtisanTheme::resolved());
+}
+
+/// Reads the installed application theme.
+pub trait ActiveTheme {
+    /// The application theme.
+    fn theme(&self) -> &ArtisanTheme;
+}
+
+impl ActiveTheme for gpui::App {
+    /// The installed theme. A context nothing installed into (a component
+    /// test) reads the same resolved values.
+    fn theme(&self) -> &ArtisanTheme {
+        self.try_global::<ArtisanTheme>()
+            .unwrap_or_else(|| ArtisanTheme::resolved_ref())
+    }
+}
+
 impl ArtisanTheme {
-    /// Returns the cached theme for this mode.
+    /// The resolved theme values, built once. Production code reads the
+    /// installed global through [`ActiveTheme::theme`].
     #[must_use]
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        static LIGHT: OnceLock<ArtisanTheme> = OnceLock::new();
-        static DARK: OnceLock<ArtisanTheme> = OnceLock::new();
-        *match mode {
-            ThemeMode::Light => &LIGHT,
-            ThemeMode::Dark => &DARK,
-        }
-        .get_or_init(|| Self::build(mode))
+    pub fn resolved() -> Self {
+        *Self::resolved_ref()
     }
 
-    fn build(mode: ThemeMode) -> Self {
-        let colors = match mode {
-            ThemeMode::Light => Self::light_colors(),
-            ThemeMode::Dark => Self::dark_colors(),
-        };
-        let highlight = match mode {
-            ThemeMode::Light => SurfaceStep::S950.oklch(),
-            ThemeMode::Dark => SurfaceStep::S50.oklch(),
-        };
+    fn resolved_ref() -> &'static Self {
+        static THEME: OnceLock<ArtisanTheme> = OnceLock::new();
+        THEME.get_or_init(Self::build)
+    }
+
+    fn build() -> Self {
+        let colors = Self::colors();
+        let highlight = SurfaceStep::S50.oklch();
 
         let mut theme = Self {
-            mode,
-            workspace: WorkspaceColors::for_mode(mode),
             colors,
             typography: TypographyTokens {
                 sans: FontRole {
@@ -755,10 +874,7 @@ impl ArtisanTheme {
                 focus_ring_width: px(3.0),
                 focus_ring_color: colors.ring.with_alpha(0.5),
                 invalid_ring_color: colors.destructive.with_alpha(0.2),
-                selection_background: Oklch::new(0.5318, 0.1807, 258.26).with_alpha(match mode {
-                    ThemeMode::Light => 0.3,
-                    ThemeMode::Dark => 1.0,
-                }),
+                selection_background: Oklch::new(0.5318, 0.1807, 258.26),
                 hover_fill_top: colors.foreground.with_alpha(0.16),
                 hover_fill_bottom: colors.foreground.with_alpha(0.07),
             },
@@ -801,56 +917,24 @@ impl ArtisanTheme {
         theme.interaction.hover_fill_top = theme.interaction.hover_fill_top.resolved();
         theme.interaction.hover_fill_bottom = theme.interaction.hover_fill_bottom.resolved();
         theme.colors.charts = theme.colors.charts.map(Oklch::resolved);
+        theme.colors.chrome = theme.colors.chrome.resolved();
+        theme.colors.workspace = theme.colors.workspace.resolved();
+        theme.colors.sidebar = theme.colors.sidebar.resolved();
+        theme.colors.line = theme.colors.line.resolved();
+        theme.colors.workspace_foreground = theme.colors.workspace_foreground.resolved();
+        theme.colors.workspace_secondary = theme.colors.workspace_secondary.resolved();
+        theme.colors.selected = theme.colors.selected.resolved();
+        theme.colors.primary_action = theme.colors.primary_action.resolved();
+        theme.colors.primary_action_foreground = theme.colors.primary_action_foreground.resolved();
+        theme.colors.field = theme.colors.field.resolved();
+        theme.colors.field_line = theme.colors.field_line.resolved();
+        theme.colors.popover_line = theme.colors.popover_line.resolved();
+        theme.colors.shortcut_line = theme.colors.shortcut_line.resolved();
         theme
     }
 
-    /// Light-mode semantic colors.
-    fn light_colors() -> ColorTokens {
-        ColorTokens {
-            background: SurfaceStep::S0.oklch(),
-            foreground_base: SurfaceStep::S950.oklch(),
-            foreground: Oklch::new(0.2269, 0.0045, 285.823),
-            foreground_extra: SurfaceStep::S950.oklch(),
-            highlight: SurfaceStep::S950.oklch(),
-            card: SurfaceStep::S0.oklch(),
-            card_foreground: SurfaceStep::S950.oklch(),
-            popover: SurfaceStep::S0.oklch(),
-            popover_foreground: SurfaceStep::S950.oklch(),
-            primary: SurfaceStep::S900.oklch(),
-            primary_foreground: SurfaceStep::S50.oklch(),
-            secondary: SurfaceStep::S100.oklch(),
-            secondary_foreground: SurfaceStep::S900.oklch(),
-            muted: SurfaceStep::S100.oklch(),
-            muted_foreground: SurfaceStep::S500.oklch(),
-            accent: SurfaceStep::S100.oklch(),
-            accent_foreground: SurfaceStep::S900.oklch(),
-            destructive: Oklch::new(0.577, 0.245, 27.325),
-            banner_info: Oklch::new(0.623, 0.214, 259.815),
-            banner_error: Oklch::new(0.577, 0.245, 27.325),
-            banner_warning: Oklch::new(0.681, 0.162, 75.834),
-            banner_success: Oklch::new(0.527, 0.154, 150.069),
-            favorite: Oklch::new(0.706, 0.153, 78.5),
-            unread: Oklch::new(0.685, 0.145, 230.318),
-            question_from: Oklch::new(0.558, 0.288, 302.321),
-            question_to: Oklch::new(0.714, 0.203, 305.504),
-            mention_skill: Oklch::new(0.591, 0.233, 328.0),
-            mention_connector: Oklch::new(0.623, 0.214, 259.815),
-            mention_command: Oklch::new(0.666, 0.179, 58.318),
-            border: SurfaceStep::S200.oklch(),
-            input: SurfaceStep::S200.oklch(),
-            ring: SurfaceStep::S400.oklch(),
-            charts: [
-                SurfaceStep::S300.oklch(),
-                SurfaceStep::S500.oklch(),
-                SurfaceStep::S600.oklch(),
-                SurfaceStep::S700.oklch(),
-                SurfaceStep::S800.oklch(),
-            ],
-        }
-    }
-
-    /// Dark-mode semantic colors.
-    fn dark_colors() -> ColorTokens {
+    /// The semantic and workspace colors.
+    fn colors() -> ColorTokens {
         ColorTokens {
             background: SurfaceStep::S950.oklch(),
             foreground_base: SurfaceStep::S50.oklch(),
@@ -891,10 +975,23 @@ impl ArtisanTheme {
                 SurfaceStep::S700.oklch(),
                 SurfaceStep::S800.oklch(),
             ],
+            chrome: Oklch::from_srgb_hex(0x000a_0a0a),
+            workspace: Oklch::from_srgb_hex(0x000a_0a0a),
+            sidebar: Oklch::from_srgb_hex(0x0011_1111),
+            line: Oklch::from_srgb_hex(0x0029_2929),
+            workspace_foreground: Oklch::from_srgb_hex(0x00ed_eded),
+            workspace_secondary: Oklch::from_srgb_hex(0x00a1_a1a1),
+            selected: Oklch::from_srgb_hex(0x0024_2424),
+            primary_action: Oklch::from_srgb_hex(0x00ed_eded),
+            primary_action_foreground: Oklch::from_srgb_hex(0x000a_0a0a),
+            field: Oklch::from_srgb_hex(0x0017_1717),
+            field_line: Oklch::from_srgb_hex(0x0033_3333),
+            popover_line: Oklch::from_srgb_hex(0x0038_3838),
+            shortcut_line: Oklch::from_srgb_hex(0x003a_3a3a),
         }
     }
 
-    /// Elevation for one mode: the `card` utility stack with its
+    /// Elevation: the `card` utility stack with its
     /// highlight-derived hairline resolved, the floating-menu `shadow-2xl`,
     /// and both inset stacks as recorded-only layers.
     fn elevation(highlight: Oklch) -> ElevationTokens {
@@ -952,96 +1049,6 @@ fn with_alpha(mut base: SrgbComponents, a: f32) -> SrgbComponents {
     base
 }
 
-/// Shared colors for native workspace chrome and controls.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WorkspaceColors {
-    /// Native titlebar and outer chrome background (`#0a0a0a`).
-    pub chrome: Hsla,
-    /// Main workspace background (`#0a0a0a`).
-    pub workspace: Hsla,
-    /// Sidebar and composer surface (`#111111`).
-    pub sidebar: Hsla,
-    /// Hairline rules (`#292929`).
-    pub line: Hsla,
-    /// Primary text (`#ededed`).
-    pub foreground: Hsla,
-    /// Secondary text (`#a1a1a1`).
-    pub secondary: Hsla,
-    /// Selected row background (`#242424`).
-    pub selected: Hsla,
-    /// Primary action background (`#ededed`).
-    pub primary_action: Hsla,
-    /// Primary action foreground (`#0a0a0a`).
-    pub primary_action_foreground: Hsla,
-    /// Search and composer input surface (`#171717`).
-    pub field: Hsla,
-    /// Input border (`#333333`).
-    pub field_line: Hsla,
-    /// Search result surface border (`#383838`).
-    pub popover_line: Hsla,
-    /// Keyboard shortcut capsule border (`#3a3a3a`).
-    pub shortcut_line: Hsla,
-}
-
-impl WorkspaceColors {
-    /// The accepted neutral-dark native workspace palette.
-    #[must_use]
-    fn for_mode(mode: ThemeMode) -> Self {
-        if mode == ThemeMode::Light {
-            let colors = ArtisanTheme::light_colors();
-            return Self {
-                chrome: colors.background.to_paint(),
-                workspace: colors.background.to_paint(),
-                sidebar: colors.card.to_paint(),
-                line: colors.border.to_paint(),
-                foreground: colors.foreground.to_paint(),
-                secondary: colors.muted_foreground.to_paint(),
-                selected: colors.accent.to_paint(),
-                primary_action: colors.primary.to_paint(),
-                primary_action_foreground: colors.primary_foreground.to_paint(),
-                field: colors.muted.to_paint(),
-                field_line: colors.input.to_paint(),
-                popover_line: colors.border.to_paint(),
-                shortcut_line: colors.border.to_paint(),
-            };
-        }
-        Self {
-            chrome: desktop_color(0x000a_0a0a),
-            workspace: desktop_color(0x000a_0a0a),
-            sidebar: desktop_color(0x0011_1111),
-            line: desktop_color(0x0029_2929),
-            foreground: desktop_color(0x00ed_eded),
-            secondary: desktop_color(0x00a1_a1a1),
-            selected: desktop_color(0x0024_2424),
-            primary_action: desktop_color(0x00ed_eded),
-            primary_action_foreground: desktop_color(0x000a_0a0a),
-            field: desktop_color(0x0017_1717),
-            field_line: desktop_color(0x0033_3333),
-            popover_line: desktop_color(0x0038_3838),
-            shortcut_line: desktop_color(0x003a_3a3a),
-        }
-    }
-}
-
-impl Default for ArtisanTheme {
-    fn default() -> Self {
-        Self::for_mode(ThemeMode::Dark)
-    }
-}
-
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "each sRGB channel is a masked byte, so the i32-to-f32 conversion is exact"
-)]
-fn desktop_color(hex: u32) -> Hsla {
-    srgb_to_hsla(SrgbComponents {
-        r: ((hex >> 16) & 0xff) as f32 / 255.0,
-        g: ((hex >> 8) & 0xff) as f32 / 255.0,
-        b: (hex & 0xff) as f32 / 255.0,
-        a: 1.0,
-    })
-}
-
 #[cfg(test)]
 mod reform_tests {
     use super::*;
@@ -1051,7 +1058,7 @@ mod reform_tests {
         let cached = source.resolved();
         assert_eq!(source, cached);
         assert_eq!(source.with_alpha(0.25), cached.with_alpha(0.25));
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         let mut uncached = theme;
         let color = theme.colors.foreground;
         uncached.colors.foreground = Oklch::new(color.l, color.c, color.h).with_alpha(color.a);

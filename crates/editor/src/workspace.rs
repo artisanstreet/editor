@@ -17,7 +17,7 @@ use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::{Button, ButtonVariant};
 use editor_ui::glass::glass_badge;
-use editor_ui::theme::{ArtisanTheme, ProseTypography, SurfaceStep, WorkspaceColors};
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme, ColorTokens, ProseTypography, SurfaceStep};
 use gpui::{
     AnyElement, AppContext as _, Context, Div, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
@@ -326,7 +326,7 @@ impl Workspace {
 
     fn render_copy_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.copy_menu.as_ref()?;
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let rows = menu.entries.iter().enumerate().map(|(index, entry)| {
             let text = entry.text.clone();
             editor_ui::button::Button::text(("copy-value", index), theme, entry.label.clone())
@@ -418,7 +418,7 @@ impl Workspace {
 
     /// The titlebar's leading section above the sidebar: the `Artisan
     /// Editor` wordmark, which goes home, and the build badge.
-    fn brand(theme: &ArtisanTheme, desktop: WorkspaceColors, cx: &Context<Self>) -> Div {
+    fn brand(theme: &ArtisanTheme, desktop: &ColorTokens, cx: &Context<Self>) -> Div {
         div()
             .w_full()
             .flex()
@@ -459,7 +459,7 @@ impl Workspace {
                     .font_weight(FontWeight::SEMIBOLD)
                     // -0.025em tracking matches the Founders specimen.
                     .letter_spacing(px(-0.65))
-                    .text_color(desktop.foreground)
+                    .text_color(desktop.workspace_foreground.to_paint())
                     .child("Artisan Editor"),
             )
             .children(
@@ -641,8 +641,8 @@ impl Workspace {
         window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let theme = ArtisanTheme::default();
-        let desktop = editor_ui::theme::ArtisanTheme::default().workspace;
+        let theme = *cx.theme();
+        let desktop = cx.theme().colors;
         let reading = self.context_reading(cx);
         let controls_width = px(CONTROL_WIDTH * 3.0);
         let meter_right = inspector.unwrap_or(px(0.0)).max(controls_width) + px(CONTEXT_METER_GAP);
@@ -668,7 +668,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .window_control_area(WindowControlArea::Drag)
-                        .child(Self::brand(&theme, desktop, cx)),
+                        .child(Self::brand(&theme, &desktop, cx)),
                 )
         });
         let content = div()
@@ -717,7 +717,7 @@ impl Workspace {
             .flex()
             .items_center()
             .border_b_1()
-            .border_color(desktop.line)
+            .border_color(desktop.line.to_paint())
             .debug_selector(|| "artisan-desktop-titlebar".to_owned())
             .children(brand)
             .child(content)
@@ -730,7 +730,7 @@ impl Workspace {
                     .top(px(0.0))
                     .w(rule)
                     .h(px(TITLEBAR_HEIGHT))
-                    .bg(desktop.line)
+                    .bg(desktop.line.to_paint())
             }))
             .children(inspector.map(|width| {
                 // The inspector's left rule, continued through the bar.
@@ -740,7 +740,7 @@ impl Workspace {
                     .top(px(0.0))
                     .w(rule)
                     .h(px(TITLEBAR_HEIGHT))
-                    .bg(desktop.line)
+                    .bg(desktop.line.to_paint())
                     .debug_selector(|| "artisan-desktop-inspector-titlebar-divider".to_owned())
             }))
             .children(meter)
@@ -748,7 +748,7 @@ impl Workspace {
     }
 
     /// The active host's connection, when it isn't live.
-    fn connection_notice(&self, theme: WorkspaceColors, cx: &Context<Self>) -> Option<AnyElement> {
+    fn connection_notice(&self, desktop: &ColorTokens, cx: &Context<Self>) -> Option<AnyElement> {
         let host = self.core.read(cx).active_host()?.read(cx);
         let text = match &host.status {
             ConnectionStatus::Live => return None,
@@ -762,11 +762,11 @@ impl Workspace {
                 )
             }
         };
-        Some(notice(theme, text, None))
+        Some(notice(desktop, text, None))
     }
 }
 
-fn notice(theme: WorkspaceColors, text: String, dismiss: Option<AnyElement>) -> AnyElement {
+fn notice(desktop: &ColorTokens, text: String, dismiss: Option<AnyElement>) -> AnyElement {
     div()
         .w_full()
         .px(px(14.0))
@@ -774,11 +774,11 @@ fn notice(theme: WorkspaceColors, text: String, dismiss: Option<AnyElement>) -> 
         .flex()
         .items_center()
         .gap(px(8.0))
-        .bg(theme.field)
+        .bg(desktop.field.to_paint())
         .border_b_1()
-        .border_color(theme.line)
+        .border_color(desktop.line.to_paint())
         .text_sm()
-        .text_color(theme.foreground)
+        .text_color(desktop.workspace_foreground.to_paint())
         .child(div().flex_1().child(text))
         .children(dismiss)
         .into_any_element()
@@ -787,7 +787,8 @@ fn notice(theme: WorkspaceColors, text: String, dismiss: Option<AnyElement>) -> 
 impl Render for Workspace {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = editor_ui::theme::ArtisanTheme::default().workspace;
+        let theme = *cx.theme();
+        let desktop = theme.colors;
         let screen = self.core.read(cx).screen().clone();
         let rule = px(1.0 / window.scale_factor().max(0.5));
         let window_width = f32::from(window.viewport_size().width);
@@ -842,7 +843,7 @@ impl Render for Workspace {
                         .top(px(0.0))
                         .bottom(px(0.0))
                         .w(rule)
-                        .bg(theme.line),
+                        .bg(desktop.line.to_paint()),
                 );
             if matches!(screen, Screen::Thread { .. }) {
                 // Cached: it notifies itself, so a frame drawn for anything
@@ -862,19 +863,19 @@ impl Render for Workspace {
                 .h_full()
                 .flex_shrink_0()
                 .border_r_1()
-                .border_color(theme.line)
+                .border_color(desktop.line.to_paint())
                 .debug_selector(|| "artisan-desktop-sidebar".to_owned())
                 .child(self.sidebar.clone())
         });
         let failure = self.failure.clone().map(|text| {
-            let dismiss = Button::text("dismiss-failure", ArtisanTheme::default(), "Dismiss")
+            let dismiss = Button::text("dismiss-failure", *cx.theme(), "Dismiss")
                 .variant(ButtonVariant::Ghost)
                 .on_activate(cx.listener(|this, _, _, cx| {
                     this.failure = None;
                     cx.notify();
                 }))
                 .into_any_element();
-            notice(theme, text, Some(dismiss))
+            notice(&desktop, text, Some(dismiss))
         });
         let titlebar = self.titlebar(
             sidebar_width.map(px),
@@ -915,15 +916,15 @@ impl Render for Workspace {
             // One continuous true-black face; cards and popovers paint their
             // own surfaces above it.
             .bg(gpui::rgb(SHELL_BLACK))
-            .text_color(theme.foreground)
-            .font_family(ArtisanTheme::default().typography.sans.family)
+            .text_color(desktop.workspace_foreground.to_paint())
+            .font_family(cx.theme().typography.sans.family)
             .text_size(px(14.0))
             // One tracking for every text in the window, at its own size.
             .tracking(ProseTypography::TRACKING_EM)
             .debug_selector(|| "artisan-desktop-workspace".to_owned())
             .child(titlebar)
             .children(failure)
-            .children(self.connection_notice(theme, cx))
+            .children(self.connection_notice(&desktop, cx))
             .child(
                 div()
                     .relative()
@@ -950,11 +951,7 @@ impl Render for Workspace {
             .children(self.render_copy_menu(cx))
             // Above everything: an image opened from the composer or a
             // thread.
-            .children(editor_ui::image_preview::overlay(
-                &ArtisanTheme::default(),
-                window,
-                cx,
-            ))
+            .children(editor_ui::image_preview::overlay(&theme, window, cx))
     }
 }
 

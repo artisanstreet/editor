@@ -1,0 +1,109 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 170
+expression: "replay(\"web-search-actions\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "sparse",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: WebSearch {
+                    query: "initial query",
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "sparse",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: WebSearch {
+                    query: "initial query",
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "nested",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: WebSearch {
+                    query: "first; second",
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "page",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: WebSearch {
+                    query: "https://example.test/page",
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Api,
+                message: Inline(
+                    "Provider rejected the request",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Failed,
+            error: Some(
+                "Provider rejected the request",
+            ),
+        },
+    ),
+]

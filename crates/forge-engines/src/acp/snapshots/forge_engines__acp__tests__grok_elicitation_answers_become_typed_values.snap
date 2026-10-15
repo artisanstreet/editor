@@ -1,0 +1,331 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 198
+expression: "replay(Profile::Grok, \"elicitation\")"
+---
+[
+    Event(
+        Item {
+            key: "question:1",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "colour",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Same",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Same",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "question:1",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "colour",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Same",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "Same",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                    ],
+                ),
+                answers: Some(
+                    Inline(
+                        [
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-1",
+                                        ],
+                                    ),
+                                },
+                            ),
+                        ],
+                    ),
+                ),
+                answer_text: None,
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":91,\"result\":{\"action\":\"accept\",\"content\":{\"colour\":\"second\"}}}",
+    ),
+    Event(
+        Item {
+            key: "question:2",
+            parent: None,
+            status: AwaitingUser,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "color",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "count",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "1",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "2",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "counts",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: true,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                        Question {
+                            id: "flag",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                        Question {
+                            id: "number",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                    ],
+                ),
+                answers: None,
+                answer_text: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "answer-error:question:2",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "counts is outside its allowed range",
+                ),
+                retryable: true,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "question:2",
+            parent: None,
+            status: Done,
+            kind: Question {
+                blocking: false,
+                questions: Inline(
+                    [
+                        Question {
+                            id: "color",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "Blue",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "count",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [
+                                    QuestionOption {
+                                        id: "option-0",
+                                        label: "1",
+                                        description: None,
+                                    },
+                                    QuestionOption {
+                                        id: "option-1",
+                                        label: "2",
+                                        description: None,
+                                    },
+                                ],
+                            ),
+                        },
+                        Question {
+                            id: "counts",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: true,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                        Question {
+                            id: "flag",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                        Question {
+                            id: "number",
+                            header: None,
+                            text: Inline(
+                                "Pick",
+                            ),
+                            multi_select: false,
+                            options: Inline(
+                                [],
+                            ),
+                        },
+                    ],
+                ),
+                answers: Some(
+                    Inline(
+                        [
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-0",
+                                        ],
+                                    ),
+                                },
+                            ),
+                            Some(
+                                Choices {
+                                    ids: Inline(
+                                        [
+                                            "option-1",
+                                        ],
+                                    ),
+                                },
+                            ),
+                            Some(
+                                Text {
+                                    text: "[2,3]",
+                                },
+                            ),
+                            Some(
+                                Text {
+                                    text: "false",
+                                },
+                            ),
+                            Some(
+                                Text {
+                                    text: "4",
+                                },
+                            ),
+                        ],
+                    ),
+                ),
+                answer_text: None,
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":92,\"result\":{\"action\":\"accept\",\"content\":{\"color\":\"blue-id\",\"count\":2,\"counts\":[2,3],\"flag\":false,\"number\":4}}}",
+    ),
+]

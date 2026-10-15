@@ -25,7 +25,7 @@ pub fn inspect_agent_messages(data_dir: &Path) -> Result<usize> {
         );
         let body: String = row.get(1)?;
         let item: artisan_api::Item = serde_json::from_str(&body)?;
-        count += usize::from(legacy_agent_message(&conn, &item.kind)?.is_some());
+        count += usize::from(legacy_agent_message(&conn, &item)?.is_some());
     }
     Ok(count)
 }
@@ -62,7 +62,7 @@ pub async fn normalize_agent_messages(store: &Store) -> Result<usize> {
                     let Some(old) = crate::read::item(tx, &id)? else {
                         continue;
                     };
-                    let Some(tool) = legacy_agent_message(tx, &old.kind)? else {
+                    let Some(tool) = legacy_agent_message(tx, &old)? else {
                         continue;
                     };
                     let mut item = old.clone();
@@ -80,8 +80,8 @@ pub async fn normalize_agent_messages(store: &Store) -> Result<usize> {
     Ok(normalized)
 }
 
-fn legacy_agent_message(conn: &Connection, kind: &ItemKind) -> Result<Option<ToolKind>> {
-    let input = match kind {
+fn legacy_agent_message(conn: &Connection, item: &artisan_api::Item) -> Result<Option<ToolKind>> {
+    let input = match &item.kind {
         ItemKind::Tool {
             tool:
                 ToolKind::Other {
@@ -102,7 +102,16 @@ fn legacy_agent_message(conn: &Connection, kind: &ItemKind) -> Result<Option<Too
             std::borrow::Cow::Owned(crate::content::resolve(conn, input)?)
         }
     };
-    Ok(parse_legacy_agent_message(&input))
+    let Some(mut tool) = parse_legacy_agent_message(&input) else {
+        return Ok(None);
+    };
+    if let ToolKind::AgentMessage {
+        recipient, target, ..
+    } = &mut tool
+    {
+        *target = crate::read::agent_by_address(conn, &item.thread_id, recipient)?;
+    }
+    Ok(Some(tool))
 }
 
 fn parse_legacy_agent_message(input: &str) -> Option<ToolKind> {
@@ -114,21 +123,9 @@ fn parse_legacy_agent_message(input: &str) -> Option<ToolKind> {
             .filter(|value| !value.trim().is_empty())
             .map(str::to_owned)
     };
-    let recipient = field("to")?;
-    let recipient_label = if recipient.starts_with("uds:") || recipient.contains('/') {
-        "another session".to_owned()
-    } else if recipient.len() >= 16
-        && recipient
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-    {
-        "an agent".to_owned()
-    } else {
-        recipient.clone()
-    };
     Some(ToolKind::AgentMessage {
-        recipient,
-        recipient_label,
+        recipient: field("to")?,
+        target: None,
         summary: field("summary"),
         text: (field("message").unwrap_or_default()).into(),
     })

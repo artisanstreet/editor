@@ -13,10 +13,6 @@ pub struct Item {
     pub run_id: Option<RunId>,
     /// Set when the item belongs to a subagent: the subagent's `Agent` item.
     pub parent_id: Option<ItemId>,
-    /// The engine's own id (tool_use_id, Codex item id, ACP toolCallId…),
-    /// used only to update the item in place.
-    #[serde(skip)]
-    pub native_id: Option<String>,
     pub status: Status,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -71,12 +67,9 @@ pub enum ItemKind {
         title: Option<String>,
         output: Option<Output>,
         exit_code: Option<i32>,
+        /// Set while the engine asks the user before running it, and kept
+        /// with the decision; the item is `AwaitingUser` until answered.
         approval: Option<Approval>,
-    },
-    /// A user approval request, distinct from the execution it may gate.
-    Approval {
-        target: Option<ItemId>,
-        approval: Approval,
     },
     Agent {
         /// The engine's name for it: a type ("general-purpose"), a nickname
@@ -155,11 +148,14 @@ pub enum Phase {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolKind {
-    /// A normalized message to an agent or session. Adapters own recipient
-    /// interpretation; Clients render this label without provider heuristics.
+    /// A message to another agent or session.
     AgentMessage {
+        /// The engine's address for the recipient (Claude's `to`).
         recipient: String,
-        recipient_label: String,
+        /// The thread's `Agent` item the message went to, when the recipient
+        /// is one; Forge resolves it from the address.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<ItemId>,
         summary: Option<String>,
         text: TextContent,
     },
@@ -454,125 +450,6 @@ impl Item {
         }
     }
 
-    /// Allocated content bytes for resident-window budgets, excluding allocator overhead.
-    #[must_use]
-    pub fn resident_bytes(&self) -> usize {
-        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
-        let payload =
-            |value: &Option<TextContent>| value.as_ref().map_or(0, TextContent::resident_bytes);
-        let approval = |value: Option<&Approval>| {
-            value.map_or(0, |approval| {
-                payload(&approval.reason)
-                    + approval.options.capacity() * size_of::<Decision>()
-                    + match &approval.request {
-                        ApprovalRequest::Command { command, cwd } => {
-                            command.resident_bytes() + optional(cwd)
-                        }
-                        ApprovalRequest::Action { description } => description.resident_bytes(),
-                        ApprovalRequest::FileChange => 0,
-                    }
-            })
-        };
-        let content = match &self.kind {
-            ItemKind::UserMessage { text, images, .. } => {
-                text.resident_bytes()
-                    + images.capacity() * size_of::<BlobHash>()
-                    + images.iter().map(|hash| hash.0.capacity()).sum::<usize>()
-            }
-            ItemKind::AssistantMessage { text, .. } => text.resident_bytes(),
-            ItemKind::Approval {
-                target,
-                approval: request,
-            } => approval(Some(request)) + target.as_ref().map_or(0, |target| target.0.capacity()),
-            ItemKind::Tool {
-                tool,
-                title,
-                output,
-                approval: request,
-                ..
-            } => {
-                tool.resident_bytes()
-                    + optional(title)
-                    + approval(request.as_ref())
-                    + output
-                        .as_ref()
-                        .map_or(0, |output| output.text.resident_bytes())
-            }
-            ItemKind::Agent {
-                name,
-                description,
-                prompt,
-                agent_id,
-                model,
-                result,
-                label,
-                ..
-            } => {
-                description.resident_bytes()
-                    + payload(prompt)
-                    + payload(result)
-                    + [name, agent_id, model, label]
-                        .into_iter()
-                        .map(optional)
-                        .sum::<usize>()
-            }
-            ItemKind::Question {
-                questions,
-                answers,
-                answer_text,
-                ..
-            } => {
-                questions.resident_bytes(|question| {
-                    question.id.capacity()
-                        + optional(&question.header)
-                        + question.text.resident_bytes()
-                        + question.options.resident_bytes(|option| {
-                            option.id.capacity()
-                                + option.label.capacity()
-                                + payload(&option.description)
-                        })
-                }) + payload(answer_text)
-                    + answers.as_ref().map_or(0, |answers| {
-                        answers.resident_bytes(|answer| {
-                            answer.as_ref().map_or(0, |answer| match answer {
-                                QuestionAnswer::Choices { ids } => {
-                                    ids.resident_bytes(String::capacity)
-                                }
-                                QuestionAnswer::Text { text } => text.capacity(),
-                            })
-                        })
-                    })
-            }
-            ItemKind::Plan {
-                steps,
-                proposal,
-                approval: request,
-            } => {
-                steps.resident_bytes(|step| step.text.resident_bytes())
-                    + payload(proposal)
-                    + approval(request.as_ref())
-            }
-            ItemKind::Image { blob, caption } => blob.0.capacity() + payload(caption),
-            ItemKind::Compaction { .. } => 0,
-            ItemKind::Notice { kind, text } => {
-                text.resident_bytes()
-                    + match kind {
-                        NoticeKind::Goal { state } => state.capacity(),
-                        NoticeKind::Reroute { model } => model.capacity(),
-                        NoticeKind::Safety | NoticeKind::Info => 0,
-                    }
-            }
-            ItemKind::Error { message, .. } => message.resident_bytes(),
-        };
-        size_of::<Self>()
-            + self.id.0.capacity()
-            + self.thread_id.0.capacity()
-            + self.run_id.as_ref().map_or(0, |id| id.0.capacity())
-            + self.parent_id.as_ref().map_or(0, |id| id.0.capacity())
-            + optional(&self.native_id)
-            + content
-    }
-
     /// The text a reader sees first, for previews and titles.
     #[must_use]
     pub fn preview(&self) -> Option<&str> {
@@ -596,94 +473,6 @@ impl Item {
                 .clone()
                 .unwrap_or_else(|| crate::fallback_agent_name(self.id.as_str()).to_owned()),
         )
-    }
-}
-
-impl ToolKind {
-    /// Totals of unified edit operations, computed once by Forge on save.
-    #[must_use]
-    pub fn edit_totals(&self) -> Option<crate::EditTotals> {
-        let Self::Edit { changes } = self else {
-            return None;
-        };
-        let mut totals = crate::EditTotals::default();
-        for change in changes.inline()? {
-            let Some(diff) = &change.diff else {
-                continue;
-            };
-            let diff = diff.inline()?;
-            let count = crate::EditTotals::from_diff(diff);
-            totals.added = totals.added.saturating_add(count.added);
-            totals.removed = totals.removed.saturating_add(count.removed);
-        }
-        Some(totals)
-    }
-
-    fn resident_bytes(&self) -> usize {
-        let optional = |value: &Option<String>| value.as_ref().map_or(0, String::capacity);
-        let payload =
-            |value: &Option<TextContent>| value.as_ref().map_or(0, TextContent::resident_bytes);
-        match self {
-            Self::Shell { command, cwd, .. } => command.resident_bytes() + optional(cwd),
-            Self::Read { path, .. } => path.capacity(),
-            Self::Edit { changes } => changes.resident_bytes(|change| {
-                change.path.capacity()
-                    + payload(&change.diff)
-                    + match &change.op {
-                        FileOp::Move { from } => from.capacity(),
-                        _ => 0,
-                    }
-            }),
-            Self::Search { pattern, path, .. } => pattern.capacity() + optional(path),
-            Self::WebFetch { url } => url.capacity(),
-            Self::WebSearch { query } => query.capacity(),
-            Self::Mcp {
-                server,
-                tool,
-                input,
-            } => server.capacity() + tool.capacity() + payload(input),
-            Self::ViewImage { path } => path.capacity(),
-            Self::AgentMessage {
-                recipient,
-                recipient_label,
-                summary,
-                text,
-            } => {
-                recipient.capacity()
-                    + recipient_label.capacity()
-                    + optional(summary)
-                    + text.resident_bytes()
-            }
-            Self::Other { name, input } => name.capacity() + payload(input),
-        }
-    }
-}
-
-impl crate::EditTotals {
-    /// Counts authored unified-diff operations. Forge stores this derivation
-    /// beside immutable source bytes, so status-only updates do not reload diffs.
-    pub fn from_diff(diff: &str) -> Self {
-        let mut totals = Self::default();
-        let mut in_hunk = false;
-        for line in diff.lines() {
-            if line.starts_with("diff --git ") {
-                in_hunk = false;
-                continue;
-            }
-            if line.starts_with("@@") {
-                in_hunk = true;
-                continue;
-            }
-            if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
-                continue;
-            }
-            if line.starts_with('+') {
-                totals.added = totals.added.saturating_add(1);
-            } else if line.starts_with('-') {
-                totals.removed = totals.removed.saturating_add(1);
-            }
-        }
-        totals
     }
 }
 

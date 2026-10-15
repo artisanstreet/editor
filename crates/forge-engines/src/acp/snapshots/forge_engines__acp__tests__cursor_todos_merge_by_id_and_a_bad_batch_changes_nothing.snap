@@ -1,0 +1,279 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 181
+expression: "replay(Profile::Cursor, \"todos\")"
+---
+[
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: AwaitingUser,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: Some(
+                    Inline(
+                        "# Native plan",
+                    ),
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve this plan?",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: Some(
+                    Inline(
+                        "# Native plan",
+                    ),
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve this plan?",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":20,\"result\":{\"outcome\":{\"outcome\":\"accepted\"}}}",
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Done,
+                        },
+                    ],
+                ),
+                proposal: Some(
+                    Inline(
+                        "# Native plan",
+                    ),
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve this plan?",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{}}",
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Same",
+                            ),
+                            status: Pending,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Renamed",
+                            ),
+                            status: InProgress,
+                        },
+                    ],
+                ),
+                proposal: Some(
+                    Inline(
+                        "# Native plan",
+                    ),
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve this plan?",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{}}",
+    ),
+    Event(
+        Item {
+            key: "plan-error:1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "malformed native plan entries: missing field `content`",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":23,\"error\":{\"code\":-32602,\"message\":\"malformed native plan entries: missing field `content`\"}}",
+    ),
+    Event(
+        Item {
+            key: "plan-error:2",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "malformed native plan entries: unknown variant `future`, expected one of `pending`, `in_progress`, `completed`, `cancelled`",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":24,\"error\":{\"code\":-32602,\"message\":\"malformed native plan entries: unknown variant `future`, expected one of `pending`, `in_progress`, `completed`, `cancelled`\"}}",
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [],
+                ),
+                proposal: Some(
+                    Inline(
+                        "# Native plan",
+                    ),
+                ),
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve this plan?",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        "{\"jsonrpc\":\"2.0\",\"id\":25,\"result\":{}}",
+    ),
+    Event(
+        Status {
+            key: "plan",
+            status: Done,
+        },
+    ),
+]

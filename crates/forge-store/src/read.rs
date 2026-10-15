@@ -79,23 +79,20 @@ pub(crate) fn thread(conn: &Connection, id: &ThreadId) -> Result<Option<Thread>>
     )
 }
 
-/// Native identity is Forge-private; its SQLite column is authoritative.
 fn item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     let body: String = row.get(0)?;
-    let mut item: Item = serde_json::from_str(&body).map_err(|error| {
+    serde_json::from_str(&body).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
-    })?;
-    item.native_id = row.get(1)?;
-    Ok(item)
+    })
 }
 pub(crate) fn items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<Item>> {
     conn.prepare_cached(sql)?
         .query_map(params, item_row)?
         .collect::<rusqlite::Result<_>>()
-        .context("read Items with native identity")
+        .context("read Items")
 }
 pub(crate) fn item(conn: &Connection, id: &ItemId) -> Result<Option<Item>> {
-    conn.prepare_cached("SELECT body,native_id FROM items WHERE id=?1")?
+    conn.prepare_cached("SELECT body FROM items WHERE id=?1")?
         .query_row([id.as_str()], item_row)
         .optional()
         .context("read Item")
@@ -106,8 +103,27 @@ pub(crate) fn item_by_native(
     run_id: Option<&RunId>,
     native_id: &str,
 ) -> Result<Option<Item>> {
-    conn.prepare_cached("SELECT body,native_id FROM items WHERE thread_id=?1 AND native_id=?2 AND (?3 IS NULL OR run_id=?3) ORDER BY position DESC LIMIT 1")?
+    conn.prepare_cached("SELECT body FROM items WHERE thread_id=?1 AND native_id=?2 AND (?3 IS NULL OR run_id=?3) ORDER BY position DESC LIMIT 1")?
         .query_row(params![thread_id.as_str(),native_id,run_id.map(RunId::as_str)],item_row).optional().context("read native Item")
+}
+
+/// The thread's `Agent` item an engine addresses as `address` (Claude's
+/// `agentId`): the latest one, as a resumed agent keeps its address.
+pub(crate) fn agent_by_address(
+    conn: &Connection,
+    thread_id: &ThreadId,
+    address: &str,
+) -> Result<Option<ItemId>> {
+    conn.prepare_cached(
+        "SELECT id FROM items WHERE thread_id=?1 AND kind_type='agent'
+         AND json_extract(body,'$.kind.agent_id')=?2 ORDER BY position DESC LIMIT 1",
+    )?
+    .query_row(params![thread_id.as_str(), address], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map(|id| id.map(ItemId))
+    .context("read the agent an engine address names")
 }
 
 /// The names Artisan already gave subagents in a thread.
@@ -173,7 +189,7 @@ pub(crate) fn pending_inputs(
     const BATCH_BYTES: usize = 4 * 1024 * 1024;
     let tx = conn.unchecked_transaction()?;
     let cutoff = tx.query_row("SELECT coalesce(max(seq),0) FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message'", [thread_id.as_str()], |row| row.get(0))?;
-    let mut query = tx.prepare_cached("SELECT body,native_id FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message' ORDER BY position LIMIT 32")?;
+    let mut query = tx.prepare_cached("SELECT body FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message' ORDER BY position LIMIT 32")?;
     let mut rows = query.query([thread_id.as_str()])?;
     let mut items = Vec::with_capacity(BATCH_ROWS);
     let mut bytes = 0usize;
@@ -290,26 +306,16 @@ pub(crate) fn scoped_items_page(
     // Without `after` the page is the newest items before `before` (the tail);
     // with it the page reads forward from `after`.
     let order = if query.after.is_some() { "ASC" } else { "DESC" };
-    let recipient: Option<String> = if let Some(Some(agent)) = parent {
-        conn.query_row(
-            "SELECT json_extract(body,'$.kind.agent_id') FROM items WHERE id=?1 AND thread_id=?2",
-            params![agent.as_str(), thread_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?
-        .flatten()
-    } else {
-        None
-    };
     let sql = match parent {
-        Some(Some(_)) => format!("SELECT body,native_id FROM (
-            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND parent_id=?5 AND position>?2 AND position<?3
+        // An agent's own work, plus the messages the root sent it.
+        Some(Some(_)) => format!("SELECT body FROM (
+            SELECT body,position FROM items WHERE thread_id=?1 AND parent_id=?5 AND position>?2 AND position<?3
             UNION ALL
-            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND parent_id IS NULL
-                AND json_extract(body,'$.kind.tool.kind')='agent_message' AND json_extract(body,'$.kind.tool.recipient')=?6 AND position>?2 AND position<?3
+            SELECT body,position FROM items WHERE thread_id=?1 AND parent_id IS NULL
+                AND json_extract(body,'$.kind.tool.kind')='agent_message' AND json_extract(body,'$.kind.tool.target')=?5 AND position>?2 AND position<?3
             ) ORDER BY position {order} LIMIT ?4"),
-        Some(None) => format!("SELECT body,native_id FROM items WHERE thread_id=?1 AND parent_id IS NULL AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
-        None => format!("SELECT body,native_id FROM items WHERE thread_id=?1 AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
+        Some(None) => format!("SELECT body FROM items WHERE thread_id=?1 AND parent_id IS NULL AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
+        None => format!("SELECT body FROM items WHERE thread_id=?1 AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
     };
     let mut statement = conn.prepare_cached(&sql)?;
     let mut rows = if let Some(Some(parent)) = parent {
@@ -318,8 +324,7 @@ pub(crate) fn scoped_items_page(
             after,
             before,
             fetch,
-            parent.as_str(),
-            recipient
+            parent.as_str()
         ])?
     } else {
         statement.query(params![thread_id.as_str(), after, before, fetch])?
@@ -337,9 +342,7 @@ pub(crate) fn scoped_items_page(
             break;
         }
         bytes = bytes.saturating_add(body.len());
-        let mut item: Item = from_body(&body)?;
-        item.native_id = row.get(1)?;
-        items.push(item);
+        items.push(from_body(&body)?);
     }
     drop(rows);
     drop(statement);

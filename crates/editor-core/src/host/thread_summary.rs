@@ -209,6 +209,7 @@ impl HostData {
 }
 
 fn summary_bytes(summary: &InspectorSummary) -> usize {
+    use crate::{CollectionBytes as _, ResidentBytes as _};
     fn question_heap(question: &artisan_api::Question) -> usize {
         question.id.capacity()
             + question.header.as_ref().map_or(0, String::capacity)

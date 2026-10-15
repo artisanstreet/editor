@@ -118,8 +118,8 @@ impl RenderOnce for MediaFrame {
             Size::Attachment => frame
                 .size(px(72.0))
                 .flex_none()
-                .rounded(px(6.0))
-                .bg(theme.workspace.field)
+                .rounded(RadiusTokens::value(RadiusStep::Sm))
+                .bg(theme.colors.field.to_paint())
                 .shadow(crate::glass::card_shadows(&theme)),
             Size::SentAttachment => frame
                 .size(px(96.0))

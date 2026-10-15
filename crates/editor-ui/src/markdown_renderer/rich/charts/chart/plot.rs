@@ -135,7 +135,7 @@ pub(super) fn layout(
             color: theme.colors.foreground.with_alpha(0.08).to_paint(),
         });
     }
-    let end_labels = end_labels(theme, spec, model, &tracks, view, &y, axis.unit.as_deref());
+    let end_labels = end_labels(spec, model, &tracks, view, &y, axis.unit.as_deref());
     Geometry {
         shapes: shapes.into(),
         tracks,
@@ -199,7 +199,6 @@ const END_LABEL_SERIES_MAX: usize = 8;
 /// Each visible line or area series named at its last value in view, so
 /// the reader does not shuttle between the plot and the legend.
 fn end_labels(
-    theme: &ArtisanTheme,
     spec: &ChartStyle,
     model: &Model,
     tracks: &[Track],
@@ -238,7 +237,7 @@ fn end_labels(
             Some(EndLabel {
                 y: y.domain.fraction_down(anchor).clamp(0.0, 1.0),
                 text: SharedString::from(format!("{name} {value}")),
-                color: kit::series_color(theme, index).to_paint(),
+                color: kit::series_color(index).to_paint(),
             })
         })
         .collect();
@@ -360,7 +359,7 @@ struct Marks<'a> {
 
 impl Marks<'_> {
     fn color(&self, index: usize) -> Hsla {
-        kit::series_color(self.theme, index).to_paint()
+        kit::series_color(index).to_paint()
     }
 
     fn point(&self, x: f64, y: f64) -> (f32, f32) {

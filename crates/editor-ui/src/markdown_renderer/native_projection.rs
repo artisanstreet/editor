@@ -5,7 +5,7 @@
 use std::ops::Range;
 use std::sync::{Arc, Weak};
 
-use gpui::{FontId, LineLayout, Pixels, ShapedGlyph, ShapedRun, WrappedLineLayout, px};
+use gpui::{LineLayout, Pixels, ShapedGlyph, ShapedRun, WrappedLineLayout, px};
 
 const MAX_ROWS: usize = 128;
 const MAX_PROJECTED_BYTES: usize = 2 * 1024 * 1024;
@@ -31,9 +31,6 @@ pub struct ProjectedSource {
     pub ranges: Vec<Range<usize>>,
 }
 impl ProjectedSource {
-    pub fn is_contiguous(&self) -> bool {
-        self.ranges.len() <= 1
-    }
     pub fn resident_bytes(&self) -> usize {
         self.ranges.capacity() * std::mem::size_of::<Range<usize>>()
     }
@@ -496,18 +493,6 @@ impl ParagraphWrapIndex {
             return Err(ProjectionError::WindowBudget);
         }
         Ok(projected)
-    }
-}
-
-/// Glyph visits retain font fallback and emoji identity from the native layout.
-pub fn visit_projected_glyphs(
-    row: &ProjectedNativeRow,
-    mut visit: impl FnMut(FontId, &ShapedGlyph),
-) {
-    for run in &row.layout.runs {
-        for glyph in &run.glyphs {
-            visit(run.font_id, glyph);
-        }
     }
 }
 

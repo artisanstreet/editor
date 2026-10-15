@@ -22,7 +22,7 @@ pub fn with_skill_mentions(engine: EngineId, text: &str, skills: &[artisan_api::
         .map(|skill| skill.name.as_str())
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
-    let mentioned = artisan_api::skill_mentions(text, &names)
+    let mentioned = artisan_mentions::skill_mentions(text, &names)
         .into_iter()
         .filter(|mention| seen.insert(mention.name.clone()))
         .map(|mention| mention.name)

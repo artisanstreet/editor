@@ -26,22 +26,20 @@ impl ToolPresenter<'_> {
         item: &Item,
         expanded: bool,
         live: Option<&str>,
-        agents: &HashMap<String, String>,
+        agents: &HashMap<artisan_api::ItemId, String>,
     ) -> AnyElement {
         let theme = self.text.shared.theme;
         let Some(category) = activity::category(item) else {
             return div().into_any_element();
         };
         let message = activity::agent_message(item);
-        let detail = message.as_ref().map_or_else(
-            || activity::detail_text(item, category),
-            |message| {
-                format!(
-                    "Talked to {}",
-                    agents.get(&message.to).unwrap_or(&message.label)
-                )
-            },
-        );
+        let detail = match message.as_ref().and_then(|message| message.to.as_ref()) {
+            Some(agent) => agents.get(agent).map_or_else(
+                || activity::detail_text(item, category),
+                |name| format!("Talked to {name}"),
+            ),
+            None => activity::detail_text(item, category),
+        };
         let shell = matches!(
             item.kind,
             ItemKind::Tool {
@@ -333,7 +331,6 @@ mod tests {
             seq: 1,
             run_id: None,
             parent_id: None,
-            native_id: None,
             status: Status::Running,
             created_at: 0,
             updated_at: 0,
@@ -360,7 +357,7 @@ mod tests {
         assert!(details_available(&tool, None, None));
         let mut message = item(ToolKind::AgentMessage {
             recipient: "agent-1".to_owned(),
-            recipient_label: "Reviewer".to_owned(),
+            target: None,
             summary: Some("summary only".to_owned()),
             text: "".into(),
         });

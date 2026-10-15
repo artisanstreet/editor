@@ -1,6 +1,7 @@
 //! Read-only source previews fetched from the Forge that produced a reference.
 
 use editor_core::ForgeClient;
+use editor_ui::theme::ActiveTheme as _;
 use editor_ui::{
     button::{Button, ButtonVariant},
     dialog::Dialog,
@@ -9,7 +10,6 @@ use editor_ui::{
         SelectableText, SelectionLeaf, SelectionSource, register_selection_source,
         release_selection_scope,
     },
-    theme::ArtisanTheme,
 };
 use gpui::{
     Context, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _, Render,
@@ -100,7 +100,7 @@ impl Render for ResourcePreview {
         if let Some(source) = &self.selection_source {
             register_selection_source(source, window, cx);
         }
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let content = match &self.content {
             None => div().child("Reading source…").into_any_element(),
             Some(Err(error)) => div().child(error.clone()).into_any_element(),
@@ -131,9 +131,9 @@ impl Render for ResourcePreview {
                                 .gap(px(12.0))
                                 .text_size(px(13.0))
                                 .bg(if line == target_line {
-                                    theme.workspace.selected
+                                    theme.colors.selected.to_paint()
                                 } else {
-                                    theme.workspace.sidebar
+                                    theme.colors.sidebar.to_paint()
                                 })
                                 .font_family(theme.typography.mono.family)
                                 .tracking(0.0)
@@ -141,7 +141,7 @@ impl Render for ResourcePreview {
                                     div()
                                         .w(px(64.0))
                                         .flex_shrink_0()
-                                        .text_color(theme.workspace.secondary)
+                                        .text_color(theme.colors.workspace_secondary.to_paint())
                                         .child((line + 1).to_string()),
                                 )
                                 .child(

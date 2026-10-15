@@ -1,8 +1,8 @@
 //! About (`render/about.rs`): which build is running and from where.
 
-use crate::chrome::{card, header, row, section_shell};
 use crate::page;
 use editor_core::SettingsPage;
+use editor_ui::page::{card, header, row, section_shell};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{Div, IntoElement, ParentElement as _, Styled as _, div};
 use std::path::Path;
@@ -51,12 +51,8 @@ pub(crate) fn render(build: &BuildInfo, theme: &ArtisanTheme) -> Div {
             page::label(SettingsPage::About),
             page::description(SettingsPage::About),
         ))
-        .child(section_shell(
-            theme,
-            "build",
-            "Build",
-            None,
-            None,
-            card(theme, rows),
-        ))
+        .child(
+            section_shell(theme, "Build", None, None, card(theme, rows))
+                .debug_selector("settings-section-build"),
+        )
 }

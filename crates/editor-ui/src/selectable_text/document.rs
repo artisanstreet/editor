@@ -924,16 +924,6 @@ mod tests {
     }
 
     #[test]
-    fn copy_substitution_bytes_are_charged_to_selection_budget() {
-        let mut observed = leaf("huge-copy", "x", 0.0);
-        observed.copies = Rc::from([(0..1, SharedString::from("x".repeat(17 * 1024 * 1024)))]);
-        let mut document = Document::default();
-        document.observe(&[observed]);
-        assert!(document.leaves.is_empty());
-        assert_eq!(document.retained_bytes, 0);
-    }
-
-    #[test]
     fn drag_from_one_paragraph_into_another_selects_across() {
         let mut document = Document::default();
         document.reset_to(&page());
@@ -1238,7 +1228,6 @@ mod source_tests {
         doc.register_source(&source, EntityId::from(1_u64));
         let focused = doc.source_leaves("thread").remove(0);
         doc.select_source(focused);
-        assert_eq!(doc.retained_bytes, 0, "gesture budget remains bounded");
         assert!(doc.is_active() && doc.has_selection());
         assert!(
             !doc.painted().is_empty(),

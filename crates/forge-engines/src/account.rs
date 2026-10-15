@@ -39,10 +39,10 @@ pub(crate) fn engine_command(engine: EngineId, binary: &Path, home: &Path) -> Co
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some((directory, _)) = crate::engines::host_spec(engine).config {
-        if let Err(error) = std::fs::create_dir_all(home.join(directory)) {
-            tracing::warn!(home = %home.display(), %error, "couldn't create engine configuration directory");
-        }
+    if let Some((directory, _)) = crate::engines::host_spec(engine).config
+        && let Err(error) = std::fs::create_dir_all(home.join(directory))
+    {
+        tracing::warn!(home = %home.display(), %error, "couldn't create engine configuration directory");
     }
     command
 }

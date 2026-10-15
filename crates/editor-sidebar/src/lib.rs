@@ -1,6 +1,5 @@
 //! The sidebar renders a bounded Forge thread projection. Only visible rows load metadata.
 mod avatar;
-mod hover;
 mod list;
 mod picker;
 mod row;
@@ -8,14 +7,16 @@ mod row;
 mod tests;
 mod usage;
 mod usage_visual;
-use crate::hover::HoverSurface;
 use crate::list::{Lists, RowData};
 use crate::picker::{FolderPicker, PickerEvent};
 use artisan_api::{BlobHash, ProjectId, Seq, ThreadId, Timestamp, UpdateThread};
 use editor_core::{BlobImage, Core, CoreEvent, HostData, HostEvent, HostId, Screen};
 use editor_ui::asset_seam::asset_glyph;
+use editor_ui::measure::Measured;
 use editor_ui::motion::MotionDuration;
+use editor_ui::picker_motion::HoverSurface;
 use editor_ui::picker_motion::{MenuEntrance, MenuMotion, animate_menu, smooth_out};
+use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use editor_ui::{
     AssetId,
     button::{Button, ButtonVariant},
@@ -30,15 +31,11 @@ use gpui::{
     ScrollWheelEvent, Stateful, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     Window, anchored, deferred, div, point, px,
 };
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 const PROFILE_MENU_OPEN: Duration = MotionDuration::Fast.as_duration();
 const PROFILE_MENU_CLOSE: Duration = MotionDuration::Quick.as_duration();
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     time::{Duration, Instant},
 };
@@ -96,7 +93,11 @@ pub struct Sidebar {
     history_open: bool,
     nav_hover: HoverSurface,
     threads_hover: HoverSurface,
-    profile_origin: Rc<Cell<gpui::Bounds<Pixels>>>,
+    /// Cached thread rows the list laid out since the last render; the
+    /// rest are dropped, so only rows on screen keep an entity.
+    rows: HashMap<ThreadId, (Entity<row::ThreadRow>, Measured)>,
+    laid_out: HashSet<ThreadId>,
+    profile_origin: Measured,
     avatars: HashMap<String, Arc<Image>>,
     icons: HashMap<ProjectId, IconEntry>,
     icon_order: VecDeque<ProjectId>,
@@ -145,7 +146,7 @@ impl Sidebar {
         });
         let mut this = Self {
             core,
-            theme: ArtisanTheme::default(),
+            theme: *cx.theme(),
             host: None,
             open: None,
             lists: Lists::default(),
@@ -157,7 +158,9 @@ impl Sidebar {
             history_open: false,
             nav_hover: HoverSurface::default(),
             threads_hover: HoverSurface::default(),
-            profile_origin: Rc::default(),
+            rows: HashMap::new(),
+            laid_out: HashSet::new(),
+            profile_origin: Measured::default(),
             avatars: HashMap::new(),
             icons: HashMap::new(),
             icon_order: VecDeque::new(),
@@ -742,6 +745,46 @@ impl Sidebar {
             );
         }
     }
+    /// A laid-out thread row: its cached entity, fed through set-and-notify,
+    /// with the probes a cached view cannot carry (its paint replays).
+    fn thread_row(&mut self, inputs: row::RowInputs, cx: &mut Context<Self>) -> AnyElement {
+        let id = inputs.data.id.clone();
+        self.laid_out.insert(id.clone());
+        let (row, bounds) = if let Some((row, bounds)) = self.rows.get(&id) {
+            row.update(cx, |row, cx| row.set(inputs, cx));
+            (row.clone(), bounds.clone())
+        } else {
+            let bounds = Measured::default();
+            let (theme, sidebar, hover) = (
+                self.theme,
+                cx.entity().downgrade(),
+                self.threads_hover.clone(),
+            );
+            let row_bounds = bounds.clone();
+            let row = cx.new(|_| row::ThreadRow::new(inputs, theme, sidebar, hover, row_bounds));
+            self.rows.insert(id.clone(), (row.clone(), bounds.clone()));
+            (row, bounds)
+        };
+        // The row's name sits out here: a cached view's replayed paint does
+        // not record debug bounds.
+        let selector = format!("sidebar-thread-{id}");
+        div()
+            .relative()
+            .w_full()
+            .h(px(row::ROW_HEIGHT))
+            .debug_selector(move || selector.clone())
+            .child(
+                row.cached(
+                    gpui::StyleRefinement::default()
+                        .w_full()
+                        .h(px(row::ROW_HEIGHT)),
+                ),
+            )
+            .child(bounds.record())
+            .child(self.threads_hover.row_probe(format!("sidebar-thread-{id}")))
+            .into_any_element()
+    }
+
     fn render_entry(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.entries.get(index).cloned() else {
             return div().into_any_element();
@@ -763,15 +806,13 @@ impl Sidebar {
                     .as_ref()
                     .and_then(|host| host.read(cx).repository(&data.project))
                     .map(|repository| repository.host.clone());
-                row::render(
+                let inputs = row::RowInputs {
                     data,
                     image,
-                    repository,
-                    self.theme,
-                    cx.entity().downgrade(),
-                    self.threads_hover.clone(),
-                    cx.reduce_motion(),
-                )
+                    host: repository,
+                    reduced: cx.reduce_motion(),
+                };
+                self.thread_row(inputs, cx)
             }
             Entry::Gap(height) => div().h(px(height)).into_any_element(),
             Entry::Spacer => div().h(px(self.history_spacer())).into_any_element(),
@@ -807,7 +848,7 @@ impl Sidebar {
                         AssetId::TABLER_CHEVRON_RIGHT
                     })
                     .size(px(12.0))
-                    .text_color(self.theme.workspace.secondary),
+                    .text_color(self.theme.colors.workspace_secondary.to_paint()),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.history_open = !this.history_open;
@@ -831,7 +872,7 @@ impl Sidebar {
             let foreground = if destructive {
                 theme.colors.destructive.to_paint()
             } else {
-                theme.workspace.foreground
+                theme.colors.workspace_foreground.to_paint()
             };
             div()
                 .id(id)
@@ -846,9 +887,15 @@ impl Sidebar {
                 .flex()
                 .items_center()
                 .gap(px(8.0))
-                .rounded(px(12.0))
+                .rounded(RadiusTokens::value(RadiusStep::LgMid))
                 .cursor_pointer()
-                .hover(move |style| style.bg(editor_ui::gradient::hover_fill_gradient(theme)))
+                .hover(move |style| {
+                    editor_ui::hover_card::hover_fill(
+                        style,
+                        &theme,
+                        editor_ui::hover_card::HoverFill::Plain,
+                    )
+                })
                 .child(
                     div().size(px(16.0)).flex_none().child(
                         asset_glyph(asset)
@@ -856,13 +903,13 @@ impl Sidebar {
                             .text_color(if destructive {
                                 foreground
                             } else {
-                                theme.workspace.secondary
+                                theme.colors.workspace_secondary.to_paint()
                             }),
                     ),
                 )
                 .child(
                     div()
-                        .text_size(px(14.0))
+                        .text_size(TypographyTokens::size(TextStep::Sm))
                         .line_height(px(20.0))
                         .whitespace_nowrap()
                         .text_color(foreground)
@@ -1001,7 +1048,7 @@ impl Sidebar {
             .items_center()
             .gap(px(8.0))
             .px(px(8.0))
-            .rounded(px(6.0))
+            .rounded(RadiusTokens::value(RadiusStep::Sm))
             .cursor_pointer()
             .child(surface.row_probe(hover_id))
             .on_hover(cx.listener(move |_, hovered: &bool, _, cx| {
@@ -1012,16 +1059,16 @@ impl Sidebar {
                 div()
                     .size(px(16.0))
                     .flex_none()
-                    .text_color(self.theme.workspace.secondary)
+                    .text_color(self.theme.colors.workspace_secondary.to_paint())
                     .child(asset_glyph(icon).size(px(15.0))),
             )
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(TypographyTokens::size(TextStep::Sm))
                     .text_color(if current {
                         self.theme.colors.banner_info.to_paint()
                     } else {
-                        self.theme.workspace.foreground
+                        self.theme.colors.workspace_foreground.to_paint()
                     })
                     .child(label),
             )
@@ -1087,17 +1134,13 @@ impl Sidebar {
             .w_full()
             .h(px(44.0))
             .p(px(5.0))
-            .rounded(px(8.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .cursor_pointer()
             .flex()
             .items_center()
             .gap(px(8.0))
             .child(self.nav_hover.row_probe("profile"))
-            .child(
-                gpui::canvas(|_, _, _| {}, move |bounds, (), _, _| origin.set(bounds))
-                    .absolute()
-                    .size_full(),
-            )
+            .child(origin.record())
             .on_hover(cx.listener(move |_, hovered: &bool, _, cx| {
                 hover.hovered("profile", *hovered);
                 cx.notify();
@@ -1106,7 +1149,7 @@ impl Sidebar {
                 div()
                     .size(px(32.0))
                     .flex_shrink_0()
-                    .rounded(px(8.0))
+                    .rounded(RadiusTokens::value(RadiusStep::Md))
                     .overflow_hidden()
                     .child(avatar::avatar(image)),
             )
@@ -1119,21 +1162,21 @@ impl Sidebar {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(14.0))
+                            .text_size(TypographyTokens::size(TextStep::Sm))
                             .line_height(px(16.0))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(self.theme.workspace.foreground)
+                            .text_color(self.theme.colors.workspace_foreground.to_paint())
                             .child(name),
                     )
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(10.0))
+                            .text_size(TypographyTokens::size(TextStep::X3s))
                             .line_height(px(12.0))
                             .text_color(if status.is_some() {
                                 self.theme.colors.banner_warning.to_paint()
                             } else {
-                                self.theme.workspace.secondary
+                                self.theme.colors.workspace_secondary.to_paint()
                             })
                             .child(status.unwrap_or(machine)),
                     ),
@@ -1142,7 +1185,7 @@ impl Sidebar {
                 gpui::svg()
                     .path(AssetId::TABLER_CHEVRON_UP.as_str())
                     .size(px(15.0))
-                    .text_color(self.theme.workspace.secondary)
+                    .text_color(self.theme.colors.workspace_secondary.to_paint())
                     .with_transformation(gpui::Transformation::rotate(gpui::radians(
                         turn * std::f32::consts::PI,
                     ))),
@@ -1249,6 +1292,9 @@ impl Sidebar {
 }
 impl Render for Sidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Rows the list did not lay out last frame are off screen.
+        let laid_out = std::mem::take(&mut self.laid_out);
+        self.rows.retain(|id, _| laid_out.contains(id));
         let theme = self.theme;
         let screen = self.core.read(cx).screen().clone();
         let nav = div()
@@ -1292,6 +1338,7 @@ impl Render for Sidebar {
             let max_usage = (self
                 .profile_origin
                 .get()
+                .unwrap_or_default()
                 .top()
                 .min(window.viewport_size().height)
                 - px(178.0))
@@ -1300,10 +1347,16 @@ impl Render for Sidebar {
             let content = div()
                 .id("artisan-desktop-profile-menu")
                 .debug_selector(|| "artisan-desktop-profile-menu".into())
-                .w(self.profile_origin.get().size.width.max(px(256.0)))
+                .w(self
+                    .profile_origin
+                    .get()
+                    .unwrap_or_default()
+                    .size
+                    .width
+                    .max(px(256.0)))
                 .child(profile.clone())
                 .on_mouse_down_out(move |event, _, cx| {
-                    if !origin.get().contains(&event.position)
+                    if !origin.contains(&event.position)
                         && !account.read(cx).contains_popup(&event.position)
                     {
                         let _ = owner.update(cx, |this, cx| {
@@ -1314,7 +1367,7 @@ impl Render for Sidebar {
             deferred(
                 anchored()
                     .anchor(gpui::Anchor::BottomLeft)
-                    .position(self.profile_origin.get().origin)
+                    .position(self.profile_origin.get().unwrap_or_default().origin)
                     .offset(point(px(0.0), px(-4.0)))
                     .child(animate_menu(
                         div()
@@ -1544,7 +1597,7 @@ impl Render for Sidebar {
                                 div()
                                     .h(px(1.0))
                                     .mx(px(-10.0))
-                                    .bg(theme.workspace.line)
+                                    .bg(theme.colors.line.to_paint())
                                     .debug_selector(|| "artisan-sidebar-footer-divider".into()),
                             )
                             .child(footer),

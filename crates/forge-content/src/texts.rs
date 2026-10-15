@@ -1,6 +1,7 @@
-//! Every authored payload follows the same traversal before storage and on
-//! explicitly admitted Forge reads. Identities and short display labels stay metadata.
-use crate::{ApprovalRequest, Collection, ItemKind, TextContent, ToolKind};
+//! Every authored text and stored collection of an item, visited the same
+//! way before storage and on Forge's reads. Identities and short display
+//! labels stay metadata.
+use artisan_api::{ApprovalRequest, Collection, ContentRef, ItemKind, TextContent, ToolKind};
 
 macro_rules! approval_texts {
     ($approval:expr, $visit:ident $(,$mutable:tt)?) => {{
@@ -31,11 +32,9 @@ macro_rules! item_texts {
                     ToolKind::Mcp { input, .. } | ToolKind::Other { input, .. } => {
                         for text in input { $visit(text)?; }
                     }
-                    ToolKind::Edit { changes } => {
-                        if let Collection::Inline(changes) = changes {
-                            for change in changes {
-                                for text in &$($mutable)? change.diff { $visit(text)?; }
-                            }
+                    ToolKind::Edit { changes: Collection::Inline(changes) } => {
+                        for change in changes {
+                            for text in &$($mutable)? change.diff { $visit(text)?; }
                         }
                     }
                     _ => {}
@@ -43,9 +42,8 @@ macro_rules! item_texts {
                 for output in output { $visit(&$($mutable)? output.text)?; }
                 for approval in approval { approval_texts!(approval, $visit $(,$mutable)?); }
             }
-            ItemKind::Approval { approval, .. } => approval_texts!(approval, $visit $(,$mutable)?),
-            ItemKind::Question { questions,answer_text,.. } => {
-                for text in answer_text {$visit(text)?;}
+            ItemKind::Question { questions, answer_text, .. } => {
+                for text in answer_text { $visit(text)?; }
                 if let Collection::Inline(questions) = questions {
                     for question in questions {
                         $visit(&$($mutable)? question.text)?;
@@ -58,7 +56,9 @@ macro_rules! item_texts {
                 }
             }
             ItemKind::Plan { steps, proposal, approval } => {
-                if let Collection::Inline(steps) = steps { for step in steps { $visit(&$($mutable)? step.text)?; } }
+                if let Collection::Inline(steps) = steps {
+                    for step in steps { $visit(&$($mutable)? step.text)?; }
+                }
                 for text in proposal { $visit(text)?; }
                 for approval in approval { approval_texts!(approval, $visit $(,$mutable)?); }
             }
@@ -68,42 +68,57 @@ macro_rules! item_texts {
         Ok(())
     }};
 }
-impl ItemKind {
-    pub fn try_visit_texts<E>(
+
+/// Traversals of an item's authored payload.
+pub trait ItemTexts {
+    fn try_visit_texts<E>(&self, visit: impl FnMut(&TextContent) -> Result<(), E>)
+    -> Result<(), E>;
+    fn try_visit_texts_mut<E>(
+        &mut self,
+        visit: impl FnMut(&mut TextContent) -> Result<(), E>,
+    ) -> Result<(), E>;
+    /// Stored collections, visited apart from resident text. A stored
+    /// collection's own dependencies belong to its immutable source.
+    fn try_visit_collection_sources<E>(
+        &self,
+        visit: impl FnMut(&ContentRef) -> Result<(), E>,
+    ) -> Result<(), E>;
+    /// Stores large collections by identity. Nested texts must already use
+    /// the store's source descriptors, or the identity differs.
+    fn compact_collections(&mut self) -> Result<(), serde_json::Error>;
+}
+
+impl ItemTexts for ItemKind {
+    fn try_visit_texts<E>(
         &self,
         mut visit: impl FnMut(&TextContent) -> Result<(), E>,
     ) -> Result<(), E> {
         item_texts!(self, visit)
     }
-    pub fn try_visit_texts_mut<E>(
+
+    fn try_visit_texts_mut<E>(
         &mut self,
         mut visit: impl FnMut(&mut TextContent) -> Result<(), E>,
     ) -> Result<(), E> {
         item_texts!(self, visit, mut)
     }
-}
 
-impl ItemKind {
-    /// Collection owners are visited independently of resident text. A stored
-    /// collection's transitive dependencies are owned by its immutable source.
-    pub fn try_visit_collection_sources<E>(
+    fn try_visit_collection_sources<E>(
         &self,
-        mut visit: impl FnMut(&crate::ContentRef) -> Result<(), E>,
+        mut visit: impl FnMut(&ContentRef) -> Result<(), E>,
     ) -> Result<(), E> {
         match self {
-            Self::Plan { steps, .. } => {
-                if let Collection::Stored(value) = steps {
-                    visit(&value.source)?;
-                }
-            }
-            Self::Tool {
-                tool: ToolKind::Edit { changes },
+            Self::Plan {
+                steps: Collection::Stored(value),
                 ..
-            } => {
-                if let Collection::Stored(value) = changes {
-                    visit(&value.source)?;
-                }
             }
+            | Self::Tool {
+                tool:
+                    ToolKind::Edit {
+                        changes: Collection::Stored(value),
+                    },
+                ..
+            } => visit(&value.source)?,
             Self::Question {
                 questions, answers, ..
             } => {
@@ -117,60 +132,55 @@ impl ItemKind {
                         }
                     }
                 }
-                if let Some(answers) = answers {
-                    match answers {
-                        Collection::Stored(value) => visit(&value.source)?,
-                        Collection::Inline(answers) => {
-                            for answer in answers.iter().flatten() {
-                                if let crate::QuestionAnswer::Choices {
-                                    ids: Collection::Stored(value),
-                                } = answer
-                                {
-                                    visit(&value.source)?;
-                                }
+                match answers {
+                    Some(Collection::Stored(value)) => visit(&value.source)?,
+                    Some(Collection::Inline(answers)) => {
+                        for answer in answers.iter().flatten() {
+                            if let artisan_api::QuestionAnswer::Choices {
+                                ids: Collection::Stored(value),
+                            } = answer
+                            {
+                                visit(&value.source)?;
                             }
                         }
                     }
+                    None => {}
                 }
             }
             _ => {}
         }
         Ok(())
     }
-}
 
-impl ItemKind {
-    /// Pure retention conversion. Nested TextContent must already use the same
-    /// source descriptors as Store before this method creates a collection hash.
-    pub fn compact_collections(&mut self) -> Result<(), serde_json::Error> {
+    fn compact_collections(&mut self) -> Result<(), serde_json::Error> {
         match self {
             Self::Plan { steps, .. } => {
-                steps.compact_if_large()?;
+                crate::compact_collection(steps)?;
             }
             Self::Tool {
                 tool: ToolKind::Edit { changes },
                 ..
             } => {
-                changes.compact_if_large()?;
+                crate::compact_collection(changes)?;
             }
             Self::Question {
                 questions, answers, ..
             } => {
                 if let Collection::Inline(questions) = questions {
                     for question in questions {
-                        question.options.compact_if_large()?;
+                        crate::compact_collection(&mut question.options)?;
                     }
                 }
-                questions.compact_if_large()?;
+                crate::compact_collection(questions)?;
                 if let Some(answers) = answers {
                     if let Collection::Inline(answers) = answers {
                         for answer in answers.iter_mut().flatten() {
-                            if let crate::QuestionAnswer::Choices { ids } = answer {
-                                ids.compact_if_large()?;
+                            if let artisan_api::QuestionAnswer::Choices { ids } = answer {
+                                crate::compact_collection(ids)?;
                             }
                         }
                     }
-                    answers.compact_if_large()?;
+                    crate::compact_collection(answers)?;
                 }
             }
             _ => {}

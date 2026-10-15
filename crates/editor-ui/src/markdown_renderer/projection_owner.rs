@@ -1,5 +1,5 @@
 //! One renderer-owned publication and hot-page cache, fenced by immutable input.
-use super::projection_worker::{self, NativeInput, NativeWindow};
+use super::projection_worker::{self, NativeWindow};
 use gpui::{App, Pixels, SharedString, Task, TextRun};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -17,7 +17,7 @@ pub enum NativePreparation {
 }
 struct Entry {
     key: SharedString,
-    source: NativeInput,
+    source: SharedString,
     font_size: Pixels,
     width: Pixels,
     runs: Arc<[TextRun]>,
@@ -29,12 +29,12 @@ struct Entry {
 impl Entry {
     fn matches(
         &self,
-        source: &NativeInput,
+        source: &SharedString,
         font_size: Pixels,
         width: Pixels,
         runs: &Arc<[TextRun]>,
     ) -> bool {
-        self.source.same(source)
+        projection_worker::same_source(&self.source, source)
             && self.font_size == font_size
             && self.width == width
             && Arc::ptr_eq(&self.runs, runs)
@@ -85,7 +85,7 @@ impl ProjectionOwner {
     pub fn row_count(
         &self,
         key: &SharedString,
-        source: &NativeInput,
+        source: &SharedString,
         font_size: Pixels,
         width: Pixels,
         runs: &Arc<[TextRun]>,
@@ -102,7 +102,7 @@ impl ProjectionOwner {
     pub fn prepare(
         &self,
         key: SharedString,
-        source: NativeInput,
+        source: SharedString,
         font_size: Pixels,
         width: Pixels,
         runs: Arc<[TextRun]>,
@@ -164,7 +164,7 @@ impl ProjectionOwner {
         let shape_source = entry
             .pages
             .back()
-            .map(|page| NativeInput::Inline(page.text.clone()))
+            .map(|page| page.text.clone())
             .unwrap_or(source);
         let task = match projection_worker::start(cx, shape_source, font_size, runs, width, range) {
             Ok(task) => task,

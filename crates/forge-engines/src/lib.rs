@@ -17,6 +17,7 @@ mod harness;
 mod install;
 mod manager;
 mod mentions;
+mod native;
 mod opencode;
 pub mod process;
 mod question;

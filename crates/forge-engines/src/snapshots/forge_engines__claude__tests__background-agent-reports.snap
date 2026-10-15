@@ -1,0 +1,128 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 770
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "toolu_a",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Faithful CMAA2 port",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Do Faithful CMAA2 port in full.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_b",
+            parent: None,
+            status: Running,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Temporal mode inputs",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Do Temporal mode inputs in full.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_a",
+            parent: None,
+            status: Cancelled,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Faithful CMAA2 port",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Do Faithful CMAA2 port in full.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: None,
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_b",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Temporal mode inputs",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Do Temporal mode inputs in full.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: Some(
+                    Inline(
+                        "Waiting for the suite to finish.",
+                    ),
+                ),
+                label: None,
+            },
+        },
+        Item {
+            key: "toolu_b",
+            parent: None,
+            status: Done,
+            kind: Agent {
+                name: None,
+                description: Inline(
+                    "Temporal mode inputs",
+                ),
+                prompt: Some(
+                    Inline(
+                        "Do Temporal mode inputs in full.",
+                    ),
+                ),
+                agent_id: None,
+                context_used: None,
+                model: None,
+                background: true,
+                result: Some(
+                    Inline(
+                        "Temporal mode is in on `render-taa`.",
+                    ),
+                ),
+                label: None,
+            },
+        },
+    ],
+    None,
+)

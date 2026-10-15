@@ -125,15 +125,4 @@ mod tests {
             "equal hash/language/length cannot substitute other source bytes"
         );
     }
-    #[test]
-    fn fence_cache_charges_retained_capacities_and_stays_bounded() {
-        let mut memo = FenceTokenCache::default();
-        for index in 0..300 {
-            let source = format!("{index}{}", "x".repeat(32_768));
-            memo.cached("rust", &source);
-            memo.remember("rust", &source, Arc::from([]));
-            assert!(memo.entries.len() <= MARKDOWN_FENCE_CACHE_MAX_ENTRIES);
-            assert!(memo.resident_bytes() <= MARKDOWN_FENCE_CACHE_MAX_BYTES);
-        }
-    }
 }

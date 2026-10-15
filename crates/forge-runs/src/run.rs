@@ -3,7 +3,8 @@
 use crate::Hub;
 use anyhow::{Context, Result};
 use artisan_api::{
-    ItemId, ItemKind, LiveTarget, Run, RunId, RunStatus, Status, ThreadId, UpdateThread, Usage,
+    ItemId, ItemKind, LiveTarget, Run, RunId, RunStatus, Status, ThreadId, ToolKind, UpdateThread,
+    Usage,
 };
 use forge_engines::{EngineEvent, Input, LiveKind, Outcome, RunIo, Turn, UserInput};
 use forge_store::NewItem;
@@ -172,13 +173,17 @@ async fn execute(
     tokio::pin!(forwarding);
     let (events, mut reports) = mpsc::channel(256);
     let harness = (hub.inner.harness_for)(engine);
-    let outcome = harness.run(
-        turn,
-        RunIo {
-            inbox: adapter_inbox,
-            events,
-            cancel: cancel.clone(),
-        },
+    // Everything the adapter logs names the thread and run it belongs to.
+    let outcome = tracing::Instrument::instrument(
+        harness.run(
+            turn,
+            RunIo {
+                inbox: adapter_inbox,
+                events,
+                cancel: cancel.clone(),
+            },
+        ),
+        tracing::warn_span!("run", thread = %run.thread_id, run = %run.id, %engine),
     );
     tokio::pin!(outcome);
 
@@ -372,24 +377,6 @@ async fn parent_of(
 async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -> Result<()> {
     let store = hub.store();
     let thread_id = run.thread_id.clone();
-    let event = match event {
-        EngineEvent::Approval {
-            key,
-            parent,
-            target,
-            status,
-            approval,
-        } => EngineEvent::Item {
-            key,
-            parent,
-            status,
-            kind: ItemKind::Approval {
-                target: target.map(|key| items.id(&key)),
-                approval,
-            },
-        },
-        event => event,
-    };
     let event = if let EngineEvent::Image {
         key,
         parent,
@@ -456,8 +443,22 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             key,
             parent,
             status,
-            kind,
+            mut kind,
         } => {
+            // A message to an agent names the agent's item: the engine
+            // knows it only by its own address (Claude's `agentId`).
+            if let ItemKind::Tool {
+                tool:
+                    ToolKind::AgentMessage {
+                        recipient,
+                        target: target @ None,
+                        ..
+                    },
+                ..
+            } = &mut kind
+            {
+                *target = store.agent_by_address(&thread_id, recipient).await?;
+            }
             let parent_id = match parent {
                 Some(parent) => Some(parent_of(store, run, items, &parent).await?),
                 None => None,
@@ -561,9 +562,7 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
             };
             store.accept_inputs(thread_id, run.id.clone(), ids).await?;
         }
-        EngineEvent::Image { .. } | EngineEvent::Approval { .. } => {
-            unreachable!("normalized before dispatch")
-        }
+        EngineEvent::Image { .. } => unreachable!("normalized before dispatch"),
     }
     Ok(())
 }

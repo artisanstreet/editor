@@ -7,59 +7,16 @@ use gpui::{
     App, Pixels, SharedString, Task, TextRun, TextSystem, WindowTextSystem, WrappedLineLayout,
 };
 use std::ops::Range;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_RUN_BYTES: usize = 128 * 1024;
 const ADMITTED_ESTIMATE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_READY_BYTES: usize = 32 * 1024 * 1024;
-static READY_OWNER: LazyLock<Arc<tokio::sync::Semaphore>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_READY_BYTES)));
 const MAX_NATIVE_RESIDENT_BYTES: usize = 64 * 1024 * 1024;
-static SHAPE_OWNER: LazyLock<Arc<tokio::sync::Semaphore>> =
-    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 
-#[derive(Clone)]
-pub enum NativeInput {
-    Inline(SharedString),
-    Stored {
-        reference: artisan_api::ContentRef,
-        fetcher: super::stored::ContentFetch,
-    },
-}
-impl NativeInput {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Inline(text) => text.len(),
-            Self::Stored { reference, .. } => {
-                usize::try_from(reference.bytes).unwrap_or(usize::MAX)
-            }
-        }
-    }
-    pub fn same(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Inline(a), Self::Inline(b)) => a.as_ptr() == b.as_ptr() && a.len() == b.len(),
-            (Self::Stored { reference: a, .. }, Self::Stored { reference: b, .. }) => a == b,
-            _ => false,
-        }
-    }
-    async fn resolve(self) -> Result<SharedString, String> {
-        match self {
-            Self::Inline(text) => Ok(text),
-            Self::Stored { reference, fetcher } => {
-                let text = super::stored::fetch_complete_range(
-                    &reference,
-                    0..reference.bytes as usize,
-                    &fetcher,
-                )
-                .await?;
-                if artisan_api::ContentRef::from_text(&text) != reference {
-                    return Err("The literal source does not match its immutable digest".into());
-                }
-                Ok(text.into())
-            }
-        }
-    }
+/// Whether two paragraph sources are the same immutable text.
+pub(super) fn same_source(a: &SharedString, b: &SharedString) -> bool {
+    a.as_ptr() == b.as_ptr() && a.len() == b.len()
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -80,11 +37,11 @@ impl From<&str> for StartError {
     }
 }
 pub(super) async fn wait_for_owner() {
-    if let Ok(owner) = SHAPE_OWNER.clone().acquire_owned().await {
+    if let Ok(owner) = super::budget::shaping().acquire_owned().await {
         drop(owner);
     }
 }
-pub(super) fn admits(source: &NativeInput, runs: &[TextRun]) -> bool {
+pub(super) fn admits(source: &SharedString, runs: &[TextRun]) -> bool {
     source.len() <= MAX_INPUT_BYTES
         && std::mem::size_of_val(runs) <= MAX_RUN_BYTES
         && source
@@ -100,10 +57,6 @@ pub struct NativeWindow {
     pub runs: Arc<[TextRun]>,
     pub start: usize,
     pub rows: Vec<Arc<ProjectedNativeRow>>,
-    /// Accounted public Rust layout/glyph snapshot before it was dropped.
-    /// Excludes platform internals, private text-cache bookkeeping, and source
-    /// line/decorations storage; this is not the measured physical peak.
-    pub native_resident_bytes: usize,
     _resident: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 impl NativeWindow {
@@ -127,7 +80,7 @@ impl NativeWindow {
 /// generation key. Publish only if that key still matches after awaiting.
 pub(super) fn start(
     cx: &App,
-    source: NativeInput,
+    source: SharedString,
     font_size: Pixels,
     runs: Arc<[TextRun]>,
     width: Pixels,
@@ -136,7 +89,6 @@ pub(super) fn start(
     if window.start > window.end || window.len() > 128 {
         return Err("Native projection request exceeds its visual row budget".into());
     }
-    let run_bytes = std::mem::size_of_val(runs.as_ref());
     if !admits(&source, &runs) {
         return Err(
             "This paragraph exceeds the native shaping admission budget; open the full source"
@@ -154,24 +106,15 @@ pub(super) fn start(
     {
         return Err("Native paragraph source, runs, or geometry do not match".into());
     }
-    // This estimate governs admitted work, not opaque native allocations. One
+    // `admits` bounds admitted work, not opaque native allocations. One
     // actual owner holds the permit until synchronous native shaping returns.
-    let estimate = source
-        .len()
-        .checked_mul(256)
-        .and_then(|bytes| bytes.checked_add(run_bytes))
-        .ok_or("Native shaping estimate overflow")?;
-    if estimate > ADMITTED_ESTIMATE_BYTES {
-        return Err("Native shaping estimate exceeds admission".into());
-    }
-    let owner = SHAPE_OWNER
-        .clone()
+    let owner = super::budget::shaping()
         .try_acquire_owned()
         .map_err(|_| StartError::Busy)?;
     let system: Arc<TextSystem> = cx.text_system().clone();
     Ok(cx.background_executor().spawn(async move {
         let _owner = owner;
-        let text = source.resolve().await?;
+        let text = source;
         let worker = WindowTextSystem::new(system);
         let shaped = worker
             .shape_text(text.clone(), font_size, &runs, Some(width), None)
@@ -227,16 +170,14 @@ pub(super) fn start(
             runs,
             start,
             rows,
-            native_resident_bytes,
             _resident: None,
         };
         let bytes = ready.resident_bytes();
-        if bytes > MAX_READY_BYTES {
+        if bytes > super::budget::NATIVE_READY_BYTES {
             return Err("Native paragraph page exceeds its presentation budget".into());
         }
         let capacity = Arc::new(
-            READY_OWNER
-                .clone()
+            super::budget::native_ready()
                 .try_acquire_many_owned(bytes as u32)
                 .map_err(|_| "Native paragraph presentation budget is occupied".to_owned())?,
         );

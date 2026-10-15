@@ -3,10 +3,10 @@
 //! configurable yet.
 
 use crate::Settings;
-use crate::chrome::{card, header, row, section_shell};
 use crate::page;
 use editor_core::SettingsPage;
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{card, header, row, section_shell};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{Div, IntoElement, ParentElement as _, Styled as _, div, px};
 
@@ -56,20 +56,18 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme) -> Div {
             page::label(SettingsPage::Models),
             page::description(SettingsPage::Models),
         ))
-        .child(section_shell(
-            theme,
-            "compaction",
-            "Compaction",
-            Some("Compaction choices are not yet configurable in the native app."),
-            None,
-            compaction,
-        ))
-        .child(section_shell(
-            theme,
-            "favorites",
-            "Favorites",
-            None,
-            None,
-            favorites,
-        ))
+        .child(
+            section_shell(
+                theme,
+                "Compaction",
+                Some("Compaction choices are not yet configurable in the native app."),
+                None,
+                compaction,
+            )
+            .debug_selector("settings-section-compaction"),
+        )
+        .child(
+            section_shell(theme, "Favorites", None, None, favorites)
+                .debug_selector("settings-section-favorites"),
+        )
 }

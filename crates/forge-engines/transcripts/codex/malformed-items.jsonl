@@ -1,0 +1,15 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "no-command", "status": "completed", "type": "commandExecution"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "no-name", "status": "completed", "type": "dynamicToolCall"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "no-path", "type": "imageView"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "no-changes", "status": "completed", "type": "fileChange"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "blank-path", "status": "completed", "changes": [{"path": " ", "kind": {"type": "add"}, "diff": ""}], "type": "fileChange"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "no-server", "status": "completed", "tool": "x", "arguments": null, "type": "mcpToolCall"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "odd-status", "status": "queued", "command": "ls", "type": "commandExecution"}}}
+{"method": "item/started", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "started-bare", "status": "inProgress", "type": "commandExecution"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "unsuccessful", "status": "completed", "success": false, "tool": "lookup", "arguments": {"q": 1}, "contentItems": [{"type": "inputText", "text": "not found"}], "type": "dynamicToolCall"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "mcp", "status": "failed", "server": "docs", "tool": "search", "arguments": {}, "error": {"message": "server down"}, "type": "mcpToolCall"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "moved", "status": "declined", "changes": [{"path": "old.rs", "kind": {"type": "update", "move_path": "new.rs"}, "diff": ""}], "type": "fileChange"}}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}

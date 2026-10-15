@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// Authored text larger than this travels as a [`ContentRef`].
 pub const INLINE_TEXT_BYTES: usize = 16 * 1024;
-pub const CONTENT_CHUNK_BYTES: usize = 32 * 1024;
+/// The most bytes one content range carries.
 pub const CONTENT_RANGE_BYTES: u32 = 64 * 1024;
 
 /// SHA-256 of the exact UTF-8 bytes. Stored sources are immutable.
@@ -84,12 +85,6 @@ impl TextContent {
             Self::Stored(source) => source.bytes,
         }
     }
-    pub fn resident_bytes(&self) -> usize {
-        match self {
-            Self::Inline(text) => text.capacity(),
-            Self::Stored(source) => source.id.0.capacity(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -124,7 +119,6 @@ mod tests {
         });
         assert_eq!(reference.inline(), None);
         assert_eq!(reference.byte_len(), 9_000_000);
-        assert!(reference.resident_bytes() < 1000);
         assert_eq!(
             serde_json::from_str::<TextContent>(&serde_json::to_string(&reference).unwrap())
                 .unwrap(),

@@ -6,6 +6,7 @@
 //! number gutter, clickable paths, quiet toggles, and Markdown fences — live
 //! here; each kind's file holds only what is particular to it.
 
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use editor_assets::AssetId;
@@ -18,7 +19,6 @@ use serde_json::Value;
 use super::actions::open_reference;
 use super::{RichBlock, block};
 use crate::button::{Button, ButtonVariant, LabelOverflow};
-use crate::theme::ArtisanTheme;
 
 mod annotated;
 mod code_ref;
@@ -61,7 +61,7 @@ fn code_panel(theme: &ArtisanTheme) -> Div {
         .flex_col()
         .font_family(theme.typography.mono.family)
         .tracking(0.0)
-        .text_size(px(13.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
         .line_height(px(LINE_PX))
         .text_color(theme.colors.foreground.to_paint())
 }

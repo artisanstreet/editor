@@ -121,7 +121,7 @@ impl RenderOnce for SankeyView {
                 } else {
                     0.3
                 };
-                kit::series_color(&theme, node).with_alpha(alpha).to_paint()
+                kit::series_color(node).with_alpha(alpha).to_paint()
             })
             .collect();
         let link_colors: Vec<Hsla> = graph
@@ -134,9 +134,7 @@ impl RenderOnce for SankeyView {
                     Some(true) => 0.6,
                     Some(false) => 0.08,
                 };
-                kit::series_color(&theme, link.from)
-                    .with_alpha(alpha)
-                    .to_paint()
+                kit::series_color(link.from).with_alpha(alpha).to_paint()
             })
             .collect();
         let label_height = f32::from(theme.typography.control_text) * (4.0 / 3.0);
@@ -482,7 +480,7 @@ mod native_tests {
                 .debug_selector(|| "native-sankey".into())
                 .child(SankeyView {
                     id: "native-sankey".into(),
-                    theme: ArtisanTheme::default(),
+                    theme: ArtisanTheme::resolved(),
                     graph: self.graph.clone(),
                 })
         }

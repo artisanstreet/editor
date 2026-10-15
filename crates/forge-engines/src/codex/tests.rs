@@ -4,7 +4,9 @@
 //! server lines as Codex wrote them, and `{"client": …}` lines for what the
 //! recorder sent. The replay plays the driver's part: it registers each
 //! request so response ids line up, and answers approvals the way the
-//! recording did. Consecutive live appends to one target are merged.
+//! recording did. `{"answer": {"key", "answer"}}` lines are the user
+//! answering an item (questions; recordings reply to approvals themselves).
+//! Consecutive live appends to one target are merged.
 
 use super::decoder::Decoder;
 use crate::{EngineEvent, Outcome};
@@ -25,6 +27,10 @@ enum Step {
     },
     /// The root thread's turn ended this way.
     TurnEnd(Outcome),
+    /// A user message the driver sends next (answers to async questions).
+    Message(String),
+    /// A line Codex's protocol can't carry: the run fails.
+    ProtocolError(String),
 }
 
 fn replay(case: &str) -> Vec<Step> {
@@ -36,8 +42,18 @@ fn replay(case: &str) -> Vec<Step> {
     let mut asked: HashMap<String, String> = HashMap::new();
     let mut steps = Vec::new();
     for line in transcript.lines().filter(|line| !line.trim().is_empty()) {
-        let message: Value =
-            serde_json::from_str(line).unwrap_or_else(|error| panic!("{case}: {error}: {line}"));
+        // A line that isn't JSON still goes to the decoder, which fails it.
+        let message: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+        if let Some(answer) = message.get("answer") {
+            let key = answer["key"].as_str().expect("answered key");
+            let answer: Answer =
+                serde_json::from_value(answer["answer"].clone()).expect("an Answer");
+            let events = decoder.answer(key, &answer);
+            steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
+            steps.extend(decoder.take_outbox().into_iter().map(Step::Reply));
+            steps.extend(decoder.take_messages().into_iter().map(Step::Message));
+            continue;
+        }
         if let Some(client) = message.get("client") {
             match (client["method"].as_str(), &client["id"]) {
                 (Some(method), id) if !id.is_null() => {
@@ -67,28 +83,19 @@ fn replay(case: &str) -> Vec<Step> {
             && let Some(id) = message.get("id")
             && let Some(item) = message["params"]["itemId"].as_str()
         {
-            let key = if message["method"]
-                .as_str()
-                .is_some_and(|method| method.ends_with("/requestApproval"))
-            {
-                format!("approval-request:{id}")
-            } else {
-                item.to_owned()
-            };
-            asked.insert(id.to_string(), key);
+            asked.insert(id.to_string(), item.to_owned());
         }
-        steps.extend(
-            decoder
-                .feed(line)
-                .unwrap()
-                .into_iter()
-                .map(|event| Step::Event(Box::new(event))),
-        );
+        match decoder.feed(line) {
+            Ok(events) => {
+                steps.extend(events.into_iter().map(|event| Step::Event(Box::new(event))));
+            }
+            Err(error) => steps.push(Step::ProtocolError(format!("{error:#}"))),
+        }
         steps.extend(decoder.take_outbox().into_iter().map(Step::Reply));
         for response in decoder.take_responses() {
             steps.push(Step::Response {
                 method: response.method,
-                result: response.result.map(|_| ()),
+                result: response.result.map(|_| ()).map_err(|error| error.message),
             });
         }
         if let Some(outcome) = decoder.take_turn_end() {
@@ -141,6 +148,58 @@ fn steer_lands_in_the_running_turn_and_a_late_one_is_rejected() {
 #[test]
 fn subagent_becomes_an_agent_item_owning_its_child_items() {
     insta::assert_debug_snapshot!(replay("subagent"));
+}
+
+/// Lines that aren't JSON-RPC, and a turn end Artisan can't read, fail the
+/// run; notices and items it can't read are skipped.
+#[test]
+fn unreadable_frames_fail_the_run_only_when_the_turn_depends_on_them() {
+    insta::assert_debug_snapshot!(replay("malformed"));
+}
+
+/// A completed item missing what it needs is an error, never an empty card.
+#[test]
+fn malformed_items_become_errors_not_empty_cards() {
+    insta::assert_debug_snapshot!(replay("malformed-items"));
+}
+
+/// Web actions show what they looked up, keep what they knew, and leave
+/// out what names nothing; a real error still shows.
+#[test]
+fn web_actions_show_their_query_or_address() {
+    insta::assert_debug_snapshot!(replay("web-search-actions"));
+}
+
+/// Approvals ride on the item they gate: a second one waits behind the
+/// first, one asked before its item makes the item, and Codex can settle
+/// one itself.
+#[test]
+fn approvals_queue_on_the_item_they_gate() {
+    insta::assert_debug_snapshot!(replay("approval-queue"));
+}
+
+/// Questions Codex can't ask are refused with an error; an answer names
+/// the chosen option by id, and the tool call behind it settles it.
+#[test]
+fn user_input_is_answered_by_choice_id() {
+    insta::assert_debug_snapshot!(replay("user-input"));
+}
+
+/// A malformed plan keeps the last good one.
+#[test]
+fn plan_updates_replace_the_plan_and_a_malformed_one_is_an_error() {
+    insta::assert_debug_snapshot!(replay("plan"));
+}
+
+/// Questions inside an agent message are answered with the next message.
+#[test]
+fn async_questions_are_answered_as_a_message() {
+    insta::assert_debug_snapshot!(replay("async-questions"));
+}
+
+#[test]
+fn notices_and_a_refused_turn() {
+    insta::assert_debug_snapshot!(replay("notices"));
 }
 
 /// The tier chosen in the picker is what Codex is asked for, on the thread

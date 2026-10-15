@@ -1,0 +1,97 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 191
+expression: "replay(\"plan\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Read",
+                            ),
+                            status: Done,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Write",
+                            ),
+                            status: InProgress,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex supplied malformed plan steps",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Read",
+                            ),
+                            status: Done,
+                        },
+                        PlanStep {
+                            text: Inline(
+                                "Write",
+                            ),
+                            status: Done,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+]

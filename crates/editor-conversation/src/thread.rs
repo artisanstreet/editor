@@ -3,6 +3,7 @@
 
 use crate::viewport::{Effect, Fetch, Input, Jump, State, Viewport};
 use artisan_api::{Item, ItemId, ItemsPage, ItemsQuery, LiveTarget, Run, RunId, Seq, ThreadId};
+use editor_core::ResidentBytes as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

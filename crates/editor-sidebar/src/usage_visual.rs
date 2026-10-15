@@ -13,17 +13,20 @@ use editor_ui::glass::{
     glass_highlight_layer, glass_material_layer,
 };
 use editor_ui::icon::{IconSize, IconStyle, IconTint, icon};
+use editor_ui::measure::Measured;
 use editor_ui::motion::{MotionCurve, MotionDuration};
 use editor_ui::picker_motion::HoverRect;
-use editor_ui::theme::{ArtisanTheme, RadiusStep, RadiusTokens, WorkspaceColors};
+use editor_ui::theme::{
+    ArtisanTheme, ColorTokens, RadiusStep, RadiusTokens, TextStep, TypographyTokens,
+};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Bounds, Context, Div, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, StyledText, canvas, div, px,
+    Context, Div, FontWeight, HighlightStyle, Hsla, InteractiveElement as _, ParentElement as _,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, StyledText, canvas, div,
+    px,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::time::Instant;
 
 /// Ticks in a meter, as the previous Editor quantized it.
@@ -197,8 +200,6 @@ pub(crate) const fn engine_name(engine: EngineId) -> &'static str {
 
 /// One meter: its engine and its window's place in the report.
 type MeterKey = (EngineId, usize);
-/// The hovered meter and its row's place in the menu.
-type TipAnchor = Rc<RefCell<Option<(MeterKey, HoverRect)>>>;
 
 /// The Usage section's pointer state.
 #[derive(Default)]
@@ -207,34 +208,17 @@ pub(crate) struct UsageUi {
     pub(crate) refresh_hover: Option<EngineId>,
     /// Each engine's reading/Refresh/spinner swap, mid-flight or at rest.
     swaps: RefCell<HashMap<EngineId, RefreshSwap>>,
-    /// The hovered meter and its row's place in the menu.
+    /// The hovered meter, and its row's and the menu's measured places.
     pub(crate) meter_hover: Option<MeterKey>,
-    pub(crate) tip_anchor: TipAnchor,
-    pub(crate) menu_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    pub(crate) tip_anchor: Measured,
+    pub(crate) menu_bounds: Measured,
 }
 
 impl UsageUi {
     pub(crate) fn clear(&mut self) {
         self.refresh_hover = None;
         self.meter_hover = None;
-        self.tip_anchor.borrow_mut().take();
-    }
-
-    /// Records the menu panel's bounds, for the tooltip's place.
-    pub(crate) fn menu_probe(&self) -> impl IntoElement {
-        let bounds = Rc::clone(&self.menu_bounds);
-        canvas(
-            |_, _, _| {},
-            move |measured, (), window, cx| {
-                if bounds.borrow_mut().replace(measured) != Some(measured) {
-                    window.defer(cx, |window, _| window.refresh());
-                }
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
+        self.tip_anchor.clear();
     }
 }
 
@@ -243,7 +227,7 @@ pub(crate) fn section(
     sidebar: &Account,
     engines: &[(EngineId, UsageLimits)],
     theme: &ArtisanTheme,
-    desktop: WorkspaceColors,
+    desktop: &ColorTokens,
     separator: Hsla,
     cx: &mut Context<Account>,
 ) -> Stateful<Div> {
@@ -273,7 +257,7 @@ fn engine_block(
     usage: &UsageLimits,
     now: Timestamp,
     theme: &ArtisanTheme,
-    desktop: WorkspaceColors,
+    desktop: &ColorTokens,
     cx: &mut Context<Account>,
 ) -> Div {
     let accent = engine_accent(engine);
@@ -292,7 +276,7 @@ fn engine_block(
                 .min_w(px(0.0))
                 .items_center()
                 .gap(px(8.0))
-                .text_color(desktop.foreground)
+                .text_color(desktop.workspace_foreground.to_paint())
                 .child(
                     icon(IconStyle::resolve(
                         *theme,
@@ -306,10 +290,10 @@ fn engine_block(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(TypographyTokens::size(TextStep::Xs))
                         .line_height(px(16.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(desktop.foreground)
+                        .text_color(desktop.workspace_foreground.to_paint())
                         .child(engine_name(engine)),
                 ),
         )
@@ -337,10 +321,10 @@ fn engine_block(
         }
         group = group.child(
             div()
-                .text_size(px(12.0))
+                .text_size(TypographyTokens::size(TextStep::Xs))
                 .line_height(px(16.0))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(desktop.foreground)
+                .text_color(desktop.workspace_foreground.to_paint())
                 .child(cadence.title()),
         );
         for meter in &meters {
@@ -356,7 +340,7 @@ fn engine_block(
                     .with_highlights([(
                         start..start + duration.len(),
                         HighlightStyle {
-                            color: Some(desktop.foreground),
+                            color: Some(desktop.workspace_foreground.to_paint()),
                             ..Default::default()
                         },
                     )]),
@@ -365,9 +349,9 @@ fn engine_block(
             group = group.child(
                 div()
                     .mt(px(8.0))
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
-                    .text_color(desktop.secondary)
+                    .text_color(desktop.workspace_secondary.to_paint())
                     .child(body),
             );
         }
@@ -467,7 +451,7 @@ fn refresh_control(
     checked: &str,
     refreshing: bool,
     theme: &ArtisanTheme,
-    desktop: WorkspaceColors,
+    desktop: &ColorTokens,
     cx: &mut Context<Account>,
 ) -> Stateful<Div> {
     let selector = format!("artisan-profile-usage-refresh-{engine}");
@@ -504,14 +488,18 @@ fn refresh_control(
         .debug_selector(move || selector.clone())
         .grid()
         .flex_shrink_0()
-        .text_size(px(12.0))
+        .text_size(TypographyTokens::size(TextStep::Xs))
         .line_height(px(16.0))
         .child(
             layer(0)
-                .text_color(desktop.secondary)
+                .text_color(desktop.workspace_secondary.to_paint())
                 .child(checked.to_owned()),
         )
-        .child(layer(1).text_color(desktop.foreground).child("Refresh"))
+        .child(
+            layer(1)
+                .text_color(desktop.workspace_foreground.to_paint())
+                .child("Refresh"),
+        )
         .child(
             layer(2).child(
                 FadeArc::new(
@@ -568,7 +556,7 @@ fn meter_row(
     meter: &Meter,
     accent: Hsla,
     dim: Hsla,
-    desktop: WorkspaceColors,
+    desktop: &ColorTokens,
     cx: &mut Context<Account>,
 ) -> Stateful<Div> {
     let lit = lit_ticks(meter.used_percent);
@@ -584,35 +572,7 @@ fn meter_row(
                 .bg(if index < lit { accent } else { dim }),
         );
     }
-    let probe = {
-        let (anchor, surface) = (
-            Rc::clone(&sidebar.ui.tip_anchor),
-            Rc::clone(&sidebar.ui.menu_bounds),
-        );
-        let hovered = sidebar.ui.meter_hover == Some(key);
-        canvas(
-            |_, _, _| {},
-            move |bounds, (), window, cx| {
-                if !hovered {
-                    return;
-                }
-                let Some(surface) = *surface.borrow() else {
-                    return;
-                };
-                let rect = HoverRect::within(bounds, surface);
-                let mut anchor = anchor.borrow_mut();
-                if anchor.as_ref() == Some(&(key, rect)) {
-                    return;
-                }
-                *anchor = Some((key, rect));
-                window.defer(cx, |window, _| window.refresh());
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-    };
+    let hovered = sidebar.ui.meter_hover == Some(key);
     div()
         .id(SharedString::from(selector.clone()))
         .debug_selector(move || selector.clone())
@@ -620,16 +580,16 @@ fn meter_row(
         .flex()
         .items_center()
         .gap(px(16.0))
-        .child(probe)
+        .when(hovered, |row| row.child(sidebar.ui.tip_anchor.track()))
         .child(
             div()
                 .min_w(px(0.0))
                 .flex_1()
                 .truncate()
                 .pl(px(8.0))
-                .text_size(px(12.0))
+                .text_size(TypographyTokens::size(TextStep::Xs))
                 .line_height(px(16.0))
-                .text_color(desktop.secondary)
+                .text_color(desktop.workspace_secondary.to_paint())
                 .child(
                     meter
                         .scope
@@ -643,7 +603,7 @@ fn meter_row(
                 sidebar.ui.meter_hover = Some(key);
             } else if sidebar.ui.meter_hover == Some(key) {
                 sidebar.ui.meter_hover = None;
-                sidebar.ui.tip_anchor.borrow_mut().take();
+                sidebar.ui.tip_anchor.clear();
             }
             cx.notify();
         }))
@@ -654,13 +614,10 @@ pub(crate) fn tooltip(
     sidebar: &Account,
     engines: &[(EngineId, UsageLimits)],
     theme: &ArtisanTheme,
-    desktop: WorkspaceColors,
+    desktop: &ColorTokens,
 ) -> Option<Stateful<Div>> {
     let key = sidebar.ui.meter_hover?;
-    let (anchor_key, anchor) = (*sidebar.ui.tip_anchor.borrow())?;
-    if anchor_key != key {
-        return None;
-    }
+    let anchor = HoverRect::within(sidebar.ui.tip_anchor.get()?, sidebar.ui.menu_bounds.get()?);
     let window = engines
         .iter()
         .find(|(engine, _)| *engine == key.0)?
@@ -680,7 +637,7 @@ pub(crate) fn tooltip(
             .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
             .bg(glass_foreground_base(theme))
             .border_1()
-            .border_color(desktop.line)
+            .border_color(desktop.line.to_paint())
             .shadow(glass_card_shadows())
             .child(glass_material_layer(GlassStrength::Quiet, radius))
             .child(glass_highlight_layer(GlassStrength::Quiet, radius))
@@ -692,9 +649,9 @@ pub(crate) fn tooltip(
                     .flex_row()
                     .items_center()
                     .whitespace_nowrap()
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
-                    .text_color(desktop.foreground)
+                    .text_color(desktop.workspace_foreground.to_paint())
                     .child(format!(
                         "You have {}% left.",
                         remaining_percent(window.used_percent)

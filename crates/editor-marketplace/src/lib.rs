@@ -11,7 +11,7 @@ mod tests;
 
 use artisan_api::SkillAction;
 use editor_core::{Core, CoreEvent, HostEvent, HostId, Screen};
-use editor_ui::theme::ArtisanTheme;
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme};
 use gpui::{Context, Entity, ListAlignment, ListState, Subscription, px};
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ impl Marketplace {
         let shown = matches!(core.read(cx).screen(), Screen::Marketplace);
         let mut page = Self {
             core,
-            theme: ArtisanTheme::default(),
+            theme: *cx.theme(),
             host: None,
             generation: 0,
             catalog: None,

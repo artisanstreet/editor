@@ -76,22 +76,11 @@ pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
         "WebSearch" => ToolKind::WebSearch {
             query: text("query"),
         },
+        // Forge resolves `to` to the Agent item it names.
         "SendMessage" if optional("to").is_some_and(|to| !to.trim().is_empty()) => {
-            let recipient = text("to");
-            let recipient_label = if recipient.starts_with("uds:") || recipient.contains('/') {
-                "another session".to_owned()
-            } else if recipient.len() >= 16
-                && recipient
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric())
-            {
-                "an agent".to_owned()
-            } else {
-                recipient.clone()
-            };
             ToolKind::AgentMessage {
-                recipient,
-                recipient_label,
+                recipient: text("to"),
+                target: None,
                 summary: optional("summary").filter(|summary| !summary.trim().is_empty()),
                 text: (text("message")).into(),
             }

@@ -70,7 +70,10 @@ fn caption_button(theme: &ArtisanTheme, caption: Caption, stroke: Pixels) -> Sta
             gpui::rgb_to_hsla(gpui::rgb(0x00e8_1123)),
             gpui::rgb_to_hsla(gpui::rgb(0x00ff_ffff)),
         ),
-        Caption::Maximize(_) => (theme.workspace.selected, theme.workspace.foreground),
+        Caption::Maximize(_) => (
+            theme.colors.selected.to_paint(),
+            theme.colors.workspace_foreground.to_paint(),
+        ),
         _ => (
             theme.colors.muted.with_alpha(0.5).to_paint(),
             theme.colors.foreground.to_paint(),
@@ -130,7 +133,7 @@ fn maximize_glyph(theme: &ArtisanTheme, maximized: bool, stroke: Pixels) -> Div 
                     .h(px(7.0))
                     .border_t(stroke)
                     .border_r(stroke)
-                    .border_color(theme.workspace.foreground),
+                    .border_color(theme.colors.workspace_foreground.to_paint()),
             )
             .child(
                 div()
@@ -140,12 +143,12 @@ fn maximize_glyph(theme: &ArtisanTheme, maximized: bool, stroke: Pixels) -> Div 
                     .w(px(7.0))
                     .h(px(7.0))
                     .border(stroke)
-                    .border_color(theme.workspace.foreground),
+                    .border_color(theme.colors.workspace_foreground.to_paint()),
             );
     } else {
         glyph = glyph
             .border(stroke)
-            .border_color(theme.workspace.foreground);
+            .border_color(theme.colors.workspace_foreground.to_paint());
     }
     glyph
 }

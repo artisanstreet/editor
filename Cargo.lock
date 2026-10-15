@@ -318,6 +318,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "artisan-mentions"
+version = "0.0.0"
+
+[[package]]
 name = "as-raw-xcb-connection"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1816,6 +1820,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "artisan-api",
+ "artisan-mentions",
  "editor-core",
  "editor-ui",
  "forge-engines",
@@ -2374,14 +2379,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "forge-content"
+version = "0.0.0"
+dependencies = [
+ "artisan-api",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "forge-engines"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "artisan-api",
+ "artisan-mentions",
  "base64 0.22.1",
  "chrono",
  "flate2",
+ "forge-content",
  "fs2",
  "futures",
  "getrandom 0.4.3",
@@ -2464,6 +2482,7 @@ dependencies = [
  "anyhow",
  "artisan-api",
  "artisan-markdown-index",
+ "forge-content",
  "hex",
  "image",
  "rusqlite",

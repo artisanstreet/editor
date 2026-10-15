@@ -17,6 +17,7 @@
 //! so while one render runs, changes wait and its completion asks for the
 //! latest view; dragging renders at one sample per pixel, at rest 2×2.
 
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -37,7 +38,6 @@ use super::mesh::{Up, Vec3};
 use super::raster::{self, Camera, Look};
 use crate::button::{Button, ButtonVariant};
 use crate::segmented_control::{Segment, SegmentedControl};
-use crate::theme::{ArtisanTheme, ThemeMode};
 use editor_assets::AssetId;
 
 /// The frame's aspect ratio unless the spec hints one.
@@ -260,10 +260,7 @@ impl ModelView {
 
     /// The surface colors for this theme.
     fn look(&self, shading: Shading) -> Look {
-        let clay = match self.theme.mode {
-            ThemeMode::Dark => Vec3::new(0.52, 0.5, 0.48),
-            ThemeMode::Light => Vec3::new(0.4, 0.385, 0.37),
-        };
+        let clay = Vec3::new(0.52, 0.5, 0.48);
         Look {
             base: self.color.unwrap_or(clay),
             edges: (shading == Shading::Wireframe).then_some((Vec3::new(0.01, 0.01, 0.012), 0.6)),
@@ -464,7 +461,7 @@ impl ModelView {
             )
             .child(
                 kit::muted(&theme, format!("{} · {count} {noun}", model.format.label()))
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .whitespace_nowrap(),
             )
     }
@@ -684,6 +681,6 @@ fn hint(theme: &ArtisanTheme, group: &SharedString, dragging: bool) -> Div {
                 theme,
                 format!("Drag to turn · Shift-drag to pan · {shortcut} to zoom"),
             )
-            .text_size(px(12.0)),
+            .text_size(TypographyTokens::size(TextStep::Xs)),
         )
 }

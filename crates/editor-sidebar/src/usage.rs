@@ -1,11 +1,14 @@
 //! Account controls own their request state and one minute clock, only while open.
-use crate::{avatar, hover::HoverSurface, usage_visual};
+use crate::{avatar, usage_visual};
 use artisan_api::{EngineId, UsageLimits};
 #[cfg(test)]
 use artisan_api::{Timestamp, UsageCadence, UsageWindow};
 use editor_core::{ConnectionStatus, Core, HostData, HostEvent, Screen, SettingsPage};
+use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
-use editor_ui::{AssetId, theme::ArtisanTheme};
+use editor_ui::measure::Measured;
+use editor_ui::picker_motion::HoverSurface;
+use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Bounds, Context, Entity, FontWeight, Image, InteractiveElement as _, IntoElement,
@@ -23,7 +26,7 @@ pub(crate) struct Account {
     machines_hover: HoverSurface,
     machines_open: bool,
     host_origin: Rc<Cell<Bounds<Pixels>>>,
-    submenu_bounds: Rc<Cell<Bounds<Pixels>>>,
+    submenu_bounds: Measured,
     avatars: HashMap<String, Arc<Image>>,
     close: Option<Rc<dyn Fn(&mut gpui::App)>>,
     usage_height: Pixels,
@@ -65,7 +68,7 @@ impl Account {
             machines_hover: HoverSurface::default(),
             machines_open: false,
             host_origin: Rc::default(),
-            submenu_bounds: Rc::default(),
+            submenu_bounds: Measured::default(),
             avatars: HashMap::new(),
             close: None,
             usage_height: px(0.0),
@@ -165,7 +168,7 @@ impl Account {
         cx.notify();
     }
     pub(crate) fn contains_popup(&self, position: &gpui::Point<Pixels>) -> bool {
-        self.machines_open && self.submenu_bounds.get().contains(position)
+        self.machines_open && self.submenu_bounds.contains(position)
     }
     fn action(
         &self,
@@ -174,7 +177,7 @@ impl Account {
         label: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let hover = self.hover.clone();
         div()
             .id(id)
@@ -189,22 +192,22 @@ impl Account {
             .flex()
             .items_center()
             .gap(px(8.0))
-            .rounded(px(12.0))
+            .rounded(RadiusTokens::value(RadiusStep::LgMid))
             .cursor_pointer()
             .child(self.hover.row_probe(id))
             .child(
                 asset_glyph(asset)
                     .size(px(15.0))
-                    .text_color(theme.workspace.secondary),
+                    .text_color(theme.colors.workspace_secondary.to_paint()),
             )
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(14.0))
+                    .text_size(TypographyTokens::size(TextStep::Sm))
                     .line_height(px(20.0))
-                    .text_color(theme.workspace.foreground)
+                    .text_color(theme.colors.workspace_foreground.to_paint())
                     .child(label),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -216,7 +219,7 @@ impl Account {
             }))
     }
     fn host_menu(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let current = self.host.as_ref().map(|host| host.read(cx).id.clone());
         let hosts: Vec<_> = self
             .core
@@ -264,7 +267,7 @@ impl Account {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .rounded(px(12.0))
+                    .rounded(RadiusTokens::value(RadiusStep::LgMid))
                     .cursor_pointer()
                     .child(self.machines_hover.row_probe(hover_id.clone()))
                     .on_hover(cx.listener(move |_, hovered: &bool, _, cx| {
@@ -275,7 +278,7 @@ impl Account {
                         div()
                             .size(px(32.0))
                             .flex_none()
-                            .rounded(px(8.0))
+                            .rounded(RadiusTokens::value(RadiusStep::Md))
                             .overflow_hidden()
                             .child(avatar::avatar(image)),
                     )
@@ -288,16 +291,16 @@ impl Account {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(14.0))
+                                    .text_size(TypographyTokens::size(TextStep::Sm))
                                     .line_height(px(20.0))
                                     .child(config.name),
                             )
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(12.0))
+                                    .text_size(TypographyTokens::size(TextStep::Xs))
                                     .line_height(px(16.0))
-                                    .text_color(theme.workspace.secondary)
+                                    .text_color(theme.colors.workspace_secondary.to_paint())
                                     .child(secondary),
                             ),
                     )
@@ -364,14 +367,7 @@ impl Account {
                     div()
                         .id("machine-dropdown")
                         .relative()
-                        .child(
-                            gpui::canvas(
-                                |_, _, _| {},
-                                move |bounds, (), _, _| submenu_bounds.set(bounds),
-                            )
-                            .absolute()
-                            .size_full(),
-                        )
+                        .child(submenu_bounds.record())
                         .debug_selector(|| "machine-dropdown".into())
                         .w(width)
                         .max_h(px(400.0))
@@ -386,7 +382,7 @@ impl Account {
 }
 impl Render for Account {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let (seed, user, name, status) = self
             .host
             .as_ref()
@@ -444,7 +440,7 @@ impl Render for Account {
             .flex()
             .items_center()
             .gap(px(12.0))
-            .rounded(px(12.0))
+            .rounded(RadiusTokens::value(RadiusStep::LgMid))
             .cursor_pointer()
             .child(self.hover.row_probe("profile-host"))
             .child(
@@ -467,7 +463,7 @@ impl Render for Account {
                 div()
                     .size(px(32.0))
                     .flex_none()
-                    .rounded(px(8.0))
+                    .rounded(RadiusTokens::value(RadiusStep::Md))
                     .overflow_hidden()
                     .child(avatar::avatar(image)),
             )
@@ -480,7 +476,7 @@ impl Render for Account {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(14.0))
+                            .text_size(TypographyTokens::size(TextStep::Sm))
                             .line_height(px(20.0))
                             .font_weight(FontWeight::MEDIUM)
                             .child(user),
@@ -488,16 +484,16 @@ impl Render for Account {
                     .child(
                         div()
                             .truncate()
-                            .text_size(px(12.0))
+                            .text_size(TypographyTokens::size(TextStep::Xs))
                             .line_height(px(16.0))
-                            .text_color(theme.workspace.secondary)
+                            .text_color(theme.colors.workspace_secondary.to_paint())
                             .child(status),
                     ),
             )
             .child(
                 asset_glyph(AssetId::TABLER_CHEVRON_RIGHT)
                     .size(px(15.0))
-                    .text_color(theme.workspace.secondary),
+                    .text_color(theme.colors.workspace_secondary.to_paint()),
             );
         let reports: Vec<(EngineId, UsageLimits)> = self
             .host
@@ -525,7 +521,7 @@ impl Render for Account {
             .relative()
             .flex()
             .flex_col()
-            .child(self.ui.menu_probe())
+            .child(self.ui.menu_bounds.track())
             .child(self.hover.surface_probe())
             .child(
                 self.hover
@@ -546,7 +542,7 @@ impl Render for Account {
                             self,
                             &reports,
                             &theme,
-                            theme.workspace,
+                            &theme.colors,
                             separator,
                             cx,
                         )),
@@ -596,7 +592,7 @@ impl Render for Account {
             );
         }
         body = body.child(actions);
-        if let Some(tooltip) = usage_visual::tooltip(self, &reports, &theme, theme.workspace) {
+        if let Some(tooltip) = usage_visual::tooltip(self, &reports, &theme, &theme.colors) {
             body = body.child(tooltip);
         }
         let submenu = self.machines_open.then(|| self.host_menu(window, cx));

@@ -1,0 +1,17 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "item/started", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "known", "status": "inProgress", "command": "/bin/bash -lc 'printf \"a  b\"'", "type": "commandExecution"}}}
+{"id": 7, "method": "item/commandExecution/requestApproval", "params": {"threadId": "root", "turnId": "turn", "itemId": "known", "approvalId": "first"}}
+{"id": 8, "method": "item/commandExecution/requestApproval", "params": {"threadId": "root", "turnId": "turn", "itemId": "known", "approvalId": "second"}}
+{"client": {"id": 7, "result": {"decision": "accept"}}}
+{"client": {"id": 8, "result": {"decision": "decline"}}}
+{"id": 9, "method": "item/commandExecution/requestApproval", "params": {"threadId": "root", "turnId": "turn", "itemId": "later"}}
+{"method": "item/started", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "later", "status": "inProgress", "command": "echo later", "type": "commandExecution"}}}
+{"method": "serverRequest/resolved", "params": {"threadId": "root", "requestId": 9}}
+{"id": 10, "method": "item/permissions/requestApproval", "params": {"threadId": "root", "turnId": "turn", "reason": "Needs network", "permissions": {"network": true, "paths": null}}}
+{"answer": {"key": "permissions:10", "answer": {"type": "approval", "decision": "allow_always"}}}
+{"id": 11, "method": "item/fileChange/requestApproval", "params": {"threadId": "root", "turnId": "turn"}}
+{"id": 12, "method": "item/fileChange/requestApproval", "params": {"threadId": "root", "turnId": "turn", "itemId": "patch", "reason": "Edit files"}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "patch", "status": "completed", "changes": [{"path": "a.rs", "kind": {"type": "update", "move_path": null}, "diff": "@@\n-a\n+b\n"}], "type": "fileChange"}}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}

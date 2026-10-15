@@ -11,6 +11,7 @@
 //! row first loaded: a later row naming a rewritten file is a new track.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -29,7 +30,6 @@ use serde::Deserialize;
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
 use super::source::{Located, MediaProvider, MediaRequest, MediaSource, Owned, Payload, locate};
-use crate::theme::ArtisanTheme;
 
 /// How often a playing row redraws its time.
 const TICK: Duration = Duration::from_millis(200);
@@ -435,7 +435,7 @@ impl RenderOnce for TrackRow {
             .children(time.map(|time| {
                 kit::mono(&theme, time)
                     .flex_shrink_0()
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .text_color(theme.colors.muted_foreground.to_paint())
             }))
             .into_any_element()
@@ -518,7 +518,7 @@ impl TrackRow {
                     .relative()
                     .w_full()
                     .h(px(4.0))
-                    .rounded(px(2.0))
+                    .rounded(RadiusTokens::value(RadiusStep::X2s))
                     .bg(kit::hairline(&theme))
                     .child(
                         canvas(
@@ -535,7 +535,7 @@ impl TrackRow {
                             .left_0()
                             .h_full()
                             .w(relative(shown.progress()))
-                            .rounded(px(2.0))
+                            .rounded(RadiusTokens::value(RadiusStep::X2s))
                             .bg(theme.colors.foreground.with_alpha(0.75).to_paint()),
                     ),
             )

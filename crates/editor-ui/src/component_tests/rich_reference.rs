@@ -16,7 +16,7 @@ impl Render for ReferenceFixture {
         div().w(px(128.0)).flex().child(
             Button::icon_text(
                 "bounded-reference",
-                ArtisanTheme::default(),
+                ArtisanTheme::resolved(),
                 AssetId::TABLER_FILE_TEXT,
                 "a/very/long/host/path/that/must/keep/the/final/file.rs:120",
             )

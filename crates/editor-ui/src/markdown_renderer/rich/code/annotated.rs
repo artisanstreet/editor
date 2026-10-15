@@ -8,6 +8,7 @@
 //! order.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -23,7 +24,6 @@ use super::{
     code_lines, code_panel, excerpt_width, gutter_width, hover_slot, line_number, path_link,
 };
 use crate::button::{Button, ButtonVariant};
-use crate::theme::ArtisanTheme;
 
 #[derive(Debug, Deserialize)]
 struct NoteSpec {
@@ -247,8 +247,8 @@ fn badge(theme: &ArtisanTheme, number: usize, active: bool) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(8.0))
-        .text_size(px(10.0))
+        .rounded(RadiusTokens::value(RadiusStep::Md))
+        .text_size(TypographyTokens::size(TextStep::X3s))
         .line_height(px(16.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .bg(color.with_alpha(if active { 0.9 } else { 0.18 }).to_paint())
@@ -371,7 +371,7 @@ impl AnnotatedView {
                         .flex()
                         .items_start()
                         .gap(px(8.0))
-                        .rounded(px(6.0))
+                        .rounded(RadiusTokens::value(RadiusStep::Sm))
                         .when(on, |row| {
                             row.bg(Tone::Accent.color(&theme).with_alpha(0.08).to_paint())
                         })
@@ -394,7 +394,7 @@ impl AnnotatedView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(14.0))
+                                .text_size(TypographyTokens::size(TextStep::Sm))
                                 .line_height(px(20.0))
                                 .text_color(theme.colors.foreground.to_paint())
                                 .child(entry.text.clone()),

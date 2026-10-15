@@ -2,9 +2,9 @@
 //! system notification, kept in this device's `settings.json`.
 
 use crate::Settings;
-use crate::chrome::{card, header, row, section_shell};
 use crate::page;
 use editor_core::SettingsPage;
+use editor_ui::page::{card, header, row, section_shell};
 use gpui::{Context, Div, IntoElement, ParentElement as _, Styled as _, div};
 use serde_json::Value;
 
@@ -57,12 +57,8 @@ pub(crate) fn render(
             page::label(SettingsPage::Notifications),
             page::description(SettingsPage::Notifications),
         ))
-        .child(section_shell(
-            theme,
-            "system",
-            "System",
-            None,
-            None,
-            card(theme, blocks),
-        ))
+        .child(
+            section_shell(theme, "System", None, None, card(theme, blocks))
+                .debug_selector("settings-section-system"),
+        )
 }

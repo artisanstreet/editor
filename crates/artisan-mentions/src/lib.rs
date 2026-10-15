@@ -1,4 +1,6 @@
-//! Shared skill mention grammar. Rendering and provider input use the same spans.
+//! The mention grammar the composer paints and Forge hands to engines:
+//! `$skill` and `@connector` names, matched against the installed ones.
+//! Rendering and provider input use the same spans.
 
 use std::{collections::HashSet, ops::Range};
 
@@ -119,7 +121,7 @@ mod tests {
         assert!(
             mentions
                 .iter()
-                .all(|mention| &text[mention.range.clone()] == format!("${}", mention.name))
+                .all(|mention| text[mention.range.clone()] == format!("${}", mention.name))
         );
     }
     #[test]
@@ -135,7 +137,7 @@ mod tests {
     }
     #[test]
     fn long_unmatched_tokens_and_duplicate_names_remain_bounded() {
-        let text = format!("${} $short", "a.".repeat(100000));
+        let text = format!("${} $short", "a.".repeat(100_000));
         assert_eq!(skill_mentions(&text, &["short", "short"]).len(), 1);
     }
 }

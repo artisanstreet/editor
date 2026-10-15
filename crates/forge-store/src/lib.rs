@@ -285,7 +285,6 @@ fn fresh_item(new: NewItem, created_at: Timestamp) -> Item {
         seq: 0,
         run_id: new.run_id,
         parent_id: new.parent_id,
-        native_id: new.native_id,
         status: new.status,
         created_at,
         updated_at: created_at,

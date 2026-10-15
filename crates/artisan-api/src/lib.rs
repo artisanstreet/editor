@@ -6,31 +6,26 @@
 
 mod agent_names;
 mod content;
-mod source_index;
 mod engine;
 mod event;
 mod extensions;
 mod ids;
 mod item;
-mod item_text;
-mod mentions;
 mod request;
+mod source_index;
 mod thread;
 #[cfg(feature = "tls")]
 pub mod tls;
 
 pub use agent_names::*;
 pub use content::*;
-pub use source_index::*;
 pub use engine::*;
 pub use event::*;
 pub use extensions::*;
 pub use ids::*;
 pub use item::*;
-pub use mentions::{
-    MAX_SKILL_NAME_BYTES, Mention, MentionNames, named_mentions, skill_mentions, valid_mention_name,
-};
 pub use request::*;
+pub use source_index::*;
 pub use thread::*;
 
 /// Milliseconds since the Unix epoch.
@@ -47,7 +42,7 @@ pub fn now() -> Timestamp {
 }
 
 /// The wire-schema version both endpoints must support. Build hashes may differ.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 mod collection;
 pub use collection::*;

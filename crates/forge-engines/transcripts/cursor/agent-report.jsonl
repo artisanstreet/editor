@@ -1,0 +1,7 @@
+{"dir": "note", "text": "synthesized from the ACP schema: shapes as Cursor sends them, values made up; a settled agent's late report replaces its result"}
+{"dir": "out", "line": {"jsonrpc": "2.0", "id": 3, "method": "session/prompt", "params": {"sessionId": "s", "prompt": [{"type": "text", "text": "go"}]}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call", "toolCallId": "agent", "rawInput": {"_toolName": "task", "prompt": "Inspect the parser", "description": "Inspect", "subagentType": "reviewer"}, "rawOutput": "report", "status": "completed"}}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "agent", "status": "completed"}}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "agent", "rawOutput": "corrected report", "status": "completed"}}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call", "toolCallId": "shell", "kind": "execute", "rawInput": {"command": "echo hello"}, "rawOutput": "hello", "status": "completed"}}}}
+{"dir": "in", "line": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "shell", "rawOutput": "later real output", "status": "completed"}}}}

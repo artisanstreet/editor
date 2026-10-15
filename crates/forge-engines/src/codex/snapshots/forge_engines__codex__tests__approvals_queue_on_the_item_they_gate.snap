@@ -1,0 +1,485 @@
+---
+source: crates/forge-engines/src/codex/tests.rs
+assertion_line: 178
+expression: "replay(\"approval-queue\")"
+---
+[
+    Event(
+        Session {
+            id: "root",
+        },
+    ),
+    Event(
+        Model {
+            id: "gpt-5.6-luna",
+        },
+    ),
+    Response {
+        method: "thread/start",
+        result: Ok(
+            (),
+        ),
+    },
+    Event(
+        Item {
+            key: "known",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "printf \"a  b\"",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "known",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "printf \"a  b\"",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "printf \"a  b\"",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "known",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "printf \"a  b\"",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "printf \"a  b\"",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(7),
+            "result": Object {
+                "decision": String("accept"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "known",
+            parent: None,
+            status: Declined,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "printf \"a  b\"",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "printf \"a  b\"",
+                            ),
+                            cwd: None,
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            DenyOnce,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(8),
+            "result": Object {
+                "decision": String("decline"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "later",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Other {
+                    name: "command",
+                    input: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve command execution",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "later",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo later",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve command execution",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "later",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "echo later",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Approve command execution",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "permissions:10",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Other {
+                    name: "permissions",
+                    input: Some(
+                        Inline(
+                            "{\"network\":true,\"paths\":null}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Needs network",
+                            ),
+                        },
+                        reason: Some(
+                            Inline(
+                                "Needs network",
+                            ),
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "permissions:10",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Other {
+                    name: "permissions",
+                    input: Some(
+                        Inline(
+                            "{\"network\":true,\"paths\":null}",
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Action {
+                            description: Inline(
+                                "Needs network",
+                            ),
+                        },
+                        reason: Some(
+                            Inline(
+                                "Needs network",
+                            ),
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: Some(
+                            AllowAlways,
+                        ),
+                    },
+                ),
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(10),
+            "result": Object {
+                "permissions": Object {
+                    "network": Bool(true),
+                },
+                "scope": String("session"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error-1",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Codex request omitted its required item ID",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Reply(
+        Object {
+            "id": Number(11),
+            "error": Object {
+                "code": Number(-32602),
+                "message": String("Codex request omitted its required item ID"),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "patch",
+            parent: None,
+            status: AwaitingUser,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: Some(
+                            Inline(
+                                "Edit files",
+                            ),
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "patch",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "a.rs",
+                                op: Modify,
+                                diff: Some(
+                                    Inline(
+                                        "@@\n-a\n+b\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: Some(
+                            Inline(
+                                "Edit files",
+                            ),
+                        ),
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                            Cancelled,
+                        ],
+                        decision: None,
+                    },
+                ),
+            },
+        },
+    ),
+    TurnEnd(
+        Outcome {
+            status: Done,
+            error: None,
+        },
+    ),
+    Event(
+        Status {
+            key: "later",
+            status: Cancelled,
+        },
+    ),
+]

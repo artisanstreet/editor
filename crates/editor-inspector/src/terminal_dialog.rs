@@ -3,6 +3,7 @@ use crate::{ShellScreen, model::shell_output};
 use artisan_api::{Item, ItemId, ItemKind, LiveTarget, Status, ThreadId, ToolKind};
 use editor_conversation::{Conversation, ConversationEvent};
 use editor_core::{Core, HostEvent, HostId};
+use editor_ui::theme::{ActiveTheme as _, TextStep, TypographyTokens};
 use editor_ui::{
     AssetId,
     button::{Button, ButtonVariant},
@@ -411,12 +412,7 @@ impl TerminalDialog {
                     .is_none_or(|view| view.read(cx).source(cx) != source)
                 {
                     job.command_source = Some(cx.new(|cx| {
-                        editor_core::ContentText::new(
-                            &host,
-                            source.clone(),
-                            ArtisanTheme::default(),
-                            cx,
-                        )
+                        editor_core::ContentText::new(&host, source.clone(), *cx.theme(), cx)
                     }));
                 }
             }
@@ -438,12 +434,7 @@ impl TerminalDialog {
                 .is_none_or(|view| view.read(cx).source(cx) != source)
             {
                 job.output_source = Some(cx.new(|cx| {
-                    editor_core::ContentText::new(
-                        &host,
-                        source.clone(),
-                        ArtisanTheme::default(),
-                        cx,
-                    )
+                    editor_core::ContentText::new(&host, source.clone(), *cx.theme(), cx)
                 }));
             }
             job.unverified = false;
@@ -605,7 +596,7 @@ impl Render for TerminalDialog {
         let Some(job) = &self.job else {
             return div().into_any_element();
         };
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let height = (f32::from(window.viewport_size().height) * 0.62)
             .min(640.0)
             .min((f32::from(window.viewport_size().height) - 160.0).max(32.0));
@@ -658,7 +649,7 @@ impl Render for TerminalDialog {
             .h(px(height))
             .w_full()
             .font_family(theme.typography.mono.family)
-            .text_size(px(12.5))
+            .text_size(TypographyTokens::size(TextStep::Terminal))
             .line_height(px(OUTPUT_LINE_HEIGHT)),
         );
         content = content.child(actions);

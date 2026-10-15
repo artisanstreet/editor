@@ -1,0 +1,89 @@
+---
+source: crates/forge-engines/src/acp/tests.rs
+assertion_line: 186
+expression: "replay(Profile::Cursor, \"tool-inputs\")"
+---
+[
+    Event(
+        Item {
+            key: "argv",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Shell {
+                    command: Inline(
+                        "printf 'a  b' '$literal'",
+                    ),
+                    cwd: None,
+                    background: false,
+                },
+                title: Some(
+                    "printf",
+                ),
+                output: Some(
+                    Output {
+                        text: Inline(
+                            "a  b",
+                        ),
+                        omitted_bytes: 0,
+                    },
+                ),
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "read",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "ACP tool omitted required native fields",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "far",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "file",
+                    range: Some(
+                        (
+                            18446744073709551615,
+                            18446744073709551615,
+                        ),
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "none",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Read {
+                    path: "file",
+                    range: None,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+]

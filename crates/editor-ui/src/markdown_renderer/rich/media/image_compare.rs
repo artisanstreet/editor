@@ -16,6 +16,7 @@
 //! divider is dragged.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -32,7 +33,6 @@ use super::picture::{self, Loaded, SizeHint};
 use super::source::MediaSource;
 use crate::hover_card::{glass_handle, glass_pill};
 use crate::segmented_control::{Segment, SegmentedControl};
-use crate::theme::ArtisanTheme;
 use editor_assets::AssetId;
 
 /// Diameter of the divider's handle.
@@ -230,7 +230,7 @@ fn pill(theme: &ArtisanTheme, text: impl Into<SharedString>) -> crate::hover_car
             .px(px(9.0))
             .flex()
             .items_center()
-            .text_size(px(12.0))
+            .text_size(TypographyTokens::size(TextStep::Xs))
             .line_height(px(16.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .whitespace_nowrap()

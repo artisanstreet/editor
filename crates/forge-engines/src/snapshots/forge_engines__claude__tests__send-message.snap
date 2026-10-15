@@ -1,0 +1,97 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 770
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "send-0",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "a1234567890123456",
+                    target: None,
+                    summary: Some(
+                        "Review update",
+                    ),
+                    text: Inline(
+                        "Check the cancellation path.",
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "send-1",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "uds:/tmp/another-session",
+                    target: None,
+                    summary: Some(
+                        "Review update",
+                    ),
+                    text: Inline(
+                        "Check the cancellation path.",
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "send-2",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: AgentMessage {
+                    recipient: "reviewer",
+                    target: None,
+                    summary: Some(
+                        "Review update",
+                    ),
+                    text: Inline(
+                        "Check the cancellation path.",
+                    ),
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "invalid-tool:bad-send",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "Claude SendMessage omitted a valid to",
+                ),
+                retryable: false,
+            },
+        },
+        Status {
+            key: "send-0",
+            status: Cancelled,
+        },
+        Status {
+            key: "send-1",
+            status: Cancelled,
+        },
+        Status {
+            key: "send-2",
+            status: Cancelled,
+        },
+    ],
+    None,
+)

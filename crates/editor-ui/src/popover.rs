@@ -1,13 +1,21 @@
 //! Pointer-anchored menus with shared overlay focus and dismissal.
 
-use crate::{overlay, theme::ArtisanTheme};
+use crate::glass::{
+    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
+    glass_highlight_layer, glass_material_layer,
+};
+use crate::theme::{RadiusStep, RadiusTokens};
+use crate::{
+    overlay,
+    theme::{ActiveTheme as _, ArtisanTheme},
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Point,
-    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored,
-    deferred, div, px,
+    AnyElement, App, InteractiveElement as _, IntoElement, ParentElement, Pixels, Point,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, Styled, Window, anchored, deferred,
+    div, point, px,
 };
-use std::{cell::Cell, rc::Rc};
+use std::rc::Rc;
 
 #[derive(IntoElement)]
 pub struct Popover {
@@ -62,7 +70,7 @@ impl RenderOnce for Popover {
         });
         let pointer_close = close.clone();
         let keys = focus.clone();
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let panel = div()
             .id(root_id)
             .role(gpui::Role::Menu)
@@ -158,7 +166,7 @@ impl RenderOnce for PopoverPanel {
             .overflow_y_scroll()
             .when(!self.select_menu, |root| {
                 root.p(self.menu_padding)
-                    .rounded(px(10.))
+                    .rounded(RadiusTokens::value(RadiusStep::Lg))
                     .border_1()
                     .border_color(theme.colors.border.to_paint())
             })
@@ -179,10 +187,6 @@ impl RenderOnce for PopoverPanel {
                 root.bg(theme.colors.popover.to_paint())
             })
             .when(self.quiet_glass, |root| {
-                use crate::glass::{
-                    GlassStrength, glass_blur_radius, glass_card_shadows, glass_foreground_base,
-                    glass_highlight_layer, glass_material_layer,
-                };
                 root.rounded(radius)
                     .backdrop_blur(glass_blur_radius(GlassStrength::Quiet))
                     .bg(glass_foreground_base(&theme))
@@ -198,23 +202,57 @@ impl RenderOnce for PopoverPanel {
         root
     }
 }
-/// Trigger-owned popups have two disjoint hit regions. The popup records its
-/// actual panel bounds, so dismissal never depends on a list's scroll internals.
-#[derive(Clone, Default)]
-pub struct PopupBounds(Rc<Cell<Option<gpui::Bounds<Pixels>>>>);
-impl PopupBounds {
-    pub fn contains(&self, position: &Point<Pixels>) -> bool {
-        self.0.get().is_some_and(|bounds| bounds.contains(position))
-    }
-    pub fn recorder(&self) -> impl IntoElement {
-        let bounds = self.0.clone();
-        gpui::canvas(
-            move |current, _, _| bounds.set(Some(current)),
-            |_, (), _, _| {},
+/// The glass-menu variant of the popover chrome: a strong-glass column
+/// whose corners follow `radius`. Model, project and option menus and
+/// mention completion are built on it; the caller sizes it, routes its
+/// keys, and adds rows.
+#[must_use]
+pub fn glass_menu(
+    id: impl Into<SharedString>,
+    theme: &ArtisanTheme,
+    radius: Pixels,
+) -> gpui::Stateful<gpui::Div> {
+    glass_frame(div().id(id.into()), theme, GlassStrength::Strong, radius)
+        .occlude()
+        .flex()
+        .flex_col()
+        .text_color(theme.colors.foreground.to_paint())
+}
+
+/// The glass surface every glass popup shares: backdrop blur over the glass
+/// base, the card shadows, then the material and highlight layers.
+pub(crate) fn glass_frame<E: Styled + ParentElement>(
+    element: E,
+    theme: &ArtisanTheme,
+    strength: GlassStrength,
+    radius: Pixels,
+) -> E {
+    element
+        .relative()
+        .overflow_hidden()
+        .rounded(radius)
+        .backdrop_blur(glass_blur_radius(strength))
+        .bg(glass_foreground_base(theme))
+        .shadow(glass_card_shadows())
+        .child(glass_material_layer(strength, radius))
+        .child(glass_highlight_layer(strength, radius))
+}
+
+/// Places `content` above the element this is a child of, `gap` away, its
+/// left edge on the trigger's and kept 8 px inside the window. Popups paint
+/// in `priority` order.
+#[must_use]
+pub fn above_trigger(gap: Pixels, priority: usize, content: impl IntoElement) -> gpui::Div {
+    div().absolute().top_0().left_0().child(
+        deferred(
+            anchored()
+                .anchor(gpui::Anchor::BottomLeft)
+                .offset(point(px(0.0), -gap))
+                .snap_to_window_with_margin(px(8.0))
+                .child(content),
         )
-        .absolute()
-        .size_full()
-    }
+        .with_priority(priority),
+    )
 }
 
 #[cfg(test)]
@@ -228,7 +266,7 @@ mod tests {
             div().size_full().flex().flex_col().items_start().child(
                 PopoverPanel::new(
                     "panel",
-                    ArtisanTheme::default(),
+                    ArtisanTheme::resolved(),
                     div().w(px(166.0)).h(px(1000.0)),
                 )
                 .debug_selector("bounded-panel-test"),

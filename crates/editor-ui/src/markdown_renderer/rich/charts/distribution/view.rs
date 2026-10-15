@@ -168,7 +168,7 @@ impl RenderOnce for DistributionView {
                     } else {
                         sample.name.clone().into()
                     },
-                    color: kit::series_color(&theme, index).to_paint(),
+                    color: kit::series_color(index).to_paint(),
                     hidden: false,
                 })
                 .collect();
@@ -201,7 +201,7 @@ impl RenderOnce for DistributionView {
 
 impl DistributionView {
     fn color(&self, index: usize) -> Hsla {
-        kit::series_color(&self.theme, index).to_paint()
+        kit::series_color(index).to_paint()
     }
 
     /// The share of each series at or below `threshold`.
@@ -425,7 +425,7 @@ impl DistributionView {
                             x,
                             0.5,
                             1.0,
-                            kit::series_color(&theme, row).to_paint(),
+                            kit::series_color(row).to_paint(),
                             &mut shapes,
                         );
                     }
@@ -692,7 +692,7 @@ mod regression_tests {
         let data = Arc::new(Distribution::from_spec(serde_json::from_value(serde_json::json!({"mode":"cdf","series":[{"name":"empty","values":[]},{"name":"present","values":[1,2]}]})).unwrap()));
         let view = DistributionView {
             id: "fixture".into(),
-            theme: ArtisanTheme::for_mode(crate::theme::ThemeMode::Dark),
+            theme: ArtisanTheme::resolved(),
             data,
         };
         let layout = view.cdf(None, 480.0);
@@ -736,7 +736,7 @@ mod native_box_window_tests {
                 .on_action(crate::focus_navigation::focus_previous)
                 .child(DistributionView {
                     id: "native-box".into(),
-                    theme: ArtisanTheme::default(),
+                    theme: ArtisanTheme::resolved(),
                     data: self.data.clone(),
                 })
         }
@@ -753,7 +753,7 @@ mod native_box_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-box-box-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(
             cx.debug_bounds("native-box-box-row-50").is_none(),
@@ -776,7 +776,7 @@ mod native_box_window_tests {
                 .unwrap()
                 .size
                 .height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         cx.simulate_keystrokes("home");
         cx.run_until_parked();
@@ -785,7 +785,7 @@ mod native_box_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-box-box-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-box-box-row-999").is_none());
     }
@@ -812,7 +812,7 @@ mod outlier_mark_tests {
             data.domain(),
             0.5,
             1.0,
-            ArtisanTheme::default().colors.foreground.to_paint(),
+            ArtisanTheme::resolved().colors.foreground.to_paint(),
             &mut shapes,
         );
         assert_eq!(

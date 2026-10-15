@@ -9,9 +9,8 @@ use gpui::{
 };
 
 use crate::asset_seam::asset_glyph;
-use crate::gradient::hover_fill_gradient;
 use crate::motion::MotionPolicy;
-use crate::theme::{ArtisanTheme, SurfaceStep, ThemeMode};
+use crate::theme::{ArtisanTheme, SurfaceStep};
 
 /// The visual purpose of an action.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -217,12 +216,7 @@ impl RenderOnce for Button {
                 theme.colors.primary.with_alpha(0.8).to_paint(),
             ),
             ButtonVariant::Outline => (
-                match theme.mode {
-                    ThemeMode::Light => SurfaceStep::S100,
-                    ThemeMode::Dark => SurfaceStep::S900,
-                }
-                .oklch()
-                .to_paint(),
+                SurfaceStep::S900.oklch().to_paint(),
                 theme.colors.foreground.to_paint(),
                 theme.colors.border.to_paint(),
                 theme.colors.input.with_alpha(0.5).to_paint(),
@@ -237,15 +231,7 @@ impl RenderOnce for Button {
                 transparent,
                 theme.colors.foreground.to_paint(),
                 transparent,
-                theme
-                    .colors
-                    .muted
-                    .with_alpha(if theme.mode == ThemeMode::Light {
-                        1.0
-                    } else {
-                        0.5
-                    })
-                    .to_paint(),
+                theme.colors.muted.with_alpha(0.5).to_paint(),
             ),
         };
         let icon_only = matches!(self.content, Content::Icon { .. });
@@ -319,7 +305,11 @@ impl RenderOnce for Button {
             })
             .hover(move |style| {
                 if self.hover_fill {
-                    style.bg(hover_fill_gradient(theme))
+                    crate::hover_card::hover_fill(
+                        style,
+                        &theme,
+                        crate::hover_card::HoverFill::Plain,
+                    )
                 } else {
                     style.bg(hover)
                 }

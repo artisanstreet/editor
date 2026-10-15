@@ -183,7 +183,9 @@ impl Store {
                 }
                 tx.with_stamp(stamp, |tx| {
                     let input = matches!(&new.kind, ItemKind::UserMessage { .. });
+                    let native_id = new.native_id.clone();
                     let item = tx.save_item(crate::fresh_item(new, stamp.created_at), None)?;
+                    tx.set_native_id(&item.id, native_id.as_deref())?;
                     if input {
                         tx.mark_activity(&item.thread_id, item.seq)?;
                     }

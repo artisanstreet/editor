@@ -508,7 +508,7 @@ fn skill_metadata(text: &str) -> Option<(String, String)> {
             .map(str::to_owned)
     };
     let name = field("name")?;
-    if !artisan_api::valid_mention_name(&name) {
+    if !artisan_mentions::valid_mention_name(&name) {
         return None;
     }
     Some((name, field("description").unwrap_or_default()))

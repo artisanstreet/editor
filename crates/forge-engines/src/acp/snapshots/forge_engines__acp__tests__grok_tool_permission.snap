@@ -1,6 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
-assertion_line: 124
+assertion_line: 119
 expression: "replay(Profile::Grok, \"tool-permission\")"
 ---
 [
@@ -83,57 +83,87 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
         },
     ),
     Event(
-        Approval {
-            key: "permission-request:0",
+        Item {
+            key: "call_1",
             parent: None,
-            target: Some(
-                "call_1",
-            ),
             status: AwaitingUser,
-            approval: Approval {
-                request: Command {
+            kind: Tool {
+                tool: Shell {
                     command: Inline(
                         "ls",
                     ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
+                    background: false,
                 },
-                reason: None,
-                options: [
-                    AllowOnce,
-                    AllowAlways,
-                    DenyOnce,
-                ],
-                decision: None,
+                title: Some(
+                    "ls",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "ls",
+                            ),
+                            cwd: Some(
+                                "/tmp/scratch",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
             },
         },
     ),
     Event(
-        Approval {
-            key: "permission-request:0",
+        Item {
+            key: "call_1",
             parent: None,
-            target: Some(
-                "call_1",
-            ),
-            status: Done,
-            approval: Approval {
-                request: Command {
+            status: Running,
+            kind: Tool {
+                tool: Shell {
                     command: Inline(
                         "ls",
                     ),
                     cwd: Some(
                         "/tmp/scratch",
                     ),
+                    background: false,
                 },
-                reason: None,
-                options: [
-                    AllowOnce,
-                    AllowAlways,
-                    DenyOnce,
-                ],
-                decision: Some(
-                    AllowOnce,
+                title: Some(
+                    "ls",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "ls",
+                            ),
+                            cwd: Some(
+                                "/tmp/scratch",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
                 ),
             },
         },
@@ -170,7 +200,27 @@ expression: "replay(Profile::Grok, \"tool-permission\")"
                 exit_code: Some(
                     0,
                 ),
-                approval: None,
+                approval: Some(
+                    Approval {
+                        request: Command {
+                            command: Inline(
+                                "ls",
+                            ),
+                            cwd: Some(
+                                "/tmp/scratch",
+                            ),
+                        },
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            AllowAlways,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            AllowOnce,
+                        ),
+                    },
+                ),
             },
         },
     ),

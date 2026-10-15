@@ -32,7 +32,7 @@ struct Gallery {
 }
 impl Render for Gallery {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         let mut page = div()
             .size_full()
             .flex()
@@ -144,7 +144,7 @@ struct ImageGallery {
 }
 impl Render for ImageGallery {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         div()
             .size_full()
             .child(
@@ -205,7 +205,7 @@ struct KeyboardGallery {
 }
 impl Render for KeyboardGallery {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         div()
             .flex()
             .flex_col()
@@ -296,7 +296,7 @@ struct NestedOverlays {
 }
 impl Render for NestedOverlays {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         let mut root = div().size_full().child(
             Button::text("open", theme, "Open")
                 .debug_selector("nested-open")
@@ -398,7 +398,7 @@ impl Render for CaptionGallery {
             .on_action(crate::focus_navigation::focus_next)
             .on_action(crate::focus_navigation::focus_previous)
             .child(crate::window_controls::WindowControls::new(
-                ArtisanTheme::default(),
+                ArtisanTheme::resolved(),
                 self.maximized,
             ))
     }
@@ -441,7 +441,7 @@ struct PreviewOnly;
 impl Render for PreviewOnly {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().children(crate::image_preview::overlay(
-            &ArtisanTheme::default(),
+            &ArtisanTheme::resolved(),
             window,
             cx,
         ))
@@ -530,7 +530,7 @@ impl Render for SliderGallery {
         let root = div().w(px(480.0)).child(
             crate::slider::Slider::new(
                 "threshold",
-                ArtisanTheme::default(),
+                ArtisanTheme::resolved(),
                 "Threshold",
                 "Value",
                 self.slider.clone(),
@@ -599,7 +599,7 @@ impl Render for SharedControlsGallery {
         let leaves = cx.entity().downgrade();
         let modes = SegmentedControl::new(
             "modes",
-            ArtisanTheme::default(),
+            ArtisanTheme::resolved(),
             "Mode",
             self.selection,
             Segment::new(0, "First"),
@@ -615,7 +615,7 @@ impl Render for SharedControlsGallery {
         });
         let branch = TreeRow::branch(
             self.tree_focus.node("branch"),
-            ArtisanTheme::default(),
+            ArtisanTheme::resolved(),
             0,
             "Directory",
             self.expanded,
@@ -629,7 +629,7 @@ impl Render for SharedControlsGallery {
         .debug_selector("gallery-branch");
         let leaf = TreeRow::leaf(
             self.tree_focus.node("leaf"),
-            ArtisanTheme::default(),
+            ArtisanTheme::resolved(),
             1,
             "File",
             "directory/file.rs",

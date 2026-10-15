@@ -254,7 +254,108 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
        CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
         WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
     )],
+    // Approvals live on the item they gate, and a message to an agent names
+    // its Agent item instead of carrying display text.
+    &[
+        Step::Rust(migrate_approvals),
+        Step::Sql(
+            r"UPDATE items SET body=json_remove(body,'$.kind.tool.recipient_label')
+         WHERE kind_type='tool' AND json_extract(body,'$.kind.tool.kind')='agent_message';
+       UPDATE items SET body=json_set(body,'$.kind.tool.target',(SELECT a.id FROM items a
+           WHERE a.thread_id=items.thread_id AND a.kind_type='agent'
+             AND json_extract(a.body,'$.kind.agent_id')=json_extract(items.body,'$.kind.tool.recipient')
+           ORDER BY a.position DESC LIMIT 1))
+         WHERE kind_type='tool' AND json_extract(body,'$.kind.tool.kind')='agent_message'
+           AND EXISTS(SELECT 1 FROM items a WHERE a.thread_id=items.thread_id AND a.kind_type='agent'
+             AND json_extract(a.body,'$.kind.agent_id')=json_extract(items.body,'$.kind.tool.recipient'));
+       DROP INDEX IF EXISTS items_agent_recipient_position;
+       CREATE INDEX items_agent_message_target ON items(thread_id,json_extract(body,'$.kind.tool.target'),position)
+        WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
+        ),
+    ],
 ];
+
+/// An approval stored as its own item (`{"type":"approval", target,
+/// approval}`, written by Codex and ACP runs before approvals moved onto the
+/// item they gate) as a standalone tool that carries it. Migration 17 first
+/// moves each one onto its target; this keeps the rest, and old databases
+/// whose earlier migrations read every item, loadable.
+pub(crate) fn legacy_approval(item: &mut serde_json::Value) {
+    let Some(kind) = item.get_mut("kind") else {
+        return;
+    };
+    if kind.get("type").and_then(serde_json::Value::as_str) != Some("approval") {
+        return;
+    }
+    let approval = kind
+        .get_mut("approval")
+        .map(serde_json::Value::take)
+        .unwrap_or_default();
+    *kind = serde_json::json!({
+        "type": "tool",
+        "tool": {"kind": "other", "name": "approval", "input": null},
+        "title": null,
+        "output": null,
+        "exit_code": null,
+        "approval": approval,
+    });
+}
+
+/// Moves each stored approval onto the tool or plan it gated, when that
+/// item has none of its own, and drops the approval's own row; any other
+/// approval becomes the standalone tool [`legacy_approval`] makes. Bodies
+/// change in place: no seq, no event.
+fn migrate_approvals(conn: &Connection) -> Result<()> {
+    use serde_json::Value;
+    let approvals: Vec<(String, String, String)> = conn
+        .prepare(
+            "SELECT id,thread_id,body FROM items WHERE kind_type='approval' ORDER BY position",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, thread, body) in approvals {
+        let mut value: Value =
+            serde_json::from_str(&body).with_context(|| format!("read approval {id}"))?;
+        let target = value
+            .pointer("/kind/target")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let gated: Option<(String, Value)> = match &target {
+            Some(target) => conn
+                .query_row(
+                    "SELECT id,body FROM items WHERE id=?1 AND thread_id=?2
+                     AND kind_type IN ('tool','plan') AND json_extract(body,'$.kind.approval') IS NULL",
+                    rusqlite::params![target, thread],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?
+                .map(|(id, body)| serde_json::from_str(&body).map(|body| (id, body)))
+                .transpose()
+                .with_context(|| format!("read the item approval {id} gated"))?,
+            None => None,
+        };
+        if let Some((target, mut gated)) = gated {
+            gated["kind"]["approval"] = value["kind"]["approval"].take();
+            let item: artisan_api::Item = serde_json::from_value(gated)
+                .with_context(|| format!("move approval {id} onto item {target}"))?;
+            conn.execute(
+                "UPDATE items SET body=?2 WHERE id=?1",
+                rusqlite::params![target, serde_json::to_string(&item)?],
+            )?;
+            crate::content::own(conn, &item)?;
+            conn.execute("DELETE FROM items WHERE id=?1", [&id])?;
+        } else {
+            legacy_approval(&mut value);
+            let item: artisan_api::Item = serde_json::from_value(value)
+                .with_context(|| format!("keep approval {id} as a tool"))?;
+            conn.execute(
+                "UPDATE items SET body=?2,kind_type='tool' WHERE id=?1",
+                rusqlite::params![id, serde_json::to_string(&item)?],
+            )?;
+        }
+    }
+    Ok(())
+}
 
 /// Collection records with their dependency graph. A source stays while an
 /// item or a parent source references it; `content_delete` cascades.
@@ -348,7 +449,7 @@ fn backfill_edit_totals(conn: &Connection) -> Result<()> {
         let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
         if let Some(tool) = body.pointer("/kind/tool") {
             let tool: artisan_api::ToolKind = serde_json::from_value(tool.clone())?;
-            if let Some(stats) = tool.edit_totals() {
+            if let Some(stats) = crate::content::inline_edit_totals(&tool) {
                 update.execute(rusqlite::params![id, stats.added, stats.removed])?;
             }
         }
@@ -694,7 +795,6 @@ mod item_column_migration_tests {
             seq: 0,
             run_id: None,
             parent_id: parent.map(|parent| ItemId(parent.into())),
-            native_id: None,
             status,
             created_at: 1,
             updated_at: 1,
@@ -770,5 +870,105 @@ mod item_column_migration_tests {
                 .collect::<Vec<_>>(),
             ["input"]
         );
+    }
+
+    /// Threads Codex and ACP ran before approvals moved onto the item they
+    /// gate still load: each approval shows on its command, and a message to
+    /// an agent still shows in that agent's transcript.
+    #[test]
+    fn stored_approvals_move_onto_their_items_and_agent_messages_name_their_agent() {
+        use serde_json::json;
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, 16).unwrap();
+        let row = |id: &str, position: i64, status: &str, kind: serde_json::Value| {
+            json!({"id":id,"thread_id":"t","position":position,"seq":position,"run_id":null,
+                "parent_id":null,"status":status,"created_at":1,"updated_at":1,"kind":kind})
+        };
+        let approval = json!({"request":{"type":"command","command":"touch a","cwd":"/w"},
+            "reason":null,"options":["allow_once","deny_once"],"decision":"allow_once"});
+        let rows = [
+            row(
+                "tool",
+                1,
+                "done",
+                json!({"type":"tool","tool":{"kind":"shell","command":"touch a","cwd":"/w"},
+                "title":null,"output":null,"exit_code":0,"approval":null}),
+            ),
+            row(
+                "asked",
+                2,
+                "done",
+                json!({"type":"approval","target":"tool","approval":approval}),
+            ),
+            row(
+                "orphan",
+                3,
+                "declined",
+                json!({"type":"approval","target":null,"approval":approval}),
+            ),
+            row(
+                "agent",
+                4,
+                "running",
+                json!({"type":"agent","name":null,"description":"task",
+                "agent_id":"a935b57d5f0b8fb33","background":true,"result":null}),
+            ),
+            row(
+                "sent",
+                5,
+                "done",
+                json!({"type":"tool","tool":{"kind":"agent_message",
+                "recipient":"a935b57d5f0b8fb33","recipient_label":"an agent","summary":null,"text":"hi"},
+                "title":null,"output":null,"exit_code":null,"approval":null}),
+            ),
+        ];
+        for row in &rows {
+            conn.execute(
+                "INSERT INTO items(id,thread_id,position,seq,status,body,kind_type) VALUES(?1,'t',?2,?2,?3,?4,json_extract(?4,'$.kind.type'))",
+                rusqlite::params![
+                    row["id"].as_str().unwrap(),
+                    row["position"].as_i64().unwrap(),
+                    row["status"].as_str().unwrap(),
+                    row.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        migrate(&mut conn).unwrap();
+        let page =
+            crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, None).unwrap();
+        let ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["tool", "orphan", "agent", "sent"]);
+        let ItemKind::Tool {
+            approval: Some(moved),
+            ..
+        } = &page.items[0].kind
+        else {
+            panic!("the approval moved onto its command: {:?}", page.items[0]);
+        };
+        assert_eq!(moved.decision, Some(artisan_api::Decision::AllowOnce));
+        assert!(matches!(
+            &page.items[1].kind,
+            ItemKind::Tool {
+                approval: Some(_),
+                ..
+            }
+        ));
+        let agent = ItemId("agent".into());
+        let scoped = crate::read::scoped_items_page(
+            &conn,
+            &ThreadId("t".into()),
+            &WHOLE,
+            Some(Some(&agent)),
+        )
+        .unwrap();
+        assert_eq!(scoped.items.len(), 1);
+        assert!(matches!(
+            &scoped.items[0].kind,
+            ItemKind::Tool {
+                tool: artisan_api::ToolKind::AgentMessage { target: Some(target), .. },
+                ..
+            } if *target == agent
+        ));
     }
 }

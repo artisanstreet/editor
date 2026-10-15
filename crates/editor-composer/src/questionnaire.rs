@@ -22,7 +22,10 @@ use artisan_api::{Answer, Collection, ItemId, Question, QuestionAnswer};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::Button;
-use editor_ui::theme::{ArtisanTheme, WorkspaceColors};
+use editor_ui::theme::{
+    ActiveTheme as _, ArtisanTheme, ColorTokens, RadiusStep, RadiusTokens, TextStep,
+    TypographyTokens,
+};
 use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -259,7 +262,7 @@ impl Composer {
                 &host,
                 source,
                 "Choices",
-                ArtisanTheme::default(),
+                *cx.theme(),
                 present,
                 Some(activate),
                 cx,
@@ -603,7 +606,7 @@ impl Composer {
     /// Questions share the same accessible rows and controls as other pages.
     pub(crate) fn render_questionnaires(
         &mut self,
-        desktop: WorkspaceColors,
+        desktop: &ColorTokens,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         self.sync_question_window(cx);
@@ -620,17 +623,16 @@ impl Composer {
             let mut loading = div().child(error.unwrap_or_else(|| "Loading question…".into()));
             if let Some(window) = window {
                 loading = loading.child(
-                    Button::text("question-page-retry", ArtisanTheme::default(), "Retry")
-                        .on_activate(move |_, _, cx| {
-                            window.update(cx, |window, cx| window.retry(cx))
-                        }),
+                    Button::text("question-page-retry", *cx.theme(), "Retry").on_activate(
+                        move |_, _, cx| window.update(cx, |window, cx| window.retry(cx)),
+                    ),
                 );
             }
             return Some(loading.into_any_element());
         };
         self.sync_options_browser(&question, cx);
         let sending = self.questionnaire.sending.is_some();
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         let owner = cx.entity().downgrade();
         let dismiss = div()
             .id("composer-question-dismiss")
@@ -641,9 +643,13 @@ impl Composer {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(6.0))
+            .rounded(RadiusTokens::value(RadiusStep::Sm))
             .cursor_pointer()
-            .hover(move |style| style.bg(desktop.selected).text_color(desktop.foreground))
+            .hover(move |style| {
+                style
+                    .bg(desktop.selected.to_paint())
+                    .text_color(desktop.workspace_foreground.to_paint())
+            })
             .debug_selector(|| "composer-question-dismiss".into())
             .child(asset_glyph(AssetId::TABLER_X).size(px(14.0)))
             .on_click(move |_, _, cx| {
@@ -660,9 +666,9 @@ impl Composer {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .text_size(px(12.0))
+                        .text_size(TypographyTokens::size(TextStep::Xs))
                         .line_height(px(16.0))
-                        .text_color(desktop.secondary)
+                        .text_color(desktop.workspace_secondary.to_paint())
                         .child(asset_glyph(AssetId::TABLER_MESSAGE_CIRCLE).size(px(14.0)))
                         .child(
                             div().flex_1().min_w_0().truncate().child(
@@ -674,9 +680,9 @@ impl Composer {
                 .child(
                     div()
                         .px(px(2.0))
-                        .text_size(px(15.0))
+                        .text_size(TypographyTokens::size(TextStep::SmMid))
                         .line_height(px(22.0))
-                        .text_color(desktop.foreground)
+                        .text_color(desktop.workspace_foreground.to_paint())
                         .whitespace_normal()
                         .child(match &question.text {
                             artisan_api::TextContent::Inline(text) => {
@@ -713,9 +719,9 @@ impl Composer {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(4.0))
+                        .rounded(RadiusTokens::value(RadiusStep::Xs))
                         .border_1()
-                        .border_color(desktop.field_line)
+                        .border_color(desktop.field_line.to_paint())
                         .when(selected, |marker| {
                             marker.child(asset_glyph(AssetId::TABLER_CHECK).size(px(12.0)))
                         })
@@ -723,20 +729,20 @@ impl Composer {
                     div()
                         .w(px(16.0))
                         .flex_none()
-                        .text_color(desktop.secondary)
+                        .text_color(desktop.workspace_secondary.to_paint())
                         .child(format!("{}", index + 1))
                 };
-                let mut text = div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .child(div().text_color(desktop.foreground).child(label.clone()));
+                let mut text = div().flex().flex_col().min_w_0().child(
+                    div()
+                        .text_color(desktop.workspace_foreground.to_paint())
+                        .child(label.clone()),
+                );
                 if let Some(description) = &option.description {
                     text = text.child(
                         div()
-                            .text_size(px(12.0))
+                            .text_size(TypographyTokens::size(TextStep::Xs))
                             .line_height(px(16.0))
-                            .text_color(desktop.secondary)
+                            .text_color(desktop.workspace_secondary.to_paint())
                             .child(match description {
                                 artisan_api::TextContent::Inline(text) => text.clone(),
                                 artisan_api::TextContent::Stored(_) => {
@@ -758,13 +764,13 @@ impl Composer {
                     .gap(px(10.0))
                     .px(px(10.0))
                     .py(px(6.0))
-                    .rounded(px(10.0))
-                    .text_size(px(14.0))
+                    .rounded(RadiusTokens::value(RadiusStep::Lg))
+                    .text_size(TypographyTokens::size(TextStep::Sm))
                     .line_height(px(20.0))
-                    .when(selected, |row| row.bg(desktop.selected))
+                    .when(selected, |row| row.bg(desktop.selected.to_paint()))
                     .when(!sending, |row| {
                         row.cursor_pointer()
-                            .hover(move |style| style.bg(desktop.selected))
+                            .hover(move |style| style.bg(desktop.selected.to_paint()))
                     })
                     .child(marker)
                     .child(text)
@@ -827,10 +833,10 @@ impl Composer {
                     .self_end()
                     .px(px(10.0))
                     .py(px(4.0))
-                    .rounded(px(8.0))
-                    .text_size(px(13.0))
-                    .bg(desktop.primary_action)
-                    .text_color(desktop.primary_action_foreground)
+                    .rounded(RadiusTokens::value(RadiusStep::Md))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
+                    .bg(desktop.primary_action.to_paint())
+                    .text_color(desktop.primary_action_foreground.to_paint())
                     .when(!sending, |button| {
                         button.focusable().tab_index(0).cursor_pointer()
                     })
@@ -857,8 +863,8 @@ impl Composer {
             card = card.child(
                 div()
                     .px(px(2.0))
-                    .text_size(px(12.0))
-                    .text_color(desktop.secondary)
+                    .text_size(TypographyTokens::size(TextStep::Xs))
+                    .text_color(desktop.workspace_secondary.to_paint())
                     .child("Sending your answer…"),
             );
         } else if let Some(error) = &self.questionnaire.error {
@@ -912,13 +918,15 @@ impl Composer {
                     .gap(px(8.0))
                     .px(px(10.0))
                     .py(px(4.0))
-                    .rounded(px(8.0))
-                    .text_size(px(13.0))
+                    .rounded(RadiusTokens::value(RadiusStep::Md))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(18.0))
-                    .text_color(desktop.secondary)
+                    .text_color(desktop.workspace_secondary.to_paint())
                     .when(!sending, |row| {
                         row.cursor_pointer().hover(move |style| {
-                            style.bg(desktop.selected).text_color(desktop.foreground)
+                            style
+                                .bg(desktop.selected.to_paint())
+                                .text_color(desktop.workspace_foreground.to_paint())
                         })
                     })
                     .child(asset_glyph(AssetId::TABLER_CHEVRON_RIGHT).size(px(14.0)))
@@ -942,7 +950,7 @@ impl Composer {
             .pb(px(8.0))
             .mb(px(4.0))
             .border_b_1()
-            .border_color(desktop.line)
+            .border_color(desktop.line.to_paint())
             .child(card);
         if stacked {
             panel = panel.child(stack);

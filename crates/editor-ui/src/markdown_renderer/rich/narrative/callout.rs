@@ -1,6 +1,7 @@
 //! `callout`: a note set apart, in the tone of its kind.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use gpui::{
     AnyElement, App, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
     Window, div, prelude::*, px,
@@ -9,7 +10,6 @@ use serde::Deserialize;
 
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, Chrome, RichBlock};
-use crate::theme::ArtisanTheme;
 use editor_assets::AssetId;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -128,7 +128,7 @@ impl RenderOnce for CalloutView {
             .child(kit::glyph(self.kind.icon(), 16.0, color.to_paint()))
             .child(
                 div()
-                    .text_size(px(14.0))
+                    .text_size(TypographyTokens::size(TextStep::Sm))
                     .line_height(px(20.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(color.to_paint())

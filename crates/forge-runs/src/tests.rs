@@ -127,6 +127,16 @@ fn reply(key: &str, text: &str) -> EngineEvent {
 }
 
 impl Fixture {
+    /// The item the engine knows as `key`.
+    async fn by_native(&self, key: &str) -> Item {
+        self.hub
+            .store()
+            .item_by_native(&self.thread_id, None, key)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("no item {key}"))
+    }
+
     async fn items(&self) -> Vec<Item> {
         let query = ItemsQuery {
             before: None,
@@ -1027,10 +1037,7 @@ async fn a_resumed_subagent_keeps_its_work_under_it() {
         .unwrap();
     fixture.settled().await;
     let items = fixture.items().await;
-    let step = items
-        .iter()
-        .find(|item| item.native_id.as_deref() == Some("toolu_resumed_step"))
-        .expect("the resumed work");
+    let step = fixture.by_native("toolu_resumed_step").await;
     assert_eq!(
         step.parent_id.as_ref(),
         Some(&agent.id),
@@ -1956,63 +1963,141 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
     fixture.hub.shutdown();
 }
 
+/// A message to an agent names the agent's item, whatever the engine calls
+/// the agent, so it shows in that agent's view; one to another session
+/// names none.
 #[tokio::test(flavor = "multi_thread")]
-async fn separate_approval_callbacks_reserve_one_execution_identity() {
-    let fixture = fixture(Arc::new(|_turn, mut io| {
+async fn a_message_to_an_agent_names_the_agents_item() {
+    let fixture = fixture(Arc::new(|_turn, io| {
         Box::pin(async move {
-            let approval = |decision| artisan_api::Approval {
-                request: ApprovalRequest::Command {
-                    command: "echo once".into(),
-                    cwd: None,
-                },
-                reason: None,
-                options: vec![Decision::AllowOnce, Decision::DenyOnce],
-                decision,
-            };
-            for key in ["callback-a", "callback-b"] {
-                io.emit(EngineEvent::Approval {
-                    key: key.into(),
-                    parent: None,
-                    target: Some("execution".into()),
-                    status: Status::AwaitingUser,
-                    approval: approval(None),
-                })
-                .await;
-            }
             io.emit(EngineEvent::Item {
-                key: "execution".into(),
+                key: "agent-call".into(),
                 parent: None,
                 status: Status::Running,
-                kind: ItemKind::Tool {
-                    tool: ToolKind::Shell {
-                        command: "echo once".into(),
-                        cwd: None,
-                        background: false,
-                    },
-                    title: None,
-                    output: None,
-                    exit_code: None,
-                    approval: None,
+                kind: ItemKind::Agent {
+                    name: None,
+                    description: "Review".into(),
+                    prompt: None,
+                    agent_id: Some("a935b57d5f0b8fb33".into()),
+                    context_used: None,
+                    model: None,
+                    background: true,
+                    result: None,
+                    label: None,
                 },
             })
             .await;
-            for _ in 0..2 {
-                let Some(Input::Answer {
-                    key,
-                    answer: artisan_api::Answer::Approval { decision },
-                }) = io.inbox.recv().await
-                else {
-                    return Outcome::failed("missing callback answer");
-                };
-                io.emit(EngineEvent::Approval {
-                    key,
+            for (key, recipient) in [
+                ("to-agent", "a935b57d5f0b8fb33"),
+                ("to-session", "uds:/tmp/session"),
+            ] {
+                io.emit(EngineEvent::Item {
+                    key: key.into(),
                     parent: None,
-                    target: Some("execution".into()),
                     status: Status::Done,
-                    approval: approval(Some(decision)),
+                    kind: ItemKind::Tool {
+                        tool: ToolKind::AgentMessage {
+                            recipient: recipient.into(),
+                            target: None,
+                            summary: None,
+                            text: "Check the parser.".into(),
+                        },
+                        title: None,
+                        output: None,
+                        exit_code: None,
+                        approval: None,
+                    },
                 })
                 .await;
             }
+            Outcome::done()
+        })
+    }))
+    .await;
+    fixture
+        .hub
+        .send_message(&fixture.thread_id, message("delegate"))
+        .await
+        .unwrap();
+    fixture.settled().await;
+    let agent = fixture.by_native("agent-call").await;
+    let target = |item: &Item| match &item.kind {
+        ItemKind::Tool {
+            tool: ToolKind::AgentMessage { target, .. },
+            ..
+        } => target.clone(),
+        _ => panic!("not a message: {item:?}"),
+    };
+    let sent = fixture.by_native("to-agent").await;
+    assert_eq!(target(&sent), Some(agent.id.clone()));
+    assert_eq!(target(&fixture.by_native("to-session").await), None);
+    let view = fixture
+        .hub
+        .store()
+        .transcript_page(
+            &fixture.thread_id,
+            Some(&agent.id),
+            ItemsQuery {
+                before: None,
+                after: None,
+                limit: Some(50),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(view.items.iter().any(|item| item.id == sent.id));
+}
+
+/// An approval rides on the item it gates: the answer reaches the engine
+/// under that item's own id, and decisions the request didn't offer or
+/// answers of the wrong kind never reach it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_approval_is_answered_on_the_item_it_gates() {
+    let fixture = fixture(Arc::new(|_turn, mut io| {
+        Box::pin(async move {
+            let shell = |decision| ItemKind::Tool {
+                tool: ToolKind::Shell {
+                    command: "echo once".into(),
+                    cwd: None,
+                    background: false,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: Some(artisan_api::Approval {
+                    request: ApprovalRequest::Command {
+                        command: "echo once".into(),
+                        cwd: None,
+                    },
+                    reason: None,
+                    options: vec![Decision::AllowOnce, Decision::DenyOnce],
+                    decision,
+                }),
+            };
+            io.emit(EngineEvent::Item {
+                key: "execution".into(),
+                parent: None,
+                status: Status::AwaitingUser,
+                kind: shell(None),
+            })
+            .await;
+            let Some(Input::Answer {
+                key,
+                answer: artisan_api::Answer::Approval { decision },
+            }) = io.inbox.recv().await
+            else {
+                return Outcome::failed("missing the approval answer");
+            };
+            if key != "execution" {
+                return Outcome::failed(format!("answered {key}, not the gated item"));
+            }
+            io.emit(EngineEvent::Item {
+                key,
+                parent: None,
+                status: Status::Running,
+                kind: shell(Some(decision)),
+            })
+            .await;
             io.emit(EngineEvent::Status {
                 key: "execution".into(),
                 status: Status::Done,
@@ -2028,105 +2113,43 @@ async fn separate_approval_callbacks_reserve_one_execution_identity() {
         .await
         .unwrap();
     fixture
-        .wait_for(|items| {
-            items
-                .iter()
-                .filter(|item| matches!(item.kind, ItemKind::Approval { .. }))
-                .count()
-                == 2
-                && items
-                    .iter()
-                    .any(|item| matches!(item.kind, ItemKind::Tool { .. }))
-        })
+        .wait_for(|items| items.iter().any(|item| item.status == Status::AwaitingUser))
         .await;
-    let items = fixture.items().await;
-    let tools: Vec<_> = items
-        .iter()
-        .filter(|item| matches!(item.kind, ItemKind::Tool { .. }))
-        .collect();
-    assert_eq!(tools.len(), 1);
-    // Mismatched kinds and decisions never reach the native callback inbox.
-    assert!(
-        fixture
-            .hub
-            .answer(
-                &tools[0].id,
-                artisan_api::Answer::Approval {
-                    decision: Decision::AllowOnce
-                }
-            )
-            .await
-            .is_err()
-    );
-    for item in items
-        .iter()
-        .filter(|item| matches!(item.kind, ItemKind::Approval { .. }))
-    {
-        assert!(
-            matches!(&item.kind,ItemKind::Approval {target:Some(target),..} if target==&tools[0].id)
-        );
-        assert!(
-            fixture
-                .hub
-                .answer(
-                    &item.id,
-                    artisan_api::Answer::Approval {
-                        decision: Decision::DenyAlways
-                    }
-                )
-                .await
-                .is_err()
-        );
-        assert!(
-            fixture
-                .hub
-                .answer(
-                    &item.id,
-                    artisan_api::Answer::Approval {
-                        decision: Decision::Cancelled
-                    }
-                )
-                .await
-                .is_err()
-        );
-        assert!(
-            fixture
-                .hub
-                .answer(
-                    &item.id,
-                    artisan_api::Answer::Question {
-                        answers: Vec::new()
-                    }
-                )
-                .await
-                .is_err()
-        );
-        fixture
-            .hub
-            .answer(
-                &item.id,
-                artisan_api::Answer::Approval {
-                    decision: Decision::AllowOnce,
-                },
-            )
-            .await
-            .unwrap();
+    let tool = fixture.by_native("execution").await;
+    for refused in [
+        artisan_api::Answer::Approval {
+            decision: Decision::DenyAlways,
+        },
+        artisan_api::Answer::Approval {
+            decision: Decision::Cancelled,
+        },
+        artisan_api::Answer::Question {
+            answers: Vec::new(),
+        },
+    ] {
+        assert!(fixture.hub.answer(&tool.id, refused).await.is_err());
     }
-    fixture.settled().await;
-    let items = fixture.items().await;
-    assert_eq!(
-        items
-            .iter()
-            .filter(|item| matches!(item.kind, ItemKind::Tool { .. }))
-            .count(),
-        1
-    );
+    fixture
+        .hub
+        .answer(
+            &tool.id,
+            artisan_api::Answer::Approval {
+                decision: Decision::AllowOnce,
+            },
+        )
+        .await
+        .unwrap();
+    let runs = fixture.settled().await;
     assert!(
-        items
-            .iter()
-            .filter(|item| matches!(item.kind, ItemKind::Approval { .. }))
-            .all(|item| item.status == Status::Done)
+        runs.iter()
+            .all(|run| run.status == artisan_api::RunStatus::Done)
     );
+    let tool = fixture.by_native("execution").await;
+    assert_eq!(tool.status, Status::Done);
+    assert!(matches!(
+        &tool.kind,
+        ItemKind::Tool { approval: Some(approval), .. } if approval.decision == Some(Decision::AllowOnce)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2264,13 +2287,6 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
                     },
                 ),
                 (
-                    "approval",
-                    ItemKind::Approval {
-                        target: None,
-                        approval: approval.clone(),
-                    },
-                ),
-                (
                     "tool-approval",
                     ItemKind::Tool {
                         tool: ToolKind::Shell {
@@ -2322,17 +2338,8 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
         .await
         .unwrap();
     fixture.settled().await;
-    let items = fixture.items().await;
-    for key in [
-        "blocking-question",
-        "approval",
-        "tool-approval",
-        "plan-approval",
-    ] {
-        let item = items
-            .iter()
-            .find(|item| item.native_id.as_deref() == Some(key))
-            .unwrap();
+    for key in ["blocking-question", "tool-approval", "plan-approval"] {
+        let item = fixture.by_native(key).await;
         assert_eq!(
             item.status,
             Status::Cancelled,
@@ -2355,10 +2362,7 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
             );
         }
     }
-    let output = items
-        .iter()
-        .find(|item| item.native_id.as_deref() == Some("ordinary-output"))
-        .unwrap();
+    let output = fixture.by_native("ordinary-output").await;
     assert_eq!(output.status, Status::Done);
     assert_eq!(
         fixture
@@ -2422,21 +2426,13 @@ for line in sys.stdin:
             .await
             .unwrap();
         fixture
-            .wait_for(|items| {
-                items.iter().any(|item| {
-                    item.native_id.as_deref() == Some("approval-request:0")
-                        && item.status == Status::AwaitingUser
-                })
-            })
+            .wait_for(|items| items.iter().any(|item| item.status == Status::AwaitingUser))
             .await;
         let item = fixture
             .items()
             .await
             .into_iter()
-            .find(|item| {
-                item.native_id.as_deref() == Some("approval-request:0")
-                    && item.status == Status::AwaitingUser
-            })
+            .find(|item| item.status == Status::AwaitingUser)
             .unwrap();
         assert!(
             identities.iter().all(|id| id != &item.id),
@@ -2469,7 +2465,15 @@ for line in sys.stdin:
         .items()
         .await
         .into_iter()
-        .filter(|item| matches!(item.kind, ItemKind::Approval { .. }))
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::Tool {
+                    approval: Some(_),
+                    ..
+                }
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(approvals.len(), 2);
     assert_ne!(approvals[0].run_id, approvals[1].run_id);

@@ -1,6 +1,7 @@
 //! One canvas paints hierarchy marks; only readable labels build text elements.
 //! The plot owns pointer hit testing and the shared chart keyboard interaction.
 
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -13,7 +14,6 @@ use super::super::frame::{self, ReadoutRow};
 use super::super::scale::percent;
 use super::super::scene::{Probe, fractions, probe, probed_width};
 use super::{GROUP_HEADER, Layout, Tree, partition, treemap};
-use crate::theme::ArtisanTheme;
 
 /// Height of a treemap plot.
 const TREEMAP_HEIGHT: f32 = 340.0;
@@ -434,9 +434,7 @@ impl HierarchyView {
     /// The fill of `node` under `focus`, stronger when hovered.
     fn fill(&self, focus: usize, node: usize, alpha: f32) -> gpui::Hsla {
         match self.tree.branch(focus, node) {
-            Some(branch) => kit::series_color(&self.theme, branch)
-                .with_alpha(alpha)
-                .to_paint(),
+            Some(branch) => kit::series_color(branch).with_alpha(alpha).to_paint(),
             None => self
                 .theme
                 .colors
@@ -457,7 +455,7 @@ impl HierarchyView {
             .flex_wrap()
             .items_center()
             .gap(px(2.0))
-            .text_size(px(12.0))
+            .text_size(TypographyTokens::size(TextStep::Xs))
             .line_height(px(16.0))
             .children(path.into_iter().enumerate().flat_map(|(step, node)| {
                 let current = step == last;
@@ -505,7 +503,7 @@ impl HierarchyView {
                 3.0
             }))
             .overflow_hidden()
-            .text_size(px(11.0))
+            .text_size(TypographyTokens::size(TextStep::X2s))
             .line_height(px(14.0))
             .text_color(self.theme.colors.foreground.to_paint())
             .flex()
@@ -615,7 +613,7 @@ mod batching_tests {
         });
         let view = HierarchyView {
             id: "dense".into(),
-            theme: ArtisanTheme::default(),
+            theme: ArtisanTheme::resolved(),
             tree: Arc::new(tree),
             layout: Layout::Treemap,
             unit: None,
@@ -667,7 +665,7 @@ mod geometry_cache_tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let plot = HierarchyView {
                 id: "cached-hierarchy".into(),
-                theme: ArtisanTheme::default(),
+                theme: ArtisanTheme::resolved(),
                 tree: self.tree.clone(),
                 layout: Layout::Treemap,
                 unit: None,

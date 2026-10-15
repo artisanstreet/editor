@@ -4,6 +4,7 @@ mod terminal_dialog;
 use artisan_api::{Collection, InspectorSummary, ItemId, Status, StepStatus, ThreadId};
 use editor_conversation::{Conversation, ConversationEvent};
 use editor_core::{Core, CoreEvent, HostData, HostEvent, HostId};
+use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens};
 use editor_ui::{AssetId, button::Button, terminal_text::TerminalScreen, theme::ArtisanTheme};
 use gpui::{
     Animation, AnimationExt as _, AppContext as _, Context, Entity, InteractiveElement as _,
@@ -202,7 +203,7 @@ impl Inspector {
             .items_center()
             .gap(px(8.0))
             .px(px(8.0))
-            .rounded(px(8.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .text_size(theme.typography.control_text);
         #[cfg(test)]
         let row = row.debug_selector(move || format!("inspector-entry-{index}"));
@@ -215,7 +216,7 @@ impl Inspector {
                 .pt(px(10.0))
                 .pb(px(4.0))
                 .border_t_1()
-                .border_color(theme.workspace.line)
+                .border_color(theme.colors.line.to_paint())
                 .text_size(theme.typography.label_text)
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(*label)
@@ -311,7 +312,13 @@ impl Inspector {
                     .role(gpui::Role::Button)
                     .aria_label(agent.label.clone())
                     .cursor_pointer()
-                    .hover(move |style| style.bg(editor_ui::gradient::hover_fill_gradient(theme)))
+                    .hover(move |style| {
+                        editor_ui::hover_card::hover_fill(
+                            style,
+                            &theme,
+                            editor_ui::hover_card::HoverFill::Plain,
+                        )
+                    })
                     .on_click(move |_, _, cx| {
                         let _ = owner.update(cx, |this, cx| {
                             this.conversation.update(cx, |conversation, cx| {
@@ -470,7 +477,13 @@ impl Inspector {
                         artisan_api::TextContent::Stored(_) => "Stored shell command".into(),
                     })
                     .cursor_pointer()
-                    .hover(move |style| style.bg(editor_ui::gradient::hover_fill_gradient(theme)))
+                    .hover(move |style| {
+                        editor_ui::hover_card::hover_fill(
+                            style,
+                            &theme,
+                            editor_ui::hover_card::HoverFill::Plain,
+                        )
+                    })
                     .on_click(move |_, window, cx| {
                         let _ = owner.update(cx, |this, cx| this.open_terminal(&id, window, cx));
                     })
@@ -509,7 +522,7 @@ fn inspector_glyph(theme: &ArtisanTheme, id: AssetId) -> impl IntoElement {
 }
 impl Render for Inspector {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         if let Some(plan) = &self.plan {
             let height = window.viewport_size().height * 0.4;
             plan.update(cx, |plan, cx| plan.set_max_list_height(height, cx));

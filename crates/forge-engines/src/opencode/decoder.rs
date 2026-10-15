@@ -84,7 +84,6 @@ pub(crate) struct Reply {
 
 #[derive(Default)]
 pub(crate) struct Decoder {
-    ownership: crate::retained::Ownership,
     reasoning_summary: crate::reasoning::Summary,
     root: Option<String>,
     /// Followed sessions → the `Agent` item their items belong to.
@@ -117,7 +116,6 @@ struct Tool {
     awaiting_child: bool,
 }
 
-#[derive(serde::Serialize)]
 enum Pending {
     Permission { session: String, request: String },
     Question { session: String, request: String },
@@ -198,7 +196,7 @@ impl Decoder {
         );
         anyhow::ensure!(
             event["type"].is_string(),
-            "native protocol frame is missing its required envelope identity"
+            "OpenCode event is missing its type"
         );
         #[derive(serde::Deserialize)]
         struct Identity<'a> {
@@ -207,33 +205,9 @@ impl Decoder {
         let identity = <Identity as serde::Deserialize>::deserialize(&event)
             .context("decoding OpenCode event identity")?;
         anyhow::ensure!(!identity.id.trim().is_empty(), "OpenCode event ID is empty");
-        let pending_frame = matches!(
-            event["type"].as_str(),
-            Some("permission.v2.asked" | "question.v2.asked")
-        );
-        if pending_frame {
-            crate::retained::admit_pending(self.pending.len(), self.ownership.bytes(), &event)?;
-        }
-        let pending_before = self.pending.len();
         let events = self.feed_raw(&event);
         let events = self.reasoning_summary.normalize(events, false);
-        for key in crate::retained::changed_keys(&events) {
-            if let Some(tool) = self.tools.get_mut(key) {
-                if tool.status.is_terminal() {
-                    crate::retained::compact_terminal(&mut tool.kind)?;
-                }
-                self.ownership
-                    .replace(key, crate::retained::owned_charge(&tool.kind)?);
-            } else {
-                self.ownership.remove(key);
-            }
-        }
-        if pending_frame || self.pending.len() != pending_before {
-            self.ownership
-                .set_pending(crate::retained::owned_charge(&self.pending)?);
-        }
-        self.ownership.check()?;
-        Ok(events)
+        Ok(crate::retained::settle(self, events))
     }
 
     fn feed_raw(&mut self, event: &Value) -> Vec<EngineEvent> {
@@ -279,7 +253,6 @@ impl Decoder {
                     }
                 }
                 self.step_texts.remove(session);
-                self.ownership.remove_buffer(session);
             }
             "session.next.text.started" => {
                 let Some(key) = text_key(data) else {
@@ -315,7 +288,7 @@ impl Decoder {
             "session.next.text.ended" => {
                 let Some(text) = data["text"].as_str() else {
                     let message = "OpenCode completed a text without its required final body";
-                    out.push(error_item(&event, parent, ErrorKind::Api, message, false));
+                    out.push(error_item(event, parent, ErrorKind::Api, message, false));
                     if root {
                         self.error = Some(message.to_owned());
                         self.turn_open = false;
@@ -331,13 +304,6 @@ impl Decoder {
                     .entry(session.to_owned())
                     .or_default()
                     .push((key.clone(), text.clone()));
-                self.ownership.append_buffer(
-                    session,
-                    key.len()
-                        .saturating_add(text.len())
-                        .saturating_add(128)
-                        .saturating_mul(4),
-                );
                 out.push(EngineEvent::Live {
                     target: LiveKind::Text { key },
                     text,
@@ -370,8 +336,7 @@ impl Decoder {
             "session.next.step.failed" => {
                 let message = error_message(&data["error"]);
                 self.step_texts.remove(session);
-                self.ownership.remove_buffer(session);
-                out.push(error_item(&event, parent, ErrorKind::Api, &message, false));
+                out.push(error_item(event, parent, ErrorKind::Api, &message, false));
                 if root {
                     self.turn_open = false;
                     self.error = Some(message);
@@ -386,7 +351,7 @@ impl Decoder {
                     })
                 );
                 out.push(error_item(
-                    &event,
+                    event,
                     parent,
                     ErrorKind::Api,
                     &message,
@@ -507,30 +472,8 @@ impl Decoder {
     /// Answers the approval or question on item `key`: the events to emit
     /// now and the request that tells OpenCode.
     pub fn answer(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
-        let mut result = self.answer_raw(key, answer);
-        if let Some(item) = self.tools.get_mut(key)
-            && item.status.is_terminal()
-            && let Err(error) = crate::retained::compact_terminal(&mut item.kind)
-            && let Some((_, events)) = &mut result
-        {
-            events.push(crate::retained::error(key, error));
-        }
-        let refreshed = (|| -> anyhow::Result<()> {
-            if let Some(item) = self.tools.get(key) {
-                self.ownership
-                    .replace(key, crate::retained::owned_charge(&item.kind)?);
-            }
-            self.ownership
-                .set_pending(crate::retained::owned_charge(&self.pending)?);
-            self.ownership.check()
-        })();
-        if let Err(error) = refreshed
-            && let Some((_, events)) = &mut result
-        {
-            events.push(crate::retained::ownership_error(key, error));
-        }
-
-        result
+        let (reply, events) = self.answer_raw(key, answer)?;
+        Some((reply, crate::retained::settle(self, events)))
     }
 
     fn answer_raw(&mut self, key: &str, answer: &Answer) -> Option<(Reply, Vec<EngineEvent>)> {
@@ -759,7 +702,7 @@ impl Decoder {
             .or_else(|| data["output"].as_str())
             .or_else(|| data["text"].as_str())
             .map(str::to_owned)
-            .or_else(|| content_text(&data["content"]));
+            .or_else(|| crate::native::content_text(&data["content"]));
         if let Some(text) = text {
             let key = call.to_owned();
             let target = match &tool.kind {
@@ -787,7 +730,7 @@ impl Decoder {
         };
         let structured = &data["structured"];
         let text = if success {
-            content_text(&data["content"]).or_else(|| str_at(structured, "content"))
+            crate::native::content_text(&data["content"]).or_else(|| str_at(structured, "content"))
         } else {
             Some(error_message(&data["error"]))
         };
@@ -809,22 +752,22 @@ impl Decoder {
                 *exit_code = structured["exit"]
                     .as_i64()
                     .and_then(|code| i32::try_from(code).ok());
-                if let ToolKind::Edit { changes } = kind {
-                    if let Err(message) = settle_changes(changes, structured) {
-                        tool.status = Status::Failed;
-                        out.push(EngineEvent::Item {
-                            key: format!("edit-error:{call}"),
-                            parent: None,
-                            status: Status::Failed,
-                            kind: ItemKind::Error {
-                                kind: ErrorKind::Execution,
-                                message: message.into(),
-                                retryable: false,
-                            },
-                        });
-                        out.push(self.tool_event(call));
-                        return;
-                    }
+                if let ToolKind::Edit { changes } = kind
+                    && let Err(message) = settle_changes(changes, structured)
+                {
+                    tool.status = Status::Failed;
+                    out.push(EngineEvent::Item {
+                        key: format!("edit-error:{call}"),
+                        parent: None,
+                        status: Status::Done,
+                        kind: ItemKind::Error {
+                            kind: ErrorKind::Execution,
+                            message: message.into(),
+                            retryable: false,
+                        },
+                    });
+                    out.push(self.tool_event(call));
+                    return;
                 }
                 let denied = approval
                     .as_ref()
@@ -879,7 +822,6 @@ impl Decoder {
         }
         out.push(EngineEvent::Usage(self.usage.clone()));
         let texts = self.step_texts.remove(session).unwrap_or_default();
-        self.ownership.remove_buffer(session);
         let final_step = data["finish"].as_str() != Some("tool-calls");
         let last = texts.len().saturating_sub(1);
         for (index, (key, text)) in texts.into_iter().enumerate() {
@@ -955,7 +897,7 @@ impl Decoder {
                 )
                 .unwrap_or_else(|_| ToolKind::Other {
                     name: action.to_owned(),
-                    input: (Some(json!({"resources":resources}).to_string())).map(Into::into),
+                    input: Some(json!({"resources":resources}).to_string().into()),
                 }),
                 title: None,
                 output: None,
@@ -1027,7 +969,7 @@ impl Decoder {
             }
             _ => {
                 let message = "OpenCode supplied malformed question prompts or options";
-                tracing::warn!(request, message);
+                tracing::warn!(session, request, message);
                 out.push(EngineEvent::Item {
                     key: format!("invalid-question:{request}"),
                     parent: self.sessions.get(session).cloned().flatten(),
@@ -1139,6 +1081,12 @@ impl Decoder {
     }
 }
 
+impl crate::retained::Retains for Decoder {
+    fn retained(&mut self, key: &str) -> Option<&mut ItemKind> {
+        self.tools.get_mut(key).map(|tool| &mut tool.kind)
+    }
+}
+
 fn text_key(data: &Value) -> Option<String> {
     use serde::Deserialize;
     #[derive(Deserialize)]
@@ -1174,16 +1122,6 @@ fn str_at(value: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn content_text(content: &Value) -> Option<String> {
-    let parts: Vec<&str> = content
-        .as_array()?
-        .iter()
-        .filter(|part| part["type"].as_str() == Some("text"))
-        .filter_map(|part| part["text"].as_str())
-        .collect();
-    (!parts.is_empty()).then(|| parts.join("\n"))
-}
-
 fn error_message(error: &Value) -> String {
     error["message"]
         .as_str()
@@ -1209,7 +1147,7 @@ fn error_item(
                 .expect("validated native event identity")
         ),
         parent,
-        status: Status::Failed,
+        status: Status::Done,
         kind: ItemKind::Error {
             kind,
             message: (message.to_owned()).into(),
@@ -1409,224 +1347,4 @@ fn todo_steps(todos: &Value) -> Result<Vec<PlanStep>, String> {
             },
         })
         .collect())
-}
-
-#[cfg(test)]
-mod boundary_tests {
-    use super::*;
-    #[test]
-    fn malformed_text_completion_does_not_publish_an_empty_replacement() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        decoder.turn_open = true;
-        let events = decoder.feed(&json!({"id":"bad-text","type":"session.next.text.ended","data":{"sessionID":"root","messageID":"m1","partID":"part1"}}).to_string()).unwrap();
-        assert!(
-            decoder
-                .error
-                .as_deref()
-                .is_some_and(|message| message.contains("required final body"))
-        );
-        assert!(decoder.idle());
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, EngineEvent::Live { text, .. } if text.is_empty()))
-        );
-    }
-
-    #[test]
-    fn overflow_is_terminal_on_explicit_idle_but_clears_when_recovery_starts() {
-        let error = json!({ "id": "overflow", "type": "session.error", "data": { "sessionID": "root", "error": { "name": "ContextOverflowError", "data": { "message": "too much context" } } } }).to_string();
-        let idle = json!({ "id": "idle", "type": "session.status", "data": { "sessionID": "root", "status": { "type": "idle" } } }).to_string();
-        let mut decoder = Decoder::new(Some("root".into()));
-        decoder.feed(&idle).unwrap(); // Initial idle before prompt acceptance is harmless.
-        assert!(decoder.error.is_none());
-        decoder.turn_open = true;
-        decoder.feed(&error).unwrap();
-        decoder.feed(&idle).unwrap();
-        assert!(decoder.idle());
-        assert_eq!(decoder.error.as_deref(), Some("too much context"));
-        let mut recovering = Decoder::new(Some("root".into()));
-        recovering.turn_open = true;
-        recovering.feed(&error).unwrap();
-        recovering.feed(&json!({ "id": "step", "type": "session.next.step.started", "data": { "sessionID": "root" } }).to_string()).unwrap();
-        recovering.feed(&idle).unwrap();
-        assert!(recovering.error.is_none());
-        assert!(!recovering.idle());
-    }
-
-    #[test]
-    fn root_session_error_ends_without_waiting_for_a_step_but_overflow_can_compact() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        decoder.turn_open = true;
-        let recovering = decoder.feed(&json!({"id":"overflow", "type":"session.error", "data":{"sessionID":"root", "error":{"name":"ContextOverflowError", "data":{"message":"context full"}}}}).to_string()).unwrap();
-        assert!(!decoder.idle() && decoder.error.is_none());
-        assert!(matches!(
-            &recovering[0],
-            EngineEvent::Item {
-                kind: ItemKind::Error {
-                    retryable: true,
-                    ..
-                },
-                ..
-            }
-        ));
-        decoder.feed(&json!({"id":"failure", "type":"session.error", "data":{"sessionID":"root", "error":{"name":"APIError", "data":{"message":"denied"}}}}).to_string()).unwrap();
-        assert!(decoder.idle());
-        assert_eq!(decoder.error.as_deref(), Some("denied"));
-    }
-
-    #[test]
-    fn malformed_questions_fail_explicitly_instead_of_creating_empty_items() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        decoder.turn_open = true;
-        let mut events = Vec::new();
-        decoder.question_asked(
-            "root",
-            &json!({ "id": "ask", "questions": [{ "options": [] }] }),
-            &mut events,
-        );
-        assert!(decoder.idle());
-        assert!(decoder.error.is_some());
-        assert!(matches!(
-            &events[0],
-            EngineEvent::Item {
-                kind: ItemKind::Error { .. },
-                ..
-            }
-        ));
-        assert!(decoder.pending.is_empty());
-    }
-}
-
-#[cfg(test)]
-mod required_tool_fields_tests {
-    use super::*;
-    #[test]
-    fn known_native_tool_inputs_cannot_form_empty_canonical_cards() {
-        for name in [
-            "bash",
-            "read",
-            "write",
-            "edit",
-            "grep",
-            "glob",
-            "webfetch",
-            "websearch",
-        ] {
-            assert!(tool_kind(name, &json!({})).is_err(), "{name}");
-        }
-        assert!(tool_kind("write", &json!({"filePath":"file","content":""})).is_ok());
-    }
-}
-
-#[cfg(test)]
-mod malformed_frame_tests {
-    use super::*;
-    #[test]
-    fn malformed_json_and_nonobject_frames_are_protocol_errors() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        assert!(decoder.feed("{broken-json").is_err());
-        assert!(decoder.feed("null").is_err());
-        assert!(decoder.feed("[]").is_err());
-        assert!(decoder.feed("{}").is_err());
-    }
-}
-
-#[cfg(test)]
-mod native_plan_identity_tests {
-    use super::*;
-    #[test]
-    fn unfinished_native_todos_are_running_and_malformed_batches_never_become_partial_plans() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        let events=decoder.feed(&json!({"id":"event-1","type":"todo.updated","data":{"sessionID":"root","todos":[{"content":"Task","status":"pending"}]}}).to_string()).unwrap();
-        assert!(matches!(
-            &events[0],
-            EngineEvent::Item {
-                status: Status::Running,
-                kind: ItemKind::Plan { .. },
-                ..
-            }
-        ));
-        let events=decoder.feed(&json!({"id":"event-2","type":"todo.updated","data":{"sessionID":"root","todos":[{"content":"Valid","status":"completed"},{"status":"pending"}]}}).to_string()).unwrap();
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            EngineEvent::Item {
-                kind: ItemKind::Plan { .. },
-                ..
-            }
-        )));
-        assert!(events.iter().any(|event| matches!(
-            event,
-            EngineEvent::Item {
-                kind: ItemKind::Error { .. },
-                ..
-            }
-        )));
-        assert!(
-            decoder
-                .feed(&json!({"type":"server.connected","data":{}}).to_string())
-                .is_err()
-        );
-        let events=decoder.feed(&json!({"id":"event-3","type":"session.next.compaction.started","data":{"sessionID":"root"}}).to_string()).unwrap();
-        assert!(events.iter().any(|event|matches!(event,EngineEvent::Item {kind:ItemKind::Error {message,..},..} if message.inline().expect("adapter error is inline").contains("messageID"))));
-        assert!(events.iter().all(|event| !matches!(
-            event,
-            EngineEvent::Item {
-                kind: ItemKind::Compaction { .. },
-                ..
-            }
-        )));
-    }
-}
-
-#[cfg(test)]
-mod collection_partial_update_tests {
-    use super::*;
-    use artisan_api::CollectionRef;
-    #[test]
-    fn late_partial_edit_does_not_panic_or_drop_referenced_changes() {
-        let records: Vec<FileChange> = (0..5000)
-            .map(|n| FileChange {
-                path: format!("file-{n}"),
-                op: FileOp::Modify,
-                diff: None,
-            })
-            .collect();
-        let reference = CollectionRef::from_records(&records).unwrap();
-        let mut changes = Collection::Stored(reference.clone());
-        settle_changes(&mut changes, &json!({})).unwrap();
-        assert_eq!(changes.stored(), Some(&reference));
-        assert!(settle_changes(&mut changes, &json!({"existed":true})).is_err());
-        assert_eq!(changes.stored(), Some(&reference));
-        settle_changes(
-            &mut changes,
-            &json!({"files":[{"file":"changed","status":"added"}]}),
-        )
-        .unwrap();
-        assert_eq!(changes.inline().unwrap()[0].path, "changed");
-        assert_eq!(changes.inline().unwrap()[0].op, FileOp::Add);
-    }
-}
-
-#[cfg(test)]
-mod step_owner_tests {
-    use super::*;
-    #[test]
-    fn completed_text_is_owned_until_its_native_step_ends() {
-        let mut decoder = Decoder::new(Some("root".into()));
-        let text = "step 界🙂 ".repeat(4096);
-        decoder.feed(&json!({"id":"text", "type":"session.next.text.ended", "data":{"sessionID":"root", "assistantMessageID":"message", "textID":"part", "text":text}}).to_string()).unwrap();
-        assert!(decoder.ownership.bytes() >= text.len() * 4);
-        let before = decoder.ownership.bytes();
-        decoder
-            .feed(
-                &json!({"id":"extension", "type":"extension", "data":{"sessionID":"root"}})
-                    .to_string(),
-            )
-            .unwrap();
-        assert_eq!(decoder.ownership.bytes(), before);
-        decoder.feed(&json!({"id":"step", "type":"session.next.step.ended", "data":{"sessionID":"root", "finish":"stop"}}).to_string()).unwrap();
-        assert!(decoder.step_texts.get("root").is_none());
-        assert_eq!(decoder.ownership.bytes(), 0);
-    }
 }

@@ -22,6 +22,7 @@ pub mod image_preview;
 pub mod inline_code_text;
 pub mod markdown;
 pub mod markdown_renderer;
+pub mod measure;
 pub mod media_frame;
 pub mod motion;
 pub mod overlay;

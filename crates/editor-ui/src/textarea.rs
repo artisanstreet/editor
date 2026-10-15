@@ -1,5 +1,5 @@
 //! Private field chrome consumed by the text editor.
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep};
 use gpui::{Hsla, Pixels, px};
 
 pub(crate) struct TextareaStyle {
@@ -15,10 +15,7 @@ pub(crate) struct TextareaStyle {
 }
 impl TextareaStyle {
     pub(crate) fn resolve(theme: ArtisanTheme) -> Self {
-        let surface = match theme.mode {
-            ThemeMode::Light => SurfaceStep::S100,
-            ThemeMode::Dark => SurfaceStep::S900,
-        };
+        let surface = SurfaceStep::S900;
         Self {
             horizontal_padding: theme.spacing.steps(3.),
             vertical_padding: theme.spacing.steps(3.),

@@ -1,8 +1,6 @@
 //! Joined message segments keep one frame recipe while native rows own visibility.
 use crate::gradient::vertical_gradient;
-use crate::theme::{
-    ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode,
-};
+use crate::theme::{ArtisanTheme, Oklch, ProseTypography, RadiusStep, RadiusTokens, SurfaceStep};
 use gpui::InteractiveElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -60,10 +58,7 @@ impl ChatBubbleSegment {
 impl ChatBubbleSegment {
     fn frame(self) -> gpui::Div {
         let position = self.position;
-        let (top, bottom) = match self.theme.mode {
-            ThemeMode::Dark => (SurfaceStep::S775.oklch(), SurfaceStep::S850.oklch()),
-            ThemeMode::Light => (SurfaceStep::S150.oklch(), SurfaceStep::S225.oklch()),
-        };
+        let (top, bottom) = (SurfaceStep::S775.oklch(), SurfaceStep::S850.oklch());
         let middle = Oklch::new((top.l + bottom.l) * 0.5, 0.0, 0.0);
         let (top, bottom) = match position {
             SegmentPosition::Single => (top, bottom),
@@ -117,7 +112,7 @@ mod tests {
     struct Segments;
     impl Render for Segments {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let theme = ArtisanTheme::default();
+            let theme = ArtisanTheme::resolved();
             div()
                 .w_full()
                 .flex()
@@ -155,7 +150,7 @@ mod tests {
     }
     #[test]
     fn rendered_frame_rounds_only_the_exposed_message_corners() {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         let radius: gpui::AbsoluteLength = RadiusTokens::value(RadiusStep::X2l).into();
         for (position, expected) in [
             (SegmentPosition::Single, [true, true, true, true]),

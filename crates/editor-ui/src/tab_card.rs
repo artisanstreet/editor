@@ -18,16 +18,16 @@ use gpui::{
 };
 
 use crate::glass::TabCardMaterial;
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 
 /// Padding between the shell edge and the wrapped card.
 pub const TAB_CARD_PADDING_PX: f32 = 4.0;
 /// Height of the tab above the body.
 pub const TAB_CARD_TAB_HEIGHT_PX: f32 = 36.0;
 /// Rounding of the tab's two top corners.
-const TAB_RADIUS_PX: f32 = 14.0;
+const TAB_RADIUS: Pixels = RadiusTokens::value(RadiusStep::Xl);
 /// Concave fillet where the tab's right edge meets the body.
-const FILLET_RADIUS_PX: f32 = 12.0;
+const FILLET_RADIUS: Pixels = RadiusTokens::value(RadiusStep::LgMid);
 /// Horizontal room the tab leaves around its content.
 const TAB_PADDING_X_PX: f32 = 4.0;
 
@@ -91,7 +91,7 @@ impl RenderOnce for TabCard {
             strip,
         } = self;
         let geometry = window.use_keyed_state(id, cx, |_, _| GeometryCache::default());
-        let radius = px(crate::glass::COMPOSER_RADIUS + TAB_CARD_PADDING_PX);
+        let radius = crate::glass::COMPOSER_RADIUS + px(TAB_CARD_PADDING_PX);
         let reveal = strip
             .as_ref()
             .map_or(0.0, |strip| strip.reveal.clamp(0.0, 1.0));
@@ -119,7 +119,7 @@ impl RenderOnce for TabCard {
                 .top_0()
                 .left_0()
                 .size_full()
-                .rounded_t(px(TAB_RADIUS_PX))
+                .rounded_t(TAB_RADIUS)
                 .backdrop_blur(blur),
         )
         // Spans the tab, so its bounds give the tab width; it paints the
@@ -230,8 +230,8 @@ fn trace_silhouette(
 ) {
     let (x0, y0) = (bounds.origin.x, bounds.origin.y);
     let (x1, y1) = (x0 + bounds.size.width, y0 + bounds.size.height);
-    let tab_radius = px(TAB_RADIUS_PX);
-    let fillet = px(FILLET_RADIUS_PX);
+    let tab_radius = TAB_RADIUS;
+    let fillet = FILLET_RADIUS;
     let tab_x1 = x0 + tab_width;
     let body_y0 = y0 + px(TAB_CARD_TAB_HEIGHT_PX);
     let radii = |value: Pixels| point(value, value);
@@ -291,7 +291,7 @@ fn trace_silhouette(
 /// Where the strip's leading edge stands at `reveal`: from one tab corner's
 /// width past the tab to the shell's right edge. `None` before it grows.
 fn strip_right(bounds: Bounds<Pixels>, tab_width: Pixels, reveal: f32) -> Option<Pixels> {
-    let start = bounds.origin.x + tab_width + px(TAB_RADIUS_PX);
+    let start = bounds.origin.x + tab_width + TAB_RADIUS;
     let end = bounds.origin.x + bounds.size.width;
     (reveal > 0.0 && end > start).then(|| start + (end - start) * reveal.min(1.0))
 }
@@ -317,7 +317,7 @@ enum StripBottom {
 fn strip_end(bounds: Bounds<Pixels>, tab_width: Pixels, radius: Pixels, right: Pixels) -> StripEnd {
     let tab_x1 = bounds.origin.x + tab_width;
     let corner_x = bounds.origin.x + bounds.size.width - radius;
-    let top = px(TAB_RADIUS_PX).min((right - tab_x1) / 2.0);
+    let top = TAB_RADIUS.min((right - tab_x1) / 2.0);
     let bottom = if right > corner_x {
         let r = f32::from(radius);
         let dx = f32::from(right - corner_x).min(r);
@@ -340,8 +340,8 @@ fn trace_strip(
     builder: &mut PathBuilder,
 ) {
     let y0 = bounds.origin.y;
-    let tab_radius = px(TAB_RADIUS_PX);
-    let fillet = px(FILLET_RADIUS_PX);
+    let tab_radius = TAB_RADIUS;
+    let fillet = FILLET_RADIUS;
     let tab_x1 = bounds.origin.x + tab_width;
     let corner_x = bounds.origin.x + bounds.size.width - radius;
     let body_y0 = y0 + px(TAB_CARD_TAB_HEIGHT_PX);
@@ -492,7 +492,7 @@ fn paint_strip_card_edge(
     window: &mut Window,
 ) {
     let y0 = bounds.origin.y;
-    let left = bounds.origin.x + tab_width - px(TAB_RADIUS_PX);
+    let left = bounds.origin.x + tab_width - TAB_RADIUS;
     let body_y0 = y0 + px(TAB_CARD_TAB_HEIGHT_PX);
     let end = strip_end(bounds, tab_width, radius, right);
     let (bottom, bottom_radius) = match end.bottom {
@@ -671,14 +671,14 @@ mod tests {
     #[test]
     fn the_strip_grows_from_past_the_tab_to_the_shell_edge() {
         let start = strip_right(shell(), px(120.0), 0.001).expect("strip");
-        assert!(start > px(120.0) + px(TAB_RADIUS_PX) - px(0.01));
+        assert!(start > px(120.0) + TAB_RADIUS - px(0.01));
         assert_eq!(strip_right(shell(), px(120.0), 1.0), Some(px(800.0)));
     }
 
     #[test]
     fn a_grown_strip_runs_its_right_edge_on_into_the_body() {
         let end = strip_end(shell(), px(120.0), px(24.0), px(800.0));
-        assert_eq!(end.top, px(TAB_RADIUS_PX));
+        assert_eq!(end.top, TAB_RADIUS);
         assert!(matches!(end.bottom, StripBottom::Down(drop) if drop == px(24.0)));
     }
 
@@ -688,7 +688,7 @@ mod tests {
             StripBottom::Rounded(radius) => Some(radius),
             StripBottom::Down(_) => None,
         };
-        assert_eq!(rounded(400.0), Some(px(TAB_RADIUS_PX)));
+        assert_eq!(rounded(400.0), Some(TAB_RADIUS));
         assert_eq!(rounded(770.0), Some(px(6.0)));
         assert_eq!(rounded(776.0), Some(Pixels::ZERO));
         assert_eq!(rounded(777.0), None);

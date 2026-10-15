@@ -10,7 +10,7 @@ const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
 fn encode<T: Serialize>(record: &T) -> Result<String> {
     let json = serde_json::to_string(record)?;
     ensure!(
-        json.len() <= artisan_api::INLINE_COLLECTION_BYTES,
+        json.len() <= forge_content::INLINE_COLLECTION_BYTES,
         "canonical record metadata exceeds 64 KiB; authored text must use a source reference"
     );
     Ok(json)
@@ -47,7 +47,7 @@ pub(crate) fn store<T: Serialize>(
 ) -> Result<CollectionRef> {
     // First pass computes identity with at most one encoded record in memory.
     // Existing immutable collections do not incur chunk or record writes.
-    let reference = CollectionRef::from_records(records)?;
+    let reference = forge_content::collection_ref(records)?;
     let source = reference.source;
     ensure!(
         source
@@ -79,7 +79,7 @@ pub(crate) fn store<T: Serialize>(
         let mut insert_chunk = conn
             .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
         let mut buffer = String::with_capacity(if inserted {
-            artisan_api::CONTENT_CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
+            crate::content::CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
         } else {
             0
         });
@@ -105,8 +105,8 @@ pub(crate) fn store<T: Serialize>(
             }
             buffer.push_str(&encoded);
             buffer.push('\n');
-            while buffer.len() >= artisan_api::CONTENT_CHUNK_BYTES {
-                let mut boundary = artisan_api::CONTENT_CHUNK_BYTES;
+            while buffer.len() >= crate::content::CHUNK_BYTES {
+                let mut boundary = crate::content::CHUNK_BYTES;
                 while !buffer.is_char_boundary(boundary) {
                     boundary -= 1;
                 }
@@ -172,7 +172,7 @@ pub(crate) fn range<T: DeserializeOwned>(
         );
         let size = usize::try_from(end - start)?;
         ensure!(
-            size <= artisan_api::INLINE_COLLECTION_BYTES,
+            size <= forge_content::INLINE_COLLECTION_BYTES,
             "stored record exceeds range budget"
         );
         if loaded_bytes + size > artisan_api::COLLECTION_RANGE_BYTES {
@@ -455,8 +455,8 @@ fn normalize<T: Serialize>(
             "collection data exceeds 64 MiB"
         );
     }
-    if records.len() > artisan_api::INLINE_COLLECTION_ENTRIES
-        || encoded_bytes.saturating_add(1) > artisan_api::INLINE_COLLECTION_BYTES as u64
+    if records.len() > forge_content::INLINE_COLLECTION_ENTRIES
+        || encoded_bytes.saturating_add(1) > forge_content::INLINE_COLLECTION_BYTES as u64
     {
         let reference = store(
             conn,

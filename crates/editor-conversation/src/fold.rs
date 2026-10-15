@@ -377,17 +377,10 @@ pub(crate) struct Folded {
     reason = "one pass over the items, in transcript order, deciding each one's row"
 )]
 pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> Folded {
-    // The id messages to the open agent address it by.
-    let scope_address =
-        scope
-            .and_then(|agent| view.item(agent))
-            .and_then(|agent| match &agent.kind {
-                ItemKind::Agent { agent_id, .. } => agent_id.clone(),
-                _ => None,
-            });
+    // Messages the root sent the open agent show in its view.
     let to_scope = |item: &Item| {
-        scope_address.as_ref().is_some_and(|address| {
-            activity::agent_message(item).is_some_and(|message| message.to == *address)
+        scope.is_some_and(|agent| {
+            activity::agent_message(item).is_some_and(|message| message.to.as_ref() == Some(agent))
         })
     };
     let shown: Vec<&Item> = view
@@ -456,7 +449,7 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
                 ..
             } if scope.is_none() => Some(Row::Reply(item.id.clone())),
             ItemKind::Question { .. } => Some(Row::Prompt(item.id.clone())),
-            ItemKind::Tool { .. } | ItemKind::Plan { .. } | ItemKind::Approval { .. }
+            ItemKind::Tool { .. } | ItemKind::Plan { .. }
                 if item.status == Status::AwaitingUser =>
             {
                 Some(Row::Prompt(item.id.clone()))
@@ -1001,7 +994,6 @@ mod run_metadata_tests {
                 seq: 5,
                 run_id: Some(run.id.clone()),
                 parent_id: None,
-                native_id: None,
                 status,
                 created_at: 400,
                 updated_at: 600,

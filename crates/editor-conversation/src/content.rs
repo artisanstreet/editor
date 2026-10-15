@@ -98,7 +98,6 @@ impl SourceField {
             },
             Self::ApprovalCommand | Self::ApprovalDescription | Self::ApprovalReason => {
                 let approval = match &item.kind {
-                    ItemKind::Approval { approval, .. } => Some(approval),
                     ItemKind::Tool { approval, .. } | ItemKind::Plan { approval, .. } => {
                         approval.as_ref()
                     }
@@ -149,7 +148,7 @@ impl RenderOnce for StoredText {
             if owner.source(cx) != &self.source {
                 owner.set_source(self.source, cx);
             }
-            if theme.mode != self.theme.mode {
+            if *theme != self.theme {
                 owner.set_theme(self.theme, cx);
             }
         });

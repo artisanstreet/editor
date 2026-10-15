@@ -1,0 +1,28 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 136
+expression: "replay(\"malformed\")"
+---
+[
+    ProtocolError(
+        "decoding OpenCode protocol JSON: key must be a string at line 1 column 2",
+    ),
+    ProtocolError(
+        "OpenCode protocol frame must be an object",
+    ),
+    ProtocolError(
+        "OpenCode protocol frame must be an object",
+    ),
+    ProtocolError(
+        "OpenCode event is missing its type",
+    ),
+    ProtocolError(
+        "decoding OpenCode event identity: missing field `id`",
+    ),
+    ProtocolError(
+        "OpenCode event ID is empty",
+    ),
+    Idle(
+        false,
+    ),
+]

@@ -7,6 +7,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+use crate::theme::{ArtisanTheme, Oklch, ProseTypography, TextStep, TypographyTokens};
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -19,14 +20,14 @@ use gpui::{
 
 use crate::markdown::{Block, CodeToken, CodeTokenKind, Span};
 use crate::selectable_text::SelectableText;
-use crate::theme::{ArtisanTheme, Oklch, ProseTypography};
 
 mod async_preparation;
+mod budget;
 pub mod native_projection;
 mod projection_owner;
 mod projection_worker;
 pub use projection_owner::NativePreparation;
-pub use projection_worker::{NativeInput, NativeWindow};
+pub use projection_worker::NativeWindow;
 mod literal;
 mod stored;
 pub use literal::{LiteralLeaf, LiteralPreparation};
@@ -150,7 +151,7 @@ impl MarkdownRenderer {
     pub fn prepare_native_window(
         &self,
         key: SharedString,
-        source: NativeInput,
+        source: SharedString,
         font_size: Pixels,
         width: Pixels,
         runs: Arc<[gpui::TextRun]>,
@@ -164,7 +165,7 @@ impl MarkdownRenderer {
     pub fn native_row_count(
         &self,
         key: &SharedString,
-        source: &NativeInput,
+        source: &SharedString,
         font_size: Pixels,
         width: Pixels,
         runs: &Arc<[gpui::TextRun]>,
@@ -889,9 +890,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
     );
     let text_id = render.element_id(code.text);
     let text_order = render.selection_order(code.text);
-    let diagram = fence.diagrams.as_ref().map(|diagrams| {
-        &diagrams[usize::from(matches!(theme.mode, crate::theme::ThemeMode::Dark))]
-    });
+    let diagram = fence.diagram.as_ref();
     let mut body = body_container(theme, MarkdownBodyTone::Muted)
         .relative()
         .font_family(theme.typography.mono.family)
@@ -937,7 +936,7 @@ fn render_code(code: &PreparedCode, render: &RenderContext<'_>) -> AnyElement {
             .child(code)
             .child(
                 div()
-                    .text_size(px(13.0))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
                     .text_color(theme.colors.muted_foreground.to_paint())
                     .child(note),

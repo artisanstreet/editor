@@ -12,7 +12,7 @@ use gpui::{
 
 use crate::motion::{MotionPolicy, SHIMMER_CYCLE, SHIMMER_DELAY};
 use crate::text_runs::{TextRunOverride, compile_text_runs};
-use crate::theme::{ArtisanTheme, ThemeMode};
+use crate::theme::ArtisanTheme;
 
 const MAX_SPREAD: f32 = 100.0;
 
@@ -126,7 +126,6 @@ impl gpui::RenderOnce for ShimmerText {
             child: text,
             phase: phase.unwrap_or(0.0),
             spread: 50.0,
-            mode: self.theme.mode,
             animating: phase.is_some(),
         };
         root.child(text).into_any_element()
@@ -148,14 +147,11 @@ fn gradient_strength(position: f32, phase: f32, spread: f32) -> f32 {
 
 /// Mixes contrast in sRGB while preserving the text alpha.
 #[must_use]
-fn shimmer_color(base: Hsla, mode: ThemeMode, strength: f32) -> Hsla {
+fn shimmer_color(base: Hsla, strength: f32) -> Hsla {
     if strength <= 0.0 {
         return base;
     }
-    let (target, mix) = match mode {
-        ThemeMode::Light => (1.0, 0.65),
-        ThemeMode::Dark => (0.0, 0.55),
-    };
+    let (target, mix) = (0.0, 0.55);
     let amount = strength.clamp(0.0, 1.0) * mix;
     let mut color = hsla_to_rgba(base);
     color.red += (target - color.red) * amount;
@@ -169,7 +165,6 @@ struct GradientText {
     child: AnyElement,
     phase: f32,
     spread: f32,
-    mode: ThemeMode,
     animating: bool,
 }
 
@@ -228,7 +223,7 @@ impl Element for GradientText {
         if self.animating {
             window.request_animation_frame();
         }
-        let (phase, spread, mode) = (self.phase, self.spread, self.mode);
+        let (phase, spread) = (self.phase, self.spread);
         let width = f32::from(bounds.size.width);
         if width <= 0.0 || spread <= 0.0 {
             self.child.paint(window, cx);
@@ -237,7 +232,7 @@ impl Element for GradientText {
         window.with_text_color_map(
             Some(Rc::new(move |x, color| {
                 let position = f32::from(x - bounds.left()) / width;
-                shimmer_color(color, mode, gradient_strength(position, phase, spread))
+                shimmer_color(color, gradient_strength(position, phase, spread))
             })),
             |window| self.child.paint(window, cx),
         );

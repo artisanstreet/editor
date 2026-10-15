@@ -1,6 +1,6 @@
 ---
 source: crates/forge-engines/src/acp/tests.rs
-assertion_line: 129
+assertion_line: 124
 expression: "replay(Profile::Grok, \"question-steer\")"
 ---
 [
@@ -236,41 +236,83 @@ expression: "replay(Profile::Grok, \"question-steer\")"
         },
     ),
     Event(
-        Approval {
-            key: "permission-request:8",
+        Item {
+            key: "call_2",
             parent: None,
-            target: Some(
-                "call_2",
-            ),
             status: AwaitingUser,
-            approval: Approval {
-                request: FileChange,
-                reason: None,
-                options: [
-                    AllowOnce,
-                    DenyOnce,
-                ],
-                decision: None,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Add,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
+                },
+                title: Some(
+                    "Write notes.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: None,
+                    },
+                ),
             },
         },
     ),
     Event(
-        Approval {
-            key: "permission-request:8",
+        Item {
+            key: "call_2",
             parent: None,
-            target: Some(
-                "call_2",
-            ),
             status: Cancelled,
-            approval: Approval {
-                request: FileChange,
-                reason: None,
-                options: [
-                    AllowOnce,
-                    DenyOnce,
-                ],
-                decision: Some(
-                    Cancelled,
+            kind: Tool {
+                tool: Edit {
+                    changes: Inline(
+                        [
+                            FileChange {
+                                path: "/tmp/scratch/notes.txt",
+                                op: Add,
+                                diff: Some(
+                                    Inline(
+                                        "--- /tmp/scratch/notes.txt\n+++ /tmp/scratch/notes.txt\n@@ -0,0 +1 @@\n+blue\n",
+                                    ),
+                                ),
+                            },
+                        ],
+                    ),
+                },
+                title: Some(
+                    "Write notes.txt",
+                ),
+                output: None,
+                exit_code: None,
+                approval: Some(
+                    Approval {
+                        request: FileChange,
+                        reason: None,
+                        options: [
+                            AllowOnce,
+                            DenyOnce,
+                        ],
+                        decision: Some(
+                            Cancelled,
+                        ),
+                    },
                 ),
             },
         },

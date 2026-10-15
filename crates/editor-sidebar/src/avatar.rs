@@ -2,7 +2,7 @@
 //! machine keeps its colour whoever is signed in. Ported from the previous
 //! Editor's `profile_avatar` (itself `gradient-avatar.ts`).
 
-use editor_ui::theme::Oklch;
+use editor_ui::theme::{Oklch, RadiusStep, RadiusTokens};
 use gpui::{
     Div, Hsla, Image, ImageFormat, ObjectFit, ParentElement as _, Styled as _, StyledImage as _,
     div, img, px,
@@ -157,7 +157,7 @@ pub(crate) fn avatar(image: Arc<Image>) -> Div {
     div().size(px(32.0)).child(
         img(image)
             .size(px(32.0))
-            .rounded(px(8.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .object_fit(ObjectFit::Cover),
     )
 }

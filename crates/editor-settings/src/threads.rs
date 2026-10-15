@@ -1,11 +1,11 @@
 //! Archived thread index, refreshed from host metadata and rendered as visible rows.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use artisan_api::{ThreadId, Timestamp, UpdateThread};
 use editor_core::{HostData, HostId, SettingsPage};
 use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::page::{PageBlock, card, error_text, header, row, section_shell};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
     AnyElement, App, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement,
@@ -132,7 +132,7 @@ fn render_archived(
     host: &Entity<HostData>,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let muted = |text: &str| {
         div()
             .w_full()
@@ -241,12 +241,12 @@ fn render_archived(
     }
     section_shell(
         theme,
-        "archived",
         "Archived",
         Some("Archived threads leave the sidebar. They stay here until you restore them."),
         None,
         body,
     )
+    .debug_selector("settings-section-archived")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -367,7 +367,7 @@ fn span(millis: Timestamp) -> String {
 }
 
 /// Retention: Forge never erases a thread, so erasing stays off.
-fn render_retention(settings: &Settings, theme: &ArtisanTheme) -> Div {
+fn render_retention(settings: &Settings, theme: &ArtisanTheme) -> PageBlock {
     let body = card(
         theme,
         vec![
@@ -395,18 +395,17 @@ fn render_retention(settings: &Settings, theme: &ArtisanTheme) -> Div {
     );
     section_shell(
         theme,
-        "retention",
         "Retention",
         Some("Retention controls are not yet connected in the native app."),
         None,
         body,
     )
+    .debug_selector("settings-section-retention")
 }
 
-fn render_titles(settings: &Settings, theme: &ArtisanTheme) -> Div {
+fn render_titles(settings: &Settings, theme: &ArtisanTheme) -> PageBlock {
     section_shell(
         theme,
-        "thread-titles",
         "Titles",
         Some("Title choices are not yet configurable in the native app."),
         None,
@@ -423,12 +422,12 @@ fn render_titles(settings: &Settings, theme: &ArtisanTheme) -> Div {
             ],
         ),
     )
+.debug_selector("settings-section-thread-titles")
 }
 
-fn render_usage_recovery(settings: &Settings, theme: &ArtisanTheme) -> Div {
+fn render_usage_recovery(settings: &Settings, theme: &ArtisanTheme) -> PageBlock {
     section_shell(
         theme,
-        "usage-recovery",
         "Usage recovery",
         Some("Usage-recovery choices are not yet configurable in the native app."),
         None,
@@ -445,9 +444,10 @@ fn render_usage_recovery(settings: &Settings, theme: &ArtisanTheme) -> Div {
             ],
         ),
     )
+.debug_selector("settings-section-usage-recovery")
 }
 
-fn render_agent_names(_settings: &Settings, theme: &ArtisanTheme) -> Div {
+fn render_agent_names(_settings: &Settings, theme: &ArtisanTheme) -> PageBlock {
     let select = Some(
         editor_ui::select::Select::new(
             "settings-select-agent-names",
@@ -467,7 +467,6 @@ fn render_agent_names(_settings: &Settings, theme: &ArtisanTheme) -> Div {
     );
     section_shell(
         theme,
-        "agents",
         "Agents",
         Some("The name set is not yet configurable in the native app."),
         None,
@@ -484,6 +483,7 @@ fn render_agent_names(_settings: &Settings, theme: &ArtisanTheme) -> Div {
             ],
         ),
     )
+    .debug_selector("settings-section-agents")
 }
 
 #[cfg(test)]

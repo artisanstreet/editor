@@ -1,7 +1,7 @@
 //! Shared page headers, sections, field rows, notices and navigation.
 
 use crate::card::Card;
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::{
     AnyElement, App, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
     RenderOnce, SharedString, Styled as _, Window, div, px,
@@ -55,7 +55,7 @@ pub fn text_preview(theme: &ArtisanTheme, text: &str) -> PageBlock {
         div()
             .px(px(12.0))
             .py(px(10.0))
-            .rounded(px(8.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .bg(theme.colors.foreground.with_alpha(0.04).to_paint())
             .text_xs()
             .text_color(theme.colors.muted_foreground.to_paint())
@@ -89,7 +89,7 @@ pub const CONTENT_MAX_WIDTH: f32 = 896.0;
 /// Navigation rail width.
 pub const NAV_RAIL_WIDTH: f32 = 176.0;
 /// Gap between navigation and content.
-pub const NAV_CONTENT_GAP: f32 = 24.0;
+pub const NAV_CONTENT_GAP: f32 = 56.0;
 
 /// The page header: a 20 px title over a muted line.
 pub fn header(
@@ -103,7 +103,7 @@ pub fn header(
             .flex_col()
             .child(
                 div()
-                    .text_size(px(20.0))
+                    .text_size(TypographyTokens::size(TextStep::Xl))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.foreground.to_paint())
                     .child(title.into()),
@@ -118,21 +118,19 @@ pub fn header(
     )
 }
 
-/// One section block: the heading with an optional
-/// action at its baseline, an optional intro, then the body.
+/// One section block: the heading with an optional action at its
+/// baseline, an optional intro, then the body. Name it with
+/// [`PageBlock::debug_selector`].
 pub fn section_shell(
     theme: &ArtisanTheme,
-    anchor: &str,
     title: &str,
     intro: Option<&str>,
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> PageBlock {
-    let selector = format!("settings-section-{anchor}");
     let mut head = div()
         .flex()
         .flex_row()
-        .flex_wrap()
         .items_center()
         .justify_between()
         .gap(px(16.0))
@@ -146,12 +144,7 @@ pub fn section_shell(
     if let Some(action) = action {
         head = head.child(action);
     }
-    let mut section = div()
-        .flex()
-        .flex_col()
-        .mt(px(40.0))
-        .debug_selector(move || selector.clone())
-        .child(head);
+    let mut section = div().flex().flex_col().mt(px(40.0)).child(head);
     if let Some(intro) = intro {
         section = section.child(
             div()
@@ -183,7 +176,7 @@ pub fn row(
         .flex()
         .flex_col()
         .flex_1()
-        .min_w(px(160.0))
+        .min_w_0()
         .gap(px(2.0))
         .child(
             div()
@@ -203,16 +196,26 @@ pub fn row(
         .w_full()
         .flex()
         .flex_row()
-        .flex_wrap()
         .items_center()
         .justify_between()
-        .gap(px(16.0))
+        .gap(px(24.0))
         .py(px(14.0))
         .child(text);
     if let Some(control) = control {
         row = row.child(div().flex_shrink_0().child(control));
     }
     PageBlock::new(row)
+}
+
+/// A muted 12 px line under a section.
+pub fn footnote(theme: &ArtisanTheme, text: impl Into<SharedString>) -> PageBlock {
+    PageBlock::new(
+        div()
+            .mt(px(10.0))
+            .text_xs()
+            .text_color(theme.colors.muted_foreground.to_paint())
+            .child(text.into()),
+    )
 }
 
 /// A muted line inside a card band.
@@ -274,7 +277,7 @@ pub fn notice(theme: &ArtisanTheme, text: impl Into<SharedString>) -> Notice {
             .mt(px(24.0))
             .px(px(12.0))
             .py(px(10.0))
-            .rounded(px(10.0))
+            .rounded(RadiusTokens::value(RadiusStep::Lg))
             .bg(tone.with_alpha(0.10).to_paint())
             .text_sm()
             .text_color(tone.to_paint())
@@ -290,7 +293,7 @@ mod tests {
     struct Page;
     impl Render for Page {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            let theme = ArtisanTheme::default();
+            let theme = ArtisanTheme::resolved();
             div()
                 .w_full()
                 .flex()
@@ -320,27 +323,25 @@ mod tests {
         }
     }
     #[gpui::test]
-    fn field_controls_wrap_and_notices_keep_actions_inside_the_page(cx: &mut TestAppContext) {
+    fn field_controls_stay_beside_their_text_and_notices_keep_actions_inside(
+        cx: &mut TestAppContext,
+    ) {
         let (_, cx) = cx.add_window_view(|_, _| Page);
-        cx.simulate_resize(gpui::size(px(240.0), px(400.0)));
-        let narrow = cx.debug_bounds("page-field").unwrap();
-        let control = cx.debug_bounds("page-control").unwrap();
-        assert_eq!(narrow.size.width, px(240.0));
-        assert!(
-            control.top() > narrow.top() + px(14.0),
-            "control wraps below the text at a narrow width"
-        );
-        assert!(control.right() <= narrow.right());
+        for width in [240.0, 480.0] {
+            cx.simulate_resize(gpui::size(px(width), px(400.0)));
+            let field = cx.debug_bounds("page-field").unwrap();
+            let control = cx.debug_bounds("page-control").unwrap();
+            assert_eq!(field.size.width, px(width));
+            assert!(
+                control.top() >= field.top() && control.bottom() <= field.bottom(),
+                "the control shares the row with its text at {width} px"
+            );
+            assert_eq!(control.right(), field.right(), "the control ends the row");
+        }
         let notice = cx.debug_bounds("page-notice").unwrap();
         let retry = cx.debug_bounds("page-retry").unwrap();
         assert!(retry.left() >= notice.left() && retry.right() <= notice.right());
         assert!(retry.bottom() <= notice.bottom());
-        cx.simulate_resize(gpui::size(px(480.0), px(400.0)));
-        let wide = cx.debug_bounds("page-field").unwrap();
-        assert!(
-            wide.size.height < narrow.size.height,
-            "text and control share a row when it fits"
-        );
     }
 }
 

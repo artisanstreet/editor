@@ -1,6 +1,6 @@
 //! A typed value picker. Opening, keyboard navigation and scrolling belong here.
 
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep};
 use crate::{
     AssetId,
     icon::{IconSize, IconStyle, IconTint, icon},
@@ -175,12 +175,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
             .rounded(RadiusTokens::value(RadiusStep::X4l))
             .border_1()
             .border_color(theme.colors.input.to_paint())
-            .bg(match theme.mode {
-                ThemeMode::Light => SurfaceStep::S100,
-                ThemeMode::Dark => SurfaceStep::S900,
-            }
-            .oklch()
-            .to_paint())
+            .bg(SurfaceStep::S900.oklch().to_paint())
             .text_color(theme.colors.foreground.to_paint())
             .text_size(theme.typography.control_text)
             .flex()
@@ -422,7 +417,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                 .min(popup_height))
             .track_scroll(&scroll);
             let outside = state.clone();
-            let popup_bounds = crate::popover::PopupBounds::default();
+            let popup_bounds = crate::measure::Measured::default();
             let outside_bounds = popup_bounds.clone();
             root = root
                 .on_mouse_down_out(move |event: &MouseDownEvent, _, cx| {
@@ -451,7 +446,7 @@ impl<V: Clone + Eq + 'static> RenderOnce for Select<V> {
                                     .w(px(144.0).min(
                                         (window.viewport_size().width - px(16.0)).max(px(1.0)),
                                     ))
-                                    .child(popup_bounds.recorder())
+                                    .child(popup_bounds.record())
                                     .child(
                                         crate::popover::PopoverPanel::new("panel", theme, list)
                                             .select_menu(),

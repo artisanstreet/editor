@@ -15,8 +15,7 @@
 
 mod citations;
 mod decoder;
-mod notices;
-mod required_items;
+mod protocol;
 #[cfg(test)]
 mod tests;
 

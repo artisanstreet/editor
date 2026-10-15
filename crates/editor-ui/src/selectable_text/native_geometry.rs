@@ -3,7 +3,9 @@ use crate::markdown_renderer::native_projection::{ParagraphWrapIndex, VisualClus
 use gpui::{Bounds, Pixels, SharedString, TextLayout, WrappedLineLayout};
 use std::sync::Arc;
 
-const MAX_NATIVE_SOURCE: usize = 16 * 1024;
+/// The largest leaf laid out as one native text; longer leaves page through
+/// the projected native window.
+pub const MAX_NATIVE_SOURCE: usize = 16 * 1024;
 #[derive(Default)]
 pub(super) struct NativeGeometryCache {
     cached: Option<Cached>,

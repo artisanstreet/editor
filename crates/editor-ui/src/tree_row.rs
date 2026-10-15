@@ -1,4 +1,5 @@
 //! Shared file-tree rows own disclosure, focus, keyboard commands and row geometry.
+use crate::theme::{TextStep, TypographyTokens};
 use crate::{
     asset_seam::asset_glyph,
     theme::{ArtisanTheme, RadiusStep, RadiusTokens},
@@ -248,10 +249,10 @@ impl RenderOnce for TreeRow {
             .cursor_pointer()
             .focus_visible(move |style| style.border_color(theme.colors.ring.to_paint()))
             .hover(move |style| {
-                crate::hover_card::hover_fill_style(
-                    style,
+                crate::hover_card::hover_fill(
+                    style.rounded(RadiusTokens::value(RadiusStep::Sm)),
                     &theme,
-                    RadiusTokens::value(RadiusStep::Sm),
+                    crate::hover_card::HoverFill::Edged,
                 )
             });
         if let Some(selector) = self.debug_selector {
@@ -287,7 +288,7 @@ impl RenderOnce for TreeRow {
                 .flex_shrink_0()
                 .max_w(gpui::relative(0.6))
                 .truncate()
-                .text_size(px(13.0))
+                .text_size(TypographyTokens::size(TextStep::XsMid))
                 .text_color(if deleted {
                     theme.colors.muted_foreground.to_paint()
                 } else {
@@ -310,7 +311,7 @@ impl RenderOnce for TreeRow {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(12.0))
+                .text_size(TypographyTokens::size(TextStep::Xs))
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(description)
         }))

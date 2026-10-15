@@ -89,9 +89,9 @@ pub(crate) fn category(item: &Item) -> Option<ActivityCategory> {
 /// One message sent to an agent (or another session) with `SendMessage`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMessage {
-    /// Where it went: an agent's id (`Agent { agent_id }`), or a session.
-    pub to: String,
-    pub label: String,
+    /// The thread's `Agent` item it went to; `None` for another session or
+    /// an agent this thread doesn't have.
+    pub to: Option<artisan_api::ItemId>,
     pub summary: Option<String>,
     pub text: artisan_api::TextContent,
 }
@@ -101,10 +101,10 @@ pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
     let ItemKind::Tool {
         tool:
             ToolKind::AgentMessage {
-                recipient,
-                recipient_label,
+                target,
                 summary,
                 text,
+                ..
             },
         ..
     } = &item.kind
@@ -112,8 +112,7 @@ pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
         return None;
     };
     Some(AgentMessage {
-        to: recipient.clone(),
-        label: recipient_label.clone(),
+        to: target.clone(),
         summary: summary.clone(),
         text: text.clone(),
     })
@@ -131,12 +130,10 @@ pub(crate) fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec
 
 /// The agent an item talks to, for counting a chain's agents once: the
 /// agent it started, or the one it messaged.
-fn talked_to(item: &Item) -> Option<String> {
+fn talked_to(item: &Item) -> Option<artisan_api::ItemId> {
     match &item.kind {
-        ItemKind::Agent { agent_id, .. } => {
-            Some(agent_id.clone().unwrap_or_else(|| item.id.to_string()))
-        }
-        _ => agent_message(item).map(|message| message.to),
+        ItemKind::Agent { .. } => Some(item.id.clone()),
+        _ => agent_message(item).and_then(|message| message.to),
     }
 }
 
@@ -258,9 +255,14 @@ pub(crate) fn detail_text(item: &Item, category: ActivityCategory) -> String {
                     .unwrap_or_else(|| format!("{server} · {tool}")),
             ),
             ToolKind::ViewImage { path } => Some(path.clone()),
-            ToolKind::AgentMessage {
-                recipient_label, ..
-            } => Some(format!("Talked to {recipient_label}")),
+            ToolKind::AgentMessage { target, .. } => Some(
+                if target.is_some() {
+                    "Talked to an agent"
+                } else {
+                    "Sent a message"
+                }
+                .to_owned(),
+            ),
             ToolKind::Other { name, .. } => title.clone().or_else(|| Some(name.clone())),
         },
         _ => None,

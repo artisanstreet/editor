@@ -1,6 +1,7 @@
 //! `stats`: a row of figures with deltas, sparklines, and hover hints.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use editor_assets::AssetId;
@@ -14,7 +15,6 @@ use super::super::kit::part;
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
 use crate::hover_card::{glass_hover_card, hover_card_text, hover_card_title};
-use crate::theme::ArtisanTheme;
 
 /// A figure as written: a number, formatted for reading, or text as is.
 #[derive(Clone, Debug, Deserialize)]
@@ -291,7 +291,7 @@ impl StatsView {
                 .child(kit::label(theme, delta.text(true)).text_color(color))
         });
         let spark_color = if tone == Tone::Neutral {
-            kit::series_color(theme, 0).to_paint()
+            kit::series_color(0).to_paint()
         } else {
             color
         };
@@ -327,7 +327,7 @@ impl StatsView {
             })
             .child(
                 div()
-                    .text_size(px(22.0))
+                    .text_size(TypographyTokens::size(TextStep::X2l))
                     .line_height(px(28.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.colors.foreground.to_paint())

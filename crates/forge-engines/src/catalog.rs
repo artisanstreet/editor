@@ -831,6 +831,31 @@ fn variant_label(id: &str) -> String {
     }
 }
 
+/// Choices come from reported model limits, never a model-name guess.
+fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> {
+    if base == 0 || base > 100_000_000 {
+        return Vec::new();
+    }
+    let mut choices = Vec::new();
+    if engine == EngineId::Claude && base >= 1_000_000 {
+        choices.push(ContextWindow {
+            tokens: 400_000,
+            override_tokens: Some(400_000),
+        });
+    }
+    choices.push(ContextWindow {
+        tokens: base,
+        override_tokens: None,
+    });
+    if engine == EngineId::Codex && max > base && max <= 100_000_000 {
+        choices.push(ContextWindow {
+            tokens: max,
+            override_tokens: Some(max),
+        });
+    }
+    choices
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1172,29 +1197,4 @@ mod tests {
         );
         assert!(listing.models[1].speeds.is_empty());
     }
-}
-
-/// Choices come from reported model limits, never a model-name guess.
-fn context_choices(engine: EngineId, base: u64, max: u64) -> Vec<ContextWindow> {
-    if base == 0 || base > 100_000_000 {
-        return Vec::new();
-    }
-    let mut choices = Vec::new();
-    if engine == EngineId::Claude && base >= 1_000_000 {
-        choices.push(ContextWindow {
-            tokens: 400_000,
-            override_tokens: Some(400_000),
-        });
-    }
-    choices.push(ContextWindow {
-        tokens: base,
-        override_tokens: None,
-    });
-    if engine == EngineId::Codex && max > base && max <= 100_000_000 {
-        choices.push(ContextWindow {
-            tokens: max,
-            override_tokens: Some(max),
-        });
-    }
-    choices
 }

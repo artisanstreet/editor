@@ -18,9 +18,9 @@ use mermaid_rs_renderer::{
     LayoutConfig, Theme, compute_layout, measure_svg_dimensions, parse_mermaid_strict, render_svg,
 };
 
-use crate::theme::{ArtisanTheme, Oklch, ThemeMode};
+use crate::theme::{ArtisanTheme, Oklch};
 
-/// Diagrams kept per thread, keyed by source and theme mode. A streaming
+/// Diagrams kept per thread, keyed by source. A streaming
 /// reply re-renders every frame, so a settled fence above the stream must
 /// not lay out again each time.
 const MEMO_CAPACITY: usize = 32;
@@ -52,7 +52,7 @@ pub(super) struct MermaidDiagram {
 /// and release all diagram resources when that worker closes.
 #[derive(Default)]
 pub(super) struct DiagramCache {
-    entries: VecDeque<(String, Option<Arc<[DiagramSvg; 2]>>)>,
+    entries: VecDeque<(String, Option<Arc<DiagramSvg>>)>,
 }
 impl DiagramCache {
     pub(super) fn prepare(&mut self, document: &mut MarkdownDocument) {
@@ -64,7 +64,7 @@ impl DiagramCache {
                 Block::Code(fence)
                     if fence.closed && fence.language.as_deref() == Some("mermaid") =>
                 {
-                    fence.diagrams = self.get(&fence.source);
+                    fence.diagram = self.get(&fence.source);
                 }
                 Block::List { items, .. } => {
                     for item in items {
@@ -75,34 +75,23 @@ impl DiagramCache {
             }
         }
     }
-    fn get(&mut self, source: &str) -> Option<Arc<[DiagramSvg; 2]>> {
+    fn get(&mut self, source: &str) -> Option<Arc<DiagramSvg>> {
         if let Some((_, diagrams)) = self.entries.iter().find(|(key, _)| key == source) {
             return diagrams.clone();
         }
-        let diagrams = [ThemeMode::Light, ThemeMode::Dark]
-            .map(|mode| render(source, &ArtisanTheme::for_mode(mode)));
-        let diagrams = match diagrams {
-            [Some(light), Some(dark)] => Some(Arc::new([light, dark])),
-            _ => None,
-        };
-        self.entries
-            .push_back((source.to_owned(), diagrams.clone()));
+        let diagram = render(source, &ArtisanTheme::resolved()).map(Arc::new);
+        self.entries.push_back((source.to_owned(), diagram.clone()));
         while self.entries.len() > MEMO_CAPACITY
             || self
                 .entries
                 .iter()
-                .map(|(key, svgs)| {
-                    key.len()
-                        + svgs.as_ref().map_or(0, |svgs| {
-                            svgs.iter().map(|svg| svg.source.len()).sum::<usize>()
-                        })
-                })
+                .map(|(key, svgs)| key.len() + svgs.as_ref().map_or(0, |svg| svg.source.len()))
                 .sum::<usize>()
                 > 8 * 1024 * 1024
         {
             self.entries.pop_front();
         }
-        diagrams
+        diagram
     }
 }
 pub(super) fn image(svg: &DiagramSvg, renderer: SvgRenderer) -> Option<MermaidDiagram> {
@@ -185,10 +174,7 @@ fn diagram_theme(theme: &ArtisanTheme) -> Theme {
     let cluster = over(colors.foreground, 0.03);
     let cluster_border = over(colors.foreground, 0.16);
 
-    let base = match theme.mode {
-        ThemeMode::Light => Theme::modern(),
-        ThemeMode::Dark => Theme::dark(),
-    };
+    let base = Theme::dark();
     Theme {
         font_family: FONT_FAMILY.to_owned(),
         font_size: FONT_SIZE_PX,
@@ -247,7 +233,7 @@ mod tests {
 
     #[test]
     fn flowchart_renders_into_a_sized_svg() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let theme = ArtisanTheme::resolved();
         let diagram = render("flowchart TD\n  A[Browser] --> B[Web]\n", &theme)
             .expect("a valid flowchart renders");
         assert!(
@@ -259,7 +245,7 @@ mod tests {
 
     #[test]
     fn invalid_source_renders_nothing() {
-        let theme = ArtisanTheme::for_mode(ThemeMode::Light);
+        let theme = ArtisanTheme::resolved();
         assert!(render("this is not a diagram {{{", &theme).is_none());
         assert!(render("   \n", &theme).is_none());
     }

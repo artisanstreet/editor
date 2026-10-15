@@ -4,6 +4,7 @@
 //! Tick labels are divs placed at the same fractions the canvas paints at,
 //! so labels and marks share one scale without measuring text.
 
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::rc::Rc;
 
 use gpui::{
@@ -15,7 +16,6 @@ use super::super::kit;
 use super::scale::Ticks;
 use super::scene::{Shape, hrule, vrule};
 use crate::hover_card::{glass_hover_card, hover_card_row, hover_card_title};
-use crate::theme::ArtisanTheme;
 
 /// Height of a chart's plot area.
 pub(super) const PLOT_HEIGHT: f32 = 240.0;
@@ -102,7 +102,7 @@ impl Frame {
                 .justify_end()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .text_color(muted)
                 .child(tick.label)
@@ -110,7 +110,7 @@ impl Frame {
         let x_labels = x_tick_strip(theme, self.x_ticks);
         let title = |text: SharedString| {
             div()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(muted)
@@ -177,7 +177,7 @@ pub(super) fn x_tick_strip(theme: &ArtisanTheme, ticks: Vec<Tick>) -> Div {
                 .justify_center()
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .text_color(muted)
                 .child(tick.label)
@@ -201,7 +201,7 @@ fn gutter(labels: Vec<EndLabel>, width: f32) -> Div {
                 .h(px(16.0))
                 .overflow_hidden()
                 .whitespace_nowrap()
-                .text_size(px(11.0))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .line_height(px(16.0))
                 .text_color(label.color)
                 .child(label.text)
@@ -335,7 +335,7 @@ pub(super) fn legend(
                 .flex_shrink_0()
                 .w(px(12.0))
                 .h(px(4.0))
-                .rounded(px(2.0))
+                .rounded(RadiusTokens::value(RadiusStep::X2s))
                 .bg(if entry.hidden {
                     kit::hairline(theme)
                 } else {
@@ -353,7 +353,7 @@ pub(super) fn legend(
                     .items_center()
                     .gap(px(6.0))
                     .opacity(alpha)
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
                     .text_color(theme.colors.foreground.to_paint())
                     .child(swatch)
@@ -433,9 +433,9 @@ pub(super) fn plot_label(theme: &ArtisanTheme, label: PlotLabel) -> Div {
         .overflow_hidden()
         .whitespace_nowrap()
         .px(px(4.0))
-        .rounded(px(4.0))
+        .rounded(RadiusTokens::value(RadiusStep::Xs))
         .bg(theme.colors.background.with_alpha(0.7).to_paint())
-        .text_size(px(11.0))
+        .text_size(TypographyTokens::size(TextStep::X2s))
         .line_height(px(16.0))
         .text_color(color)
         .child(text);

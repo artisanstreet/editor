@@ -4,10 +4,13 @@ use anyhow::{Context, Result, ensure};
 use artisan_api::{
     ContentId, ContentQuery, ContentRange, ContentRef, EditTotals, Item, TextContent, ToolKind,
 };
+use forge_content::ItemTexts as _;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeSet;
 
 pub(crate) const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// Stored sources are split into chunks of this many bytes.
+pub(crate) const CHUNK_BYTES: usize = 32 * 1024;
 const MAX_ITEM_BYTES: usize = 512 * 1024;
 const GRACE_MILLIS: i64 = 24 * 60 * 60 * 1000;
 
@@ -302,6 +305,50 @@ pub(crate) fn resolve(conn: &Connection, text: &TextContent) -> Result<String> {
     Ok(text)
 }
 
+/// Counts authored unified-diff operations. Forge stores this derivation
+/// beside immutable source bytes, so status-only updates do not reload diffs.
+pub(crate) fn diff_totals(diff: &str) -> EditTotals {
+    let mut totals = EditTotals::default();
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+            continue;
+        }
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
+            continue;
+        }
+        if line.starts_with('+') {
+            totals.added = totals.added.saturating_add(1);
+        } else if line.starts_with('-') {
+            totals.removed = totals.removed.saturating_add(1);
+        }
+    }
+    totals
+}
+
+/// Edit totals of a tool's changes as they stand in memory, for items
+/// written before the content table existed.
+pub(crate) fn inline_edit_totals(tool: &ToolKind) -> Option<EditTotals> {
+    let ToolKind::Edit { changes } = tool else {
+        return None;
+    };
+    let mut totals = EditTotals::default();
+    for change in changes.inline()? {
+        let Some(diff) = &change.diff else {
+            continue;
+        };
+        let count = diff_totals(diff.inline()?);
+        totals.added = totals.added.saturating_add(count.added);
+        totals.removed = totals.removed.saturating_add(count.removed);
+    }
+    Some(totals)
+}
+
 pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<EditTotals>> {
     let ToolKind::Edit { changes } = tool else {
         return Ok(None);
@@ -331,7 +378,7 @@ pub(crate) fn edit_totals(conn: &Connection, tool: &ToolKind) -> Result<Option<E
         };
         for diff in slice.iter().filter_map(|change| change.diff.as_ref()) {
             let count = match diff {
-                TextContent::Inline(text) => EditTotals::from_diff(text),
+                TextContent::Inline(text) => diff_totals(text),
                 TextContent::Stored(source) => conn.query_row(
                     "SELECT diff_added,diff_removed FROM content WHERE id=?1",
                     [source.id.as_str()],
@@ -388,7 +435,7 @@ pub(crate) fn collect(conn: &Connection, now: i64) -> Result<usize> {
 /// A one-time conversion preserves Item IDs, positions and revisions. It never
 /// emits events or rewrites an Item repeatedly for its individual payload fields.
 pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
-    let mut select = conn.prepare("SELECT id,body,native_id FROM items ORDER BY rowid")?;
+    let mut select = conn.prepare("SELECT id,body FROM items ORDER BY rowid")?;
     let mut rows = select.query([])?;
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
@@ -421,9 +468,9 @@ pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
             output.insert("text".into(), text.into());
             output.insert("omitted_bytes".into(), omitted.into());
         }
+        crate::schema::legacy_approval(&mut value);
         let mut item: Item =
             serde_json::from_value(value).with_context(|| format!("migrate item source {id}"))?;
-        item.native_id = row.get(2)?;
         if collections {
             normalize(conn, &mut item, None)?;
         } else {
@@ -449,7 +496,7 @@ pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef>
         "source exceeds 64 MiB"
     );
     let source = ContentRef::from_text(value);
-    let totals = EditTotals::from_diff(value);
+    let totals = diff_totals(value);
     let inserted = conn.execute(
         "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO NOTHING",
         params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()],
@@ -459,7 +506,7 @@ pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef>
             .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
         let mut start = 0;
         while start < value.len() {
-            let mut end = (start + artisan_api::CONTENT_CHUNK_BYTES).min(value.len());
+            let mut end = (start + CHUNK_BYTES).min(value.len());
             while !value.is_char_boundary(end) {
                 end -= 1;
             }
@@ -601,7 +648,7 @@ mod tests {
             "--- old\n+++ new\n@@ -1,1 +1,1 @@\n{}",
             "-old\n+new\n".repeat(3000)
         );
-        let expected = EditTotals::from_diff(&diff);
+        let expected = diff_totals(&diff);
         let source = stored(&conn, &diff);
         let tool = ToolKind::Edit {
             changes: vec![artisan_api::FileChange {
@@ -611,7 +658,7 @@ mod tests {
             }]
             .into(),
         };
-        assert_eq!(tool.edit_totals(), None);
+        assert_eq!(inline_edit_totals(&tool), None);
         assert_eq!(edit_totals(&conn, &tool).unwrap(), Some(expected));
     }
     #[test]

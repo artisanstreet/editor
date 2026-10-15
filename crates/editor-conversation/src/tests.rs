@@ -956,7 +956,7 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
         ItemKind::Tool {
             tool: artisan_api::ToolKind::AgentMessage {
                 recipient: "ae5992bd2a38ec98a".into(),
-                recipient_label: "Martine".into(),
+                target: Some(martine.id.clone()),
                 summary: Some("Use content/variants".into()),
                 text: "Map variants already exist: use content/variants for weather.".into(),
             },
@@ -995,7 +995,7 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
         "a message to an agent counts under Agents"
     );
     let sent = crate::activity::agent_message(&message_item).unwrap();
-    assert_eq!(sent.label, "Martine");
+    assert_eq!(sent.to.as_ref(), Some(&martine.id));
     let lead_work = loaded(&conversation, cx);
     let chain =
         crate::activity::chain_categories(lead_work.iter().filter(|item| item.parent_id.is_none()));
@@ -1527,7 +1527,6 @@ fn text_streaming_in_live_work_stays_on_screen() {
         seq: position,
         run_id: Some(run.clone()),
         parent_id: None,
-        native_id: None,
         status,
         created_at: 0,
         updated_at: 0,
@@ -1958,7 +1957,6 @@ fn canonical_final_messages_keep_their_phase_when_later_work_arrives() {
         seq: position,
         run_id: Some(run.clone()),
         parent_id: None,
-        native_id: None,
         status: Status::Done,
         created_at: 0,
         updated_at: 0,
@@ -2034,7 +2032,6 @@ fn the_newest_turn_shows_before_its_start_loads() {
             seq: position,
             run_id: Some(RunId::from("run")),
             parent_id: None,
-            native_id: None,
             status: Status::Done,
             created_at: 0,
             updated_at: 0,
@@ -2222,7 +2219,6 @@ fn a_steer_sits_in_the_work_where_it_was_sent() {
         seq: position,
         run_id: Some(run.clone()),
         parent_id: None,
-        native_id: None,
         status: Status::Done,
         created_at: 0,
         updated_at: 0,
@@ -2281,7 +2277,6 @@ fn canonical_tool_commands_preserve_quoted_whitespace() {
         seq: 1,
         run_id: None,
         parent_id: None,
-        native_id: None,
         status: Status::Done,
         created_at: 0,
         updated_at: 0,
@@ -3239,7 +3234,6 @@ fn stored_payloads_keep_canonical_rows_and_agent_reports() {
         seq: 41,
         run_id: None,
         parent_id: None,
-        native_id: None,
         status: Status::Done,
         created_at: 0,
         updated_at: 0,

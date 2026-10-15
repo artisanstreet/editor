@@ -2,6 +2,7 @@
 
 use editor_core::{Core, Screen, SettingsPage};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
+use editor_ui::theme::ActiveTheme as _;
 use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _,
@@ -330,7 +331,7 @@ impl Palette {
 
 impl Render for Palette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = editor_ui::theme::ArtisanTheme::default();
+        let theme = *cx.theme();
         let entries = self.entries.clone();
         self.highlighted = self.highlighted.min(entries.len().saturating_sub(1));
         let rows = entries.into_iter().enumerate().map(|(index, entry)| {
@@ -366,7 +367,7 @@ impl Render for Palette {
             .children(rows);
         editor_ui::dialog::Dialog::new(
             "command-palette",
-            editor_ui::theme::ArtisanTheme::default(),
+            *cx.theme(),
             "Search threads and commands",
             content,
         )
@@ -452,7 +453,14 @@ mod tests {
             .unwrap()
         });
         let fingerprint = core.read_with(cx, |core, _| {
-            artisan_api::tls::fingerprint(core.identity.as_ref().unwrap().certificate_der().unwrap().as_ref())
+            artisan_api::tls::fingerprint(
+                core.identity
+                    .as_ref()
+                    .unwrap()
+                    .certificate_der()
+                    .unwrap()
+                    .as_ref(),
+            )
         });
         for (host, item) in [
             ("busy", thread("old", 100, 900_000)),

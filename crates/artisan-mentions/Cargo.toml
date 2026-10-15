@@ -1,0 +1,9 @@
+[package]
+name = "artisan-mentions"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+description = "The `$skill` and `@connector` mention grammar the composer paints and Forge hands to engines."
+
+[lints]
+workspace = true

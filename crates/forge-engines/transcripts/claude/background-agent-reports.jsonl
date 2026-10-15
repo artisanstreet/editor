@@ -1,0 +1,5 @@
+{"type": "assistant", "message": {"id": "msg-toolu_a", "content": [{"type": "tool_use", "id": "toolu_a", "name": "Agent", "input": {"description": "Faithful CMAA2 port", "prompt": "Do Faithful CMAA2 port in full.", "run_in_background": true}}]}}
+{"type": "assistant", "message": {"id": "msg-toolu_b", "content": [{"type": "tool_use", "id": "toolu_b", "name": "Agent", "input": {"description": "Temporal mode inputs", "prompt": "Do Temporal mode inputs in full.", "run_in_background": true}}]}}
+{"type": "system", "subtype": "task_notification", "tool_use_id": "toolu_a", "status": "stopped", "summary": "Faithful CMAA2 port"}
+{"type": "system", "subtype": "task_notification", "tool_use_id": "toolu_b", "status": "completed", "summary": "Waiting for the suite to finish."}
+{"type": "system", "subtype": "task_notification", "tool_use_id": "toolu_b", "status": "completed", "summary": "Temporal mode is in on `render-taa`."}

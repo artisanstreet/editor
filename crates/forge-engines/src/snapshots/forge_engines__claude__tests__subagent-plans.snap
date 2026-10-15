@@ -1,0 +1,111 @@
+---
+source: crates/forge-engines/src/claude.rs
+assertion_line: 770
+expression: "(events, outcome)"
+---
+(
+    [
+        Item {
+            key: "plan",
+            parent: None,
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "task-0",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "plan:agent-a",
+            parent: Some(
+                "agent-a",
+            ),
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "task-1",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "plan:agent-b",
+            parent: Some(
+                "agent-b",
+            ),
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "task-2",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "plan:agent-a",
+            parent: Some(
+                "agent-a",
+            ),
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "task-3",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+        Item {
+            key: "plan",
+            parent: None,
+            status: Done,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "task-4",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+    ],
+    None,
+)

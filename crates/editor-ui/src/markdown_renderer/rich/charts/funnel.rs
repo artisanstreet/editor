@@ -2,6 +2,7 @@
 //! value, its share of the first step, and the drop from the step before.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -13,7 +14,6 @@ use serde::Deserialize;
 use super::super::{BlockContext, RichBlock, kit};
 use super::frame;
 use super::scale::{f32_of, percent};
-use crate::theme::ArtisanTheme;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct Step {
@@ -183,7 +183,7 @@ impl RenderOnce for FunnelView {
         });
         let hover = state.read(cx).hover;
         let list_state = state.read(cx).rows.clone();
-        let color = kit::series_color(&theme, 0);
+        let color = kit::series_color(0);
         let row_funnel = funnel.clone();
         let row_state = state.clone();
         let row_id = self.id.clone();
@@ -242,7 +242,7 @@ impl RenderOnce for FunnelView {
                                         div()
                                             .h_full()
                                             .w(relative(funnel.width(index)))
-                                            .rounded(px(4.0))
+                                            .rounded(RadiusTokens::value(RadiusStep::Xs))
                                             .bg(color.with_alpha(alpha).to_paint()),
                                     ),
                             )
@@ -255,7 +255,7 @@ impl RenderOnce for FunnelView {
                                     .flex()
                                     .justify_end()
                                     .gap(px(6.0))
-                                    .text_size(px(13.0))
+                                    .text_size(TypographyTokens::size(TextStep::XsMid))
                                     .line_height(px(20.0))
                                     .child(
                                         div()
@@ -381,7 +381,7 @@ mod native_window_tests {
                 .on_action(crate::focus_navigation::focus_previous)
                 .child(FunnelView {
                     id: "native-funnel".into(),
-                    theme: ArtisanTheme::default(),
+                    theme: ArtisanTheme::resolved(),
                     funnel: self.funnel.clone(),
                 })
         }
@@ -403,7 +403,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-funnel-step-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-funnel-step-40").is_none());
         cx.update(|window, cx| {
@@ -423,7 +423,7 @@ mod native_window_tests {
                 .unwrap()
                 .size
                 .height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         // Parsing an unchanged source can produce a new Arc. It must preserve
         // the selected endpoint and the native list's viewport.
@@ -442,7 +442,7 @@ mod native_window_tests {
                 .unwrap()
                 .size
                 .height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         cx.simulate_keystrokes("home");
         cx.run_until_parked();
@@ -451,7 +451,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-funnel-step-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-funnel-step-63").is_none());
     }

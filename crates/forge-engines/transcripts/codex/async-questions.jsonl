@@ -1,0 +1,9 @@
+{"client": {"id": 2, "method": "thread/start", "params": {}}}
+{"id": 2, "result": {"thread": {"id": "root"}, "model": "gpt-5.6-luna"}}
+{"method": "turn/started", "params": {"threadId": "root", "turn": {"id": "turn"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "none", "text": "No questions.", "phase": "commentary", "questions": null, "type": "agentMessage"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "broken", "text": "Broken.", "phase": "commentary", "questions": [{"options": ["a"]}], "type": "agentMessage"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "blank", "text": "Blank.", "phase": "commentary", "questions": [{"title": " ", "options": []}], "type": "agentMessage"}}}
+{"method": "item/completed", "params": {"threadId": "root", "turnId": "turn", "item": {"id": "asks", "text": "Which?", "phase": "final_answer", "questions": [{"title": "Pick a colour\nfor the logo", "options": ["Red", "Red", "Blue"]}, {"title": "Size?"}], "type": "agentMessage"}}}
+{"method": "turn/completed", "params": {"threadId": "root", "turn": {"id": "turn", "status": "completed", "error": null}}}
+{"answer": {"key": "asks:questions", "answer": {"type": "question", "answers": [{"kind": "choices", "ids": ["option-1"]}, {"kind": "text", "text": "Large"}]}}}

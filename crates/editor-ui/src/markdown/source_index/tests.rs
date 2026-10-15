@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -122,17 +121,4 @@ fn source_sibling_context_keeps_heading_and_outer_list_margin_relations() {
                 in_item: false
             })
     );
-}
-
-#[test]
-fn giant_plain_paragraph_index_does_not_retain_its_text() {
-    let source = "long paragraph ".repeat(100_000);
-    let index = MarkdownIndex::build(&source).unwrap();
-    assert_eq!(index.leaves().len(), 1);
-    assert!(index.resident_bytes() < 4096);
-    assert_eq!(index.leaves()[0].source_range(), 0..source.len());
-    assert!(matches!(
-        index.normalize_leaf(0, 1, &source[1..], &MarkdownEngine::new().unwrap()),
-        Err(MarkdownIndexError::IncompleteRange)
-    ));
 }

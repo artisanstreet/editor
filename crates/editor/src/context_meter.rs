@@ -379,7 +379,7 @@ mod native_tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().p(px(40.0)).child(ContextMeter::new(
                 ContextReading::new("Model".into(), self.tokens, 200_000).unwrap(),
-                ArtisanTheme::default(),
+                ArtisanTheme::resolved(),
             ))
         }
     }

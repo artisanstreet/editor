@@ -20,6 +20,7 @@
 //! run (a held response, a reroute, a refusal), ahead of the goal: it says
 //! why the turn changed course, which the reader needs before anything else.
 
+use editor_ui::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::time::{Duration, Instant};
 
 use editor_ui::AssetId;
@@ -30,8 +31,6 @@ use gpui::{
     AnyElement, Filter, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     Styled as _, div, px,
 };
-
-use editor_ui::theme::ArtisanTheme;
 
 const GROW: Duration = Duration::from_millis(400);
 const LABEL_DELAY: Duration = Duration::from_millis(250);
@@ -220,9 +219,10 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
         | ComposerGoalState::SafetyRefused => goal.detail.clone(),
     };
     let (glyph, tone) = match goal.state {
-        ComposerGoalState::Active | ComposerGoalState::Paused => {
-            (AssetId::TABLER_TARGET_ARROW, theme.workspace.secondary)
-        }
+        ComposerGoalState::Active | ComposerGoalState::Paused => (
+            AssetId::TABLER_TARGET_ARROW,
+            theme.colors.workspace_secondary.to_paint(),
+        ),
         ComposerGoalState::SafetyHolding | ComposerGoalState::SafetyRerouted => (
             AssetId::TABLER_SHIELD_LOCK,
             theme.colors.banner_warning.to_paint(),
@@ -235,7 +235,7 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
     let headline = if goal.state.is_safety() {
         tone
     } else {
-        theme.workspace.foreground
+        theme.colors.workspace_foreground.to_paint()
     };
     let blur = (rise.abs() / 2.0).min(2.0);
     div()
@@ -248,7 +248,7 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
         .flex()
         .items_center()
         .gap(px(6.0))
-        .text_size(px(13.0))
+        .text_size(TypographyTokens::size(TextStep::XsMid))
         .opacity(opacity)
         .when(blur > 0., |label| label.filter(vec![Filter::Blur(px(blur))]))
         // The goal's mark, sized and toned like the tab's folder; a safety
@@ -273,7 +273,7 @@ fn goal_label(goal: &ComposerGoal, theme: ArtisanTheme, opacity: f32, rise: f32)
             }
         })
         .children(state.map(|state| {
-            let state = div().truncate().text_color(theme.workspace.secondary).child(state);
+            let state = div().truncate().text_color(theme.colors.workspace_secondary.to_paint()).child(state);
             if goal.state.is_safety() {
                 state.min_w_0()
             } else {
@@ -310,7 +310,7 @@ mod tests {
     fn reveal(strip: &mut GoalStrip, at: Instant) -> Option<(f32, bool)> {
         let mut moving = false;
         strip
-            .frame(at, ArtisanTheme::default(), false, &mut moving)
+            .frame(at, ArtisanTheme::resolved(), false, &mut moving)
             .map(|frame| (frame.reveal, moving))
     }
 
@@ -399,14 +399,19 @@ mod tests {
         );
         let mut moving = false;
         let frame = strip
-            .frame(start + GROW / 2, ArtisanTheme::default(), true, &mut moving)
+            .frame(
+                start + GROW / 2,
+                ArtisanTheme::resolved(),
+                true,
+                &mut moving,
+            )
             .unwrap();
         assert_eq!(frame.reveal, 1.0);
         assert!(!moving);
         strip.set(None, start, false);
         assert!(
             strip
-                .frame(start, ArtisanTheme::default(), true, &mut moving)
+                .frame(start, ArtisanTheme::resolved(), true, &mut moving)
                 .is_none()
         );
     }

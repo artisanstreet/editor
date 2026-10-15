@@ -13,9 +13,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use super::stored::{StoredSource, fetch_complete_range};
 
 const MAX_ENTRIES: usize = 128;
-const MAX_RAW_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RAW_BYTES: usize = super::budget::LITERAL_BYTES;
 const MAX_LEAF_BYTES: usize = 64 * 1024;
-const MAX_FETCHES: usize = 4;
 // fetch_complete_range retains its output while a bounded transport page is
 // alive. String-to-SharedString conversion can temporarily retain both copies.
 const FETCH_HEADROOM: usize = 65_539;
@@ -122,8 +121,8 @@ impl Default for LiteralOwner {
     fn default() -> Self {
         Self {
             cache: Rc::new(RefCell::new(Cache::default())),
-            bytes: Arc::new(Semaphore::new(MAX_RAW_BYTES)),
-            fetches: Arc::new(Semaphore::new(MAX_FETCHES)),
+            bytes: super::budget::pool(super::budget::LITERAL_BYTES),
+            fetches: super::budget::pool(super::budget::LITERAL_FETCHES),
         }
     }
 }
@@ -312,22 +311,5 @@ mod tests {
             *requested.lock().unwrap(),
             vec![(start as u64, (end - start) as u32)]
         );
-    }
-    #[test]
-    fn live_leaf_references_keep_byte_admission_after_cache_eviction() {
-        let semaphore = Arc::new(Semaphore::new(20));
-        let permit = semaphore.clone().try_acquire_many_owned(12).unwrap();
-        let leaf = Arc::new(LiteralLeaf {
-            text: "literal".into(),
-            source_ref: ContentRef::from_text("literal"),
-            ordinal: 0,
-            source_range: 0..7,
-            _capacity: permit,
-        });
-        let mounted = leaf.clone();
-        drop(leaf);
-        assert_eq!(semaphore.available_permits(), 8);
-        drop(mounted);
-        assert_eq!(semaphore.available_permits(), 20);
     }
 }

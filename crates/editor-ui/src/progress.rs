@@ -1,5 +1,5 @@
 //! Determinate progress owns one clipped track and accessible value.
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::{
     App, ElementId, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
     StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
@@ -38,7 +38,7 @@ impl RenderOnce for Progress {
             .aria_value(format!("{:.0}%", self.fraction * 100.))
             .w_full()
             .h(px(8.))
-            .rounded(px(4.))
+            .rounded(RadiusTokens::value(RadiusStep::Xs))
             .overflow_hidden()
             .bg(self.theme.colors.primary.with_alpha(0.2).to_paint())
             .child(fill)

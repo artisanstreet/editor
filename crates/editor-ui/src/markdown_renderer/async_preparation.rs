@@ -24,7 +24,7 @@ use artisan_api::ContentRef;
 // Retain the complete bounded mounted row set, including native overdraw.
 const MAX_PREPARED_ENTRIES: usize = 128;
 const MAX_PENDING_JOBS: usize = 48;
-const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_CACHE_BYTES: usize = super::budget::PREPARED_BYTES;
 const QUEUE_DEPTH: usize = 8;
 
 /// State of an Item revision's asynchronous preparation.
@@ -39,7 +39,6 @@ pub enum MarkdownPreparation {
 #[derive(Debug)]
 pub struct PreparedSource {
     pub(super) presentation: Rc<PreparedMarkdown>,
-    source_bytes: usize,
     revision: u64,
     preview: bool,
 }
@@ -50,9 +49,6 @@ impl PreparedSource {
     }
     pub fn block_count(&self) -> usize {
         self.presentation.block_count()
-    }
-    pub fn source_bytes(&self) -> usize {
-        self.source_bytes
     }
     pub fn is_preview(&self) -> bool {
         self.preview
@@ -301,7 +297,7 @@ impl Worker {
         }).map_err(|error| format!("Couldn't start Markdown preparation: {error}"))?;
         Ok(Self {
             queue,
-            source_capacity: Arc::new(tokio::sync::Semaphore::new(MAX_CACHE_BYTES)),
+            source_capacity: super::budget::pool(MAX_CACHE_BYTES),
         })
     }
 }
@@ -505,7 +501,7 @@ impl PreparationOwner {
         let generation = cache.generation;
         let previous = old.and_then(|entry| entry.prepared);
         let preview = source.previewed();
-        let source_bytes = source.len();
+
         let cache_owner = Rc::downgrade(&self.cache);
         let task_key = key.clone();
         let renderer = cx.svg_renderer();
@@ -537,7 +533,7 @@ impl PreparationOwner {
                 match document {
                     Ok((document, parts, style)) => {
                         let source = Rc::new(PreparedSource {
-                            presentation: Rc::new(PreparedMarkdown::from_indexed_parts(&document,parts,style)),source_bytes,revision:generation,preview,
+                            presentation: Rc::new(PreparedMarkdown::from_indexed_parts(&document,parts,style)),revision:generation,preview,
                         });
                         if source.resident_bytes() > MAX_CACHE_BYTES {
                             source.presentation.release_images(cx);
@@ -575,17 +571,6 @@ impl PreparationOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn entry(pending: Option<usize>) -> Entry {
-        Entry {
-            key: "fixture".into(),
-            source: SourceIdentity::Text(Arc::downgrade(&Arc::<str>::from("fixture"))),
-            generation: 0,
-            prepared: None,
-            error: None,
-            task: None,
-            pending_bytes: pending,
-        }
-    }
     #[test]
     fn rope_preview_is_utf8_bounded_and_identity_tracks_snapshot_not_content() {
         let full = format!("A{}", "🙂".repeat(MAX_MARKDOWN_SOURCE_BYTES / 4 + 2));
@@ -603,63 +588,5 @@ mod tests {
         Arc::make_mut(&mut rope).insert(end, "tail");
         assert!(!identity.same(&Source::Rope(rope).identity()));
         assert!(!identity.same(&Source::Text(Arc::from(full)).identity()));
-    }
-
-    #[test]
-    fn queue_admission_preserves_active_jobs_and_charges_owned_source_bytes() {
-        let mut cache = Cache::default();
-        for _ in 0..MAX_PENDING_JOBS {
-            cache
-                .entries
-                .push_back(entry(Some(MAX_MARKDOWN_SOURCE_BYTES)));
-        }
-        assert!(!cache.can_admit(0));
-        assert_eq!(cache.eviction_index(), None);
-        cache.entries[3].pending_bytes = None;
-        assert!(cache.can_admit(MAX_MARKDOWN_SOURCE_BYTES));
-        assert_eq!(cache.eviction_index(), Some(3));
-        cache.entries.clear();
-        cache.entries.push_back(entry(Some(MAX_CACHE_BYTES)));
-        assert!(!cache.can_admit(1));
-        cache.entries.clear();
-        // Preview size cannot stand in for the snapshot retained by its task.
-        let large = Source::Rope(Arc::new(Rope::from_str(&"x".repeat(MAX_CACHE_BYTES / 2))));
-        cache.entries.push_back(entry(Some(large.len())));
-        cache.entries.push_back(entry(Some(large.len())));
-        assert!(!cache.can_admit(MAX_MARKDOWN_SOURCE_BYTES));
-        assert_eq!(
-            cache
-                .entries
-                .iter()
-                .filter_map(|entry| entry.pending_bytes)
-                .sum::<usize>(),
-            MAX_CACHE_BYTES
-        );
-    }
-}
-
-#[cfg(test)]
-mod capacity_tests {
-    use super::*;
-    #[gpui::test]
-    fn canceled_queued_job_keeps_capacity_until_actual_drop(cx: &mut gpui::TestAppContext) {
-        let capacity = Arc::new(tokio::sync::Semaphore::new(12));
-        let (result, response) = oneshot::channel();
-        let job = DocumentJob {
-            _source_capacity: capacity.clone().try_acquire_many_owned(12).unwrap(),
-            source: Source::Text(Arc::from("retained job")),
-            renderer: cx.update(|cx| cx.svg_renderer()),
-            result,
-        };
-        let weak = job.source.identity();
-        drop(response);
-        assert!(job.result.is_canceled());
-        assert!(capacity.clone().try_acquire_owned().is_err());
-        drop(job);
-        let SourceIdentity::Text(source) = weak else {
-            unreachable!()
-        };
-        assert!(source.upgrade().is_none());
-        assert_eq!(capacity.available_permits(), 12);
     }
 }

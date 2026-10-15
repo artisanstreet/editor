@@ -11,12 +11,13 @@ use artisan_api::{ItemId, ItemKind};
 use editor_core::{ConnectionStatus, Screen};
 use editor_ui::AssetId;
 use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::theme::ActiveTheme as _;
 
 use editor_ui::hover_card::{glass_handle, glass_navigator_card};
 use editor_ui::motion::MotionDuration;
 use editor_ui::motion::smooth_out;
 use editor_ui::picker_motion::{HoverRect, sliding_hover_pill};
-use editor_ui::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
+use editor_ui::theme::{Oklch, RadiusStep, RadiusTokens};
 use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, AppContext as _, Context, FontWeight,
@@ -328,7 +329,7 @@ impl Conversation {
     ) -> Option<AnyElement> {
         let host = self.core.read(cx).host(host)?.clone();
         let status = host.read(cx).status.clone();
-        let desktop = ArtisanTheme::default().workspace;
+        let desktop = cx.theme().colors;
         let section = div()
             .flex()
             .flex_col()
@@ -341,14 +342,14 @@ impl Conversation {
                     svg()
                         .path(AssetId::TABLER_TERMINAL_2.as_str())
                         .size(px(HOME_EMBLEM_SIZE_PX))
-                        .text_color(desktop.secondary),
+                        .text_color(desktop.workspace_secondary.to_paint()),
                 ),
             );
         let heading = |text: &'static str| {
             div()
                 .text_size(px(HOME_HEADLINE_TEXT_PX))
                 .font_weight(FontWeight::NORMAL)
-                .text_color(desktop.foreground)
+                .text_color(desktop.workspace_foreground.to_paint())
                 .child(text)
         };
         let (reason, code) = match status {
@@ -387,7 +388,7 @@ impl Conversation {
                         .mt(px(8.0))
                         .max_w(px(440.0))
                         .text_size(px(15.0))
-                        .text_color(desktop.secondary)
+                        .text_color(desktop.workspace_secondary.to_paint())
                         .child(detail)
                         .child(div().mt(px(8.0)).text_size(px(12.0)).child(reason)),
                 )
@@ -401,8 +402,8 @@ impl Conversation {
                         .py(px(8.0))
                         .rounded(px(8.0))
                         .border_1()
-                        .border_color(desktop.line)
-                        .text_color(desktop.foreground)
+                        .border_color(desktop.line.to_paint())
+                        .text_color(desktop.workspace_foreground.to_paint())
                         .child("Retry connection")
                         .on_click(move |_, _, cx| host.read(cx).retry_now()),
                 )

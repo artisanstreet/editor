@@ -4,7 +4,7 @@
 use crate::AssetId;
 use crate::asset_seam::asset_glyph;
 use crate::hover_card::{glass_hover_card, hover_card_text};
-use crate::theme::{ArtisanTheme, Oklch};
+use crate::theme::{ArtisanTheme, Oklch, RadiusStep, RadiusTokens};
 use gpui::prelude::*;
 use gpui::{Context, Div, SharedString, Window, div, px};
 
@@ -83,7 +83,7 @@ fn engine_chip(theme: &ArtisanTheme, chip: &EngineChip, row_key: &str) -> impl I
         .gap(px(4.0))
         .h(px(20.0))
         .px(px(7.0))
-        .rounded(px(10.0))
+        .rounded(RadiusTokens::value(RadiusStep::Lg))
         .bg(tone.with_alpha(0.10).to_paint())
         .text_xs()
         .text_color(tone.to_paint())

@@ -1,7 +1,6 @@
 //! Global prompt drafts and optimistic save/resolve forms. Canonical metadata belongs to HostData.
 
 use crate::Settings;
-use crate::chrome::{card, header, section_shell};
 use crate::page;
 use artisan_api::{
     EngineId, GlobalPrompt, PromptCandidate, PromptEngineState, PromptEngineStatus, ResolvePrompt,
@@ -9,6 +8,7 @@ use artisan_api::{
 };
 use editor_core::{HostData, HostId, SettingsPage};
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{PageBlock, card, header, section_shell};
 use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
@@ -317,7 +317,7 @@ fn choice_section(
     theme: &ArtisanTheme,
     candidates: &[PromptCandidate],
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let rows = candidates
         .iter()
         .map(|candidate| {
@@ -363,7 +363,6 @@ fn choice_section(
         .collect();
     section_shell(
         theme,
-        "setup",
         "Choose your global prompt",
         Some(
             "Your engines had different prompts when Artisan took them over. Choose the one to keep in every engine, or write your own below. The others are backed up, never deleted.",
@@ -371,6 +370,7 @@ fn choice_section(
         None,
         card(theme, rows),
     )
+.debug_selector("settings-section-setup")
 }
 
 impl Settings {
@@ -394,7 +394,11 @@ impl Settings {
     }
 }
 
-fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+fn editor_section(
+    settings: &Settings,
+    theme: &ArtisanTheme,
+    cx: &mut Context<Settings>,
+) -> PageBlock {
     let form = &settings.prompt;
     let loaded = form.loaded;
     let dirty = form.dirty(cx);
@@ -445,7 +449,6 @@ fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
         .child(form.editor.clone());
     section_shell(
         theme,
-        "prompt",
         "Prompt",
         Some(
             "Engines read this before every conversation, after their own system prompt and before your project's AGENTS.md or CLAUDE.md.",
@@ -453,6 +456,7 @@ fn editor_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
         None,
         div().flex().flex_col().child(editor).child(footer),
     )
+.debug_selector("settings-section-prompt")
 }
 
 fn engines_section(
@@ -460,14 +464,13 @@ fn engines_section(
     theme: &ArtisanTheme,
     engines: &[PromptEngineState],
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let rows = engines
         .iter()
         .map(|engine| engine_row(settings, theme, engine, cx).into_any_element())
         .collect();
     section_shell(
         theme,
-        "engines",
         "Engines",
         Some(
             "Where each engine keeps the prompt. A file edited outside Artisan is left alone until you decide.",
@@ -475,6 +478,7 @@ fn engines_section(
         None,
         card(theme, rows),
     )
+.debug_selector("settings-section-engines")
 }
 
 fn engine_row(

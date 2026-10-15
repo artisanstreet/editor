@@ -5,7 +5,7 @@
 //! JSON shapes, handshakes) stays behind this boundary.
 
 use artisan_api::{
-    Answer, Approval, EngineConfig, EngineId, ItemId, ItemKind, RunStatus, Status, ThreadId, Usage,
+    Answer, EngineConfig, EngineId, ItemId, ItemKind, RunStatus, Status, ThreadId, Usage,
 };
 use futures::future::BoxFuture;
 use std::path::PathBuf;
@@ -75,20 +75,14 @@ pub enum EngineEvent {
         title: String,
     },
     /// Create or replace an item. `key` is the engine's own id, or one the
-    /// adapter makes up that stays stable for the item's life.
+    /// adapter makes up that stays stable for the item's life. An approval
+    /// rides on the item it gates (`Tool`/`Plan` with `approval` set and
+    /// status `AwaitingUser`), keyed like that item.
     Item {
         key: String,
         parent: Option<String>,
         status: Status,
         kind: ItemKind,
-    },
-    /// A request has its own lifecycle; target names the execution it gates.
-    Approval {
-        key: String,
-        parent: Option<String>,
-        target: Option<String>,
-        status: Status,
-        approval: Approval,
     },
     /// An adapter produced an image file; Forge stores it as a canonical blob.
     Image {

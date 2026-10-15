@@ -17,7 +17,7 @@ impl Render for Fixture {
             .debug_selector(|| "native-hierarchy".into())
             .child(HierarchyView {
                 id: "native-hierarchy".into(),
-                theme: ArtisanTheme::default(),
+                theme: ArtisanTheme::resolved(),
                 tree: self.tree.clone(),
                 layout: Layout::Treemap,
                 unit: None,

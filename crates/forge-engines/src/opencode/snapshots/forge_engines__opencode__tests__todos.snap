@@ -1,0 +1,59 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 163
+expression: "replay(\"todos\")"
+---
+[
+    Event(
+        Item {
+            key: "plan",
+            parent: None,
+            status: Running,
+            kind: Plan {
+                steps: Inline(
+                    [
+                        PlanStep {
+                            text: Inline(
+                                "Task",
+                            ),
+                            status: Pending,
+                        },
+                    ],
+                ),
+                proposal: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error:evt_037",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "malformed OpenCode todos: missing field `content`",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "error:evt_038",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode compaction omitted required messageID",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Idle(
+        false,
+    ),
+]

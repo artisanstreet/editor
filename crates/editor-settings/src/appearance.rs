@@ -1,10 +1,11 @@
 //! Device appearance preferences and the live frame-rate controls.
-use crate::chrome::{card, footnote, header, row, section_shell};
 use crate::{
     Settings,
     frame_rate::{self, FrameRateLimit},
 };
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{PageBlock, card, footnote, header, row, section_shell};
+use editor_ui::theme::{RadiusStep, RadiusTokens};
 use editor_ui::{
     select::{Select, SelectEntry},
     theme::ArtisanTheme,
@@ -81,20 +82,21 @@ fn render_top(settings: &Settings, theme: &ArtisanTheme) -> Div {
         .flex()
         .flex_col()
         .child(section_shell(
-            theme, "app-icon", "App icon", None, None, app_icon,
-        ))
+            theme, "App icon", None, None, app_icon,
+        )
+.debug_selector("settings-section-app-icon"))
         .child(footnote(
             theme,
             "Open Appearance in the Artisan desktop app to switch its runtime icon.",
         ))
         .child(section_shell(
             theme,
-            "typography",
             "Typography",
             Some("Font choices are not yet configurable in the native app."),
             Some(restore),
             typography,
-        ))
+        )
+.debug_selector("settings-section-typography"))
         .child(footnote(
             theme,
             "Local font names are requested only when you open a picker. The list stays on this device; Artisan saves only the two family names you choose.",
@@ -109,7 +111,7 @@ fn app_icon_option(theme: &ArtisanTheme, label: &str, caption: &str, selected: b
         .flex_row()
         .items_center()
         .gap(px(12.0))
-        .rounded(px(12.0))
+        .rounded(RadiusTokens::value(RadiusStep::LgMid))
         .px(px(12.0))
         .py(px(12.0))
         .border_1()
@@ -186,7 +188,7 @@ fn render_frame_rate(
     theme: &ArtisanTheme,
     _window: &mut Window,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let core = settings.core.read(cx);
     let current = frame_rate::current(core);
     let overlay_visible = frame_rate::overlay_visible(core);
@@ -216,7 +218,6 @@ fn render_frame_rate(
     );
     section_shell(
         theme,
-        "performance",
         "Performance",
         None,
         None,
@@ -246,6 +247,7 @@ fn render_frame_rate(
             ],
         ),
     )
+.debug_selector("settings-section-performance")
 }
 
 /// One disabled segmented group (`toggle-group` wrappers).
@@ -349,28 +351,34 @@ fn render_bottom(settings: &Settings, theme: &ArtisanTheme) -> Div {
     div()
         .flex()
         .flex_col()
-        .child(section_shell(
-            theme,
-            "formatting",
-            "Formatting",
-            Some("Time and path display choices are not yet configurable in the native app."),
-            None,
-            formatting,
-        ))
-        .child(section_shell(
-            theme,
-            "glass",
-            "Glass",
-            Some("The shader choice is not yet configurable in the native app."),
-            None,
-            glass,
-        ))
-        .child(section_shell(
-            theme,
-            "reading",
-            "Reading",
-            Some("The prose-width choice is not yet configurable in the native app."),
-            None,
-            reading,
-        ))
+        .child(
+            section_shell(
+                theme,
+                "Formatting",
+                Some("Time and path display choices are not yet configurable in the native app."),
+                None,
+                formatting,
+            )
+            .debug_selector("settings-section-formatting"),
+        )
+        .child(
+            section_shell(
+                theme,
+                "Glass",
+                Some("The shader choice is not yet configurable in the native app."),
+                None,
+                glass,
+            )
+            .debug_selector("settings-section-glass"),
+        )
+        .child(
+            section_shell(
+                theme,
+                "Reading",
+                Some("The prose-width choice is not yet configurable in the native app."),
+                None,
+                reading,
+            )
+            .debug_selector("settings-section-reading"),
+        )
 }

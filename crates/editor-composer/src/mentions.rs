@@ -1,13 +1,15 @@
 //! Catalog-backed mention completion. Forge and Client share the token grammar.
 use crate::Composer;
-use artisan_api::{MAX_SKILL_NAME_BYTES, McpServer, MentionNames, valid_mention_name};
+use artisan_api::McpServer;
+use artisan_mentions::{MAX_SKILL_NAME_BYTES, MentionNames, valid_mention_name};
+use editor_ui::theme::{ActiveTheme as _, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use editor_ui::{
     AssetId,
     asset_seam::asset_glyph,
     motion::MotionDuration,
     picker_motion::{MenuEntrance, MenuMotion, MenuPhase, animate_menu},
     text_editor::{ListKey, TextEditor, Token, Tokenizer},
-    theme::{ArtisanTheme, WorkspaceColors},
+    theme::{ArtisanTheme, ColorTokens},
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -87,8 +89,7 @@ fn trigger(text: &str, caret: usize) -> Option<Trigger> {
         query: text[query_start..caret].to_owned(),
     })
 }
-fn tokenizer(catalog: Rc<Catalog>) -> Tokenizer {
-    let theme = ArtisanTheme::default();
+fn tokenizer(catalog: Rc<Catalog>, theme: ArtisanTheme) -> Tokenizer {
     Rc::new(move |text| {
         let mut tokens = Vec::new();
         for (kind, names) in [
@@ -254,8 +255,9 @@ impl Composer {
             rows,
         });
         self.mentions.catalog = catalog.clone();
+        let theme = *cx.theme();
         self.editor.update(cx, |editor, cx| {
-            editor.set_tokenizer(Some(tokenizer(catalog)), cx)
+            editor.set_tokenizer(Some(tokenizer(catalog, theme)), cx);
         });
         self.mentions.rebuild_rows();
         self.update_list_keys(cx);
@@ -417,9 +419,10 @@ impl Composer {
     pub(crate) fn render_mention_menu(
         &mut self,
         window: &Window,
-        desktop: WorkspaceColors,
+        desktop: &ColorTokens,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let desktop = *desktop;
         let focus = self
             .mentions
             .menu_focus
@@ -438,7 +441,7 @@ impl Composer {
             self.begin_mention_menu_motion(false, cx);
         }
         let phase = self.mentions.motion.borrow().phase();
-        let theme = ArtisanTheme::default();
+        let theme = *cx.theme();
         if visible && self.mentions.rows.is_empty() && self.mentions.shown.is_empty() {
             let host = self.host(cx)?;
             let error = host.read(cx).catalog_load().error.clone()?;
@@ -532,7 +535,7 @@ impl Composer {
                         .h(px(9.0))
                         .py(px(4.0))
                         .mx(px(10.0))
-                        .child(div().h(px(1.0)).bg(desktop.line))
+                        .child(div().h(px(1.0)).bg(desktop.line.to_paint()))
                         .into_any_element();
                 }
                 if let Some(kind) = heading {
@@ -541,8 +544,8 @@ impl Composer {
                         .px(px(10.0))
                         .flex()
                         .items_center()
-                        .text_size(px(12.0))
-                        .text_color(desktop.secondary)
+                        .text_size(TypographyTokens::size(TextStep::Xs))
+                        .text_color(desktop.workspace_secondary.to_paint())
                         .child(if kind == Kind::Skill {
                             "Skills"
                         } else {
@@ -573,23 +576,25 @@ impl Composer {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    .rounded(px(12.0))
-                    .text_size(px(14.0))
+                    .rounded(RadiusTokens::value(RadiusStep::LgMid))
+                    .text_size(TypographyTokens::size(TextStep::Sm))
                     .cursor_pointer()
+                    // The keyboard's row wears the shared highlight, never
+                    // the pointer's hover fill.
                     .when(index == this.mentions.highlighted, |row| {
-                        row.bg(editor_ui::gradient::hover_fill_gradient(theme))
+                        editor_ui::hover_card::highlight_fill(row, &theme)
                     })
                     .child(
                         asset_glyph(row.kind.icon())
                             .size(px(16.0))
-                            .text_color(desktop.secondary),
+                            .text_color(desktop.workspace_secondary.to_paint()),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .max_w(px(260.0))
                             .truncate()
-                            .text_color(desktop.foreground)
+                            .text_color(desktop.workspace_foreground.to_paint())
                             .child(row.title.clone()),
                     )
                     .child(
@@ -597,7 +602,7 @@ impl Composer {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_color(desktop.secondary)
+                            .text_color(desktop.workspace_secondary.to_paint())
                             .child(row.description.clone()),
                     )
                     .on_hover(move |hovered: &bool, _, cx| {
@@ -628,8 +633,12 @@ impl Composer {
             .debug_selector(|| MENU_SELECTOR.to_owned())
             .w_full()
             .child(
-                crate::picker::glass_panel("composer-mentions-panel", &theme, 18.0)
-                    .child(div().p(px(6.0)).child(list)),
+                editor_ui::popover::glass_menu(
+                    "composer-mentions-panel",
+                    &theme,
+                    RadiusTokens::value(RadiusStep::X2l),
+                )
+                .child(div().p(px(6.0)).child(list)),
             );
         let card = animate_menu(
             card,

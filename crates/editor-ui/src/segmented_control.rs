@@ -1,5 +1,5 @@
 //! Single-choice groups with shared geometry, semantics and roving focus.
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, ElementId, Entity, FocusHandle, FontWeight, InteractiveElement as _, IntoElement,
@@ -176,7 +176,7 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                     .rounded(RadiusTokens::value(RadiusStep::Sm))
                     .border_1()
                     .border_color(gpui::transparent_black())
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .text_color(if chosen {
                         theme.colors.foreground.to_paint()
                     } else {
@@ -190,7 +190,7 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                         el.h(theme.density.control_default)
                             .min_w(theme.density.control_default)
                             .px(px(12.0))
-                            .rounded(px(0.0))
+                            .rounded_none()
                             .when(index == 0, |el| {
                                 el.rounded_l(RadiusTokens::value(RadiusStep::X3l))
                             })
@@ -215,10 +215,10 @@ impl<T: Clone + Eq + 'static> RenderOnce for SegmentedControl<T> {
                                 style.border_color(theme.colors.ring.to_paint())
                             })
                             .hover(move |style| {
-                                crate::hover_card::hover_fill_style(
-                                    style,
+                                crate::hover_card::hover_fill(
+                                    style.rounded(RadiusTokens::value(RadiusStep::Sm)),
                                     &theme,
-                                    RadiusTokens::value(RadiusStep::Sm),
+                                    crate::hover_card::HoverFill::Edged,
                                 )
                             })
                     })

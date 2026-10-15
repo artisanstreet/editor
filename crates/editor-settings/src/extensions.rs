@@ -3,11 +3,11 @@
 //! Marketplace's; this page only points there.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use artisan_api::{McpMutation, McpServer};
 use editor_core::{HostData, HostId, Screen, SettingsPage};
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{PageBlock, card, error_text, header, row, section_shell};
 use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -238,7 +238,11 @@ pub(crate) fn render(
 
 /// The skills live in the Marketplace, which shows where each stands in
 /// each engine and turns them on and off.
-fn skills_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> Div {
+fn skills_section(
+    settings: &Settings,
+    theme: &ArtisanTheme,
+    cx: &mut Context<Settings>,
+) -> PageBlock {
     let manage = div()
         .debug_selector(|| MANAGE_SKILLS_SELECTOR.to_owned())
         .child(settings.button(
@@ -253,7 +257,6 @@ fn skills_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
         ));
     section_shell(
         theme,
-        "skills",
         "Skills",
         Some(
             "Artisan's skills and your own reach every engine on this host; the Marketplace turns each on or off.",
@@ -261,6 +264,7 @@ fn skills_section(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Se
         None,
         div().child(manage),
     )
+.debug_selector("settings-section-skills")
 }
 
 fn mcp_section(
@@ -268,7 +272,7 @@ fn mcp_section(
     host: &Entity<HostData>,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let form = &settings.extensions;
     let servers = mcp_servers(host.read(cx));
     let mut rows: Vec<AnyElement> = Vec::new();
@@ -349,12 +353,12 @@ fn mcp_section(
     }
     section_shell(
         theme,
-        "mcp",
         "MCP servers",
         Some("Tools every engine on this host can call."),
         None,
         body,
     )
+    .debug_selector("settings-section-mcp")
 }
 
 fn mcp_form(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context<Settings>) -> AnyElement {

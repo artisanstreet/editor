@@ -1,4 +1,5 @@
 //! Attachment presentation owns frame geometry, preview activation and action placement.
+use crate::theme::{TextStep, TypographyTokens};
 use crate::{
     AssetId,
     button::{Button, ButtonVariant},
@@ -121,7 +122,7 @@ impl RenderOnce for AttachmentTile {
             div()
                 .size_full()
                 .p(px(6.))
-                .text_size(px(11.))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .text_color(theme.colors.destructive.to_paint())
                 .child(format!("{} failed: {error}", self.label))
                 .into_any_element()
@@ -144,7 +145,7 @@ impl RenderOnce for AttachmentTile {
                 .items_center()
                 .justify_center()
                 .px(px(5.))
-                .text_size(px(11.))
+                .text_size(TypographyTokens::size(TextStep::X2s))
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child("Preparing…")
                 .into_any_element()

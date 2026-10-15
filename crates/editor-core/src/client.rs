@@ -508,11 +508,6 @@ impl ForgeClient {
         .await
     }
 
-    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
-        self.call_empty(self.json(reqwest::Method::PUT, &format!("/settings/{key}"), value))
-            .await
-    }
-
     pub async fn draft(&self, scope: &str) -> Result<artisan_api::DraftSnapshot> {
         self.call(self.http.get(self.url(&format!("/drafts/{scope}"))))
             .await

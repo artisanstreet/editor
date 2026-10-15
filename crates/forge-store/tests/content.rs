@@ -188,7 +188,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
          DROP INDEX items_pending_inputs;
          DROP INDEX items_thread_kind_position;
          DROP INDEX items_thread_parent_position;
-         DROP INDEX items_agent_recipient_position;
+         DROP INDEX items_agent_message_target;
          ALTER TABLE items DROP COLUMN kind_type;
          ALTER TABLE items DROP COLUMN parent_id;
          DROP TABLE source_index_leaves;
@@ -210,7 +210,10 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
     assert_eq!(actual.status, item.status);
     assert_eq!(actual.created_at, item.created_at);
     assert_eq!(actual.updated_at, item.updated_at);
-    assert_eq!(actual.native_id, item.native_id);
+    assert_eq!(
+        migrated.native_id(&item.id).await.unwrap().as_deref(),
+        Some("preserved-native-id")
+    );
     let ItemKind::Tool {
         output: Some(output),
         ..
@@ -228,7 +231,7 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
             thread_id: actual.thread_id.clone(),
             run_id: actual.run_id.clone(),
             parent_id: actual.parent_id.clone(),
-            native_id: actual.native_id.clone(),
+            native_id: Some("preserved-native-id".into()),
             status: actual.status,
             kind: actual.kind.clone(),
         })

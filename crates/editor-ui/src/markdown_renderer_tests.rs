@@ -1,5 +1,4 @@
 use super::*;
-use crate::theme::ThemeMode;
 fn link_spans(destination: &str, label: &str) -> Vec<Span> {
     vec![
         Span::Text("see ".to_owned()),
@@ -13,7 +12,7 @@ fn link_spans(destination: &str, label: &str) -> Vec<Span> {
 
 #[test]
 fn resolved_title_preserves_authored_label_and_destination() {
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let theme = ArtisanTheme::resolved();
     let presentation = present_inline(
         &link_spans("https://example.com/page", "authored label"),
         theme,
@@ -36,7 +35,7 @@ fn resolved_title_preserves_authored_label_and_destination() {
 
 #[test]
 fn unresolved_or_failed_links_keep_the_authored_label() {
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let theme = ArtisanTheme::resolved();
     let spans = link_spans("https://example.com/pending", "authored label");
 
     // Pending and failed resolutions are simply absent from the lookup.
@@ -66,7 +65,7 @@ fn unresolved_or_failed_links_keep_the_authored_label() {
 
 #[test]
 fn resolved_title_preserves_formatted_authored_label() {
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let theme = ArtisanTheme::resolved();
     let spans = vec![
         Span::Text("read ".to_owned()),
         Span::Link {
@@ -89,7 +88,7 @@ fn resolved_title_preserves_formatted_authored_label() {
 
 #[test]
 fn blank_resolved_title_never_erases_the_authored_label() {
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let theme = ArtisanTheme::resolved();
     let presentation = present_inline(
         &link_spans("https://example.com/page", "authored label"),
         theme,
@@ -99,7 +98,7 @@ fn blank_resolved_title_never_erases_the_authored_label() {
 
 #[test]
 fn bare_urls_keep_authored_text_and_sentence_punctuation() {
-    let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+    let theme = ArtisanTheme::resolved();
     let spans = vec![
         Span::Text(
             "Read (https://example.com/wiki/Test_(thing)), then https://example.org/docs. ".into(),
@@ -137,7 +136,7 @@ fn bare_urls_keep_authored_text_and_sentence_punctuation() {
 fn explicit_link_label_is_not_recursively_linkified() {
     let rendered = present_inline(
         &link_spans("https://example.com", "https://other.example"),
-        ArtisanTheme::for_mode(ThemeMode::Dark),
+        ArtisanTheme::resolved(),
     );
     assert_eq!(rendered.links.len(), 1);
     assert_eq!(rendered.links[0].destination, "https://example.com");
@@ -152,7 +151,7 @@ fn source_label_is_ordinary_authored_link_text() {
             destination: "https://example.com".into(),
         },
     ];
-    let shown = present_inline(&spans, ArtisanTheme::for_mode(ThemeMode::Dark));
+    let shown = present_inline(&spans, ArtisanTheme::resolved());
     assert_eq!(shown.source, "Fact. Source");
     assert_eq!(shown.links.len(), 1);
 }

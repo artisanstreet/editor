@@ -5,7 +5,7 @@
 //! [`picture`], which loads through GPUI's asset cache so the block knows the
 //! image's intrinsic size before it lays out its frame or its divider.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -27,10 +27,7 @@ pub use source::{MediaFetch, MediaFetcher, MediaRequest};
 /// The actual fetch/decode future owns its permit, including synchronous native
 /// parsing. Dropping a view cannot admit replacement work while that poll runs.
 async fn work_permit() -> tokio::sync::OwnedSemaphorePermit {
-    static CAPACITY: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
-    CAPACITY
-        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
-        .clone()
+    super::budget::media_work()
         .acquire_owned()
         .await
         .expect("media capacity never closes")

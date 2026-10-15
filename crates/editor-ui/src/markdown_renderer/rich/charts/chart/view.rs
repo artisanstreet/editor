@@ -38,7 +38,6 @@ struct GeometryKey {
     zoom: Option<Domain>,
     thresholds: Vec<(SharedString, f64)>,
     width: f32,
-    mode: crate::theme::ThemeMode,
 }
 struct ChartState {
     spec: Arc<ChartStyle>,
@@ -165,7 +164,6 @@ impl RenderOnce for ChartView {
             zoom,
             thresholds: snapshot.thresholds.clone(),
             width: snapshot.width,
-            mode: theme.mode,
         };
         let geometry = state.update(cx, |state, _| {
             if let Some((known, geometry)) = &state.geometry {
@@ -294,7 +292,7 @@ impl ChartView {
             .enumerate()
             .map(|(index, series)| LegendEntry {
                 name: SharedString::from(series.name.clone()),
-                color: kit::series_color(&self.theme, index).to_paint(),
+                color: kit::series_color(index).to_paint(),
                 hidden: hidden.get(index).copied().unwrap_or(false),
             })
             .collect();
@@ -366,7 +364,7 @@ impl ChartView {
                     text = format!("{text} · {}", percent((value.abs() / scale) / total));
                 }
                 ReadoutRow::new(
-                    Some(kit::series_color(&self.theme, *index).to_paint()),
+                    Some(kit::series_color(*index).to_paint()),
                     model.series[*index].name.clone(),
                     text,
                 )
@@ -519,7 +517,7 @@ mod native_replacement_tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().w(px(640.0)).child(ChartView {
                 id: "replacement-chart".into(),
-                theme: ArtisanTheme::default(),
+                theme: ArtisanTheme::resolved(),
                 spec: self.style.clone(),
                 model: self.model.clone(),
             })
@@ -534,9 +532,7 @@ mod native_replacement_tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             let scale = window.scale_factor();
-            let data_fill: gpui::Background = kit::series_color(&ArtisanTheme::default(), 0)
-                .to_paint()
-                .into();
+            let data_fill: gpui::Background = kit::series_color(0).to_paint().into();
             window
                 .painted_quads()
                 .into_iter()

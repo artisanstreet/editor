@@ -738,6 +738,65 @@ fn choosing_fast_runs_the_thread_at_that_speed(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_resting_pointer_shows_an_options_description_beside_it(cx: &mut TestAppContext) {
+    let forge = Fixture::new(cx);
+    let target = ComposerTarget::NewThread {
+        host: forge.host.clone(),
+        project: Some(forge.project.clone()),
+    };
+    let (composer, vcx) = forge.open(cx, target);
+    let mut sonnet = EngineConfig::new(EngineId::Claude);
+    sonnet.model = Some("sonnet".into());
+    composer.update(vcx, |composer, cx| {
+        composer.choose_config(sonnet, cx);
+        composer.open_menu(crate::Menu::Model, cx);
+    });
+    let trigger = "composer-axis-Permission-trigger";
+    let mut bounds = None;
+    wait(vcx, trigger, |vcx| {
+        bounds = vcx.debug_bounds(trigger);
+        bounds.is_some()
+    });
+    vcx.simulate_click(bounds.unwrap().center(), gpui::Modifiers::none());
+    // Let the menu and its dropdown finish sliding in.
+    vcx.executor().advance_clock(Duration::from_millis(300));
+    vcx.run_until_parked();
+    let option = "composer-axis-Permission-1";
+    let mut row = None;
+    wait(vcx, option, |vcx| {
+        row = vcx.debug_bounds(option);
+        row.is_some()
+    });
+    let row = row.unwrap();
+    vcx.simulate_mouse_move(row.center(), None, gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("composer-picker-tooltip").is_none(),
+        "the description waits for the pointer to rest"
+    );
+    vcx.executor()
+        .advance_clock(editor_ui::hover_card::TOOLTIP_DELAY + Duration::from_millis(50));
+    vcx.run_until_parked();
+    let tooltip = vcx
+        .debug_bounds("composer-picker-tooltip")
+        .expect("the description shows once the pointer rests");
+    assert!(
+        tooltip.left() >= row.right() || tooltip.right() <= row.left(),
+        "the description sits beside the option, not over it"
+    );
+    vcx.simulate_mouse_move(
+        gpui::point(gpui::px(1.0), gpui::px(1.0)),
+        None,
+        gpui::Modifiers::none(),
+    );
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("composer-picker-tooltip").is_none(),
+        "leaving the option hides its description"
+    );
+}
+
+#[gpui::test]
 fn pasting_the_same_image_twice_attaches_it_once(cx: &mut TestAppContext) {
     let forge = Fixture::new(cx);
     let target = ComposerTarget::NewThread {
@@ -1376,9 +1435,7 @@ fn model_picker_wheel_glides_once_and_hides_hover_outside_the_list(cx: &mut Test
         None,
         gpui::Modifiers::none(),
     );
-    assert!(!composer.read_with(vcx, |composer, _| {
-        composer.picker.model_hover.borrow().visible()
-    }));
+    assert!(!composer.read_with(vcx, |composer, _| { composer.picker.model_hover.visible() }));
     vcx.update(|_, cx| cx.set_reduce_motion(true));
     let before = handle.offset().y;
     vcx.simulate_event(gpui::ScrollWheelEvent {

@@ -30,7 +30,8 @@ use editor_composer::{
 };
 use editor_core::{Core, CoreEvent, HostData, HostEvent, HostId, Screen};
 use editor_ui::markdown_renderer::MarkdownRenderer;
-use editor_ui::theme::{ArtisanTheme, ThemeMode};
+use editor_ui::theme::ActiveTheme as _;
+use editor_ui::theme::ArtisanTheme;
 use editor_ui::wheel_glide::WheelGlide;
 use fold::{Row, RowKey};
 use gpui::{
@@ -97,7 +98,7 @@ pub enum ConversationEvent {
 #[derive(Default)]
 struct RowContext {
     runs: HashMap<artisan_api::RunId, fold::RunSummary>,
-    agents: Arc<HashMap<String, String>>,
+    agents: Arc<HashMap<ItemId, String>>,
     gaps: Vec<f32>,
     versions: Vec<u64>,
     now: artisan_api::Timestamp,
@@ -208,7 +209,7 @@ impl Conversation {
                 let _ = this.update(cx, |this, cx| this.scrolled(top, cx));
             });
         });
-        let theme = ArtisanTheme::for_mode(ThemeMode::Dark);
+        let theme = *cx.theme();
         let shared = Rc::new(Shared {
             reveal_queue: RefCell::default(),
             prose_arrivals: RefCell::default(),
@@ -673,10 +674,10 @@ impl Conversation {
         let thread = view.thread.clone();
         match event {
             HostEvent::Item(item) => {
-                let directed = self.agent.as_ref().and_then(|agent| view.item(agent)).is_some_and(|agent| {
-                    matches!((&agent.kind, &item.kind),
-                        (ItemKind::Agent { agent_id: Some(address), .. }, ItemKind::Tool { tool: artisan_api::ToolKind::AgentMessage { recipient, .. }, .. }) if address == recipient)
-                });
+                // A message the root sent the open agent shows in its view.
+                let directed = matches!(&item.kind,
+                    ItemKind::Tool { tool: artisan_api::ToolKind::AgentMessage { target: Some(target), .. }, .. }
+                        if self.agent.as_ref() == Some(target));
                 if item.thread_id != thread
                     || (item.parent_id != self.agent
                         && !view.context.contains_key(&item.id)
@@ -1084,7 +1085,7 @@ impl Conversation {
         // native layout generation after resize or a source presentation change.
         if self.shared.markdown.native_row_count(
             &native_key,
-            &editor_ui::markdown_renderer::NativeInput::Inline(source.visible.clone()),
+            &source.visible,
             ready.font_size,
             ready.width,
             &ready.page.runs,
@@ -1941,7 +1942,7 @@ impl Conversation {
         now: artisan_api::Timestamp,
         gap: f32,
         end: f32,
-        agents: &Arc<HashMap<String, String>>,
+        agents: &Arc<HashMap<ItemId, String>>,
     ) -> RowModel {
         let mut model = RowModel {
             agents: agents.clone(),
@@ -2175,19 +2176,12 @@ impl Conversation {
     }
 }
 
-/// The thread's agents by their canonical recipient address: their
-/// names, for "Talked to …".
-fn agent_names(view: &ThreadView) -> HashMap<String, String> {
+/// The thread's agents' names by their item, for "Talked to …".
+fn agent_names(view: &ThreadView) -> HashMap<ItemId, String> {
     view.items
         .values()
         .chain(view.context.values())
-        .filter_map(|item| match &item.kind {
-            ItemKind::Agent {
-                agent_id: Some(agent_id),
-                ..
-            } => Some((agent_id.clone(), item.agent_label()?)),
-            _ => None,
-        })
+        .filter_map(|item| Some((item.id.clone(), item.agent_label()?)))
         .collect()
 }
 

@@ -17,8 +17,8 @@ use gpui::{
     Pixels, Point, Stateful, Styled as _, div, px,
 };
 
-use crate::gradient::hover_fill_gradient;
-use crate::hover_card::hover_highlight_shadow;
+use crate::hover_card::{HoverFill, hover_fill};
+use crate::measure::Measured;
 use crate::motion::MotionCurve;
 use crate::theme::ArtisanTheme;
 
@@ -221,19 +221,23 @@ pub fn sliding_hover_pill(
             .borrow_mut()
             .apply_progress(transition.generation, 1.0);
     }
-    let mut pill = div()
-        .id(ElementId::Name(id.to_owned().into()))
-        .absolute()
-        .left(px(rect.left))
-        .top(px(rect.top))
-        .w(px(rect.width))
-        .h(px(rect.height))
-        .rounded(radius)
-        .bg(hover_fill_gradient(*theme))
-        .opacity(if visible { 1.0 } else { 0.0 });
-    if shadow {
-        pill = pill.shadow(hover_highlight_shadow(theme));
-    }
+    let pill = hover_fill(
+        div()
+            .id(ElementId::Name(id.to_owned().into()))
+            .absolute()
+            .left(px(rect.left))
+            .top(px(rect.top))
+            .w(px(rect.width))
+            .h(px(rect.height))
+            .rounded(radius)
+            .opacity(if visible { 1.0 } else { 0.0 }),
+        theme,
+        if shadow {
+            HoverFill::Edged
+        } else {
+            HoverFill::Plain
+        },
+    );
     if !reduce_motion && let Some(transition) = transition {
         let motion = Rc::clone(hover);
         let HoverTransition {
@@ -257,6 +261,95 @@ pub fn sliding_hover_pill(
             .into_any_element();
     }
     pill.into_any_element()
+}
+
+/// One sliding hover surface: the pill flies between the rows measured
+/// against the surface (sidebar lists, the profile menu, picker menus).
+/// Place [`Self::surface_probe`] first inside the surface and
+/// [`Self::row_probe`] inside each row.
+#[derive(Clone, Default)]
+pub struct HoverSurface {
+    state: Rc<RefCell<SlidingHoverState>>,
+    surface: Measured,
+}
+
+impl HoverSurface {
+    /// Measures the surface the rows are placed against.
+    pub fn surface_probe(&self) -> impl IntoElement {
+        self.surface.track()
+    }
+
+    /// Measures one row into the pill; place it inside the row.
+    pub fn row_probe(&self, id: impl Into<String>) -> impl IntoElement {
+        let id = id.into();
+        let (state, surface) = (Rc::clone(&self.state), self.surface.clone());
+        gpui::canvas(
+            move |bounds, window, cx| {
+                let Some(surface) = surface.get() else {
+                    return;
+                };
+                if state
+                    .borrow_mut()
+                    .measure(&id, HoverRect::within(bounds, surface))
+                {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+    }
+
+    /// The edged pill, painted under the rows.
+    #[must_use]
+    pub fn pill(
+        &self,
+        id: &str,
+        theme: &ArtisanTheme,
+        radius: Pixels,
+        reduce_motion: bool,
+    ) -> AnyElement {
+        sliding_hover_pill(id, theme, &self.state, radius, true, reduce_motion)
+    }
+
+    /// The pointer entered or left row `id`.
+    pub fn hovered(&self, id: &str, hovered: bool) {
+        let mut state = self.state.borrow_mut();
+        if hovered {
+            state.set_active(id.to_owned());
+        } else if state.active_id() == Some(id) {
+            state.hide();
+        }
+    }
+
+    /// Sends the pill to row `id`.
+    pub fn set_active(&self, id: impl Into<String>) {
+        self.state.borrow_mut().set_active(id.into());
+    }
+
+    /// Drops the target; the next one is placed, not flown to.
+    pub fn clear(&self) {
+        self.state.borrow_mut().clear();
+    }
+
+    /// Hides the pill but keeps its place.
+    pub fn hide(&self) {
+        self.state.borrow_mut().hide();
+    }
+
+    /// Clears a target that left the list.
+    pub fn clear_if_missing(&self, visible_ids: &[String]) {
+        self.state.borrow_mut().clear_if_missing(visible_ids);
+    }
+
+    /// Whether the pill shows.
+    #[must_use]
+    pub fn visible(&self) -> bool {
+        self.state.borrow().visible()
+    }
 }
 
 /// A popover's lifecycle. `Closing` stays painted until its exit settles.

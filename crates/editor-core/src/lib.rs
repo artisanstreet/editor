@@ -13,9 +13,11 @@ mod host;
 pub mod hosts;
 pub mod media_http;
 mod pairing_targets;
+mod resident;
 pub mod runtime;
 mod screen;
 pub use pairing_targets::PairingTargets;
+pub use resident::{CollectionBytes, ResidentBytes};
 
 pub use client::ForgeClient;
 pub use connection::ConnectionStatus;

@@ -8,6 +8,7 @@ description = "Draft, attachments (converted to WebP), model picker, send / stee
 [dependencies]
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+artisan-mentions = { path = "../artisan-mentions" }
 editor-ui = { path = "../editor-ui" }
 editor-core = { path = "../editor-core" }
 gpui.workspace = true

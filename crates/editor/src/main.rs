@@ -90,6 +90,7 @@ fn main() {
             if let Err(error) = editor_ui::fonts::register_bundled_fonts(cx) {
                 tracing::warn!("using system fonts; the bundled ones didn't load: {error}");
             }
+            editor_ui::theme::install(cx);
             bind_keys(cx);
             cx.on_action(|_: &Quit, cx| cx.quit());
             cx.on_window_closed(|cx, _| {

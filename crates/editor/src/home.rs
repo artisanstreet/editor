@@ -3,7 +3,7 @@
 use editor_core::{Core, LocalTarget, Screen, SettingsPage, hosts};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
-use editor_ui::theme::WorkspaceColors;
+use editor_ui::theme::{ActiveTheme as _, ColorTokens};
 use gpui::{
     AnyElement, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -79,7 +79,7 @@ impl Home {
 
     fn button(
         &self,
-        theme: WorkspaceColors,
+        desktop: &ColorTokens,
         id: SharedString,
         label: String,
         cx: &Context<Self>,
@@ -100,8 +100,8 @@ impl Home {
             .py(px(8.0))
             .rounded(px(8.0))
             .border_1()
-            .border_color(theme.line)
-            .text_color(theme.foreground)
+            .border_color(desktop.line.to_paint())
+            .text_color(desktop.workspace_foreground.to_paint())
             .child(label);
 
         match target {
@@ -122,7 +122,7 @@ impl Home {
 
 impl Render for Home {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = editor_ui::theme::ArtisanTheme::default().workspace;
+        let desktop = cx.theme().colors;
         let targets = std::iter::once(LocalTarget::ThisMachine).chain(
             self.core
                 .read(cx)
@@ -140,7 +140,7 @@ impl Render for Home {
                     LocalTarget::Wsl { distro } => format!("Use the Forge in WSL: {distro}"),
                 };
                 self.button(
-                    theme,
+                    &desktop,
                     format!("pair-{index}").into(),
                     label,
                     cx,
@@ -149,14 +149,11 @@ impl Render for Home {
             })
             .collect();
         if let Some(error) = self.core.read(cx).pairing_targets().error.clone() {
-            buttons.push(
-                editor_ui::page::error_text(&editor_ui::theme::ArtisanTheme::default(), error)
-                    .into_any_element(),
-            );
+            buttons.push(editor_ui::page::error_text(cx.theme(), error).into_any_element());
             buttons.push(
                 editor_ui::button::Button::text(
                     "retry-local-targets",
-                    editor_ui::theme::ArtisanTheme::default(),
+                    *cx.theme(),
                     "Retry WSL discovery",
                 )
                 .on_activate(cx.listener(|this, _, _, cx| {
@@ -167,7 +164,7 @@ impl Render for Home {
             );
         }
         buttons.push(self.button(
-            theme,
+            &desktop,
             "pair-remote".into(),
             "Pair a Forge on another machine".to_owned(),
             cx,
@@ -190,14 +187,14 @@ impl Render for Home {
                         div().mb(px(16.0)).child(
                             asset_glyph(AssetId::TABLER_TERMINAL_2)
                                 .size(px(EMBLEM))
-                                .text_color(theme.secondary),
+                                .text_color(desktop.workspace_secondary.to_paint()),
                         ),
                     )
                     .child(
                         div()
                             .text_size(px(HEADLINE))
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(theme.foreground)
+                            .text_color(desktop.workspace_foreground.to_paint())
                             .child("Add a host"),
                     )
                     .child(
@@ -205,7 +202,7 @@ impl Render for Home {
                             .mt(px(8.0))
                             .max_w(px(440.0))
                             .text_size(px(15.0))
-                            .text_color(theme.secondary)
+                            .text_color(desktop.workspace_secondary.to_paint())
                             .child(
                                 "Artisan works on a Forge host you trust. Use the Forge on this computer, or pair with one on another machine.",
                             ),

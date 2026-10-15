@@ -1,5 +1,6 @@
 //! Modal content composed through the per-window overlay owner.
 
+use crate::theme::{RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use crate::{
     AssetId,
     button::{Button, ButtonVariant},
@@ -126,7 +127,7 @@ impl RenderOnce for Dialog {
             .when(!self.bare, |panel| {
                 panel
                     .p(px(20.0))
-                    .rounded(px(16.0))
+                    .rounded(RadiusTokens::value(RadiusStep::XlMid))
                     .bg(theme.colors.popover.to_paint())
                     .border_1()
                     .border_color(theme.colors.border.to_paint())
@@ -145,7 +146,7 @@ impl RenderOnce for Dialog {
                         .child(
                             div()
                                 .min_w_0()
-                                .text_size(px(18.0))
+                                .text_size(TypographyTokens::size(TextStep::Lg))
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(self.title),
                         )

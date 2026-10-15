@@ -1,5 +1,5 @@
 //! A keyboard-accessible navigation or selection row with shared geometry.
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement as _, IntoElement,
@@ -87,7 +87,7 @@ impl RenderOnce for ActionRow {
             .gap(px(8.0))
             .px(px(8.0))
             .py(px(6.0))
-            .rounded(px(8.0))
+            .rounded(RadiusTokens::value(RadiusStep::Md))
             .border_1()
             .border_color(gpui::transparent_black())
             .text_color(theme.colors.foreground.to_paint())

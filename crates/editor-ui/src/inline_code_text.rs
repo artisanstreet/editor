@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn inline_summary_uses_commonmark_code_escapes_and_nested_styles() {
-        let theme = ArtisanTheme::default();
+        let theme = ArtisanTheme::resolved();
         let runs = inline_runs(
             r"Use ``a ` b`` and **bold _nested_** \*literal\* [label](https://example.com)",
             theme,

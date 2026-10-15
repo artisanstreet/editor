@@ -209,15 +209,13 @@ impl PreparedMarkdown {
         for row in &self.flow {
             if let FlowKind::Block(block) = &row.kind {
                 if let PreparedKind::Code(code) = &block.kind {
-                    if let Some(diagrams) = &code.fence.diagrams {
-                        for diagram in diagrams {
-                            let image = diagram.image.clone();
-                            cx.defer(move |cx| {
-                                cx.drop_image(image, None);
-                                // Other owners may still draw this image in cached scenes.
-                                cx.refresh_windows();
-                            });
-                        }
+                    if let Some(diagram) = &code.fence.diagram {
+                        let image = diagram.image.clone();
+                        cx.defer(move |cx| {
+                            cx.drop_image(image, None);
+                            // Other owners may still draw this image in cached scenes.
+                            cx.refresh_windows();
+                        });
                     }
                 }
             }
@@ -246,7 +244,7 @@ fn indexed_gap(spacing: &crate::markdown::LeafSpacing) -> f32 {
             closed: true,
             source: String::new(),
             tokens: None,
-            diagrams: None,
+            diagram: None,
         }),
         BlockShape::Html => Block::Html {
             source: String::new(),
@@ -324,7 +322,7 @@ fn collect_selection(
             }
             PreparedKind::Code(code) => {
                 // Rich controls have their own interaction; ordinary code participates in prose selection.
-                if code.fence.rich.is_none() && code.fence.diagrams.is_none() {
+                if code.fence.rich.is_none() && code.fence.diagram.is_none() {
                     for (line, (range, text)) in code.fence.lines.iter().enumerate() {
                         let mut order = prefix.to_vec();
                         order.push(code.text as u64);
@@ -893,7 +891,7 @@ pub(super) struct PreparedFenceData {
     pub(super) multiline: bool,
     /// Whether the fence is a closed `mermaid` block, drawn as a diagram
     /// when its source renders.
-    pub(super) diagrams: Option<[super::diagram::MermaidDiagram; 2]>,
+    pub(super) diagram: Option<super::diagram::MermaidDiagram>,
     /// The rich block an `artisan-*` fence draws, parsed once here.
     pub(super) rich: Option<RichFence>,
     /// Assembled display byte ranges and retained text per native code line.
@@ -1030,11 +1028,8 @@ impl PreparedFenceData {
                 .map(|(_, text)| text.len())
                 .sum::<usize>()
             + rich
-            + self.diagrams.as_ref().map_or(0, |diagrams| {
-                diagrams
-                    .iter()
-                    .map(|diagram| super::rich::image_resident_bytes(&diagram.image))
-                    .sum::<usize>()
+            + self.diagram.as_ref().map_or(0, |diagram| {
+                super::rich::image_resident_bytes(&diagram.image)
             })
     }
     fn new(fence: &CodeFence, renderer: Option<&gpui::SvgRenderer>) -> Self {
@@ -1051,16 +1046,13 @@ impl PreparedFenceData {
             .iter()
             .filter_map(|token| valid_code_range(token, display))
             .collect();
-        let diagrams = fence.diagrams.as_ref().and_then(|svgs| {
-            let renderer = renderer?;
-            Some([
-                super::diagram::image(&svgs[0], renderer.clone())?,
-                super::diagram::image(&svgs[1], renderer.clone())?,
-            ])
-        });
+        let diagram = fence
+            .diagram
+            .as_ref()
+            .and_then(|svg| super::diagram::image(svg, renderer?.clone()));
         // Rich blocks and diagrams draw something else; plain code shows
         // its colors.
-        let starts = if rich.is_none() && diagrams.is_none() {
+        let starts = if rich.is_none() && diagram.is_none() {
             let whole = 0..display.len();
             rich::color_ranges(display, std::slice::from_ref(&whole))
         } else {
@@ -1074,7 +1066,7 @@ impl PreparedFenceData {
         };
         Self {
             multiline: display.contains('\n'),
-            diagrams,
+            diagram,
             rich,
             source,
             lines: code_lines(&shown),
@@ -1164,22 +1156,6 @@ mod fence_color_tests {
         );
         assert!(leaves.windows(2).all(|pair| pair[0].order < pair[1].order));
         assert!(leaves.iter().all(|leaf| leaf.order[0] == 41));
-    }
-
-    #[test]
-    fn code_line_capacity_is_charged_instead_of_an_ast_multiplier() {
-        let body = format!("```text\n{}\n```", "x\n".repeat(4096));
-        let document = crate::markdown::MarkdownEngine::new()
-            .unwrap()
-            .parse_document(&body)
-            .unwrap();
-        let syntax_bytes = document.resident_bytes();
-        let parts = PreparedParts::new(&document, None);
-        assert!(
-            parts.resident_bytes() > 4096 * std::mem::size_of::<(Range<usize>, SharedString)>()
-        );
-        let prepared = PreparedMarkdown::from_indexed_parts(&document, parts, None);
-        assert!(prepared.resident_bytes() > syntax_bytes.saturating_mul(4));
     }
 
     #[test]

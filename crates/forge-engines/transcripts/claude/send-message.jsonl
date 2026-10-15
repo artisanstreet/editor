@@ -1,0 +1,4 @@
+{"type": "assistant", "message": {"id": "message-0", "content": [{"type": "tool_use", "id": "send-0", "name": "SendMessage", "input": {"to": "a1234567890123456", "summary": "Review update", "message": "Check the cancellation path."}}]}}
+{"type": "assistant", "message": {"id": "message-1", "content": [{"type": "tool_use", "id": "send-1", "name": "SendMessage", "input": {"to": "uds:/tmp/another-session", "summary": "Review update", "message": "Check the cancellation path."}}]}}
+{"type": "assistant", "message": {"id": "message-2", "content": [{"type": "tool_use", "id": "send-2", "name": "SendMessage", "input": {"to": "reviewer", "summary": "Review update", "message": "Check the cancellation path."}}]}}
+{"type": "assistant", "message": {"id": "missing-target", "content": [{"type": "tool_use", "id": "bad-send", "name": "SendMessage", "input": {"to": " ", "message": "hello"}}]}}

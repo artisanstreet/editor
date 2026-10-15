@@ -62,6 +62,7 @@ use geometry::LeafLayout;
 use document::{LeafKey, LiveLeaf, Observed, document};
 
 pub use crate::text_runs::{TextRunOverride, compile_text_runs};
+pub use native_geometry::MAX_NATIVE_SOURCE;
 
 fn same_allocation(left: &SharedString, right: &SharedString) -> bool {
     left.as_ptr() == right.as_ptr() && left.len() == right.len()
@@ -484,25 +485,6 @@ impl SelectableText {
         }
     }
 
-    /// Paints an admitted original native visual row. `text` remains the full
-    /// registered logical leaf; global cluster offsets and bidi coverage are
-    /// supplied by the projection. No source substring is shaped here.
-    pub fn projected_row(
-        mut self,
-        row: std::sync::Arc<crate::markdown_renderer::native_projection::ProjectedNativeRow>,
-        line_height: Pixels,
-        runs: Rc<[TextRun]>,
-    ) -> Self {
-        assert_eq!(row.layout.len, self.text.len());
-        assert!(line_height > Pixels::ZERO);
-        assert_eq!(
-            runs.iter().map(|run| run.len).sum::<usize>(),
-            self.text.len()
-        );
-        self.projected = Some((row, line_height, Arc::from(runs.as_ref())));
-        self
-    }
-
     /// Measures the actual inherited content width, then requests a bounded
     /// background native glyph window. No source is shaped during layout.
     /// `on_layout_ready` publishes topology even if resize removed this ordinal.
@@ -778,7 +760,7 @@ impl Element for SelectableText {
                 .as_ref()
                 .map(|retained| retained.native_error.clone())
                 .unwrap_or_default();
-            let source = crate::markdown_renderer::NativeInput::Inline(self.text.clone());
+            let source = self.text.clone();
             let font_size = default_style.font_size.to_pixels(window.rem_size());
             let height = window.pixel_snap(
                 default_style
@@ -1585,41 +1567,6 @@ fn release(roster: &[LiveLeaf], position: Point<Pixels>, window: &mut Window, cx
         .position(|range| range.contains(&down) && range.contains(&up))
     {
         on_link(index, window, cx);
-    }
-}
-
-#[cfg(test)]
-mod source_weight_tests {
-    use super::*;
-    #[test]
-    fn source_weight_includes_spare_capacity_and_authored_copy_payloads() {
-        let baseline = SelectionSource::new("scope", vec![1], vec![]).resident_bytes();
-        let mut leaves = Vec::with_capacity(512);
-        let mut order = Vec::with_capacity(256);
-        order.push(1);
-        leaves.push(SelectionLeaf {
-            order,
-            text: "x".into(),
-            separator: "\n",
-            copies: Rc::from([(
-                0..1,
-                SharedString::from("large authored color value".repeat(1000)),
-            )]),
-        });
-        let source = SelectionSource::new("scope", vec![1], leaves);
-        let payload_bytes = source.leaves[0].copies[0].1.len();
-        assert!(
-            source.resident_bytes()
-                >= baseline
-                    + 512 * std::mem::size_of::<SelectionLeaf>()
-                    + 256 * std::mem::size_of::<u64>()
-                    + payload_bytes
-        );
-        let two_sources = source.resident_bytes().saturating_mul(2);
-        assert!(
-            two_sources > payload_bytes * 2,
-            "source metadata remains charged even when immutable payload is shared"
-        );
     }
 }
 

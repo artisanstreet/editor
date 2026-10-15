@@ -205,7 +205,7 @@ impl RenderOnce for ConcentrationView {
                 f32_of(share),
                 Some(format!("Top {} of {}", percent(share), self.spec.items()).into()),
                 vec![ReadoutRow::new(
-                    Some(kit::series_color(&theme, 0).to_paint()),
+                    Some(kit::series_color(0).to_paint()),
                     format!("Share of {}", self.spec.total()),
                     percent(held),
                 )],
@@ -260,7 +260,7 @@ impl ConcentrationView {
         hover: Option<f64>,
     ) -> (Vec<Shape>, Vec<PlotLabel>) {
         let theme = &self.theme;
-        let color = kit::series_color(theme, 0);
+        let color = kit::series_color(0);
         let at = |(x, y): (f64, f64)| (f32_of(x), 1.0 - f32_of(y));
         let sampled = sample(curve, MAX_POINTS);
         let mut shapes = frame::grid(theme, y_ticks, &[]);

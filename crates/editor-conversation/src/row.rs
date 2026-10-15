@@ -174,8 +174,8 @@ pub(crate) struct RowModel {
     pub live: HashMap<LiveTarget, Arc<ropey::Rope>>,
     pub ui: HashMap<ItemId, ItemUi>,
     pub run: Option<RunSummary>,
-    /// The thread's agents by the id messages address them by: their names.
-    pub agents: Arc<HashMap<String, String>>,
+    /// The thread's agents' names by their item.
+    pub agents: Arc<HashMap<ItemId, String>>,
     pub images: HashMap<BlobHash, Blob>,
     pub now: Timestamp,
     /// Space above the row: the transcript rhythm (see `fold::gaps`).
@@ -482,7 +482,7 @@ impl RenderOnce for StoredPreparedText {
             .source_slice(visible_range)
             .selection_scope(scope)
             .selection_order(order, separator);
-            if visible.len() <= 16 * 1024 {
+            if visible.len() <= editor_ui::selectable_text::MAX_NATIVE_SOURCE {
                 return selectable.into_any_element();
             }
             let base = Row::PlainBlock {
@@ -1373,10 +1373,6 @@ impl RowView {
             ItemKind::UserMessage { .. } => self.plain_block(&item.id, PlainSection::User, 0, None),
             ItemKind::Plan { .. } => self.tools().plan_entry(item),
             ItemKind::Notice { .. } => self.text().notice(item),
-            ItemKind::Approval { .. } => self
-                .requests()
-                .approval_card(item, self.answer_state(&item.id))
-                .unwrap_or_else(|| div().into_any_element()),
             ItemKind::Question { .. } => self.requests().question_card(item),
             ItemKind::Error { .. } => self.error_alert(item),
             ItemKind::Compaction { .. } | ItemKind::Image { .. } => div().into_any_element(),

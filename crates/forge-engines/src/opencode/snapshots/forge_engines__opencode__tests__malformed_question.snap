@@ -1,0 +1,27 @@
+---
+source: crates/forge-engines/src/opencode/tests.rs
+assertion_line: 161
+expression: "replay(\"malformed-question\")"
+---
+[
+    Event(
+        Item {
+            key: "invalid-question:ask",
+            parent: None,
+            status: Done,
+            kind: Error {
+                kind: Execution,
+                message: Inline(
+                    "OpenCode supplied malformed question prompts or options",
+                ),
+                retryable: false,
+            },
+        },
+    ),
+    Idle(
+        true,
+    ),
+    RunError(
+        "OpenCode supplied malformed question prompts or options",
+    ),
+]

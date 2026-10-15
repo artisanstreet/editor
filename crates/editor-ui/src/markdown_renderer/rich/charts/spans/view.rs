@@ -1,6 +1,7 @@
 //! Drawing a span [`Layout`]: rows of bars over a time axis, row names on
 //! the left, markers as labelled rules, and a glass readout on hover.
 
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use gpui::{
     AnyElement, App, ElementId, Entity, FontWeight, IntoElement, ParentElement as _, RenderOnce,
     SharedString, Styled as _, Window, div, prelude::*, px, relative,
@@ -13,7 +14,6 @@ use super::super::scale::{Domain, f32_of, f64_of, nice_ticks};
 use super::super::scene::{Probe, Shape, hrule, plot_canvas, probe, probed_width, vrule};
 use super::{Layout, Span};
 use crate::hover_card::hover_highlight_shadow;
-use crate::theme::ArtisanTheme;
 
 /// Room above the first row for marker labels.
 const MARKER_ROOM: f32 = 20.0;
@@ -350,7 +350,7 @@ impl SpansView {
         } else {
             span.label.clone()
         };
-        let color = kit::series_color(&theme, span.color);
+        let color = kit::series_color(span.color);
         let hovering = state.clone();
         div()
             .id(kit::part(&self.id, format_args!("span-{index}")))
@@ -366,7 +366,7 @@ impl SpansView {
             .px(px(6.0))
             .overflow_hidden()
             .whitespace_nowrap()
-            .rounded(px(4.0))
+            .rounded(RadiusTokens::value(RadiusStep::Xs))
             .bg(color
                 .with_alpha(if hovered { 0.75 } else { 0.55 })
                 .to_paint())
@@ -399,7 +399,7 @@ impl SpansView {
         let theme = &self.theme;
         let mut rows = vec![
             ReadoutRow::new(
-                Some(kit::series_color(theme, span.color).to_paint()),
+                Some(kit::series_color(span.color).to_paint()),
                 "Length",
                 layout.duration(span),
             ),
@@ -441,7 +441,7 @@ mod native_window_tests {
                 .on_action(crate::focus_navigation::focus_previous)
                 .child(SpansView {
                     id: "native-spans".into(),
-                    theme: ArtisanTheme::default(),
+                    theme: ArtisanTheme::resolved(),
                     layout: self.layout.clone(),
                 })
         }
@@ -459,7 +459,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-spans-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-spans-row-50").is_none());
         cx.update(|window, cx| {
@@ -476,7 +476,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-spans-row-511").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         // Parsing an unchanged source can produce a new Arc. It must preserve
         // the selected endpoint and the native list's viewport.
@@ -492,7 +492,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-spans-row-511").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         cx.simulate_keystrokes("home");
         cx.run_until_parked();
@@ -501,7 +501,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-spans-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-spans-row-511").is_none());
     }

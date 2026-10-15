@@ -108,7 +108,7 @@ pub struct CodeFence {
     /// `None` while the fence is open or the language is unrecognized.
     pub tokens: Option<Arc<[CodeToken]>>,
     /// Light and dark Mermaid renditions prepared off the UI thread.
-    pub diagrams: Option<Arc<[DiagramSvg; 2]>>,
+    pub diagram: Option<Arc<DiagramSvg>>,
 }
 
 /// One flattened inline run.
@@ -276,12 +276,11 @@ impl MarkdownDocument {
                             spans_bytes(spans)
                         }
                         Block::Code(fence) => {
-                            fence.diagrams.as_ref().map_or(0, |diagrams| {
-                                diagrams
-                                    .iter()
-                                    .map(|svg| svg.source.capacity())
-                                    .sum::<usize>()
-                            }) + fence.source.capacity()
+                            fence
+                                .diagram
+                                .as_ref()
+                                .map_or(0, |svg| svg.source.capacity())
+                                + fence.source.capacity()
                                 + fence.language.as_ref().map_or(0, String::capacity)
                                 + fence
                                     .tokens
@@ -1027,7 +1026,7 @@ impl DocumentBuilder {
                         closed,
                         source: fence.source,
                         tokens: None,
-                        diagrams: None,
+                        diagram: None,
                     }));
                 }
             }

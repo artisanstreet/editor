@@ -7,6 +7,7 @@
 //! directory hides the rows nested under it.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -21,7 +22,6 @@ use super::super::actions::open_reference;
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
 use super::counted;
-use crate::theme::ArtisanTheme;
 use crate::tree_row::{TreeFocus, TreeNavigation, TreeRow};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -396,7 +396,7 @@ impl FileTreeView {
                 div()
                     .font_family(theme.typography.mono.family)
                     .tracking(0.0)
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(change.tone().color(&theme).to_paint())
                     .child(change.letter()),

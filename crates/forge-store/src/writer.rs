@@ -5,9 +5,10 @@ use crate::read::{self, tag, to_body};
 use crate::{ProjectNotFound, project_name};
 use anyhow::{Context, Result};
 use artisan_api::{
-    CreateProject, CreateThread, Envelope, Event, Item, Project, Run, RunId, RunStatus, Seq,
-    Status, Thread, ThreadId, Timestamp, UpdateThread, now,
+    CreateProject, CreateThread, Envelope, Event, Item, ItemId, Project, Run, RunId, RunStatus,
+    Seq, Status, Thread, ThreadId, Timestamp, UpdateThread, now,
 };
+use forge_content::ItemTexts as _;
 use rusqlite::{Connection, Transaction, params};
 use std::ops::Deref;
 use std::sync::Arc;
@@ -290,6 +291,20 @@ impl Tx<'_> {
         Ok(thread)
     }
 
+    /// Records the engine's own id for an item, which answers and later
+    /// events address it by. It is Forge's alone and never on the wire.
+    pub(crate) fn set_native_id(&self, id: &ItemId, native_id: Option<&str>) -> Result<()> {
+        if let Some(native_id) = native_id {
+            self.sql
+                .prepare_cached(
+                    "UPDATE items SET native_id=?2 WHERE id=?1 AND native_id IS NOT ?2",
+                )?
+                .execute(params![id.as_str(), native_id])
+                .with_context(|| format!("save the engine id of item {id}"))?;
+        }
+        Ok(())
+    }
+
     /// Saves only this item: `old` is its stored version, `None` for a new
     /// item, whose position is its creation seq. Thread activity belongs to
     /// accepted input and run boundaries.
@@ -324,11 +339,11 @@ impl Tx<'_> {
         // The kind's serde tag, read from the body so it cannot drift from it.
         self.sql
             .prepare_cached(
-                "INSERT INTO items (id, thread_id, position, seq, run_id, native_id, status, body,
+                "INSERT INTO items (id, thread_id, position, seq, run_id, status, body,
                      edit_added, edit_removed, kind_type, parent_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, json_extract(?8, '$.kind.type'), ?11)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, json_extract(?7, '$.kind.type'), ?10)
                  ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, run_id = excluded.run_id,
-                     native_id = excluded.native_id, status = excluded.status, body = excluded.body,
+                     status = excluded.status, body = excluded.body,
                      edit_added = excluded.edit_added, edit_removed = excluded.edit_removed,
                      kind_type = excluded.kind_type, parent_id = excluded.parent_id",
             )?
@@ -338,7 +353,6 @@ impl Tx<'_> {
                 item.position,
                 item.seq,
                 item.run_id.as_ref().map(RunId::as_str),
-                item.native_id,
                 tag(&item.status)?,
                 to_body(&item)?,
                 edits.as_ref().map(|stats| stats.added),
@@ -479,7 +493,7 @@ impl Tx<'_> {
         }
         let items: Vec<Item> = read::items(
             self,
-            "SELECT body,native_id FROM items WHERE status IN ('running', 'awaiting_user')
+            "SELECT body FROM items WHERE status IN ('running', 'awaiting_user')
              AND kind_type != 'user_message' ORDER BY position",
             [],
         )?;

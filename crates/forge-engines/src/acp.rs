@@ -115,7 +115,10 @@ impl Harness for AcpHarness {
         Box::pin(async move {
             let process = match process::spawn(&turn, &profile.args(&turn.config)) {
                 Ok(process) => process,
-                Err(error) => return Outcome::failed(format!("{error:#}")),
+                Err(error) => {
+                    tracing::error!(engine = profile.name(), thread = %turn.thread_id, "starting the engine: {error:#}");
+                    return Outcome::failed(format!("{error:#}"));
+                }
             };
             let mut run = Run {
                 profile,
@@ -126,7 +129,7 @@ impl Harness for AcpHarness {
                 cancelled: false,
             };
             let outcome = run.run(&turn).await.unwrap_or_else(|error| {
-                tracing::warn!(engine = profile.name(), thread = %turn.thread_id, "ACP run failed: {error:#}");
+                tracing::warn!(engine = profile.name(), thread = %turn.thread_id, session = ?turn.session_id, "ACP run failed: {error:#}");
                 Outcome::failed(format!("{error:#}"))
             });
             let events = run.decoder.end_run(outcome.status != RunStatus::Done);
@@ -140,6 +143,8 @@ impl Harness for AcpHarness {
 /// Why a handshake call didn't produce a result.
 enum CallError {
     Cancelled,
+    /// The engine answered with an error.
+    Rejected(crate::rpc::RpcError),
     Failed(anyhow::Error),
 }
 
@@ -167,6 +172,9 @@ impl Run {
         match self.call("initialize", initialize).await {
             Ok(_) => {}
             Err(CallError::Cancelled) => return Ok(Outcome::cancelled()),
+            Err(CallError::Rejected(error)) => {
+                return Err(anyhow::Error::new(error).context("ACP initialize"));
+            }
             Err(CallError::Failed(error)) => return Err(error.context("ACP initialize")),
         }
         let mut params =
@@ -181,11 +189,15 @@ impl Run {
         match self.call(method, params).await {
             Ok(_) => {}
             Err(CallError::Cancelled) => return Ok(Outcome::cancelled()),
-            Err(CallError::Failed(error)) if needs_sign_in(&format!("{error:#}")) => {
+            Err(CallError::Rejected(error)) if needs_sign_in(&error) => {
                 return Ok(Outcome::failed(format!(
                     "Sign in to {} to use it.",
                     self.profile.name()
                 )));
+            }
+            Err(CallError::Rejected(error)) => {
+                return Err(anyhow::Error::new(error)
+                    .context(format!("ACP {method} (session {:?})", turn.session_id)));
             }
             Err(CallError::Failed(error)) => {
                 return Err(error.context(format!("ACP {method} (session {:?})", turn.session_id)));
@@ -220,9 +232,7 @@ impl Run {
                 .into_iter()
                 .find(|response| response.id == id)
             {
-                return response
-                    .result
-                    .map_err(|error| CallError::Failed(anyhow::anyhow!(error)));
+                return response.result.map_err(CallError::Rejected);
             }
         }
     }
@@ -251,7 +261,7 @@ impl Run {
                         if let Err(error) = response.result
                             && self.steers.is_empty()
                         {
-                            return Ok(Outcome::failed(error));
+                            return Ok(Outcome::failed(error.message));
                         }
                         // A steer that raced the prompt's end still starts the next prompt.
                         while let Ok(input) = self.io.inbox.try_recv() {
@@ -328,7 +338,7 @@ impl Run {
         }
         for path in inputs.iter().flat_map(|input| &input.images) {
             if !self.decoder.image_blocks && !self.decoder.embedded_context {
-                tracing::warn!(engine = self.profile.name(), path = %path.display(), "engine takes no images; leaving one out");
+                tracing::warn!(engine = self.profile.name(), session = ?self.decoder.session_id, path = %path.display(), "engine takes no images; leaving one out");
                 continue;
             }
             let bytes = tokio::fs::read(path)

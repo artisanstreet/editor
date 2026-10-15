@@ -435,7 +435,7 @@ impl TextEditor {
     }
 
     /// Returns the caret quad for the focused, enabled, collapsed selection.
-    fn caret_quad(&self, window: &Window) -> Option<gpui::PaintQuad> {
+    fn caret_quad(&self, window: &Window, color: gpui::Hsla) -> Option<gpui::PaintQuad> {
         if self.disabled || !self.focus_handle.is_focused(window) {
             return None;
         }
@@ -449,7 +449,7 @@ impl TextEditor {
         }
         Some(gpui::fill(
             Bounds::new(origin, size(gpui::px(2.0), line_height)),
-            crate::theme::ArtisanTheme::default().workspace.foreground,
+            color,
         ))
     }
 }

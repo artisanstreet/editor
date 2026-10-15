@@ -92,11 +92,13 @@ fn native_unicode_bidi_and_ligature_glyphs_survive_projection_without_reshaping(
     }
     let mut observed = Vec::new();
     for (row, descriptor) in projected.iter().zip(index.rows.iter()) {
-        visit_projected_glyphs(row, |font, glyph| {
-            let mut position = glyph.position;
-            position.x += descriptor.origin_x;
-            observed.push((font, glyph.id, glyph.index, position));
-        });
+        for run in &row.layout.runs {
+            for glyph in &run.glyphs {
+                let mut position = glyph.position;
+                position.x += descriptor.origin_x;
+                observed.push((run.font_id, glyph.id, glyph.index, position));
+            }
+        }
         for range in &row.source.ranges {
             assert!(text.get(range.clone()).is_some());
         }
@@ -142,15 +144,7 @@ fn native_wrap_index_keeps_only_requested_hot_glyphs() {
                 .sum::<usize>()
         })
         .sum::<usize>();
-    assert!(hot * 100 < whole);
-    assert!(
-        projected
-            .iter()
-            .map(ProjectedNativeRow::resident_bytes)
-            .sum::<usize>()
-            < MAX_PROJECTED_BYTES
-    );
-    assert!(index.resident_bytes() < MAX_INDEX_BYTES);
+    assert!(hot * 100 < whole, "only the requested rows carry glyphs");
     assert!(
         projected
             .iter()

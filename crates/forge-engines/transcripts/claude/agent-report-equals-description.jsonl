@@ -1,0 +1,2 @@
+{"type": "assistant", "message": {"id": "message-background-task", "content": [{"type": "tool_use", "id": "background-task", "name": "Task", "input": {"description": "Exact report", "prompt": "Run this task", "subagent_type": "general-purpose", "run_in_background": true}}]}}
+{"type": "system", "subtype": "task_notification", "tool_use_id": "background-task", "status": "completed", "summary": "Exact report"}

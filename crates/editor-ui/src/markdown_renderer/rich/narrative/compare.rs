@@ -3,6 +3,7 @@
 //! column; hovering a column highlights it.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use gpui::{
     AnyElement, App, Div, Entity, Hsla, IntoElement, ParentElement as _, RenderOnce, SharedString,
     Stateful, Styled as _, Window, div, prelude::*, px,
@@ -13,7 +14,6 @@ use std::sync::Arc;
 use super::super::kit::{self, Tone};
 use super::super::{BlockContext, RichBlock};
 use super::part;
-use crate::theme::ArtisanTheme;
 
 /// The `compare` spec.
 #[derive(Debug, Deserialize)]
@@ -232,7 +232,7 @@ impl RenderOnce for CompareView {
                             kit::muted(&theme, "–")
                         } else {
                             kit::body(&theme, value)
-                                .text_size(px(13.0))
+                                .text_size(TypographyTokens::size(TextStep::XsMid))
                                 .line_height(px(20.0))
                         })
                 }))

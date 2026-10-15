@@ -13,6 +13,7 @@ artisan-markdown-index = { path = "../artisan-markdown-index" }
 tempfile.workspace = true
 anyhow.workspace = true
 artisan-api = { path = "../artisan-api" }
+forge-content = { path = "../forge-content" }
 image = { workspace = true, features = ["gif", "jpeg", "png", "webp"] }
 rusqlite = { workspace = true, features = ["fallible_uint"] }
 serde.workspace = true

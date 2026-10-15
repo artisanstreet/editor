@@ -247,7 +247,6 @@ impl Hub {
         }
         if let Answer::Approval { decision } = &answer {
             let approval = match &item.kind {
-                ItemKind::Approval { approval, .. } => Some(approval),
                 ItemKind::Tool { approval, .. } | ItemKind::Plan { approval, .. } => {
                     approval.as_ref()
                 }
@@ -285,9 +284,11 @@ impl Hub {
                 "Item {item_id} is not waiting for an answer."
             )));
         }
-        let key = item
-            .native_id
-            .clone()
+        let key = self
+            .inner
+            .store
+            .native_id(item_id)
+            .await?
             .with_context(|| format!("item {item_id} has no engine id"))?;
         let ended = || refused(format!("The run of item {item_id} has ended."));
         let inbox = inbox.ok_or_else(ended)?;

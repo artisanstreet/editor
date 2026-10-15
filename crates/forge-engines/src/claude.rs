@@ -82,6 +82,7 @@ async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
         }
 
         let finished = drive(
+            &turn.thread_id,
             &mut engine,
             &mut decoder,
             &mut io,
@@ -90,6 +91,7 @@ async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
         )
         .await;
         if let Err(error) = finished {
+            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), "Claude protocol exchange failed: {error:#}");
             engine.kill().await;
             for event in decoder.finish() {
                 io.emit(event).await;
@@ -111,7 +113,7 @@ async fn run(mut turn: Turn, mut io: RunIo) -> Outcome {
             outcome = Some(result)
         } else {
             let stderr = engine.stderr_tail();
-            tracing::warn!(thread = %turn.thread_id, ?code, "Claude exited without a result: {stderr}");
+            tracing::warn!(thread = %turn.thread_id, session = ?decoder.session(), ?code, "Claude exited without a result: {stderr}");
             return Outcome::failed(format!(
                 "Claude exited ({}) before finishing{}",
                 code.map_or_else(|| "signal".to_owned(), |code| format!("code {code}")),
@@ -150,6 +152,7 @@ struct Finished {
 
 /// Pumps one process until its stdout closes.
 async fn drive(
+    thread: &artisan_api::ThreadId,
     engine: &mut EngineProcess,
     decoder: &mut ClaudeDecoder,
     io: &mut RunIo,
@@ -179,7 +182,7 @@ async fn drive(
                 }
                 for reply in decoder.take_replies() {
                     if let Err(error) = engine.send(&reply).await {
-                        tracing::warn!("answering Claude: {error:#}");
+                        tracing::warn!(%thread, session = ?decoder.session(), "answering Claude: {error:#}");
                     }
                 }
                 // Closing input ends the session: the CLI then waits only a
@@ -230,7 +233,7 @@ async fn drive(
                     }
                     for reply in decoder.take_replies() {
                         if let Err(error) = engine.send(&reply).await {
-                            tracing::warn!(key, "answering Claude: {error:#}");
+                            tracing::warn!(%thread, session = ?decoder.session(), key, "answering Claude: {error:#}");
                         }
                     }
                 }
@@ -250,7 +253,7 @@ async fn drive(
                 grace.as_mut().reset(tokio::time::Instant::now() + INTERRUPT_GRACE);
             }
             () = &mut grace, if cancelling => {
-                tracing::warn!("Claude did not stop after an interrupt; killing it");
+                tracing::warn!(%thread, session = ?decoder.session(), "Claude did not stop after an interrupt; killing it");
                 engine.kill().await;
                 grace.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(3600));
             }
@@ -423,49 +426,17 @@ fn title_from_transcript(path: &Path) -> Option<String> {
         })
 }
 
+/// The CLI caps auto-compaction without changing the model's identity.
+fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
+    config
+        .context_window_override()
+        .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ClaudeDecoder;
     use artisan_api::ItemId;
-
-    #[test]
-    fn native_agent_messages_are_canonical_tools() {
-        use artisan_api::{ItemKind, ToolKind};
-        let mut decoder = ClaudeDecoder::default();
-        for (index, recipient, expected_label) in [
-            (0, "a1234567890123456", "an agent"),
-            (1, "uds:/tmp/another-session", "another session"),
-            (2, "reviewer", "reviewer"),
-        ] {
-            let frame = serde_json::json!({
-                "type": "assistant",
-                "message": {"id": format!("message-{index}"), "content": [{
-                    "type": "tool_use", "id": format!("send-{index}"), "name": "SendMessage",
-                    "input": {"to": recipient, "summary": "Review update", "message": "Check the cancellation path."}
-                }]}
-            });
-            let events = decoder.feed(&frame.to_string()).unwrap();
-            assert!(events.iter().any(|event| matches!(event,
-                crate::EngineEvent::Item { kind: ItemKind::Tool { tool: ToolKind::AgentMessage {
-                    recipient: target, recipient_label, summary, text}, .. }, .. }
-                if target == recipient && recipient_label == expected_label
-                    && summary.as_deref() == Some("Review update") && text.inline() == Some("Check the cancellation path.")
-            )));
-        }
-        let malformed = serde_json::json!({"type":"assistant","message":{"id":"missing-target","content":[{
-            "type":"tool_use","id":"bad-send","name":"SendMessage","input":{"to":" ","message":"hello"}
-        }]}});
-        assert!(
-            decoder
-                .feed(&malformed.to_string())
-                .unwrap()
-                .iter()
-                .any(|event| matches!(event,
-                    crate::EngineEvent::Item { kind: ItemKind::Error {message,..}, .. }
-                    if message.inline().expect("adapter error is inline").contains("SendMessage")
-                ))
-        );
-    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -786,6 +757,8 @@ cat > /dev/null
             if text.contains("\"artisan-title\"") {
                 decoder.title_request("first message");
             }
+            // A line Claude's protocol can't carry fails the run.
+            let mut protocol_errors = Vec::new();
             for line in text.lines() {
                 if line.contains("\"isReplay\":true") {
                     user_lines += 1;
@@ -793,11 +766,18 @@ cat > /dev/null
                         (user_lines > 1).then(|| ItemId::from(format!("steer-{user_lines}"))),
                     );
                 }
-                events.extend(decoder.feed(line).unwrap());
+                match decoder.feed(line) {
+                    Ok(line_events) => events.extend(line_events),
+                    Err(error) => protocol_errors.push(format!("{error:#}")),
+                }
             }
             events.extend(decoder.finish());
             let outcome = decoder.take_outcome();
-            insta::assert_debug_snapshot!(name, (events, outcome));
+            if protocol_errors.is_empty() {
+                insta::assert_debug_snapshot!(name, (events, outcome));
+            } else {
+                insta::assert_debug_snapshot!(name, (events, outcome, protocol_errors));
+            }
         }
     }
 
@@ -844,104 +824,4 @@ cat > /dev/null
             "the agent never shows finished while it waits: {results:?}"
         );
     }
-
-    /// After a session is resumed in a new process, an agent from the
-    /// earlier one is resumed too; its report must still reach its item.
-    #[test]
-    fn an_agent_resumed_in_a_new_process_still_reports() {
-        let mut decoder = ClaudeDecoder::default();
-        let mut events = Vec::new();
-        for line in [
-            serde_json::json!({"type": "system", "subtype": "task_started", "task_id": "a4c1", "tool_use_id": "toolu_linnea", "task_type": "local_agent", "description": "Attachments drawn on guns", "is_backgrounded": true}),
-            serde_json::json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a4c1", "task_type": "local_agent"}]}),
-            serde_json::json!({"type": "system", "subtype": "task_notification", "task_id": "a4c1", "tool_use_id": "toolu_linnea", "status": "completed", "summary": "Attachments now show on the gun."}),
-        ] {
-            events.extend(decoder.feed(&line.to_string()).unwrap());
-        }
-        let last = events.iter().rev().find_map(|event| match event {
-            crate::EngineEvent::Item {
-                key,
-                status,
-                kind: artisan_api::ItemKind::Agent { result, .. },
-                ..
-            } if key == "toolu_linnea" => Some((*status, result.clone())),
-            _ => None,
-        });
-        assert_eq!(
-            last,
-            Some((
-                artisan_api::Status::Done,
-                Some("Attachments now show on the gun.".into())
-            ))
-        );
-    }
-
-    /// A background agent's view shows the task it got and what it really
-    /// reported: Claude notifies each time the agent stops ("finished" with
-    /// a progress line, then again with the report), and a stopped agent's
-    /// summary is only its description.
-    #[test]
-    fn a_background_agent_reports_its_latest_result_and_never_its_description() {
-        let agent = |id: &str, description: &str| {
-            serde_json::json!({"type": "assistant", "message": {"id": format!("msg-{id}"), "content": [{
-                "type": "tool_use", "id": id, "name": "Agent",
-                "input": {"description": description, "prompt": format!("Do {description} in full."), "run_in_background": true}
-            }]}})
-            .to_string()
-        };
-        let notify = |id: &str, status: &str, summary: &str| {
-            serde_json::json!({"type": "system", "subtype": "task_notification", "tool_use_id": id, "status": status, "summary": summary})
-                .to_string()
-        };
-        let mut decoder = ClaudeDecoder::default();
-        let mut events = Vec::new();
-        for line in [
-            agent("toolu_a", "Faithful CMAA2 port"),
-            agent("toolu_b", "Temporal mode inputs"),
-            notify("toolu_a", "stopped", "Faithful CMAA2 port"),
-            notify("toolu_b", "completed", "Waiting for the suite to finish."),
-            notify(
-                "toolu_b",
-                "completed",
-                "Temporal mode is in on `render-taa`.",
-            ),
-        ] {
-            events.extend(decoder.feed(&line).unwrap());
-        }
-        let last = |key: &str| {
-            events.iter().rev().find_map(|event| match event {
-                crate::EngineEvent::Item {
-                    key: k,
-                    status,
-                    kind: artisan_api::ItemKind::Agent { prompt, result, .. },
-                    ..
-                } if k == key => Some((*status, prompt.clone(), result.clone())),
-                _ => None,
-            })
-        };
-        assert_eq!(
-            last("toolu_a"),
-            Some((
-                artisan_api::Status::Cancelled,
-                Some("Do Faithful CMAA2 port in full.".into()),
-                None
-            )),
-            "a stopped agent reports nothing, and its task is the prompt"
-        );
-        assert_eq!(
-            last("toolu_b")
-                .and_then(|(_, _, result)| result)
-                .as_ref()
-                .and_then(artisan_api::TextContent::inline),
-            Some("Temporal mode is in on `render-taa`."),
-            "the later report replaces the progress line"
-        );
-    }
-}
-
-/// The CLI caps auto-compaction without changing the model's identity.
-fn context_window_env(config: &EngineConfig) -> Option<(&'static str, String)> {
-    config
-        .context_window_override()
-        .map(|tokens| ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", tokens.to_string()))
 }

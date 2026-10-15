@@ -2,12 +2,12 @@
 //! by pasting what `ae forge pair` printed.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use anyhow::Result;
 use editor_core::hosts::{self, LocalTarget};
 use editor_core::{ConnectionStatus, HostConfig, HostId, HostKind, SettingsPage};
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{card, error_text, header, row, section_shell};
 use editor_ui::text_editor::{TextEditor, TextEditorEvent};
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -316,13 +316,12 @@ pub(crate) fn render(settings: &Settings, theme: &ArtisanTheme, cx: &mut Context
             page::label(SettingsPage::Hosts),
             page::description(SettingsPage::Hosts),
         ))
-        .child(section_shell(
-            theme,
-            "paired",
-            "Paired hosts",
-            None,
-            None,
-            card(theme, rows),
-        ))
-        .child(section_shell(theme, "pair", "Pair a host", None, None, add))
+        .child(
+            section_shell(theme, "Paired hosts", None, None, card(theme, rows))
+                .debug_selector("settings-section-paired"),
+        )
+        .child(
+            section_shell(theme, "Pair a host", None, None, add)
+                .debug_selector("settings-section-pair"),
+        )
 }

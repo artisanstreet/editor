@@ -14,10 +14,13 @@ current shape.
 ```
 shared
   artisan-api          wire types: ids, Item, Thread, Run, Event, requests, TLS helpers
+  artisan-mentions     the `$skill`/`@connector` mention grammar (composer and Forge)
+  artisan-markdown-index  Markdown leaf index Forge stores and the Editor reads
 
 forge
-  forge-store          rusqlite schema, single writer thread, blobs, legacy import  → api
-  forge-engines        Harness contract, adapters, installs, sign-in, usage, skills → api
+  forge-content        which texts and collections become stored sources       → api
+  forge-store          rusqlite schema, single writer thread, blobs, legacy import  → api, content
+  forge-engines        Harness contract, adapters, installs, sign-in, usage, skills → api, content
   forge-runs           live runs: send, steer, answer, cancel                       → store, engines
   forge-http           axum routes, mutual-TLS auth, SSE event stream, pairing      → runs, store
   ae (bin)             CLI, installer, `ae forge serve`                             → http, engines, store
@@ -99,6 +102,12 @@ Each adapter is a pure decoder (lines in, events out) plus a thin driver:
 | Codex | `codex app-server` JSON-RPC over stdio |
 | OpenCode | `opencode serve` HTTP + global `/api/event` SSE |
 | Grok, Cursor | ACP JSON-RPC over stdio |
+
+An approval rides on the item it gates (`Tool`/`Plan`, `AwaitingUser`), keyed
+like that item, so an answer reaches the engine by the item's native id.
+Decoders keep their own copy of each item they may still change; once it
+settles they keep only its stored-source descriptors (`retained.rs`), which is
+what bounds their memory.
 
 Adapters are tested with recorded transcripts
 (`forge-engines/transcripts/<engine>/*.jsonl`) and insta snapshots.

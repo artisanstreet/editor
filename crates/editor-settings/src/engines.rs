@@ -1,7 +1,6 @@
 //! Engine capabilities, installation, sign-in and model defaults reported by Forge.
 
 use crate::Settings;
-use crate::chrome::{card, error_text, header, row, section_shell};
 use crate::page;
 use artisan_api::{
     EngineCommand, EngineConfig, EngineId, EngineStatus, InstallState, Integrity, SignInState,
@@ -9,6 +8,7 @@ use artisan_api::{
 use editor_core::{HostData, HostId};
 use editor_ui::badge::Badge;
 use editor_ui::button::ButtonVariant;
+use editor_ui::page::{PageBlock, card, error_text, header, row, section_shell};
 use editor_ui::text_editor::TextEditor;
 use editor_ui::theme::ArtisanTheme;
 use gpui::{
@@ -260,14 +260,10 @@ pub(crate) fn render(
         ],
     );
     page = page
-        .child(section_shell(
-            theme,
-            "availability",
-            "Availability",
-            None,
-            None,
-            availability,
-        ))
+        .child(
+            section_shell(theme, "Availability", None, None, availability)
+                .debug_selector("settings-section-availability"),
+        )
         .child(render_installation(settings, &status, busy, theme, cx))
         .child(render_account(settings, &status, busy, theme, cx));
     if let Some(error) = settings.engines.errors.get(&engine) {
@@ -389,7 +385,7 @@ fn render_installation(
     busy: bool,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let label = page::engine_label(engine);
     let mut blocks = vec![state_band(
@@ -494,7 +490,6 @@ fn render_installation(
     }
     section_shell(
         theme,
-        "installation",
         "Installation",
         None,
         Some(refresh_action(
@@ -506,6 +501,7 @@ fn render_installation(
         )),
         card(theme, blocks),
     )
+    .debug_selector("settings-section-installation")
 }
 
 /// How this engine's downloads are verified, the weaker guarantee said
@@ -604,7 +600,7 @@ fn render_account(
     busy: bool,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let mut blocks = vec![state_band(
         theme,
@@ -735,7 +731,6 @@ fn render_account(
     }
     section_shell(
         theme,
-        "account",
         "Account",
         None,
         Some(refresh_action(
@@ -747,6 +742,7 @@ fn render_account(
         )),
         card(theme, blocks),
     )
+    .debug_selector("settings-section-account")
 }
 
 fn render_models(
@@ -755,7 +751,7 @@ fn render_models(
     default_model: Option<&str>,
     theme: &ArtisanTheme,
     cx: &mut Context<Settings>,
-) -> Div {
+) -> PageBlock {
     let engine = status.engine;
     let label = page::engine_label(engine);
     let mut blocks = Vec::new();
@@ -838,7 +834,8 @@ fn render_models(
                 .into_any_element(),
         );
     }
-    section_shell(theme, "models", "Models", None, None, card(theme, blocks))
+    section_shell(theme, "Models", None, None, card(theme, blocks))
+        .debug_selector("settings-section-models")
 }
 
 #[cfg(test)]

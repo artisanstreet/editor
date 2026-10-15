@@ -1,6 +1,6 @@
 //! A controlled switch with component-owned focus, geometry and semantics.
 
-use crate::theme::{ArtisanTheme, ThemeMode};
+use crate::theme::ArtisanTheme;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, BoxShadow, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
@@ -89,7 +89,7 @@ impl RenderOnce for Switch {
             .relative()
             .w(width)
             .h(height)
-            .rounded(px(9999.0))
+            .rounded_full()
             .flex()
             .items_center()
             .border_1()
@@ -97,25 +97,15 @@ impl RenderOnce for Switch {
             .bg(if checked {
                 theme.colors.primary.to_paint()
             } else {
-                theme
-                    .colors
-                    .input
-                    .with_alpha(if theme.mode == ThemeMode::Dark {
-                        0.8
-                    } else {
-                        1.0
-                    })
-                    .to_paint()
+                theme.colors.input.with_alpha(0.8).to_paint()
             })
             .child(
                 div()
                     .relative()
                     .left(if checked { travel } else { px(0.0) })
                     .size(thumb)
-                    .rounded(px(9999.0))
-                    .bg(if theme.mode == ThemeMode::Light {
-                        theme.colors.background.to_paint()
-                    } else if checked {
+                    .rounded_full()
+                    .bg(if checked {
                         theme.colors.primary_foreground.to_paint()
                     } else {
                         theme.colors.foreground.to_paint()
@@ -142,7 +132,7 @@ impl RenderOnce for Switch {
             .h(height + px(16.0))
             .mx(px(-12.0))
             .my(px(-8.0))
-            .rounded(px(9999.0))
+            .rounded_full()
             .child(track)
             .when_some(self.debug_selector, |el, selector| {
                 el.debug_selector(move || selector.to_string())

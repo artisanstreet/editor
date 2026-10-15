@@ -3,6 +3,7 @@
 use crate::{Store, collection, content, source_index};
 use anyhow::{Result, ensure};
 use artisan_api::{Item, now};
+use forge_content::ItemTexts as _;
 use std::sync::Arc;
 
 impl Store {

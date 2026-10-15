@@ -9,7 +9,7 @@ use artisan_api::{
     EngineId, Item, ItemId, ItemKind, ItemsPage, ItemsQuery, Run, RunId, RunStatus, SendMessage,
     Seq, Status, ThreadId,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 
 /// What accepting a message changes on its thread besides activity. The run
 /// layer decides it; the store applies it in the input's own commit.
@@ -27,7 +27,8 @@ impl Store {
     pub async fn upsert_item(&self, new: NewItem) -> Result<Item> {
         let (id, thread_id) = (new.id.clone(), new.thread_id.clone());
         self.write(move |tx| {
-            if let Some(old) = read::item(tx, &new.id)? {
+            let native_id = new.native_id.clone();
+            let item = if let Some(old) = read::item(tx, &new.id)? {
                 ensure!(
                     old.thread_id == new.thread_id,
                     "item belongs to thread {}",
@@ -82,13 +83,12 @@ impl Store {
                     // was launched, in its own turn.
                     run_id: old.run_id.clone().or(new.run_id),
                     parent_id: new.parent_id.or_else(|| old.parent_id.clone()),
-                    native_id: new.native_id.or_else(|| old.native_id.clone()),
                     status: old.next_status(new.status),
                     created_at: old.created_at,
                     updated_at: old.updated_at,
                     kind,
                 };
-                tx.save_item(item, Some(old))
+                tx.save_item(item, Some(old))?
             } else {
                 let created_at = tx.created_at();
                 let mut new = new;
@@ -103,8 +103,10 @@ impl Store {
                         taken.iter().map(String::as_str),
                     ));
                 }
-                tx.save_item(fresh_item(new, created_at), None)
-            }
+                tx.save_item(fresh_item(new, created_at), None)?
+            };
+            tx.set_native_id(&item.id, native_id.as_deref())?;
+            Ok(item)
         })
         .await
         .with_context(|| format!("upsert item {id} in thread {thread_id}"))
@@ -285,7 +287,7 @@ impl Store {
         self.write(move |tx| {
             let inputs: Vec<Item> = read::items(
                 tx,
-                "SELECT body,native_id FROM items WHERE thread_id=?1 AND position<=?2 AND status='running'
+                "SELECT body FROM items WHERE thread_id=?1 AND position<=?2 AND status='running'
                     AND kind_type='user_message'",
                 params![thread.as_str(), through],
             )?;
@@ -455,6 +457,30 @@ impl Store {
     pub async fn item(&self, id: &ItemId) -> Result<Option<Item>> {
         let id = id.clone();
         self.read(move |conn| read::item(conn, &id).with_context(|| format!("read item {id}")))
+            .await
+    }
+
+    /// The engine's own id for an item: what an answer to it is routed by.
+    pub async fn native_id(&self, id: &ItemId) -> Result<Option<String>> {
+        let id = id.clone();
+        self.read(move |conn| {
+            conn.prepare_cached("SELECT native_id FROM items WHERE id=?1")?
+                .query_row([id.as_str()], |row| row.get::<_, Option<String>>(0))
+                .optional()
+                .map(Option::flatten)
+                .with_context(|| format!("read the engine id of item {id}"))
+        })
+        .await
+    }
+
+    /// The `Agent` item of `thread_id` an engine addresses as `address`.
+    pub async fn agent_by_address(
+        &self,
+        thread_id: &ThreadId,
+        address: &str,
+    ) -> Result<Option<ItemId>> {
+        let (thread_id, address) = (thread_id.clone(), address.to_owned());
+        self.read(move |conn| read::agent_by_address(conn, &thread_id, &address))
             .await
     }
 

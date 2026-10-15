@@ -1,6 +1,6 @@
 //! A sealed value slider that owns track geometry, focus, keyboard and drag behavior.
 
-use crate::theme::ArtisanTheme;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, TextStep, TypographyTokens};
 use gpui::prelude::FluentBuilder;
 use gpui::{
     App, Bounds, BoxShadow, ElementId, Entity, EventEmitter, FontWeight, InteractiveElement,
@@ -294,7 +294,7 @@ impl RenderOnce for Slider {
             .flex_1()
             .min_w(px(80.0))
             .h(px(20.0))
-            .rounded(px(6.0))
+            .rounded(RadiusTokens::value(RadiusStep::Sm))
             .border_1()
             .border_color(gpui::transparent_black())
             .when(!disabled, |track| track.cursor_ew_resize())
@@ -317,7 +317,7 @@ impl RenderOnce for Slider {
                     .right_0()
                     .top(px(9.0))
                     .h(px(2.0))
-                    .rounded(px(1.0))
+                    .rounded(RadiusTokens::value(RadiusStep::X3s))
                     .bg(theme.colors.foreground.with_alpha(0.1).to_paint()),
             )
             .child(
@@ -327,7 +327,7 @@ impl RenderOnce for Slider {
                     .top(px(9.0))
                     .h(px(2.0))
                     .w(relative(t))
-                    .rounded(px(1.0))
+                    .rounded(RadiusTokens::value(RadiusStep::X3s))
                     .bg(accent.to_paint()),
             )
             .child(
@@ -337,7 +337,7 @@ impl RenderOnce for Slider {
                     .left(relative(t))
                     .ml(px(-6.0))
                     .size(px(12.0))
-                    .rounded(px(6.0))
+                    .rounded(RadiusTokens::value(RadiusStep::Sm))
                     .border_2()
                     .border_color(accent.to_paint())
                     .bg(theme.colors.background.to_paint()),
@@ -363,7 +363,7 @@ impl RenderOnce for Slider {
                     .max_w(px(160.0))
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.muted_foreground.to_paint())
@@ -374,7 +374,7 @@ impl RenderOnce for Slider {
                 div()
                     .flex_shrink_0()
                     .whitespace_nowrap()
-                    .text_size(px(12.0))
+                    .text_size(TypographyTokens::size(TextStep::Xs))
                     .line_height(px(16.0))
                     .text_color(theme.colors.foreground.to_paint())
                     .child(readout),

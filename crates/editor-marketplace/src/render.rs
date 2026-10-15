@@ -7,16 +7,14 @@ use editor_core::{Screen, SettingsPage};
 use editor_ui::AssetId;
 use editor_ui::asset_seam::asset_glyph;
 use editor_ui::button::{Button, ButtonVariant};
-use editor_ui::card::{CardStyle, compact_card, compact_card_content};
+use editor_ui::card::CardStyle;
+use editor_ui::page;
 use editor_ui::status_chip::{ChipTone, chips_row, tone_color};
 use editor_ui::switch::{Switch, SwitchSize};
 use editor_ui::theme::ArtisanTheme;
 use editor_ui::wordmark_loader::WordmarkLoader;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, list, px};
-
-/// Content width, matching Settings.
-const CONTENT_MAX_WIDTH_PX: f32 = 896.0;
 
 pub(crate) enum Entry {
     Header,
@@ -95,7 +93,14 @@ impl Render for Marketplace {
                     cx.processor(move |this, index, _, cx| {
                         let content = match &this.entries[index] {
                             Entry::Header => {
-                                div().pt(px(48.0)).child(header(&theme)).into_any_element()
+                                div()
+                                .pt(px(48.0))
+                                .child(page::header(
+                                    &theme,
+                                    "Marketplace",
+                                    "Skills and the global prompt Artisan keeps in every engine. Changes reach each engine on its next session.",
+                                ))
+                                .into_any_element()
                             }
                             Entry::Prompt => this.prompt_section(&theme, cx).into_any_element(),
                             Entry::Notices => this.notices(&theme, cx).into_any_element(),
@@ -111,7 +116,10 @@ impl Render for Marketplace {
                                 .children(intro.map(|text| muted(&theme, text)))
                                 .into_any_element(),
                             Entry::Empty(text) => {
-                                card(&theme, vec![muted(&theme, *text).py(px(14.0))])
+                                page::card(
+                                    &theme,
+                                    vec![muted(&theme, text).py(px(14.0)).into_any_element()],
+                                )
                                     .into_any_element()
                             }
                             Entry::Skill { row, first, last } => {
@@ -145,7 +153,7 @@ impl Render for Marketplace {
                             .child(
                                 div()
                                     .w_full()
-                                    .max_w(px(CONTENT_MAX_WIDTH_PX))
+                                    .max_w(px(page::CONTENT_MAX_WIDTH))
                                     .px(px(24.0))
                                     .child(content),
                             )
@@ -158,7 +166,7 @@ impl Render for Marketplace {
 }
 
 impl Marketplace {
-    fn prompt_section(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> Div {
+    fn prompt_section(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> page::PageBlock {
         let prompt = self
             .core
             .read(cx)
@@ -216,13 +224,14 @@ impl Marketplace {
             .py(px(14.0))
             .child(text)
             .child(action);
-        section(
+        page::section_shell(
             theme,
-            "global-prompt",
             "Global prompt",
             Some("Standing instructions every engine reads before your messages."),
-            card(theme, vec![row]),
+            None,
+            page::card(theme, vec![row.into_any_element()]),
         )
+        .debug_selector("marketplace-section-global-prompt")
     }
 
     fn notices(&self, theme: &ArtisanTheme, cx: &mut Context<Self>) -> Div {
@@ -247,7 +256,8 @@ impl Marketplace {
         .into_iter()
         .flatten()
         {
-            body = body.child(notice_box(theme, error));
+            body = body
+                .child(page::notice(theme, error.to_owned()).debug_selector("marketplace-notice"));
         }
         if retry {
             body = body.child(
@@ -370,68 +380,6 @@ impl Marketplace {
     }
 }
 
-fn header(theme: &ArtisanTheme) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .text_size(px(20.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.colors.foreground.to_paint())
-                .child("Marketplace"),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .text_sm()
-                .text_color(theme.colors.muted_foreground.to_paint())
-                .child(
-                    "Skills and the global prompt Artisan keeps in every engine. Changes reach each engine on its next session.",
-                ),
-        )
-}
-
-fn section(
-    theme: &ArtisanTheme,
-    anchor: &'static str,
-    title: &str,
-    intro: Option<&str>,
-    body: Div,
-) -> Div {
-    let mut head = div().flex().flex_col().child(
-        div()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.colors.foreground.to_paint())
-            .child(title.to_owned()),
-    );
-    if let Some(intro) = intro {
-        head = head.child(div().mt(px(4.0)).child(muted(theme, intro)));
-    }
-    div()
-        .flex()
-        .flex_col()
-        .mt(px(40.0))
-        .debug_selector(move || format!("marketplace-section-{anchor}"))
-        .child(head)
-        .child(div().mt(px(12.0)).child(body))
-}
-
-fn card(theme: &ArtisanTheme, rows: Vec<Div>) -> Div {
-    let style = CardStyle::resolve(*theme);
-    let border = theme.colors.border.to_paint();
-    let mut card = compact_card(style).w_full().gap(px(0.0)).py(px(0.0));
-    for (index, row) in rows.into_iter().enumerate() {
-        let mut band = compact_card_content(style).w_full().child(row);
-        if index > 0 {
-            band = band.border_t_1().border_color(border);
-        }
-        card = card.child(band);
-    }
-    card
-}
-
 fn attention_line(theme: &ArtisanTheme, text: &str) -> Div {
     let tone = tone_color(theme, ChipTone::Warning);
     div()
@@ -446,20 +394,6 @@ fn attention_line(theme: &ArtisanTheme, text: &str) -> Div {
                 .size(px(12.0))
                 .text_color(tone.with_alpha(0.8).to_paint()),
         )
-        .child(text.to_owned())
-}
-
-fn notice_box(theme: &ArtisanTheme, text: &str) -> Div {
-    let tone = tone_color(theme, ChipTone::Danger);
-    div()
-        .mt(px(24.0))
-        .px(px(12.0))
-        .py(px(10.0))
-        .rounded(px(10.0))
-        .bg(tone.with_alpha(0.10).to_paint())
-        .text_sm()
-        .text_color(tone.to_paint())
-        .debug_selector(|| "marketplace-notice".to_owned())
         .child(text.to_owned())
 }
 

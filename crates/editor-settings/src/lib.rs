@@ -18,14 +18,14 @@ mod tests;
 mod threads;
 
 use artisan_api::EngineId;
-use chrome::{
-    CONTENT_MAX_WIDTH, NAV_CONTENT_GAP, NAV_RAIL_WIDTH, anchor_list, nav_group_label, nav_heading,
-    nav_link,
-};
+use chrome::{anchor_list, nav_link};
 use editor_core::{Core, CoreEvent, HostData, HostEvent, Screen, SettingsPage};
 use editor_ui::button::{Button, ButtonVariant};
+use editor_ui::page::{
+    CONTENT_MAX_WIDTH, NAV_CONTENT_GAP, NAV_RAIL_WIDTH, nav_group_label, nav_heading,
+};
 use editor_ui::switch::{Switch, SwitchSize};
-use editor_ui::theme::ArtisanTheme;
+use editor_ui::theme::{ActiveTheme as _, ArtisanTheme};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, InteractiveElement as _,
@@ -43,6 +43,8 @@ pub struct Settings {
     #[cfg(test)]
     completion_gate: Option<tests::CompletionGate>,
     core: Entity<Core>,
+    /// The application theme, read once from the app's global.
+    theme: ArtisanTheme,
     build: BuildInfo,
     /// The engine the Engines page shows; the host's first engine until
     /// the user picks one.
@@ -79,6 +81,7 @@ impl Settings {
             #[cfg(test)]
             completion_gate: None,
             core,
+            theme: *cx.theme(),
             build,
             engine: None,
             engines: engines::EnginesForm::new(cx),
@@ -269,16 +272,15 @@ impl Settings {
             (_, None) => div()
                 .flex()
                 .flex_col()
-                .child(chrome::header(
+                .child(editor_ui::page::header(
                     theme,
                     page::label(page),
                     page::description(page),
                 ))
-                .child(
-                    div()
-                        .mt(px(32.0))
-                        .child(chrome::note(theme, "Pair a host on the Hosts page first.")),
-                )
+                .child(div().mt(px(32.0)).child(editor_ui::page::note(
+                    theme,
+                    "Pair a host on the Hosts page first.",
+                )))
                 .into_any_element(),
             (SettingsPage::GlobalPrompt, Some(_)) => {
                 prompt::render(self, theme, cx).into_any_element()
@@ -306,7 +308,7 @@ impl Settings {
         disabled: bool,
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> AnyElement {
-        Button::text(id, theme(), label)
+        Button::text(id, self.theme, label)
             .variant(variant)
             .disabled(disabled)
             .on_activate(on_click)
@@ -331,7 +333,7 @@ impl Settings {
     ) -> AnyElement {
         let switch = Switch::new(
             id,
-            theme(),
+            self.theme,
             SwitchSize::Default,
             checked,
             id.trim_start_matches("settings-").replace('-', " "),
@@ -349,7 +351,7 @@ impl Settings {
 impl Render for Settings {
     /// Navigation wraps above the page in narrow windows.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = theme();
+        let theme = self.theme;
         let page = self.page(cx);
         let narrow = window.viewport_size().width < px(760.0);
         let nav = self.render_nav(&theme, page, cx);
@@ -383,9 +385,4 @@ impl Render for Settings {
                 ),
             )
     }
-}
-
-/// The application theme is resolved once by editor-ui.
-fn theme() -> ArtisanTheme {
-    ArtisanTheme::default()
 }

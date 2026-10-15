@@ -1,8 +1,12 @@
 //! One maintained-parser scan into compact native semantic leaf descriptors.
 use super::PARSE_OPTIONS;
-use super::*;
+use super::{
+    Arc, BlockShape, Event, INDEX_BYTES, IndexedEvent, IndexedLeaf, Kind, LeafContext, LeafSpacing,
+    ListLevel, MarkdownIndex, MarkdownIndexError, SOURCE_BYTES, TableAlignment, Tag, TagEnd, Text,
+    Token, event_heap_bytes,
+};
 use pulldown_cmark::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct OpenList {
@@ -21,6 +25,10 @@ struct ActiveLeaf {
     implicit: bool,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the parser's events, keeping list, table and leaf state together"
+)]
 pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
     if source.len() > SOURCE_BYTES {
         return Err(MarkdownIndexError::SourceBudget);
@@ -32,7 +40,7 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         source_bytes: source.len(),
     };
     let mut contexts = HashMap::<LeafContext, usize>::new();
-    let mut decoded = HashMap::<Arc<str>, ()>::new();
+    let mut decoded = HashSet::<Arc<str>>::new();
     let mut lists = Vec::<OpenList>::new();
     let mut items = Vec::<OpenItem>::new();
     let mut alignments = Vec::<TableAlignment>::new();
@@ -201,17 +209,21 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
                 _ => {}
             }
             let kind = match &event {
-                Event::Start(Tag::Paragraph) => Some(Kind::Paragraph),
                 Event::Start(Tag::Heading { .. }) => Some(Kind::Heading),
                 Event::Start(Tag::CodeBlock(_)) => Some(Kind::Code),
                 Event::Start(Tag::HtmlBlock) | Event::Html(_) => Some(Kind::Html),
                 Event::Start(Tag::TableHead) => Some(Kind::TableRow { header: true }),
                 Event::Start(Tag::TableRow) => Some(Kind::TableRow { header: false }),
+                // Inline content outside a paragraph opens one implicitly.
                 Event::Text(_)
                 | Event::Code(_)
                 | Event::InlineHtml(_)
                 | Event::Start(
-                    Tag::Emphasis | Tag::Strong | Tag::Link { .. } | Tag::Image { .. },
+                    Tag::Paragraph
+                    | Tag::Emphasis
+                    | Tag::Strong
+                    | Tag::Link { .. }
+                    | Tag::Image { .. },
                 ) => Some(Kind::Paragraph),
                 _ => None,
             };
@@ -354,7 +366,7 @@ pub(super) fn build(source: &str) -> Result<MarkdownIndex, MarkdownIndexError> {
         }
         result.leaves.push(current.leaf);
     }
-    result.decoded = decoded.into_keys().collect();
+    result.decoded = decoded.into_iter().collect();
     if result.resident_bytes() > INDEX_BYTES {
         return Err(MarkdownIndexError::IndexBudget);
     }
@@ -369,9 +381,9 @@ fn record_spacing(
 ) {
     let in_item = !items.is_empty();
     let previous = if let Some(item) = items.last_mut() {
-        std::mem::replace(&mut item.previous, Some(shape))
+        item.previous.replace(shape)
     } else {
-        std::mem::replace(root, Some(shape))
+        root.replace(shape)
     };
     spacing.push(LeafSpacing::Sibling {
         previous,
@@ -403,16 +415,16 @@ fn intern_context(
 fn intern_text(
     text: &str,
     source: &str,
-    decoded: &mut HashMap<Arc<str>, ()>,
+    decoded: &mut HashSet<Arc<str>>,
     bytes: &mut usize,
 ) -> Result<Text, MarkdownIndexError> {
     let start = (text.as_ptr() as usize).checked_sub(source.as_ptr() as usize);
-    if let Some(start) = start.filter(|start| *start <= source.len()) {
-        if source.get(start..start.saturating_add(text.len())) == Some(text) {
-            return Ok(Text::Range(start..start + text.len()));
-        }
+    if let Some(start) = start.filter(|start| *start <= source.len())
+        && source.get(start..start.saturating_add(text.len())) == Some(text)
+    {
+        return Ok(Text::Range(start..start + text.len()));
     }
-    if let Some((known, _)) = decoded.get_key_value(text) {
+    if let Some(known) = decoded.get(text) {
         return Ok(Text::Decoded(known.clone()));
     }
     if bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64) > INDEX_BYTES {
@@ -420,6 +432,6 @@ fn intern_text(
     }
     let text: Arc<str> = Arc::from(text);
     *bytes = bytes.saturating_add(text.len() + 2 * std::mem::size_of::<usize>() + 64);
-    decoded.insert(text.clone(), ());
+    decoded.insert(text.clone());
     Ok(Text::Decoded(text))
 }

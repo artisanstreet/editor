@@ -13,7 +13,6 @@
 //! POST   /threads/{id}/messages              SendMessage → Item
 //! POST   /threads/{id}/cancel
 //! POST   /items/{id}/answer                  Answer
-//! PUT    /settings/{key}                     JSON value
 //! GET    /drafts/{scope}   PUT /drafts/{scope}   JSON value
 //! PUT    /blobs  (raw WebP bytes)            BlobRef
 //! GET    /blobs/{sha256}

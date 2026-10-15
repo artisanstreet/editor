@@ -19,6 +19,7 @@
 //! Each family of kinds owns one submodule and one `parse` entry point that
 //! claims its kinds; [`parse_block`] asks each family in turn.
 
+use crate::theme::{ArtisanTheme, TextStep, TypographyTokens};
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -28,10 +29,8 @@ use gpui::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::theme::ArtisanTheme;
-
 mod actions;
-pub(super) mod budget;
+pub(super) use super::budget;
 mod charts;
 mod code;
 mod data;
@@ -282,7 +281,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
             .gap(px(2.0))
             .children(title.map(|title| {
                 div()
-                    .text_size(px(15.0))
+                    .text_size(TypographyTokens::size(TextStep::SmMid))
                     .line_height(px(22.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(theme.colors.foreground.to_paint())
@@ -290,7 +289,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
             }))
             .children(prepared.subtitle.clone().map(|subtitle| {
                 div()
-                    .text_size(px(13.0))
+                    .text_size(TypographyTokens::size(TextStep::XsMid))
                     .line_height(px(20.0))
                     .text_color(theme.colors.muted_foreground.to_paint())
                     .child(subtitle)
@@ -306,7 +305,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
         .child(prepared.block.render(cx))
         .children(prepared.caption.clone().map(|caption| {
             div()
-                .text_size(px(13.0))
+                .text_size(TypographyTokens::size(TextStep::XsMid))
                 .line_height(px(20.0))
                 .text_color(theme.colors.muted_foreground.to_paint())
                 .child(caption)
@@ -317,7 +316,7 @@ pub(super) fn render_content(prepared: &Prepared, cx: &BlockContext<'_>) -> AnyE
 /// The quiet placeholder of a fence still streaming.
 pub(super) fn render_pending(kind: &SharedString, theme: &ArtisanTheme) -> AnyElement {
     div()
-        .text_size(px(14.0))
+        .text_size(TypographyTokens::size(TextStep::Sm))
         .line_height(px(22.0))
         .text_color(theme.colors.muted_foreground.to_paint())
         .child(SharedString::from(format!("Drawing {kind}…")))

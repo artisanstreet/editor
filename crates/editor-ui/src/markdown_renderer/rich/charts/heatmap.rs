@@ -2,6 +2,7 @@
 //! with a legend ramp and a hover readout of the cell under the pointer.
 
 use crate::markdown_renderer::rich::budget;
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens};
 use std::sync::Arc;
 
 use gpui::{
@@ -14,7 +15,6 @@ use super::super::{BlockContext, RichBlock, kit};
 use super::frame::{self, ReadoutRow, Tick};
 use super::scale::{Domain, f32_of, f64_of, index_of, reading};
 use super::scene::{Probe, Shape, fractions, plot_canvas, probe, probed_width};
-use crate::theme::ArtisanTheme;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -145,11 +145,11 @@ impl Heatmap {
         }
     }
 
-    fn color(&self, theme: &ArtisanTheme, value: f64) -> gpui::Hsla {
+    fn color(&self, value: f64) -> gpui::Hsla {
         let t = self.position(value);
         match self.scale {
-            Scale::Sequential => kit::sequential_color(theme, t),
-            Scale::Diverging => kit::diverging_color(theme, t),
+            Scale::Sequential => kit::sequential_color(t),
+            Scale::Diverging => kit::diverging_color(t),
         }
         .to_paint()
     }
@@ -380,7 +380,7 @@ impl HeatmapView {
             Scale::Sequential => (
                 (0..stop_count)
                     .map(|step| {
-                        kit::sequential_color(theme, f32_of(f64_of(step) / f64_of(stop_count - 1)))
+                        kit::sequential_color(f32_of(f64_of(step) / f64_of(stop_count - 1)))
                             .to_paint()
                     })
                     .collect(),
@@ -392,7 +392,7 @@ impl HeatmapView {
                     (0..stop_count)
                         .map(|step| {
                             let t = f32_of(f64_of(step) / f64_of(stop_count - 1)) * 2.0 - 1.0;
-                            kit::diverging_color(theme, t).to_paint()
+                            kit::diverging_color(t).to_paint()
                         })
                         .collect(),
                     [reading(-reach, unit), reading(reach, unit)],
@@ -407,11 +407,15 @@ impl HeatmapView {
             .pl(px(indent))
             .child(kit::label(theme, low))
             .child(
-                div().flex().gap(px(2.0)).children(
-                    stops
-                        .into_iter()
-                        .map(|color| div().size(px(10.0)).rounded(px(2.0)).bg(color)),
-                ),
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .children(stops.into_iter().map(|color| {
+                        div()
+                            .size(px(10.0))
+                            .rounded(RadiusTokens::value(RadiusStep::X2s))
+                            .bg(color)
+                    })),
             )
             .child(kit::label(theme, high))
     }
@@ -440,7 +444,7 @@ fn row_shapes(
                 x1: x1 - inset,
                 y0: 0.05,
                 y1: 0.95,
-                color: spec.color(theme, value),
+                color: spec.color(value),
             });
         }
     }
@@ -477,7 +481,7 @@ mod native_window_tests {
                 .on_action(crate::focus_navigation::focus_previous)
                 .child(HeatmapView {
                     id: "native-heatmap".into(),
-                    theme: ArtisanTheme::default(),
+                    theme: ArtisanTheme::resolved(),
                     spec: self.spec.clone(),
                 })
         }
@@ -500,7 +504,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-heatmap-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-heatmap-row-50").is_none());
         cx.update(|window, cx| {
@@ -520,7 +524,7 @@ mod native_window_tests {
                 .unwrap()
                 .size
                 .height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         // Parsing an unchanged source can produce a new Arc. It must preserve
         // the selected endpoint and the native list's viewport.
@@ -547,7 +551,7 @@ mod native_window_tests {
                 .unwrap()
                 .size
                 .height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         cx.simulate_keystrokes("home");
         cx.run_until_parked();
@@ -556,7 +560,7 @@ mod native_window_tests {
         });
         assert_eq!(
             cx.debug_bounds("native-heatmap-row-0").unwrap().size.height,
-            ArtisanTheme::default().density.control_sm
+            ArtisanTheme::resolved().density.control_sm
         );
         assert!(cx.debug_bounds("native-heatmap-row-999").is_none());
     }
@@ -570,7 +574,13 @@ mod native_window_tests {
             scale: Scale::Sequential,
         })
         .unwrap();
-        assert_eq!(row_shapes(&map, &ArtisanTheme::default(), 0, None).len(), 1);
-        assert_eq!(row_shapes(&map, &ArtisanTheme::default(), 1, None).len(), 2);
+        assert_eq!(
+            row_shapes(&map, &ArtisanTheme::resolved(), 0, None).len(),
+            1
+        );
+        assert_eq!(
+            row_shapes(&map, &ArtisanTheme::resolved(), 1, None).len(),
+            2
+        );
     }
 }

@@ -391,35 +391,9 @@ async fn restarting_forge_interrupts_live_runs_and_cancels_their_waiting_items()
         .unwrap()
         .unwrap();
     assert_eq!(tool.status, Status::Cancelled);
-    assert_eq!(tool.native_id.as_deref(), Some("toolu_1"));
-    assert!(
-        serde_json::to_value(&tool)
-            .unwrap()
-            .get("native_id")
-            .is_none()
-    );
     assert_eq!(
-        store.item(&tool.id).await.unwrap().unwrap().native_id,
-        tool.native_id
-    );
-    assert_eq!(
-        store
-            .items_page(
-                &thread,
-                ItemsQuery {
-                    before: None,
-                    after: None,
-                    limit: None
-                }
-            )
-            .await
-            .unwrap()
-            .items
-            .iter()
-            .find(|item| item.id == tool.id)
-            .unwrap()
-            .native_id,
-        tool.native_id
+        store.native_id(&tool.id).await.unwrap().as_deref(),
+        Some("toolu_1")
     );
     assert_eq!(
         store
@@ -1299,7 +1273,7 @@ async fn canonical_agent_message_appears_in_both_pages_without_another_row() {
     sent.kind = ItemKind::Tool {
         tool: ToolKind::AgentMessage {
             recipient: "opaque-address".into(),
-            recipient_label: "an agent".into(),
+            target: Some(owner.id.clone()),
             summary: None,
             text: "hello".into(),
         },

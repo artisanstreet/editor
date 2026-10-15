@@ -2,7 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use crate::theme::{ArtisanTheme, Oklch, ShadowLayer, SurfaceStep};
+use crate::theme::{
+    ArtisanTheme, Oklch, RadiusStep, RadiusTokens, ShadowLayer, SurfaceStep, TextStep,
+    TypographyTokens,
+};
 use gpui::{
     AnyElement, App, Background, BoxShadow, Div, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, RenderOnce, SharedString, Styled as _, Window, div,
@@ -184,7 +187,7 @@ impl RenderOnce for GlassBadge {
             .child(
                 div()
                     .relative()
-                    .text_size(px(10.0))
+                    .text_size(TypographyTokens::size(TextStep::X3s))
                     .line_height(px(16.0))
                     .font_features(FEATURES.clone())
                     .text_color(self.theme.colors.foreground.to_paint())
@@ -197,7 +200,7 @@ impl RenderOnce for GlassBadge {
     }
 }
 
-pub(crate) const COMPOSER_RADIUS: f32 = 18.0;
+pub(crate) const COMPOSER_RADIUS: Pixels = RadiusTokens::value(RadiusStep::X2l);
 /// Draft chrome shares geometry with its optional TabCard shell. Content and
 /// input/drop handlers remain owned by the draft view.
 #[derive(IntoElement)]
@@ -222,7 +225,7 @@ impl ComposerFrame {
 }
 impl RenderOnce for ComposerFrame {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let radius = px(COMPOSER_RADIUS);
+        let radius = COMPOSER_RADIUS;
         let mut root = div()
             .relative()
             .w_full()
@@ -304,7 +307,7 @@ mod composer_frame_tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div().size_full().flex().flex_col().child(
                 ComposerFrame::new(
-                    ArtisanTheme::default(),
+                    ArtisanTheme::resolved(),
                     div()
                         .h(px(96.0))
                         .child(if self.loaded { "Ready" } else { "Loading" }),

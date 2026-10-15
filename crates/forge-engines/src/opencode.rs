@@ -457,7 +457,10 @@ async fn subscribe(api: &Api) -> Result<mpsc::Receiver<String>> {
         response.status()
     );
     let (sender, mut receiver) = mpsc::channel(256);
-    tokio::spawn(read_events(response, sender));
+    // The reader keeps the run's span, so its log names the thread.
+    tokio::spawn(tracing::Instrument::in_current_span(read_events(
+        response, sender,
+    )));
     let first = tokio::time::timeout(REQUEST_TIMEOUT, receiver.recv())
         .await
         .map_err(|_| anyhow!("OpenCode's event stream sent nothing"))?

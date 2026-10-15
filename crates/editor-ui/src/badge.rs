@@ -1,5 +1,5 @@
 //! Noninteractive outline badges own their frame and typography.
-use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep, ThemeMode};
+use crate::theme::{ArtisanTheme, RadiusStep, RadiusTokens, SurfaceStep};
 use gpui::{
     App, FontWeight, IntoElement, ParentElement as _, RenderOnce, SharedString, Styled as _,
     Window, div,
@@ -21,10 +21,7 @@ impl Badge {
 impl RenderOnce for Badge {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let theme = self.theme;
-        let surface = match theme.mode {
-            ThemeMode::Light => SurfaceStep::S100,
-            ThemeMode::Dark => SurfaceStep::S900,
-        };
+        let surface = SurfaceStep::S900;
         div()
             .flex()
             .flex_shrink_0()

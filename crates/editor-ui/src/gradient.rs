@@ -17,9 +17,10 @@ pub fn vertical_gradient(top: Oklch, bottom: Oklch) -> Background {
     )
 }
 
-/// Theme-resolved hover gradient.
+/// Theme-resolved hover gradient. Elements take it through
+/// [`crate::hover_card::hover_fill`]; charts paint it directly.
 #[must_use]
-pub fn hover_fill_gradient(theme: ArtisanTheme) -> Background {
+pub(crate) fn hover_fill_gradient(theme: ArtisanTheme) -> Background {
     vertical_gradient(
         theme.interaction.hover_fill_top,
         theme.interaction.hover_fill_bottom,

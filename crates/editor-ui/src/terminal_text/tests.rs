@@ -7,7 +7,7 @@ use gpui::{FontWeight, HighlightStyle, hsla};
 use super::{
     TerminalColor, TerminalLine, TerminalPalette, TerminalScreen, TerminalStyle, highlights,
 };
-use crate::theme::ThemeMode;
+use crate::theme::ArtisanTheme;
 
 /// Vite 5 startup banner, including its leading clear screen.
 const VITE_BANNER: &str = "\x1b[2J\x1b[3J\x1b[H\n  \x1b[32m\x1b[1mVITE\x1b[22m v5.4.2\x1b[39m  \
@@ -316,7 +316,7 @@ fn random_bytes_never_panic() {
 
 #[test]
 fn highlights_map_styles() {
-    let dark = TerminalPalette::for_mode(ThemeMode::Dark);
+    let dark = TerminalPalette::for_theme(&ArtisanTheme::resolved());
     let foreground = hsla(0.0, 0.0, 0.9, 1.0);
     let background = hsla(0.0, 0.0, 0.1, 1.0);
     let screen = screen(
@@ -353,14 +353,14 @@ fn highlights_map_styles() {
 
 #[test]
 fn palette_resolves_cube_and_ramp() {
-    let palette = TerminalPalette::for_mode(ThemeMode::Light);
+    let palette = TerminalPalette::for_theme(&ArtisanTheme::resolved());
     let red = gpui::hsla_to_rgba(palette.resolve(TerminalColor::Indexed(196)));
     assert!((red.red - 1.0).abs() < 1e-3 && red.green.abs() < 1e-3 && red.blue.abs() < 1e-3);
     let grey = gpui::hsla_to_rgba(palette.resolve(TerminalColor::Indexed(244)));
     assert!((grey.red - 128.0 / 255.0).abs() < 1e-3);
     assert_eq!(
         palette.resolve(TerminalColor::Indexed(4)),
-        TerminalPalette::for_mode(ThemeMode::Light).base[4]
+        TerminalPalette::for_theme(&ArtisanTheme::resolved()).base[4]
     );
 }
 
