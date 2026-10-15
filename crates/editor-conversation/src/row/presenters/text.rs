@@ -139,10 +139,41 @@ impl TextPresenter<'_> {
                 item.position,
                 section,
             ),
-            block,
+            blocks: block..block + 1,
             tone,
         }
         .into_any_element()
+    }
+
+    /// The opened activity's preview, built once per change of the item.
+    pub(super) fn preview(&self, item: &Item) -> Option<AnyElement> {
+        let key = (item.id.clone(), Slot::Preview);
+        let source = {
+            let mut sources = self.shared.sources.borrow_mut();
+            match sources.get(&key) {
+                Some((seq, source)) if *seq == item.seq => source.clone(),
+                _ => {
+                    let source: Arc<str> = crate::preview::markdown(item)?.into();
+                    sources.insert(key, (item.seq, source.clone()));
+                    source
+                }
+            }
+        };
+        Some(
+            PreparedText {
+                shared: self.shared.clone(),
+                source,
+                key: format!("{}:{}", item.id, Slot::Preview).into(),
+                order: crate::fold::selection_order(
+                    self.shared.agent_scope.get(),
+                    item.position,
+                    Slot::Preview,
+                ),
+                blocks: 0..usize::MAX,
+                tone: MarkdownBodyTone::Foreground,
+            }
+            .into_any_element(),
+        )
     }
 
     fn stored_formatted(

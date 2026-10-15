@@ -66,6 +66,10 @@ impl ResourceCache {
             (entry.release)(cx);
         }
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one resource load: its key, owner, source, budget and callbacks"
+    )]
     pub(super) fn load<A: Asset>(
         self: &Arc<Self>,
         owner: &Arc<[u64]>,
@@ -187,7 +191,7 @@ impl ResourceCache {
                     let source = source.clone();
                     entry.task = Some(cx.spawn(async move |cx| {
                         let output = task.await;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             // Publish even when the loading block has left the viewport.
                             // This task never keeps the thread cache alive by itself.
                             if let Some(cache) = cache.upgrade() {

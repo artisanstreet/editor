@@ -327,6 +327,10 @@ impl FileTreeView {
     fn node_id(&self, index: usize, row: &Row) -> SharedString {
         node_id(&self.key, index, row, &self.model)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one directory row and the tree state it reads"
+    )]
     fn dir(
         &self,
         index: usize,
@@ -462,10 +466,10 @@ impl RenderOnce for FileTreeView {
                 hidden_below = None;
             }
             visible.push(index);
-            if let RowKind::Dir { key, .. } = &row.kind {
-                if collapsed.contains(key) {
-                    hidden_below = Some(row.depth);
-                }
+            if let RowKind::Dir { key, .. } = &row.kind
+                && collapsed.contains(key)
+            {
+                hidden_below = Some(row.depth);
             }
         }
         let visible: Arc<[usize]> = visible.into();

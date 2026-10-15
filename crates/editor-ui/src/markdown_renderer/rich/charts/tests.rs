@@ -48,7 +48,7 @@ fn odd_charts_do_not_panic() {
 
 #[test]
 fn chart_prepares_optional_annotations_and_parameters() {
-    let _text = ready_example(
+    ready_example(
         "chart",
         r#"{"title": "Latency", "mark": "bar", "categories": ["a", "b"],
             "series": [{"name": "p50", "values": [12, 14.5]}, {"name": "p99", "values": [40, null]}],
@@ -78,7 +78,7 @@ fn heatmap_positions_values_and_prepares_labels() {
     assert_eq!(spec.cell(0, 1), None);
     assert!((spec.position(5.0) - 1.0).abs() < 1e-6);
     assert!((spec.position(-5.0) + 1.0).abs() < 1e-6);
-    let _text = ready_example(
+    ready_example(
         "heatmap",
         r#"{"x": ["mon", "tue"], "y": ["am"], "values": [[1, null]], "unit": "ms"}"#,
     );
@@ -88,7 +88,7 @@ fn heatmap_positions_values_and_prepares_labels() {
 
 #[test]
 fn distribution_prepares_series_and_threshold() {
-    let _text = ready_example(
+    ready_example(
         "distribution",
         r#"{"series": [{"name": "build", "values": [1, 2, 3, 4, null]}], "bins": 2, "unit": "s", "threshold": 2}"#,
     );
@@ -109,7 +109,7 @@ fn funnel_reads_shares_and_drops() {
         serde_json::from_str(r#"{"steps": [{"label": "a", "value": 0}]}"#).expect("zero");
     assert_eq!(empty.widths(), vec![0.0]);
     assert_eq!(empty.reading(0).of_first, None);
-    let _text = ready_example(
+    ready_example(
         "funnel",
         r#"{"steps": [{"label": "Visit", "value": 10}, {"label": "Pay", "value": 4}]}"#,
     );
@@ -117,7 +117,7 @@ fn funnel_reads_shares_and_drops() {
 
 #[test]
 fn sankey_prepares_node_labels_and_flows() {
-    let _text = ready_example(
+    ready_example(
         "sankey",
         r#"{"nodes": [{"id": "a", "label": "Inbox"}], "links": [{"from": "a", "to": "b", "value": 2}]}"#,
     );
@@ -142,7 +142,7 @@ fn tree_json() -> serde_json::Value {
 
 #[test]
 fn hierarchy_prepares_positive_size_and_rejects_bad_layout() {
-    let _out = ready_example("hierarchy", &tree_json().to_string());
+    ready_example("hierarchy", &tree_json().to_string());
     assert!(invalid("hierarchy", r#"{"name": "x"}"#).contains("positive"));
     assert!(invalid("hierarchy", r#"{"value": 1, "layout": "pie"}"#).contains("pie"));
 }
@@ -200,7 +200,7 @@ fn spans_read_dates_and_refuse_mixed_times() {
     }));
     assert!(mixed.expect_err("mixed").contains("mixes"));
     assert!(invalid("spans", r#"{"spans": [{"start": "soon", "end": 1}]}"#).contains("ISO date"));
-    let _out = ready_example(
+    ready_example(
         "spans",
         r#"{"spans": [{"label": "a", "start": 1, "end": 3, "lane": "x"}]}"#,
     );

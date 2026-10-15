@@ -181,14 +181,15 @@ impl<T: serde::de::DeserializeOwned + Send + 'static> RenderOnce for Mounted<T> 
                 .into_any_element();
         };
         let mut owner = self.owner.borrow_mut();
-        if let Some((host_id, item_id, view)) = owner.as_ref() {
-            if *host_id == host.entity_id() && *item_id == self.id {
-                view.update(cx, |view, cx| {
-                    view.set_source(self.source, cx);
-                    view.set_theme(self.theme, cx);
-                });
-                return view.clone().into_any_element();
-            }
+        if let Some((host_id, item_id, view)) = owner.as_ref()
+            && *host_id == host.entity_id()
+            && *item_id == self.id
+        {
+            view.update(cx, |view, cx| {
+                view.set_source(self.source, cx);
+                view.set_theme(self.theme, cx);
+            });
+            return view.clone().into_any_element();
         }
         let view = cx.new(|cx| {
             CollectionBrowser::new(

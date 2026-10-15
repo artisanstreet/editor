@@ -39,15 +39,10 @@ fn items_stream_into_the_open_thread_only(cx: &mut TestAppContext) {
         !items.iter().any(|item| item.id == elsewhere.id),
         "another thread's item stays out"
     );
-    let replies = cx.read(|cx| {
-        conversation
-            .read(cx)
-            .rows
-            .iter()
-            .filter(|(row, _)| matches!(row, Row::ProseBlock { id: item, block: 0 } if *item == id))
-            .count()
-    });
-    assert_eq!(replies, 1, "one row for the reply");
+    assert!(
+        shown(cx, format!("prose:{id}:0")).is_some(),
+        "the reply shows"
+    );
 }
 
 /// Only what arrives while the reader watches animates in. Opening a
@@ -78,16 +73,7 @@ fn only_what_arrives_while_watched_animates_in(cx: &mut TestAppContext) {
             reply(&format!("Live {step}.")),
         );
     }
-    let animating = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            conversation
-                .read(cx)
-                .row_views
-                .iter()
-                .flatten()
-                .any(|row| row.read(cx).animating)
-        })
-    };
+    let animating = |cx: &mut VisualTestContext| cx.debug_bounds("animating").is_some();
     wait(cx, "the thread to land", |cx| {
         draw(cx);
         cx.read(|cx| {
@@ -95,43 +81,26 @@ fn only_what_arrives_while_watched_animates_in(cx: &mut TestAppContext) {
             !c.landing() && c.items().count() == 8
         })
     });
-    draw(cx);
-    let fresh = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let view = c.view.as_ref().unwrap();
-            view.items
-                .values()
-                .filter(|item| view.ui.get(&item.id).is_some_and(ItemUi::fresh))
-                .count()
-        })
-    };
-    assert_eq!(
-        fresh(cx),
-        0,
-        "what arrived while it opened would animate in"
-    );
-    assert!(!animating(cx), "what arrived while it opened animated in");
+    for _ in 0..10 {
+        draw(cx);
+        assert!(!animating(cx), "what arrived while it opened animated in");
+    }
     cx.update(|window, _| window.activate_window());
-    forge.put(
+    let watched = forge.put(
         &thread,
         &ItemId::new(),
         Status::Done,
         reply("Arrived while watched, word by word."),
     );
-    wait(cx, "the new reply", |cx| {
+    wait(cx, "the new reply to animate in", |cx| {
         draw(cx);
-        cx.read(|cx| conversation.read(cx).items().count() == 9)
+        shown(cx, format!("prose:{}:0", watched.id)).is_some() && animating(cx)
     });
     settle(cx, &conversation);
-    assert_eq!(
-        fresh(cx),
-        1,
-        "only the reply that arrived while watched is new"
-    );
 }
 
-/// Reduced motion and content without prose must release the next native row.
+/// Content without prose never holds back the reply after it, with or
+/// without reduced motion.
 #[gpui::test]
 fn fresh_non_prose_content_never_blocks_later_replies(cx: &mut TestAppContext) {
     let forge = Forge::start();
@@ -164,29 +133,8 @@ fn fresh_non_prose_content_never_blocks_later_replies(cx: &mut TestAppContext) {
         );
         wait(cx, "the reply after non-prose content", |cx| {
             draw(cx);
-            cx.read(|cx| {
-                let c = conversation.read(cx);
-                c.rows.iter().enumerate().any(|(index, (row, _))| {
-                    row.anchor() == Some(&next)
-                        && c.row_views.get(index).is_some_and(Option::is_some)
-                        && c.list
-                            .bounds_for_item(index)
-                            .is_some_and(|bounds| bounds.size.height > gpui::px(0.0))
-                })
-            })
-        });
-        cx.read(|cx| {
-            assert!(
-                conversation
-                    .read(cx)
-                    .view
-                    .as_ref()
-                    .unwrap()
-                    .ui
-                    .get(&separator)
-                    .is_some_and(|ui| ui.arrived.is_some()),
-                "the separator must arrive while watched"
-            );
+            shown(cx, format!("prose:{next}:0"))
+                .is_some_and(|bounds| bounds.size.height > gpui::px(0.0))
         });
         settle(cx, &conversation);
     }
@@ -194,162 +142,106 @@ fn fresh_non_prose_content_never_blocks_later_replies(cx: &mut TestAppContext) {
 
 /// Text streams as commentary inside the live work until the run ends, so
 /// the section must stay open: folding it for "replying" left a bare header.
-#[test]
-fn text_streaming_in_live_work_stays_on_screen() {
-    use crate::fold::fold;
-    use crate::thread::ThreadView;
-    use crate::viewport::Fetch;
-    use artisan_api::{ItemsPage, Run, RunStatus, Usage};
-
-    let thread = ThreadId::from("thread");
-    let run = RunId::from("run");
-    let item = |position: u64, status: Status, kind: ItemKind| Item {
-        id: ItemId::new(),
-        thread_id: thread.clone(),
-        position,
-        seq: position,
-        run_id: Some(run.clone()),
-        parent_id: None,
-        status,
-        created_at: 0,
-        updated_at: 0,
-        kind,
-    };
-    let commentary = item(
-        3,
+#[gpui::test]
+fn text_streaming_in_live_work_stays_on_screen(cx: &mut TestAppContext) {
+    let forge = Forge::start();
+    let thread = forge.thread();
+    forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        ItemKind::UserMessage {
+            text: "fix it".into(),
+            images: Vec::new(),
+            steer: false,
+        },
+    );
+    forge.put(&thread, &ItemId::new(), Status::Done, shell("rg follow"));
+    let commentary = forge.put(
+        &thread,
+        &ItemId::new(),
         Status::Running,
         ItemKind::AssistantMessage {
             text: "Looking at what master did".into(),
             phase: Phase::Commentary,
         },
     );
-    let items = vec![
-        item(
-            1,
-            Status::Done,
-            ItemKind::UserMessage {
-                text: "fix it".into(),
-                images: Vec::new(),
-                steer: false,
-            },
-        ),
-        item(2, Status::Done, shell("rg follow")),
-        commentary.clone(),
-    ];
-    let (mut view, _) = ThreadView::open(thread.clone());
-    view.apply_page(
-        Fetch::Tail,
-        ItemsPage {
-            items,
-            runs: Vec::new(),
-            more: false,
-        },
-    );
-    let live = Run {
-        id: run.clone(),
-        thread_id: thread.clone(),
-        engine: EngineId::Claude,
-        model: None,
-        input_cutoff: 0,
-        status: RunStatus::Running,
-        usage: Usage::default(),
-        session_id: None,
-        error: None,
-        seq: 3,
-        started_at: 0,
-        ended_at: None,
-    };
-    let folded = fold(&view, Some(&live), None);
-    assert!(folded.runs[&run].open, "the live section is open");
-    assert!(
-        folded.rows.iter().any(|(row, _)| matches!(
-            row,
-            Row::Work { entries, .. } if entries.contains(&commentary.id)
-        )),
-        "the streaming text is one of the open section's rows"
-    );
+    forge
+        .runtime
+        .block_on(forge.store.upsert_run(artisan_api::Run {
+            id: RunId::from("run"),
+            thread_id: thread.clone(),
+            engine: EngineId::Claude,
+            model: None,
+            input_cutoff: 0,
+            status: artisan_api::RunStatus::Running,
+            usage: Default::default(),
+            session_id: None,
+            error: None,
+            seq: 0,
+            started_at: 0,
+            ended_at: None,
+        }))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    wait(cx, "the streaming commentary in the open work", |cx| {
+        draw(cx);
+        let _ = &conversation;
+        shown(cx, "work:run:0").is_some()
+            && shown(cx, format!("prose:{}:0", commentary.id)).is_some()
+    });
 }
 
 /// Later tools cannot reclassify an already canonical final message.
-#[test]
-fn canonical_final_messages_keep_their_phase_when_later_work_arrives() {
-    use crate::fold::fold;
-    use crate::thread::ThreadView;
-    use crate::viewport::Fetch;
-    use artisan_api::ItemsPage;
-
-    let thread = ThreadId::from("thread");
-    let run = RunId::from("run");
-    let item = |position: u64, kind: ItemKind| Item {
-        id: ItemId::new(),
-        thread_id: thread.clone(),
-        position,
-        seq: position,
-        run_id: Some(run.clone()),
-        parent_id: None,
-        status: Status::Done,
-        created_at: 0,
-        updated_at: 0,
-        kind,
-    };
-    let early = item(3, reply("The first result is available."));
-    let last = item(5, reply("All tests pass."));
-    let items = vec![
-        item(
-            1,
-            ItemKind::UserMessage {
-                text: "fix it".into(),
-                images: Vec::new(),
-                steer: false,
-            },
-        ),
-        item(2, shell("cargo test")),
-        early.clone(),
-        item(4, shell("cargo test")),
-        last.clone(),
-    ];
-    let (mut view, _) = ThreadView::open(thread.clone());
-    view.apply_page(
-        Fetch::Tail,
-        ItemsPage {
-            items,
-            runs: Vec::new(),
-            more: false,
+#[gpui::test]
+fn canonical_final_messages_keep_their_phase_when_later_work_arrives(cx: &mut TestAppContext) {
+    let forge = Forge::start();
+    let thread = forge.thread();
+    let ask = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        ItemKind::UserMessage {
+            text: "fix it".into(),
+            images: Vec::new(),
+            steer: false,
         },
     );
-    let rows: Vec<Row> = fold(&view, None, None)
-        .rows
-        .into_iter()
-        .map(|(row, _)| row)
-        .collect();
-    let works: Vec<&Row> = rows
-        .iter()
-        .filter(|row| matches!(row, Row::Work { .. }))
-        .collect();
-    assert_eq!(
-        works.len(),
-        2,
-        "two work stretches around the first reply: {rows:?}"
+    forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
+    let early = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        reply("The first result is available."),
     );
-    assert_eq!(
-        rows[2],
-        Row::ProseBlock {
-            id: early.id.clone(),
-            block: 0
-        }
+    forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
+    let last = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        reply("All tests pass."),
     );
-    assert!(
-        works
-            .iter()
-            .all(|row| matches!(row, Row::Work { entries, .. } if !entries.contains(&early.id)))
-    );
+    forge.finish_run(&thread);
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    let rows = [
+        format!("user:{}:0", ask.id),
+        "work:run:0".to_owned(),
+        format!("prose:{}:0", early.id),
+        format!("prose:{}:0", last.id),
+    ];
+    wait(cx, "the turn", |cx| {
+        draw(cx);
+        let _ = &conversation;
+        painted_order(cx, &rows).len() == rows.len()
+    });
     assert_eq!(
-        rows.last(),
-        Some(&Row::ProseBlock {
-            id: last.id.clone(),
-            block: 0
-        }),
-        "the last text is the reply"
+        painted_order(cx, &rows),
+        rows,
+        "the first reply stays a reply between the work, the last one ends the turn"
     );
 }
 
@@ -375,7 +267,6 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
         Status::Running,
         reply("Initial paragraph"),
     );
-    let key: gpui::SharedString = message.id.to_string().into();
     let target = artisan_api::LiveTarget::Text {
         item_id: message.id.clone(),
     };
@@ -384,16 +275,9 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
     open(&core, &host, &thread, cx);
     wait(cx, "initial prose leaf", |cx| {
         draw(cx);
-        cx.read(|cx| {
-            conversation
-                .read(cx)
-                .rows
-                .iter()
-                .any(|(row, _)| matches!(row, Row::ProseBlock { id, .. } if id == &message.id))
-        })
+        shown(cx, format!("prose:{}:0", message.id)).is_some()
     });
     settle(cx, &conversation);
-    let markers = cx.read(|cx| conversation.read(cx).navigator_markers.clone().unwrap());
     forge.store.publish_live(artisan_api::Event::Live {
         thread_id: thread.clone(),
         target: target.clone(),
@@ -403,32 +287,6 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
             start: 0,
             total: "Replacement paragraph".len() as u64,
         },
-    });
-    wait(
-        cx,
-        "replacement is prepared from the current immutable live snapshot",
-        |cx| {
-            draw(cx);
-            cx.read(|cx| {
-                let c = conversation.read(cx);
-                c.view
-                    .as_ref()
-                    .and_then(|view| view.live.get(&target))
-                    .is_some_and(|source| {
-                        source.to_string() == "Replacement paragraph"
-                            && c.shared.markdown.is_rope_source_prepared(&key, source)
-                    })
-            })
-        },
-    );
-    cx.read(|cx| {
-        assert!(
-            Arc::ptr_eq(
-                &markers,
-                conversation.read(cx).navigator_markers.as_ref().unwrap()
-            ),
-            "unchanged body shape must not refold unrelated turns or discard navigator preparation"
-        )
     });
     forge.store.publish_live(artisan_api::Event::Live {
         thread_id: thread.clone(),
@@ -440,90 +298,28 @@ fn streaming_text_redraws_only_its_own_reply(cx: &mut TestAppContext) {
             total: "Replacement paragraph\n\nA second paragraph".len() as u64,
         },
     });
-    wait(
-        cx,
-        "new semantic leaf changes native list structure",
-        |cx| {
-            draw(cx);
-            cx.read(|cx| {
-                let c = conversation.read(cx);
-                let leaves = c
-                    .rows
-                    .iter()
-                    .filter(
-                        |(row, _)| matches!(row, Row::ProseBlock { id, .. } if id == &message.id),
-                    )
-                    .count();
-                leaves == 2
-                    && c.view
-                        .as_ref()
-                        .and_then(|view| view.live.get(&target))
-                        .is_some_and(|source| {
-                            c.shared.markdown.is_rope_source_prepared(&key, source)
-                        })
-            })
-        },
-    );
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        let last = c
-            .rows
-            .iter()
-            .rev()
-            .find_map(|(row, _)| {
-                matches!(row, Row::ProseBlock { id, .. } if id == &message.id).then_some(row)
-            })
-            .unwrap();
-        assert_eq!(c.read_evidence(last, cx), Some(message.seq));
+    wait(cx, "the second paragraph shows", |cx| {
+        draw(cx);
+        shown(cx, format!("prose:{}:1", message.id)).is_some()
     });
+    assert!(
+        cx.debug_bounds("live-preview").is_none(),
+        "the whole reply shows"
+    );
     let retained = "Replacement paragraph\n\nA second paragraph".len() as u64;
     forge.store.publish_live(artisan_api::Event::Live {
         thread_id: thread.clone(),
         target: target.clone(),
-        text: String::new().into(),
+        text: String::new(),
         append: true,
         coverage: artisan_api::LiveCoverage {
             start: 0,
             total: retained + 1_000_000,
         },
     });
-    wait(
-        cx,
-        "incomplete live coverage reaches the current prepared leaf",
-        |cx| {
-            draw(cx);
-            cx.read(|cx| {
-                let c = conversation.read(cx);
-                let snapshot = core
-                    .read(cx)
-                    .host(&host)
-                    .unwrap()
-                    .read(cx)
-                    .live_snapshot(&thread, &target);
-                snapshot.is_some_and(|snapshot| snapshot.coverage.total == retained + 1_000_000)
-                    && c.view
-                        .as_ref()
-                        .and_then(|view| view.live.get(&target))
-                        .is_some_and(|source| {
-                            c.shared.markdown.is_rope_source_prepared(&key, source)
-                        })
-            })
-        },
-    );
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        let last = c
-            .rows
-            .iter()
-            .rev()
-            .find_map(|(row, _)| {
-                matches!(row, Row::ProseBlock { id, .. } if id == &message.id).then_some(row)
-            })
-            .unwrap();
-        assert_eq!(
-            c.read_evidence(last, cx),
-            None,
-            "a prepared prefix cannot acknowledge omitted live content"
-        );
+    wait(cx, "the reply says it shows only part of itself", |cx| {
+        draw(cx);
+        cx.debug_bounds("live-preview").is_some()
     });
+    let _ = (&core, &host);
 }

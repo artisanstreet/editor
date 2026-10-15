@@ -291,8 +291,8 @@ struct RetainedLeaf {
     /// Runs compiled for the last layout, reused while their inputs hold.
     compiled: Rc<RefCell<Option<CompiledRuns>>>,
     native_geometry: Rc<RefCell<native_geometry::NativeGeometryCache>>,
-    native_report: Rc<RefCell<Option<(usize, usize, Pixels, Pixels, Pixels, usize, usize)>>>,
-    native_layout_report: Rc<RefCell<Option<(usize, Pixels, Pixels, usize)>>>,
+    native_report: Rc<RefCell<Option<NativeReport>>>,
+    native_layout_report: Rc<RefCell<Option<NativeLayoutReport>>>,
     native_error: Rc<RefCell<Option<String>>>,
 }
 
@@ -385,13 +385,37 @@ pub struct NativeRowReady {
     pub font_size: Pixels,
     pub page: Arc<crate::markdown_renderer::NativeWindow>,
 }
-type NativeNotify = Rc<dyn Fn(&mut App)>;
-type NativeReady = Rc<dyn Fn(NativeRowReady, &mut App)>;
+/// Asks the owner to repaint once a native glyph window is prepared.
+pub type NativeNotify = Rc<dyn Fn(&mut App)>;
+/// Tells the owner a native row was laid out (or painted).
+pub type NativeReady = Rc<dyn Fn(NativeRowReady, &mut App)>;
+/// Tells the owner a native row failed to prepare, and why.
+pub type NativeFailure = Rc<dyn Fn(String, &mut App)>;
+/// Reports where an already shaped prefix ends on screen.
+pub(crate) type FrontierReport = Rc<dyn Fn(Option<Pixels>, &mut Window)>;
+/// Ordinal, row count, width, font size, line height, window start and end
+/// of the last native window reported to the owner.
+type NativeReport = (usize, usize, Pixels, Pixels, Pixels, usize, usize);
+/// Row count, width, font size and ordinal of the last reported layout.
+type NativeLayoutReport = (usize, Pixels, Pixels, usize);
+
+/// What a long literal leaf tells its owner as its native window prepares
+/// and paints.
+pub struct NativeWindowEvents {
+    /// The glyph window finished preparing.
+    pub notify: NativeNotify,
+    /// The row was laid out: its topology is known.
+    pub layout_ready: NativeReady,
+    /// The row painted: evidence it was seen.
+    pub ready: NativeReady,
+}
 type ProjectedState = (
     Arc<crate::markdown_renderer::native_projection::ProjectedNativeRow>,
     Pixels,
     Arc<[TextRun]>,
 );
+/// A prepared native row and what it reported when it became ready.
+type PreparedNative = (ProjectedState, NativeRowReady);
 struct MeasuredNative {
     renderer: Rc<crate::markdown_renderer::MarkdownRenderer>,
     key: SharedString,
@@ -400,9 +424,9 @@ struct MeasuredNative {
     notify: NativeNotify,
     ready: NativeReady,
     layout_ready: NativeReady,
-    layout_report: Rc<RefCell<Option<(usize, Pixels, Pixels, usize)>>>,
-    prepared: Rc<RefCell<Option<(ProjectedState, NativeRowReady)>>>,
-    report: Rc<RefCell<Option<(usize, usize, Pixels, Pixels, Pixels, usize, usize)>>>,
+    layout_report: Rc<RefCell<Option<NativeLayoutReport>>>,
+    prepared: Rc<RefCell<Option<PreparedNative>>>,
+    report: Rc<RefCell<Option<NativeReport>>>,
 }
 
 /// Read-only selectable text element for transcript bodies.
@@ -433,8 +457,8 @@ pub struct SelectableText {
     styled: Option<StyledText>,
     projected: Option<ProjectedState>,
     measured_native: Option<MeasuredNative>,
-    native_failure: Option<Rc<dyn Fn(String, &mut App)>>,
-    reveal_frontier: Option<(usize, Rc<dyn Fn(Option<Pixels>, &mut Window)>)>,
+    native_failure: Option<NativeFailure>,
+    reveal_frontier: Option<(usize, FrontierReport)>,
     geometry: Option<LeafLayout>,
     native_geometry: Option<Rc<RefCell<native_geometry::NativeGeometryCache>>>,
     leaf: Option<LeafFrame>,
@@ -495,9 +519,7 @@ impl SelectableText {
         key: SharedString,
         ordinal: usize,
         range: Range<usize>,
-        notify: Rc<dyn Fn(&mut App)>,
-        on_layout_ready: Rc<dyn Fn(NativeRowReady, &mut App)>,
-        on_ready: Rc<dyn Fn(NativeRowReady, &mut App)>,
+        events: NativeWindowEvents,
     ) -> Self {
         assert!(range.contains(&ordinal) && range.len() <= 128);
         self.measured_native = Some(MeasuredNative {
@@ -505,9 +527,9 @@ impl SelectableText {
             key,
             ordinal,
             range,
-            notify,
-            ready: on_ready,
-            layout_ready: on_layout_ready,
+            notify: events.notify,
+            ready: events.ready,
+            layout_ready: events.layout_ready,
             layout_report: Rc::default(),
             prepared: Rc::default(),
             report: Rc::default(),
@@ -517,18 +539,14 @@ impl SelectableText {
 
     /// Reports the bottom of an already shaped logical prefix. The complete
     /// native text remains the layout/selection source; this never shapes a slice.
-    pub(crate) fn with_reveal_frontier(
-        mut self,
-        end: usize,
-        report: Rc<dyn Fn(Option<Pixels>, &mut Window)>,
-    ) -> Self {
+    pub(crate) fn with_reveal_frontier(mut self, end: usize, report: FrontierReport) -> Self {
         self.reveal_frontier = Some((end, report));
         self
     }
 
     /// Reports explicit native admission or shaping errors to the owning view.
     /// A failed source remains noninteractive until the owner retries or replaces it.
-    pub fn native_failure_handler(mut self, callback: Rc<dyn Fn(String, &mut App)>) -> Self {
+    pub fn native_failure_handler(mut self, callback: NativeFailure) -> Self {
         self.native_failure = Some(callback);
         self
     }
@@ -772,7 +790,7 @@ impl Element for SelectableText {
                 move |known, available, _, cx| {
                     // Intrinsic probes provide no wrap width. Await the parent's
                     // definite content constraint instead of guessing viewport width.
-                    let width = known.width.or_else(|| match available.width {
+                    let width = known.width.or(match available.width {
                         gpui::AvailableSpace::Definite(width) => Some(width),
                         _ => None,
                     });
@@ -1061,7 +1079,7 @@ impl Element for SelectableText {
                     ));
                 }
                 if let Some(underline) = &style.underline {
-                    let mut underline = underline.clone();
+                    let mut underline = *underline;
                     underline.color = Some(underline.color.unwrap_or(style.color));
                     window.paint_underline(
                         bounds.origin
@@ -1071,7 +1089,7 @@ impl Element for SelectableText {
                     );
                 }
                 if let Some(strike) = &style.strikethrough {
-                    let mut strike = strike.clone();
+                    let mut strike = *strike;
                     strike.color = Some(strike.color.unwrap_or(style.color));
                     window.paint_strikethrough(
                         bounds.origin

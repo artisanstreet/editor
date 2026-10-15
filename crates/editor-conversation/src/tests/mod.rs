@@ -2,8 +2,6 @@
 //! when a long thread opens and scrolls back, and as items stream in.
 
 use crate::Conversation;
-use crate::fold::Row;
-use crate::thread::ItemUi;
 use crate::viewport::Input;
 use artisan_api::{
     Answer, CreateProject, CreateThread, EngineConfig, EngineId, Item, ItemId, ItemKind, Phase,
@@ -283,169 +281,72 @@ fn shell(command: &str) -> ItemKind {
     }
 }
 
-/// Waits for the observed scope, visible prose and geometry before interacting.
+/// Where the row named `selector` (see `Row::selector`) painted in the
+/// last frame, if it did.
+fn shown(
+    cx: &mut VisualTestContext,
+    selector: impl Into<String>,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    painted(cx, format!("row:{}", selector.into()))
+}
+
+/// The rows of `selectors` that painted, top to bottom.
+fn painted_order(cx: &mut VisualTestContext, selectors: &[String]) -> Vec<String> {
+    let mut painted: Vec<_> = selectors
+        .iter()
+        .filter_map(|selector| Some((shown(cx, selector.clone())?.top(), selector.clone())))
+        .collect();
+    painted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    painted.into_iter().map(|(_, selector)| selector).collect()
+}
+
+/// Where the element marked `selector` painted in the last frame.
+fn painted(cx: &mut VisualTestContext, selector: String) -> Option<gpui::Bounds<gpui::Pixels>> {
+    thread_local! {
+        static NAMES: std::cell::RefCell<HashMap<String, &'static str>> = Default::default();
+    }
+    let name = NAMES.with(|names| {
+        *names
+            .borrow_mut()
+            .entry(selector.clone())
+            .or_insert_with(|| Box::leak(selector.into_boxed_str()))
+    });
+    cx.debug_bounds(name)
+}
+
+/// Whether Forge holds the thread read (the sidebar's unread dot is off).
+fn read(forge: &Forge, thread: &ThreadId) -> bool {
+    !forge
+        .runtime
+        .block_on(forge.store.thread(thread))
+        .unwrap()
+        .unwrap()
+        .is_unread()
+}
+
+/// Waits until nothing loads, reveals or slides any more and the
+/// transcript has stopped moving.
 fn settle(cx: &mut VisualTestContext, conversation: &Entity<Conversation>) {
     let mut last = None;
     let mut stable_since = Instant::now();
-    let deadline = Instant::now() + Duration::from_secs(20);
     wait(cx, "visible content and motion to settle", |cx| {
         draw(cx);
-        let (ready, geometry, diagnostic) = cx.read(|cx| {
+        let still = ["text-loading", "animating", "disclosing"]
+            .iter()
+            .all(|name| cx.debug_bounds(name).is_none());
+        let (loading, geometry) = cx.read(|cx| {
             let c = conversation.read(cx);
             let top = c.list.logical_scroll_top();
-            let ready = c.disclosures.is_empty()
-                && c.agent_task.is_none()
-                && !c.view.as_ref().is_some_and(|view| view.window().in_flight)
-                && c.row_views.iter().enumerate().all(|(index, row)| {
-                    let viewport = c.list.viewport_bounds();
-                    row.as_ref().is_none_or(|row| {
-                        c.list.bounds_for_item(index).is_none_or(|bounds| {
-                            bounds.bottom() <= viewport.top()
-                                || bounds.top() >= viewport.bottom()
-                                || !row.read(cx).animating
-                        })
-                    })
-                })
-                && c.rows.iter().enumerate().all(|(index, (row, _))| {
-                    let viewport = c.list.viewport_bounds();
-                    if c.row_views.get(index).is_none_or(Option::is_none)
-                        || c.list.bounds_for_item(index).is_none_or(|bounds| {
-                            bounds.bottom() <= viewport.top() || bounds.top() >= viewport.bottom()
-                        })
-                    {
-                        return true;
-                    }
-                    let formatted = match row {
-                        Row::ProseBlock { id, block } => {
-                            Some((id, crate::fold::Slot::Prose, *block, id.to_string()))
-                        }
-                        Row::TextBlock {
-                            id, section, block, ..
-                        } => Some((
-                            id,
-                            section.slot(),
-                            *block,
-                            format!("{id}:{}", section.slot()),
-                        )),
-                        _ => None,
-                    };
-                    let Some((id, slot, block, inline_key)) = formatted else {
-                        return true;
-                    };
-                    if let Some(source) = c.shared.stored_sources.borrow().get(&(id.clone(), slot))
-                    {
-                        let key = format!("{id}:{slot}:leaf:{block}").into();
-                        c.shared
-                            .markdown
-                            .is_stored_leaf_prepared(&key, source, block)
-                    } else {
-                        c.shared
-                            .markdown
-                            .prepared_source(&inline_key.into())
-                            .is_some()
-                    }
-                });
             (
-                ready,
+                c.view.as_ref().is_some_and(|view| view.window().in_flight),
                 (
                     top.item_ix,
                     f32::from(top.offset_in_item),
                     f32::from(c.list.max_offset_for_scrollbar().y),
-                    c.rows.len(),
-                ),
-                format!(
-                    "agent_loading={} page_loading={} mounted_animations={:?} visible_rows={:?}",
-                    c.agent_task.is_some(),
-                    c.view.as_ref().is_some_and(|view| view.window().in_flight),
-                    c.row_views
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, row)| {
-                            row.as_ref()
-                                .filter(|row| row.read(cx).animating)
-                                .map(|_| (index, c.rows[index].0.key()))
-                        })
-                        .collect::<Vec<_>>(),
-                    c.rows
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, (row, _))| {
-                            let bounds = c.list.bounds_for_item(index)?;
-                            let viewport = c.list.viewport_bounds();
-                            (bounds.bottom() > viewport.top() && bounds.top() < viewport.bottom())
-                                .then(|| {
-                                    let preparation = match row {
-                                        Row::ProseBlock { id, block } => {
-                                            let block = *block;
-                                            if let Some(source) = c
-                                                .shared
-                                                .stored_sources
-                                                .borrow()
-                                                .get(&(id.clone(), crate::fold::Slot::Prose))
-                                            {
-                                                let key = format!("{id}:prose:leaf:{block}").into();
-                                                format!(
-                                                    "stored_leaf={} total={}",
-                                                    c.shared.markdown.is_stored_leaf_prepared(
-                                                        &key, source, block
-                                                    ),
-                                                    source.block_count()
-                                                )
-                                            } else {
-                                                format!(
-                                                    "inline={}",
-                                                    c.shared
-                                                        .markdown
-                                                        .prepared_source(&id.to_string().into())
-                                                        .is_some()
-                                                )
-                                            }
-                                        }
-                                        Row::TextBlock {
-                                            id, section, block, ..
-                                        } => {
-                                            if let Some(source) = c
-                                                .shared
-                                                .stored_sources
-                                                .borrow()
-                                                .get(&(id.clone(), section.slot()))
-                                            {
-                                                let key =
-                                                    format!("{id}:{}:leaf:{block}", section.slot())
-                                                        .into();
-                                                format!(
-                                                    "stored_leaf={} total={}",
-                                                    c.shared.markdown.is_stored_leaf_prepared(
-                                                        &key, source, *block
-                                                    ),
-                                                    source.block_count()
-                                                )
-                                            } else {
-                                                format!(
-                                                    "inline={}",
-                                                    c.shared
-                                                        .markdown
-                                                        .prepared_source(
-                                                            &format!("{id}:{}", section.slot())
-                                                                .into()
-                                                        )
-                                                        .is_some()
-                                                )
-                                            }
-                                        }
-                                        _ => "literal or structural".to_owned(),
-                                    };
-                                    (index, row.clone(), bounds, preparation)
-                                })
-                        })
-                        .collect::<Vec<_>>(),
                 ),
             )
         });
-        assert!(
-            ready || Instant::now() < deadline,
-            "content did not settle: {diagnostic}"
-        );
+        let ready = still && !loading;
         if !ready || last != Some(geometry) {
             stable_since = Instant::now();
             last = Some(geometry);
@@ -466,6 +367,7 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
 mod agents;
 mod media;
 mod paging;
+mod previews;
 mod reading;
 mod requests;
 mod stored;

@@ -67,9 +67,7 @@ impl RequestPresenter<'_> {
             ItemKind::Plan { approval, .. } => (approval.as_ref(), Vec::new()),
             _ => (None, Vec::new()),
         };
-        let Some(approval) = approval else {
-            return None;
-        };
+        let approval = approval?;
         let mut details = self.details_column();
         match &approval.request {
             ApprovalRequest::Command { cwd, .. } => {

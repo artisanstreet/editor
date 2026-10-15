@@ -359,7 +359,7 @@ fn decode(bytes: &[u8], renderer: SvgRenderer) -> Option<Arc<RenderImage>> {
             if retained > MAX_DECODED_BYTES || frames.len() == MAX_ANIMATION_FRAMES {
                 return None;
             }
-            for pixel in frame.buffer_mut().chunks_exact_mut(4) {
+            for pixel in frame.buffer_mut().as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             frames.push(frame);
@@ -371,7 +371,7 @@ fn decode(bytes: &[u8], renderer: SvgRenderer) -> Option<Arc<RenderImage>> {
         if buffer.as_raw().len() > MAX_DECODED_BYTES {
             return None;
         }
-        for pixel in buffer.chunks_exact_mut(4) {
+        for pixel in buffer.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         frames.push(image::Frame::new(buffer));
@@ -390,8 +390,7 @@ fn is_svg(bytes: &[u8]) -> bool {
     text.starts_with('<') && text.contains("<svg")
 }
 
-/// A Markdown image.
-
+/// A muted stand-in, with an optional icon, where media cannot show.
 pub(super) fn placeholder(
     theme: &ArtisanTheme,
     icon: Option<AssetId>,
@@ -415,8 +414,6 @@ pub(super) fn placeholder(
                 .truncate(),
         )
 }
-
-/// One quiet line saying `src` could not load, in place of its frame.
 
 #[cfg(test)]
 mod budget_tests {

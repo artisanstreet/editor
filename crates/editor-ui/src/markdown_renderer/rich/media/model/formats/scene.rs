@@ -100,7 +100,7 @@ pub(super) fn parse(
             let diffuse = material
                 .filter(|material| material.fbx.diffuse_color.has_value)
                 .map(|material| rgb(material.fbx.diffuse_color.value_vec4));
-            for tri in indices[..count * 3].chunks_exact(3) {
+            for tri in indices[..count * 3].as_chunks::<3>().0 {
                 let mut corners = [Corner::default(); 3];
                 for (corner, index) in corners.iter_mut().zip(tri) {
                     let index = *index as usize;

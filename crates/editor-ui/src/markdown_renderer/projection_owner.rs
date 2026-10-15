@@ -99,6 +99,10 @@ impl ProjectionOwner {
             .back()
             .map(|page| page.row_count())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, source, typography, width, runs, window and the callback"
+    )]
     pub fn prepare(
         &self,
         key: SharedString,
@@ -173,9 +177,9 @@ impl ProjectionOwner {
                 if error == projection_worker::StartError::Busy {
                     let owner = Rc::downgrade(&self.cache);
                     let generation = entry.generation;
-                    entry.task = Some(cx.spawn(async move |cx| {
-                        projection_worker::wait_for_owner().await;
-                        let _ =
+                    entry.task =
+                        Some(cx.spawn(async move |cx| {
+                            projection_worker::wait_for_owner().await;
                             cx.update(|cx| {
                                 let Some(owner) = owner.upgrade() else { return };
                                 let mut cache = owner.borrow_mut();
@@ -188,7 +192,7 @@ impl ProjectionOwner {
                                 drop(cache);
                                 notify(cx);
                             });
-                    }));
+                        }));
                     cache.push(entry);
                     return NativePreparation::Pending;
                 }
@@ -202,7 +206,7 @@ impl ProjectionOwner {
         let generation = entry.generation;
         entry.task = Some(cx.spawn(async move |cx| {
             let result = task.await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(owner) = owner.upgrade() else { return };
                 let mut cache = owner.borrow_mut();
                 let Some(entry) = cache

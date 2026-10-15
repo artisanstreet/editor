@@ -166,16 +166,10 @@ fn goals_are_thread_scoped_and_not_transcript_announcements(cx: &mut TestAppCont
         draw(cx);
         cx.debug_bounds("composer-goal-label").is_some()
     });
-    cx.read(|cx| {
-        assert!(
-            !conversation
-                .read(cx)
-                .rows
-                .iter()
-                .any(|(row, _)| row.anchor() == Some(&notice)),
-            "a nonempty goal lifecycle notice must not render in the transcript"
-        );
-    });
+    assert!(
+        shown(cx, "work:run:0").is_none() && shown(cx, format!("entry:{notice}")).is_none(),
+        "a nonempty goal lifecycle notice must not render in the transcript"
+    );
     core.update(cx, |core, cx| {
         core.navigate(
             Screen::NewThread {

@@ -50,8 +50,6 @@ fn scrolling_up_a_long_thread_loads_all_of_it_once(cx: &mut TestAppContext) {
         stored,
         "the whole thread, in order, with no gaps or duplicates"
     );
-    let rows = cx.read(|cx| conversation.read(cx).rows.len());
-    assert_eq!(rows, 250, "one reply row per item");
 }
 
 /// Opening a long thread hides it under the wordmark until it stops
@@ -186,16 +184,11 @@ fn a_jump_to_a_message_glides_its_last_stretch(cx: &mut TestAppContext) {
     wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 24);
     settle(cx, &conversation);
     let target = asks[1].clone();
+    // Where the target message sits relative to the top of the transcript.
     let top = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let top = c.list.logical_scroll_top();
-            let row = c
-                .rows
-                .get(top.item_ix)
-                .and_then(|(row, _)| row.anchor().cloned());
-            (row, f32::from(top.offset_in_item))
-        })
+        let viewport = cx.read(|cx| conversation.read(cx).list.viewport_bounds());
+        shown(cx, format!("user:{}:0", target.id))
+            .map(|bounds| f32::from(bounds.top() - viewport.top()))
     };
     conversation.update(cx, |conversation, cx| conversation.jump_to(&target, cx));
     draw(cx);
@@ -207,7 +200,7 @@ fn a_jump_to_a_message_glides_its_last_stretch(cx: &mut TestAppContext) {
     wait(cx, "the jump to arrive on the message", |cx| {
         draw(cx);
         let offset = conversation.update(cx, |conversation, _| conversation.arrival_offset());
-        offset == 0.0 && top(cx) == (Some(target.id.clone()), 0.0)
+        offset == 0.0 && top(cx).is_some_and(|top| top.abs() < 0.5)
     });
 }
 
@@ -397,9 +390,12 @@ fn a_wheel_glide_never_jumps_back(cx: &mut TestAppContext) {
 fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
+    // The questions and replies: rows that never merge, so their movement
+    // is what the reader sees.
+    let mut anchors = Vec::new();
     for turn in 0..12 {
         let run = RunId::from(format!("run-{turn}").as_str());
-        forge.put_in(
+        let ask = forge.put_in(
             &run,
             &thread,
             &ItemId::new(),
@@ -410,6 +406,7 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
                 steer: false,
             },
         );
+        anchors.push(format!("user:{}:0", ask.id));
         for step in 0..130 {
             forge.put_in(
                 &run,
@@ -435,7 +432,8 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
             .map(|line| format!("Paragraph {line} of answer {turn}, long enough to wrap a little."))
             .collect::<Vec<_>>()
             .join("\n\n");
-        forge.put_in(&run, &thread, &ItemId::new(), Status::Done, reply(&long));
+        let answer = forge.put_in(&run, &thread, &ItemId::new(), Status::Done, reply(&long));
+        anchors.push(format!("prose:{}:0", answer.id));
         forge.finish_run_in(&run, &thread);
     }
     let dir = tempfile::tempdir().unwrap();
@@ -454,30 +452,14 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
         "opening must not backfill a whole turn"
     );
     settle(cx, &conversation);
-    // Where each visible question and reply sits on screen: rows that
-    // never merge, so their movement is what the reader sees.
+    // Where each visible question and reply sits on screen.
     let visible = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            c.rows
-                .iter()
-                .enumerate()
-                .filter(|(_, (row, _))| {
-                    matches!(
-                        row,
-                        Row::PlainBlock {
-                            section: crate::fold::PlainSection::User,
-                            block: 0,
-                            ..
-                        } | Row::ProseBlock { block: 0, .. }
-                    )
-                })
-                .filter_map(|(index, (row, _))| {
-                    let at = c.list.bounds_for_item(index)?;
-                    Some((row.key(), f32::from(at.top())))
-                })
-                .collect::<HashMap<_, _>>()
-        })
+        anchors
+            .iter()
+            .filter_map(|anchor| {
+                Some((anchor.clone(), f32::from(shown(cx, anchor.clone())?.top())))
+            })
+            .collect::<HashMap<_, _>>()
     };
     let center = cx.update(|window, _| window.viewport_size()) / 2.0;
     let exhausted = |cx: &mut VisualTestContext| {
@@ -493,11 +475,7 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
         cx.read(|cx| {
             let c = conversation.read(cx);
             let top = c.list.logical_scroll_top();
-            format!(
-                "top {top:?} rows {} items {}",
-                c.rows.len(),
-                c.items().count()
-            )
+            format!("top {top:?} items {}", c.items().count())
         })
     };
     // A trackpad moves the list by exactly what it is given, so any other
@@ -540,9 +518,9 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
     let gap = cx.read(|cx| {
         conversation
             .read(cx)
-            .rows
-            .iter()
-            .any(|(row, _)| matches!(row, Row::Gap))
+            .view
+            .as_ref()
+            .is_some_and(|view| view.window().gap.is_some())
     });
     assert!(gap, "the bounded history window exposes its newer boundary");
     assert!(
@@ -555,7 +533,9 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
         cx.read(|cx| {
             let c = conversation.read(cx);
             !c.view.as_ref().is_some_and(|view| view.window().in_flight)
-                && c.rows.iter().all(|(row, _)| !matches!(row, Row::Gap))
+                && c.view
+                    .as_ref()
+                    .is_some_and(|view| view.window().gap.is_none())
                 && c.items().count() <= 200
         })
     });
@@ -563,51 +543,42 @@ fn scrolling_up_through_long_turns_never_jumps(cx: &mut TestAppContext) {
 
 /// The newest turn is longer than what loaded first: its work shows at
 /// once while its start loads, not just the status line.
-#[test]
-fn the_newest_turn_shows_before_its_start_loads() {
-    use crate::fold::fold;
-    use crate::thread::ThreadView;
-    use crate::viewport::Fetch;
-    use artisan_api::ItemsPage;
-
-    let thread = ThreadId::from("thread");
-    let items: Vec<Item> = (1000..1100)
-        .map(|position| Item {
-            id: ItemId::new(),
-            thread_id: thread.clone(),
-            position,
-            seq: position,
-            run_id: Some(RunId::from("run")),
-            parent_id: None,
-            status: Status::Done,
-            created_at: 0,
-            updated_at: 0,
-            kind: shell("cargo test"),
-        })
-        .collect();
-    let (mut view, _) = ThreadView::open(thread.clone());
-    view.apply_page(
-        Fetch::Tail,
-        ItemsPage {
-            items,
-            runs: Vec::new(),
-            more: true,
+#[gpui::test]
+fn the_newest_turn_shows_before_its_start_loads(cx: &mut TestAppContext) {
+    let forge = Forge::start();
+    let thread = forge.thread();
+    forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        ItemKind::UserMessage {
+            text: "test everything".into(),
+            images: Vec::new(),
+            steer: false,
         },
     );
-    assert_eq!(
-        view.shown().count(),
-        100,
-        "partial turns are usable immediately"
-    );
-    let rows = fold(&view, None, None).rows;
+    for _ in 0..250 {
+        forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    wait(cx, "the newest page", |cx| {
+        !loaded(&conversation, cx).is_empty()
+    });
+    draw(cx);
     assert!(
-        rows.iter()
-            .any(|(row, _)| matches!(row, Row::Work { entries, .. } if entries.len() == 100)),
-        "the loaded work shows: {rows:?}"
+        loaded(&conversation, cx).len() < 251,
+        "the turn's start is still loading"
+    );
+    assert!(
+        shown(cx, "work:run:0").is_some(),
+        "the loaded work shows under its header"
     );
 }
 
-/// Finishing preparation above the reader retains the native visible row and its pixel offset.
+/// Finishing preparation above the reader keeps the row the reader is on
+/// where it is.
 #[gpui::test]
 fn background_work_preparation_preserves_the_reading_anchor(cx: &mut TestAppContext) {
     let forge = Forge::start();
@@ -647,70 +618,60 @@ fn background_work_preparation_preserves_the_reading_anchor(cx: &mut TestAppCont
     });
     conversation.update(cx, |c, cx| c.toggle_work(&run, true, cx));
     settle(cx, &conversation);
+    // The reader scrolls up until the earlier commentary sits just above
+    // the view.
+    let max = |cx: &mut VisualTestContext| {
+        cx.read(|cx| f32::from(conversation.read(cx).list.max_offset_for_scrollbar().y))
+    };
     let center = cx.update(|window, _| window.viewport_size()) / 2.0;
+    let up = max(cx) - 400.0;
     cx.simulate_event(gpui::ScrollWheelEvent {
         position: gpui::point(center.width, center.height),
-        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(300.0))),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(up))),
         ..Default::default()
     });
     settle(cx, &conversation);
+    assert!(
+        shown(cx, format!("prose:{earlier}:0")).is_none(),
+        "the earlier commentary is above the view"
+    );
+    // The paragraph at the top of the view and where it sits.
     let anchor = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let top = c.list.logical_scroll_top();
-            (c.rows[top.item_ix].0.key(), f32::from(top.offset_in_item))
-        })
+        (0..100)
+            .filter_map(|block| {
+                let selector = format!("prose:{later}:{block}");
+                Some((selector.clone(), f32::from(shown(cx, selector)?.top())))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
     };
     let before = anchor(cx);
-    assert!(matches!(&before.0, crate::fold::RowKey::ProseBlock(id, _) if *id == later));
-    let expanded: Arc<str> = Arc::from(
-        (0..300)
-            .map(|n| format!("Earlier background paragraph {n}."))
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    );
+    let expanded = (0..300)
+        .map(|n| format!("Earlier background paragraph {n}."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
     forge.put_in(
         &run,
         &thread,
         &earlier,
         Status::Done,
         ItemKind::AssistantMessage {
-            text: expanded.to_string().into(),
+            text: expanded.clone().into(),
             phase: Phase::Commentary,
         },
     );
-    wait(cx, "expanded offscreen item revision", |cx| {
-        loaded(&conversation, cx).iter().any(|item| item.id == earlier && matches!(&item.kind, ItemKind::AssistantMessage { text, .. } if text.inline() == Some(expanded.as_ref())))
-    });
-    conversation.update(cx, |c, cx| {
-        let owner = cx.entity().downgrade();
-        let _ =
-            c.shared
-                .markdown
-                .prepare_source(earlier.to_string().into(), expanded, cx, move |cx| {
-                    let _ = owner.update(cx, Conversation::rebuild);
-                });
-    });
-    wait(cx, "offscreen preparation publication", |cx| {
-        draw(cx);
-        cx.read(|cx| {
-            conversation
-                .read(cx)
-                .rows
-                .iter()
-                .filter(|(row, _)| matches!(row, Row::ProseBlock { id, .. } if *id == earlier))
-                .count()
-                == 300
+    wait(cx, "the earlier commentary's new text", |cx| {
+        loaded(&conversation, cx).iter().any(|item| {
+            item.id == earlier
+                && matches!(&item.kind, ItemKind::AssistantMessage { text, .. }
+                    if text.inline() == Some(expanded.as_str()))
         })
     });
     settle(cx, &conversation);
     let after = anchor(cx);
-    assert_eq!(
-        after.0, before.0,
-        "same visible native row across preparation"
-    );
+    assert_eq!(after.0, before.0, "the same paragraph stays on top");
     assert!(
         (after.1 - before.1).abs() < 0.5,
-        "pixel anchor moved: {before:?} -> {after:?}"
+        "the paragraph moved: {before:?} -> {after:?}"
     );
 }

@@ -1,43 +1,30 @@
-//! Canonical tool categories and labels for work summaries and individual activities.
+//! What each activity says: the verb and object of its row, and what it
+//! counts as in its work chain's header.
 
-use artisan_api::{FileOp, Item, ItemKind, SearchMode, Status, ToolKind};
+use artisan_api::{
+    AgentAction, FileOp, Item, ItemId, ItemKind, MessageDirection, SearchMode, Status, ToolKind,
+};
+use std::collections::HashMap;
 
-/// The semantic bucket one activity falls in.
+/// What one activity counts as in a work chain's header.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ActivityCategory {
     Command,
+    FileCreate,
     FileDelete,
     FileEdit,
     FileRead,
     FileSearch,
     Integration,
+    Message,
     Subagent,
     Tool,
     WebSearch,
 }
 
 impl ActivityCategory {
-    /// The foreground label shared by row and header.
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Command => "Command",
-            Self::FileDelete | Self::FileEdit | Self::FileRead | Self::FileSearch => "Files",
-            Self::Integration => "Integrations",
-            Self::Tool => "Tools",
-            Self::Subagent => "Agents",
-            Self::WebSearch => "Web",
-        }
-    }
-
     /// The lowercase chain clause for `count` members.
     pub(crate) fn count_label(self, count: usize) -> String {
-        let plural = |singular: &str, many: &str| {
-            if count == 1 {
-                singular.to_owned()
-            } else {
-                format!("{count} {many}")
-            }
-        };
         let counted = |one: &str, many: &str| {
             if count == 1 {
                 one.to_owned()
@@ -46,15 +33,17 @@ impl ActivityCategory {
             }
         };
         match self {
-            Self::Command => format!("ran {}", plural("a command", "commands")),
-            Self::FileDelete => format!("deleted {}", plural("a file", "files")),
-            Self::FileEdit => format!("edited {}", plural("a file", "files")),
-            Self::FileRead => format!("read {}", plural("a file", "files")),
-            Self::FileSearch => counted("searched files", "searched {n} files"),
-            Self::Integration => format!("used {}", plural("an integration", "integrations")),
-            Self::Tool => format!("used {}", plural("a tool", "tools")),
-            Self::Subagent => format!("talked to {}", plural("an agent", "agents")),
-            Self::WebSearch => counted("searched the web", "ran {n} web searches"),
+            Self::Command => counted("ran a command", "ran {n} commands"),
+            Self::FileCreate => counted("created a file", "created {n} files"),
+            Self::FileDelete => counted("deleted a file", "deleted {n} files"),
+            Self::FileEdit => counted("edited a file", "edited {n} files"),
+            Self::FileRead => counted("read a file", "read {n} files"),
+            Self::FileSearch => counted("searched files", "searched files {n} times"),
+            Self::Integration => counted("used an integration", "used {n} integrations"),
+            Self::Message => counted("exchanged a message", "exchanged {n} messages"),
+            Self::Subagent => counted("delegated a task", "delegated {n} tasks"),
+            Self::Tool => counted("used a tool", "used {n} tools"),
+            Self::WebSearch => counted("searched the web", "searched the web {n} times"),
         }
     }
 }
@@ -62,41 +51,352 @@ impl ActivityCategory {
 /// The category one activity item counts under; `None` for items that are
 /// not activity (prose, plans, notices).
 pub(crate) fn category(item: &Item) -> Option<ActivityCategory> {
+    use ActivityCategory as C;
     match &item.kind {
-        ItemKind::Agent { .. } => Some(ActivityCategory::Subagent),
+        ItemKind::Agent { .. } => Some(C::Subagent),
         ItemKind::Tool { tool, .. } => Some(match tool {
-            ToolKind::Shell { .. } => ActivityCategory::Command,
-            ToolKind::Read { .. } | ToolKind::ViewImage { .. } => ActivityCategory::FileRead,
-            ToolKind::Edit { changes }
-                if !changes.is_empty()
-                    && changes.inline().is_some_and(|changes| {
-                        changes.iter().all(|change| change.op == FileOp::Delete)
-                    }) =>
-            {
-                ActivityCategory::FileDelete
-            }
-            ToolKind::Edit { .. } => ActivityCategory::FileEdit,
-            ToolKind::Search { .. } => ActivityCategory::FileSearch,
-            ToolKind::WebFetch { .. } | ToolKind::WebSearch { .. } => ActivityCategory::WebSearch,
-            ToolKind::Mcp { .. } => ActivityCategory::Integration,
-            ToolKind::AgentMessage { .. } => ActivityCategory::Subagent,
-            ToolKind::Other { .. } => ActivityCategory::Tool,
+            ToolKind::Shell { .. } => C::Command,
+            ToolKind::Read { .. } | ToolKind::ViewImage { .. } => C::FileRead,
+            ToolKind::Edit { changes } => match edit_op(changes) {
+                Some(FileOp::Add) => C::FileCreate,
+                Some(FileOp::Delete) => C::FileDelete,
+                _ => C::FileEdit,
+            },
+            ToolKind::Search { .. } => C::FileSearch,
+            ToolKind::WebFetch { .. } | ToolKind::WebSearch { .. } => C::WebSearch,
+            ToolKind::Mcp { .. } => C::Integration,
+            ToolKind::AgentMessage { .. } => C::Message,
+            ToolKind::Agents { .. } | ToolKind::Other { .. } => C::Tool,
         }),
         _ => None,
     }
 }
 
-/// One message sent to an agent (or another session) with `SendMessage`.
+/// The one op all of an edit's inline changes share.
+fn edit_op(changes: &artisan_api::Collection<artisan_api::FileChange>) -> Option<&FileOp> {
+    let changes = changes.inline()?;
+    let first = &changes.first()?.op;
+    changes
+        .iter()
+        .all(|change| std::mem::discriminant(&change.op) == std::mem::discriminant(first))
+        .then_some(first)
+}
+
+/// One activity row's words: what was done, in the foreground, then what it
+/// was done to, muted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Line {
+    pub verb: String,
+    pub object: String,
+    /// The object is code (a command) and sets in monospace.
+    pub code: bool,
+    pub tail: Option<Tail>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Tail {
+    /// Lines an edit added and removed.
+    Changed { added: usize, removed: usize },
+    /// Why it didn't finish: "failed", "exit 101", "declined", "stopped".
+    Failed(String),
+}
+
+/// The row's words for `item`. `agents` names each agent by its task, the
+/// name it has everywhere else in the thread.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per kind of call, each its own words"
+)]
+pub(crate) fn line(item: &Item, agents: &HashMap<ItemId, String>) -> Line {
+    let live = matches!(item.status, Status::Running | Status::AwaitingUser);
+    let tense = |done: &str, running: &str| if live { running } else { done }.to_owned();
+    let agent = |id: Option<&ItemId>| id.and_then(|id| agents.get(id)).cloned();
+    let mut code = false;
+    let mut tail = match item.status {
+        Status::Failed => Some(Tail::Failed("failed".into())),
+        Status::Declined => Some(Tail::Failed("declined".into())),
+        Status::Cancelled => Some(Tail::Failed("stopped".into())),
+        _ => None,
+    };
+    let (verb, object) = match &item.kind {
+        ItemKind::Agent { description, .. } => (
+            "Delegated".to_owned(),
+            description
+                .inline()
+                .map_or_else(|| "a task".to_owned(), first_line),
+        ),
+        ItemKind::Tool {
+            tool,
+            title,
+            exit_code,
+            ..
+        } => match tool {
+            ToolKind::Shell {
+                command,
+                background,
+                ..
+            } => {
+                code = true;
+                if let Some(code) = exit_code.filter(|code| *code != 0) {
+                    tail = Some(Tail::Failed(format!("exit {code}")));
+                }
+                (
+                    if *background {
+                        tense("Started", "Starting")
+                    } else {
+                        tense("Ran", "Running")
+                    },
+                    command
+                        .inline()
+                        .map_or_else(|| "a command".to_owned(), first_line),
+                )
+            }
+            ToolKind::Read { path, range } => (
+                tense("Read", "Reading"),
+                match range {
+                    Some((from, to)) => format!("{path}:{from}-{to}"),
+                    None => path.clone(),
+                },
+            ),
+            ToolKind::ViewImage { path } => (tense("Viewed", "Viewing"), path.clone()),
+            ToolKind::Edit { changes } => {
+                let verb = match edit_op(changes) {
+                    Some(FileOp::Add) => tense("Created", "Creating"),
+                    Some(FileOp::Delete) => tense("Deleted", "Deleting"),
+                    Some(FileOp::Move { .. }) => tense("Moved", "Moving"),
+                    _ => tense("Edited", "Editing"),
+                };
+                let object = match changes {
+                    artisan_api::Collection::Stored(source) => format!("{} files", source.count),
+                    artisan_api::Collection::Inline(changes) => match changes.as_slice() {
+                        [] => "a file".to_owned(),
+                        [one] => match &one.op {
+                            FileOp::Move { from } => format!("{from} to {}", one.path),
+                            _ => one.path.clone(),
+                        },
+                        [first, rest @ ..] => {
+                            format!("{} and {} more", first.path, rest.len())
+                        }
+                    },
+                };
+                if tail.is_none() {
+                    tail = changed(changes);
+                }
+                (verb, object)
+            }
+            ToolKind::Search {
+                pattern,
+                path,
+                mode,
+            } => {
+                let within = |text: &str| match path {
+                    Some(path) => format!("{text} in {path}"),
+                    None => text.to_owned(),
+                };
+                match mode {
+                    SearchMode::Grep => (tense("Searched for", "Searching for"), within(pattern)),
+                    SearchMode::Glob => (tense("Found files", "Finding files"), within(pattern)),
+                    SearchMode::List => (
+                        tense("Listed", "Listing"),
+                        path.clone().unwrap_or_else(|| pattern.clone()),
+                    ),
+                }
+            }
+            ToolKind::WebSearch { query } => (
+                tense("Searched the web", "Searching the web"),
+                query.clone(),
+            ),
+            ToolKind::WebFetch { url } => (
+                tense("Read a page", "Reading a page"),
+                url.trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_owned(),
+            ),
+            ToolKind::Mcp { server, tool, .. } => (
+                tense("Used", "Using"),
+                // claude.ai connectors are `claude_ai_<Name>`.
+                format!(
+                    "{} {}",
+                    sentence(&words(server.trim_start_matches("claude_ai_"))),
+                    words(tool)
+                ),
+            ),
+            ToolKind::AgentMessage {
+                recipient,
+                target,
+                summary,
+                text,
+                direction,
+            } => {
+                let peer = agent(target.as_ref());
+                let session = || {
+                    if recipient.starts_with("uds:") {
+                        "another session".to_owned()
+                    } else {
+                        recipient.clone()
+                    }
+                };
+                let main = recipient == "main";
+                match (direction, peer) {
+                    (MessageDirection::Report, _) => (
+                        tense("Reported back", "Reporting back"),
+                        summary
+                            .clone()
+                            .unwrap_or_else(|| text.inline().map(first_line).unwrap_or_default()),
+                    ),
+                    (MessageDirection::Sent, Some(task)) => (tense("Messaged", "Messaging"), task),
+                    (MessageDirection::Sent, None) if main => {
+                        (tense("Messaged", "Messaging"), "the main agent".to_owned())
+                    }
+                    (MessageDirection::Sent, None) => {
+                        (tense("Messaged session", "Messaging session"), session())
+                    }
+                    (MessageDirection::Received, Some(task)) => ("Reply from".to_owned(), task),
+                    (MessageDirection::Received, None) if main => {
+                        ("Message from".to_owned(), "the main agent".to_owned())
+                    }
+                    (MessageDirection::Received, None) => {
+                        ("Message from session".to_owned(), session())
+                    }
+                }
+            }
+            ToolKind::Agents {
+                action,
+                addresses,
+                targets,
+            } => {
+                let tasks: Vec<String> = targets.iter().filter_map(|id| agent(Some(id))).collect();
+                match action {
+                    AgentAction::List => (
+                        tense("Listed agents and sessions", "Listing agents and sessions"),
+                        String::new(),
+                    ),
+                    AgentAction::Wait => (
+                        tense("Waited for", "Waiting for"),
+                        if tasks.is_empty() {
+                            counted_agents(addresses.len())
+                        } else {
+                            tasks.join(", ")
+                        },
+                    ),
+                    AgentAction::Stop => (
+                        tense("Stopped", "Stopping"),
+                        if tasks.is_empty() {
+                            "a background job".to_owned()
+                        } else {
+                            tasks.join(", ")
+                        },
+                    ),
+                }
+            }
+            ToolKind::Other { name, input } => (
+                sentence(&words(name)),
+                title
+                    .clone()
+                    .or_else(|| {
+                        input
+                            .as_ref()
+                            .and_then(|input| first_field(input.inline()?))
+                    })
+                    .map(|text| first_line(&text))
+                    .unwrap_or_default(),
+            ),
+        },
+        _ => (String::new(), String::new()),
+    };
+    Line {
+        verb,
+        object,
+        code,
+        tail,
+    }
+}
+
+/// Lines added and removed across an edit's inline diffs.
+fn changed(changes: &artisan_api::Collection<artisan_api::FileChange>) -> Option<Tail> {
+    let (mut added, mut removed) = (0, 0);
+    for diff in changes
+        .inline()?
+        .iter()
+        .filter_map(|change| change.diff.as_ref()?.inline())
+    {
+        for line in diff.lines() {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                added += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                removed += 1;
+            }
+        }
+    }
+    (added + removed > 0).then_some(Tail::Changed { added, removed })
+}
+
+fn counted_agents(count: usize) -> String {
+    match count {
+        0 => "agents".to_owned(),
+        1 => "an agent".to_owned(),
+        count => format!("{count} agents"),
+    }
+}
+
+/// The first non-empty line, without markdown heading marks.
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(|line| line.trim().trim_start_matches('#').trim())
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// An engine identifier as lowercase words: `ToolSearch`, `tool_search` and
+/// `tool-search` all read "tool search".
+fn words(name: &str) -> String {
+    let mut out = String::new();
+    let mut previous: Option<char> = None;
+    for c in name.chars() {
+        if matches!(c, '_' | '-') {
+            out.push(' ');
+        } else {
+            if c.is_uppercase() && previous.is_some_and(char::is_lowercase) {
+                out.push(' ');
+            }
+            out.extend(c.to_lowercase());
+        }
+        previous = Some(c);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// The first short string field of a JSON input: what the call was about.
+fn first_field(input: &str) -> Option<String> {
+    let serde_json::Value::Object(map) = serde_json::from_str(input).ok()? else {
+        return None;
+    };
+    map.values()
+        .filter_map(serde_json::Value::as_str)
+        .find(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// One message between agents or sessions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentMessage {
-    /// The thread's `Agent` item it went to; `None` for another session or
-    /// an agent this thread doesn't have.
+    /// The thread's `Agent` item on the other side; `None` for another
+    /// session, the main agent or an agent this thread doesn't have.
     pub to: Option<artisan_api::ItemId>,
+    pub direction: MessageDirection,
     pub summary: Option<String>,
     pub text: artisan_api::TextContent,
 }
 
-/// The message `item` sent, when it is a `SendMessage` call.
+/// The message `item` is, when it is one.
 pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
     let ItemKind::Tool {
         tool:
@@ -104,6 +404,7 @@ pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
                 target,
                 summary,
                 text,
+                direction,
                 ..
             },
         ..
@@ -113,28 +414,15 @@ pub(crate) fn agent_message(item: &Item) -> Option<AgentMessage> {
     };
     Some(AgentMessage {
         to: target.clone(),
+        direction: *direction,
         summary: summary.clone(),
         text: text.clone(),
     })
 }
 
-/// The categories a chain counts, in order: an agent counts once however
-/// often it was started or messaged.
+/// The categories a chain counts, in order.
 pub(crate) fn chain_categories<'a>(items: impl Iterator<Item = &'a Item>) -> Vec<ActivityCategory> {
-    let mut agents = std::collections::HashSet::new();
-    items
-        .filter(|item| talked_to(item).is_none_or(|agent| agents.insert(agent)))
-        .filter_map(category)
-        .collect()
-}
-
-/// The agent an item talks to, for counting a chain's agents once: the
-/// agent it started, or the one it messaged.
-fn talked_to(item: &Item) -> Option<artisan_api::ItemId> {
-    match &item.kind {
-        ItemKind::Agent { .. } => Some(item.id.clone()),
-        _ => agent_message(item).and_then(|message| message.to),
-    }
+    items.filter_map(category).collect()
 }
 
 /// The chain header's sentence: composition counted in first-appearance
@@ -164,114 +452,6 @@ pub(crate) fn chain_clause(categories: impl Iterator<Item = ActivityCategory>) -
     text
 }
 
-/// The fallback words for an activity without a detail of its own.
-fn presentation_label(category: ActivityCategory, status: Status) -> &'static str {
-    use ActivityCategory as C;
-    match status {
-        Status::Failed | Status::Cancelled | Status::Declined => match category {
-            C::Command => "Command failed",
-            C::FileRead => "File read failed",
-            C::FileEdit => "File edit failed",
-            C::FileDelete => "File delete failed",
-            C::FileSearch => "File search failed",
-            C::WebSearch => "Web search failed",
-            C::Integration => "Integration failed",
-            C::Subagent => "Agent failed",
-            C::Tool => "Tool failed",
-        },
-        Status::Running | Status::AwaitingUser => match category {
-            C::Command => "Running a command",
-            C::FileRead => "Reading a file",
-            C::FileEdit => "Editing a file",
-            C::FileDelete => "Deleting a file",
-            C::FileSearch => "Searching files",
-            C::WebSearch => "Searching the web",
-            C::Integration => "Using an integration",
-            C::Subagent => "Talking to an agent",
-            C::Tool => "Using a tool",
-        },
-        Status::Done => match category {
-            C::Command => "Ran a command",
-            C::FileRead => "Read a file",
-            C::FileEdit => "Edited a file",
-            C::FileDelete => "Deleted a file",
-            C::FileSearch => "Searched files",
-            C::WebSearch => "Searched the web",
-            C::Integration => "Used an integration",
-            C::Subagent => "Talked to an agent",
-            C::Tool => "Used a tool",
-        },
-    }
-}
-
-/// The muted row text for one activity: the normalized shell command for a
-/// terminal row, the raw detail otherwise, else the presentation label.
-pub(crate) fn detail_text(item: &Item, category: ActivityCategory) -> String {
-    let detail: Option<String> = match &item.kind {
-        // Artisan's name for it, never the engine's type or id.
-        ItemKind::Agent { description, .. } => item.agent_label().map(|label| {
-            if description.byte_len() == 0 {
-                label
-            } else {
-                match description {
-                    artisan_api::TextContent::Inline(text) => format!("{label}: {text}"),
-                    artisan_api::TextContent::Stored(_) => format!("{label}: stored task"),
-                }
-            }
-        }),
-        ItemKind::Tool { tool, title, .. } => match tool {
-            ToolKind::Shell { command, .. } => Some(match command {
-                artisan_api::TextContent::Inline(text) => text.clone(),
-                artisan_api::TextContent::Stored(_) => "Stored shell command".into(),
-            }),
-            ToolKind::Read { path, range } => Some(match range {
-                Some((from, to)) => format!("{path}:{from}-{to}"),
-                None => path.clone(),
-            }),
-            ToolKind::Edit {
-                changes: artisan_api::Collection::Stored(source),
-            } => Some(format!("{} file changes", source.count)),
-            ToolKind::Edit {
-                changes: artisan_api::Collection::Inline(changes),
-            } => match changes.as_slice() {
-                [] => None,
-                [one] => Some(one.path.clone()),
-                [first, rest @ ..] => Some(format!("{} and {} more", first.path, rest.len())),
-            },
-            ToolKind::Search {
-                pattern,
-                path,
-                mode,
-            } => Some(match (mode, path) {
-                (SearchMode::List, Some(path)) => path.clone(),
-                (_, Some(path)) => format!("{pattern} in {path}"),
-                (_, None) => pattern.clone(),
-            }),
-            ToolKind::WebFetch { url } => Some(url.clone()),
-            ToolKind::WebSearch { query } => Some(query.clone()),
-            ToolKind::Mcp { server, tool, .. } => Some(
-                title
-                    .clone()
-                    .unwrap_or_else(|| format!("{server} · {tool}")),
-            ),
-            ToolKind::ViewImage { path } => Some(path.clone()),
-            ToolKind::AgentMessage { target, .. } => Some(
-                if target.is_some() {
-                    "Talked to an agent"
-                } else {
-                    "Sent a message"
-                }
-                .to_owned(),
-            ),
-            ToolKind::Other { name, .. } => title.clone().or_else(|| Some(name.clone())),
-        },
-        _ => None,
-    };
-    detail
-        .filter(|detail| !detail.trim().is_empty())
-        .unwrap_or_else(|| presentation_label(category, item.status).to_owned())
-}
-
 /// The original category glyph for a chain, or the mixed-activity list glyph.
 pub(crate) fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> editor_ui::AssetId {
     use editor_ui::AssetId;
@@ -286,10 +466,12 @@ pub(crate) fn chain_icon(categories: impl Iterator<Item = ActivityCategory>) -> 
         ActivityCategory::Command => AssetId::TABLER_TERMINAL_2,
         ActivityCategory::FileRead => AssetId::TABLER_FILE_TEXT,
         ActivityCategory::FileEdit => AssetId::TABLER_FILE_PENCIL,
+        ActivityCategory::FileCreate => AssetId::TABLER_FILE_SPARK,
         ActivityCategory::FileDelete => AssetId::TABLER_FILE_X,
         ActivityCategory::FileSearch => AssetId::TABLER_FILE_SEARCH,
         ActivityCategory::WebSearch => AssetId::TABLER_WORLD_SEARCH,
         ActivityCategory::Subagent => AssetId::TABLER_BOT_ID,
+        ActivityCategory::Message => AssetId::TABLER_MESSAGES,
         _ => AssetId::TABLER_TOOL,
     }
 }

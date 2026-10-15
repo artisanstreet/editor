@@ -111,14 +111,13 @@ impl RenderOnce for HierarchyView {
         };
         let width = probed_width(&plot_probe, FALLBACK_WIDTH);
         let geometry = state.update(cx, |state, _| {
-            if let Some(geometry) = &state.geometry {
-                if geometry.layout == self.layout
-                    && geometry.focus == focus
-                    && geometry.levels == self.levels
-                    && geometry.width == width
-                {
-                    return geometry.clone();
-                }
+            if let Some(geometry) = &state.geometry
+                && geometry.layout == self.layout
+                && geometry.focus == focus
+                && geometry.levels == self.levels
+                && geometry.width == width
+            {
+                return geometry.clone();
             }
             let (height, parts) = match self.layout {
                 Layout::Treemap => {

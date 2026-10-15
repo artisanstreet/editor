@@ -419,10 +419,10 @@ pub(super) fn parse(value: &Value) -> Result<Arc<dyn RichBlock>, String> {
     }
     let mut declared = HashMap::new();
     for node in &spec.nodes {
-        if let Some(previous) = declared.insert(&node.id, &node.label) {
-            if previous != &node.label {
-                return Err(format!("conflicting labels for node `{}`", node.id));
-            }
+        if let Some(previous) = declared.insert(&node.id, &node.label)
+            && previous != &node.label
+        {
+            return Err(format!("conflicting labels for node `{}`", node.id));
         }
     }
     for (index, link) in spec.links.iter().enumerate() {

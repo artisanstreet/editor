@@ -22,7 +22,7 @@ fn note(kind: &str, json: &str) -> String {
 
 #[test]
 fn compare_prepares_partial_rows_and_recommendation() {
-    let _md = ready_example(
+    ready_example(
         "compare",
         r#"{"options": ["Redis", "Postgres"], "recommended": "postgres",
             "rows": [{"criterion": "Ops", "values": ["new service"]}, {"criterion": "Speed", "values": ["fast", "ok", "extra"]}]}"#,

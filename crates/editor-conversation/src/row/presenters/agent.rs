@@ -1,11 +1,10 @@
-//! Agent rows consume canonical labels and status; navigation stays a typed action.
+//! Agent rows: the live status line in an agent's own view, and the work
+//! row that says what was delegated and opens the agent's view.
 use super::super::LINE;
 use super::{Action, Actions};
 use crate::phase::{self, Phase};
-use artisan_api::{Item, ItemKind, Status, TextContent};
+use artisan_api::{Item, ItemKind, TextContent};
 use editor_ui::{
-    AssetId,
-    asset_seam::asset_glyph,
     shimmer_text::{ShimmerText, ShimmerTone},
     theme::{ArtisanTheme, ProseTypography},
 };
@@ -55,11 +54,9 @@ impl AgentPresenter {
             return div().into_any_element();
         };
         let muted = theme.colors.muted_foreground.to_paint();
-        let state = match item.status {
-            Status::Running | Status::AwaitingUser => "Working",
-            Status::Done => "Done",
-            Status::Failed => "Failed",
-            Status::Cancelled | Status::Declined => "Stopped",
+        let task: SharedString = match description {
+            TextContent::Inline(text) => text.lines().next().unwrap_or_default().to_owned().into(),
+            TextContent::Stored(_) => "Stored task. Open the agent to read it.".into(),
         };
         let id = item.id.clone();
         let open = self.actions.handler(Action::OpenAgent(id));
@@ -80,29 +77,15 @@ impl AgentPresenter {
             .tracking(ProseTypography::TRACKING_EM)
             .text_color(muted)
             .child(
-                asset_glyph(AssetId::TABLER_BOT_ID)
-                    .size(px(16.0))
-                    .flex_none(),
-            )
-            .child(
                 div()
                     .flex_shrink_0()
                     .text_color(theme.colors.foreground.to_paint())
-                    .child(item.agent_label().unwrap_or_default()),
+                    .child("Delegated"),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(match description {
-                        TextContent::Inline(text) => {
-                            text.lines().next().unwrap_or_default().to_owned()
-                        }
-                        TextContent::Stored(_) => "Stored task. Open the agent to read it.".into(),
-                    }),
-            )
-            .child(div().flex_shrink_0().child(state))
+            .child(div().flex_1().min_w_0().truncate().child(task.clone()))
+            .children(crate::row::test_mark(format!(
+                "work-agent-text:Delegated {task}"
+            )))
             .on_click(move |_, _, cx| open(cx))
             .into_any_element()
     }

@@ -48,8 +48,7 @@ pub(crate) fn copy_action(key: String, theme: ArtisanTheme, source: CopySource) 
                     .background_executor()
                     .spawn(async move { source.into_text() })
                     .await;
-                let _ =
-                    cx.update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)));
+                cx.update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)));
             })
             .detach();
         });

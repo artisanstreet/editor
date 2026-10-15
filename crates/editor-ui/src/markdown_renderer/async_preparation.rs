@@ -357,10 +357,10 @@ impl Cache {
                 }
                 break;
             };
-            if let Some(entry) = self.entries.remove(index) {
-                if let Some(source) = entry.prepared {
-                    source.presentation.release_images(cx);
-                }
+            if let Some(entry) = self.entries.remove(index)
+                && let Some(source) = entry.prepared
+            {
+                source.presentation.release_images(cx);
             }
         }
     }
@@ -518,7 +518,7 @@ impl PreparationOwner {
                 }
                 Err(error)=>Err(error),
             };
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(owner) = cache_owner.upgrade() else {
                     return;
                 };

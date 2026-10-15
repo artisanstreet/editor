@@ -274,6 +274,11 @@ pub(super) enum Item {
         id: String,
     },
     CollabAgentToolCall(CollabCall),
+    #[serde(rename_all = "camelCase")]
+    Sleep {
+        id: String,
+        duration_ms: Option<u64>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -374,6 +379,8 @@ pub(super) struct CollabCall {
 #[serde(rename_all = "camelCase")]
 pub(super) enum CollabTool {
     SpawnAgent,
+    SendInput,
+    Wait,
     #[serde(other)]
     Other,
 }

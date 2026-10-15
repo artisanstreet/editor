@@ -39,7 +39,7 @@ impl SourceField {
             crate::fold::Slot::Prose => Self::Prose,
             crate::fold::Slot::Plain(section) => Self::Plain(section),
             crate::fold::Slot::Text(section) => Self::Text(section),
-            crate::fold::Slot::Output => Self::Output,
+            crate::fold::Slot::Output | crate::fold::Slot::Preview => Self::Output,
             crate::fold::Slot::Answer => Self::AnswerText,
         }
     }

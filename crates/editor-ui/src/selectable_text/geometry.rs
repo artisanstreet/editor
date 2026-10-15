@@ -29,10 +29,20 @@ impl LeafLayout {
         match self {
             Self::Native(..) => 0..text_len,
             Self::Projected { row, .. } => {
-                let start = row.source.ranges.iter().map(|range| range.start)
-                    .min().unwrap_or(row.source_start);
-                let end = row.source.ranges.iter().map(|range| range.end)
-                    .max().unwrap_or(start);
+                let start = row
+                    .source
+                    .ranges
+                    .iter()
+                    .map(|range| range.start)
+                    .min()
+                    .unwrap_or(row.source_start);
+                let end = row
+                    .source
+                    .ranges
+                    .iter()
+                    .map(|range| range.end)
+                    .max()
+                    .unwrap_or(start);
                 start..end
             }
         }

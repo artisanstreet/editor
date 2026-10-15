@@ -2,10 +2,12 @@
 
 use super::decoder::str_at;
 use artisan_api::{
-    AgentAction, FileChange, FileOp, MessageDirection, PlanStep, Question, QuestionOption, SearchMode, StepStatus, ToolKind,
+    AgentAction, FileChange, FileOp, MessageDirection, PlanStep, Question, QuestionOption,
+    SearchMode, StepStatus, ToolKind,
 };
 use serde_json::Value;
 
+#[expect(clippy::too_many_lines, reason = "one arm per Claude tool")]
 pub(super) fn tool_kind(name: &str, input: &Value) -> Result<ToolKind, String> {
     validate_input(name, input)?;
     let text = |field: &str| {

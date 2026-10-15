@@ -4,8 +4,8 @@ use super::tools::{questions, todo_steps, tool_kind, validate_input};
 use crate::{EngineEvent, LiveKind, Outcome};
 use anyhow::Context as _;
 use artisan_api::{
-    Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, Output, Phase,
-    RunStatus, Status, ToolKind, Usage,
+    Answer, Approval, ApprovalRequest, Decision, ErrorKind, ItemId, ItemKind, MessageDirection,
+    Output, Phase, RunStatus, Status, ToolKind, Usage,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -116,7 +116,7 @@ impl ClaudeDecoder {
             "system" => self.system(frame, &mut out),
             "stream_event" if parent.is_none() => self.stream_event(&frame["event"], &mut out),
             "assistant" => self.assistant(frame, parent, &mut out),
-            "user" => self.user(frame, &mut out),
+            "user" => self.user(frame, parent, &mut out),
             "result" => self.result(frame, &mut out),
             "control_request" => self.control_request(frame, &mut out),
             "control_response" => self.control_response(frame, &mut out),
@@ -828,7 +828,15 @@ impl ClaudeDecoder {
         self.tools.insert(id.to_owned(), tool);
     }
 
-    fn user(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {
+    fn user(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
+        // Claude replays what others put in its turn too: a message from one
+        // of its agents or another session, or a task notification. Only
+        // the rest are our own inputs.
+        match str_at(&frame["origin"], "kind") {
+            Some("peer") => return self.peer_message(frame, parent, out),
+            Some(kind) if kind != "user" => return,
+            _ => {}
+        }
         if frame["isReplay"].as_bool() == Some(true) {
             if let Some(Some(id)) = self.replays.pop_front() {
                 out.push(EngineEvent::InputAccepted { id });
@@ -866,6 +874,48 @@ impl ClaudeDecoder {
             }
             out.push(tool.event());
         }
+    }
+
+    /// A message that came in from one of this session's agents (`from` is
+    /// its id) or from another session (`name` is the session's).
+    fn peer_message(&mut self, frame: &Value, parent: Option<String>, out: &mut Vec<EngineEvent>) {
+        let origin = &frame["origin"];
+        let Some(body) = str_at(origin, "body").filter(|body| !body.trim().is_empty()) else {
+            return;
+        };
+        let recipient = if str_at(origin, "senderTaskId").is_some() {
+            str_at(origin, "from")
+        } else {
+            str_at(origin, "name").or_else(|| str_at(origin, "from"))
+        };
+        let Some(recipient) = recipient else {
+            tracing::warn!("Claude peer message omitted its sender");
+            return;
+        };
+        let key = str_at(origin, "msg_id")
+            .or_else(|| str_at(frame, "uuid"))
+            .map_or_else(
+                || format!("peer:{}", self.tools.len()),
+                |id| format!("peer:{id}"),
+            );
+        out.push(EngineEvent::Item {
+            key,
+            parent,
+            status: Status::Done,
+            kind: ItemKind::Tool {
+                tool: ToolKind::AgentMessage {
+                    recipient: recipient.to_owned(),
+                    target: None,
+                    summary: None,
+                    text: body.into(),
+                    direction: MessageDirection::Received,
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        });
     }
 
     fn result(&mut self, frame: &Value, out: &mut Vec<EngineEvent>) {

@@ -2,10 +2,9 @@
 
 use super::*;
 
-/// The lead's messages to an agent read as talking to it: in the lead's
-/// work "Talked to Martine" under Agents (one agent, however often it was
-/// messaged), and in Martine's own view as messages where they arrived,
-/// with a live line while she works.
+/// The lead's messages to an agent name the agent by its task: in the
+/// lead's work "Messaged Close renderer gaps", and in Martine's own view as
+/// messages where they arrived, with a live line while she works.
 #[gpui::test]
 #[expect(
     clippy::too_many_lines,
@@ -65,6 +64,7 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
                 target: Some(martine.id.clone()),
                 summary: Some("Use content/variants".into()),
                 text: "Map variants already exist: use content/variants for weather.".into(),
+                direction: artisan_api::MessageDirection::Sent,
             },
             title: None,
             output: None,
@@ -90,25 +90,30 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
     open(&core, &host, &thread, cx);
     wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 2);
 
-    // The lead's work: one chain, counting Martine once.
+    // The lead's work: it delegated a task and messaged its agent by name
+    // of that task.
     let message_item = loaded(&conversation, cx)
         .into_iter()
         .find(|item| item.id == message.id)
         .unwrap();
+    let agents = conversation.read_with(cx, |conversation, _| {
+        conversation
+            .view
+            .as_ref()
+            .map(super::super::agent_names)
+            .unwrap()
+    });
+    let line = crate::activity::line(&message_item, &agents);
     assert_eq!(
-        crate::activity::category(&message_item),
-        Some(crate::activity::ActivityCategory::Subagent),
-        "a message to an agent counts under Agents"
+        (line.verb.as_str(), line.object.as_str()),
+        ("Messaged", "Close renderer gaps")
     );
-    let sent = crate::activity::agent_message(&message_item).unwrap();
-    assert_eq!(sent.to.as_ref(), Some(&martine.id));
     let lead_work = loaded(&conversation, cx);
     let chain =
         crate::activity::chain_categories(lead_work.iter().filter(|item| item.parent_id.is_none()));
     assert_eq!(
         crate::activity::chain_clause(chain.into_iter()),
-        "Talked to an agent",
-        "Martine started and messaged is one agent"
+        "Delegated a task, exchanged a message"
     );
 
     // Martine's view: her task, her work, the message where it arrived,
@@ -116,63 +121,19 @@ fn messages_to_an_agent_show_in_its_view_and_read_as_talking_to_it(cx: &mut Test
     conversation.update(cx, |conversation, cx| {
         conversation.open_agent(Some(martine.id.clone()), cx);
     });
+    let her_view = [
+        "agent-task:martine:0",
+        "work:start",
+        "agent-message:message:0",
+        "prose:switch:0",
+        "agent-status:martine:working",
+    ]
+    .map(str::to_owned);
     wait(cx, "her view", |cx| {
-        cx.read(|cx| {
-            conversation.read(cx).rows.iter().any(|(row, _)| {
-                matches!(
-                    row,
-                    Row::PlainBlock {
-                        section: crate::fold::PlainSection::AgentMessage,
-                        ..
-                    }
-                )
-            })
-        })
+        draw(cx);
+        painted_order(cx, &her_view).len() == her_view.len()
     });
-    let rows: Vec<String> = cx.read(|cx| {
-        let c = conversation.read(cx);
-        // This asserts canonical ordering, independently of native leaf subdivision.
-        crate::fold::fold(
-            c.view.as_ref().unwrap(),
-            c.run(cx).as_ref(),
-            c.agent.as_ref(),
-        )
-        .rows
-        .iter()
-        .map(|(row, _)| match row {
-            Row::PlainBlock {
-                id,
-                section: crate::fold::PlainSection::AgentTask,
-                ..
-            } => format!("task {id}"),
-            Row::PlainBlock {
-                id,
-                section: crate::fold::PlainSection::AgentMessage,
-                ..
-            } => format!("message {id}"),
-            Row::AgentStatus(_, working) => format!("live working={working}"),
-            Row::Work { entries, .. } => format!(
-                "work {}",
-                entries
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            other => format!("{other:?}"),
-        })
-        .collect()
-    });
-    assert_eq!(
-        rows,
-        [
-            "task martine",
-            "work start",
-            "message message",
-            "work switch build",
-            "live working=true",
-        ]
-    );
+    assert_eq!(painted_order(cx, &her_view), her_view);
 }
 
 /// The context meter reads the open agent's own context and model: an
@@ -224,9 +185,10 @@ fn an_agents_view_reads_its_own_context(cx: &mut TestAppContext) {
 fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
     let forge = Forge::start();
     let thread = forge.thread();
+    let user = ItemId::new();
     forge.put(
         &thread,
-        &ItemId::new(),
+        &user,
         Status::Done,
         ItemKind::UserMessage {
             text: "build the HUD".into(),
@@ -302,56 +264,45 @@ fn a_subagent_opens_into_its_own_view(cx: &mut TestAppContext) {
     // The work section is folded under its reply: open it.
     click(cx, "work-header");
     settle(cx, &conversation);
-    // The agent sits in the work's chain ("talked to an agent"): open it.
+    // The agent sits in the work's chain ("delegated a task"): open it.
     click(cx, "work-chain");
     settle(cx, &conversation);
-    click(cx, "work-agent");
-    settle(cx, &conversation);
+    // Like a command, its row reads "Delegated" and the task it got: no
+    // name, no status.
     assert!(
-        cx.read(|cx| conversation.read(cx).agent_task.is_none()),
-        "completed agent ancestry must release its loading task"
+        painted(
+            cx,
+            "work-agent-text:Delegated Match UI: HUD and in-match screens".to_owned()
+        )
+        .is_some(),
+        "the agent's row reads \"Delegated\" then its task, and nothing else"
     );
-    let rows = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
+    click(cx, "work-agent");
+    wait(cx, "its task, its work and its report", |cx| {
+        draw(cx);
+        let child = cx.read(|cx| {
             conversation
                 .read(cx)
-                .rows
-                .iter()
-                .map(|(row, _)| row.clone())
-                .collect::<Vec<_>>()
-        })
-    };
-    let shown = rows(cx);
-    assert!(
-        matches!(shown.first(), Some(Row::PlainBlock {id, section: crate::fold::PlainSection::AgentTask, block: 0}) if *id == agent),
-        "{shown:?}"
-    );
-    assert!(
-        matches!(shown.last(), Some(Row::TextBlock {id, section: crate::fold::TextSection::AgentResult, ..}) if *id == agent),
-        "{shown:?}"
-    );
-    assert!(
-        shown
-            .iter()
-            .any(|row| matches!(row, Row::Work { entries, .. } if entries.len() == 1)),
-        "its own work: {shown:?}"
-    );
+                .items()
+                .find(|item| item.parent_id.as_ref() == Some(&agent))
+                .map(|item| item.id.clone())
+        });
+        let Some(child) = child else { return false };
+        let its_view = [
+            format!("agent-task:{agent}:0"),
+            format!("work:{child}"),
+            format!("result-view:{agent}:0"),
+        ];
+        painted_order(cx, &its_view) == its_view
+    });
     let trail = cx.read(|cx| conversation.read(cx).agent_trail());
     assert_eq!(trail, vec![(agent.clone(), name.clone())]);
 
     conversation.update(cx, |conversation, cx| conversation.open_agent(None, cx));
-    settle(cx, &conversation);
-    assert!(
-        rows(cx).iter().any(|row| matches!(
-            row,
-            Row::PlainBlock {
-                section: crate::fold::PlainSection::User,
-                block: 0,
-                ..
-            }
-        )),
-        "back in the thread"
-    );
+    wait(cx, "back in the thread", |cx| {
+        draw(cx);
+        shown(cx, format!("user:{user}:0")).is_some()
+    });
 }
 
 #[test]

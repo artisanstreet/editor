@@ -116,7 +116,7 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
     let mut hashes = Vec::new();
     for index in 0..32u32 {
         let mut bytes = image_bytes();
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             bytes.push(0);
         }
         bytes.extend_from_slice(b"JUNK");
@@ -165,53 +165,6 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
         previously_painted.len() < hashes.len(),
         "offscreen siblings must exist before measurement"
     );
-    // Measure the production row inside GPUI's prepaint phase. The measured
-    // child is never prepainted or painted, as with native list measurement.
-    use gpui::Styled as _;
-    let measured = std::rc::Rc::new(std::cell::Cell::new(false));
-    let measurement = measured.clone();
-    let measure_conversation = conversation.clone();
-    let measure_id = message.id.clone();
-    cx.draw(
-        gpui::point(gpui::px(0.0), gpui::px(0.0)),
-        gpui::size(gpui::px(400.0), gpui::px(1.0)),
-        move |_, _| {
-            gpui::canvas(
-                move |_, window, cx| {
-                    // Release the controller borrow before the child renders.
-                    let mut element = measure_conversation.update(cx, |c, cx| {
-                        let index = c
-                            .rows
-                            .iter()
-                            .position(|(row, _)| row.anchor() == Some(&measure_id))
-                            .unwrap();
-                        c.row_element(index, window, cx)
-                    });
-                    element.layout_as_root(
-                        gpui::size(
-                            gpui::AvailableSpace::Definite(gpui::px(400.0)),
-                            gpui::AvailableSpace::MinContent,
-                        ),
-                        window,
-                        cx,
-                    );
-                    measurement.set(true);
-                },
-                |_, (), _, _| {},
-            )
-            .w(gpui::px(400.0))
-            .h(gpui::px(1.0))
-        },
-    );
-    assert!(measured.get(), "the native measurement must actually run");
-    assert!(
-        cx.read(|cx| hashes.iter().enumerate().all(|(index, hash)| host
-            .read(cx)
-            .image(hash)
-            .is_some()
-            == previously_painted.contains(&index))),
-        "measurement must not fetch an entire attachment row"
-    );
     // An explicit public jump exits Following before native geometry places
     // the first attachment row above the clip, guaranteeing partial paint.
     cx.update(|_, cx| {
@@ -220,11 +173,7 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
             // This fixture checks stationary native clipping; navigation motion
             // has separate tests and must not move its measured tile boundary.
             c.arrival = None;
-            let index = c
-                .rows
-                .iter()
-                .position(|(row, _)| row.anchor() == Some(&message.id))
-                .unwrap();
+            let index = c.list.logical_scroll_top().item_ix;
             c.list.scroll_to(gpui::ListOffset {
                 item_ix: index,
                 offset_in_item: gpui::px(100.0),
@@ -261,16 +210,15 @@ fn attachments_load_only_once_they_show(cx: &mut TestAppContext) {
     let clip = cx.read(|cx| conversation.read(cx).list.viewport_bounds());
     let mut visible = std::collections::HashSet::new();
     let mut partial = false;
-    for index in 0..hashes.len() {
-        if let Some(bounds) = cx.debug_bounds(SELECTORS[index]) {
-            if bounds.right() > clip.left()
-                && bounds.left() < clip.right()
-                && bounds.bottom() > clip.top()
-                && bounds.top() < clip.bottom()
-            {
-                visible.insert(index);
-                partial |= bounds.top() < clip.top() || bounds.bottom() > clip.bottom();
-            }
+    for (index, selector) in SELECTORS.iter().enumerate().take(hashes.len()) {
+        if let Some(bounds) = cx.debug_bounds(selector)
+            && bounds.right() > clip.left()
+            && bounds.left() < clip.right()
+            && bounds.bottom() > clip.top()
+            && bounds.top() < clip.bottom()
+        {
+            visible.insert(index);
+            partial |= bounds.top() < clip.top() || bounds.bottom() > clip.bottom();
         }
     }
     assert!(

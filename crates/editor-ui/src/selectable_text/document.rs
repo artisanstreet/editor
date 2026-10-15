@@ -102,10 +102,13 @@ struct Drag {
     anchor_end: Position,
 }
 
+/// A registered source: its scope and owner order.
+type SourceKey = (SharedString, Rc<[u64]>);
+
 /// The selection of one window.
 #[derive(Default)]
 pub(super) struct Document {
-    sources: HashMap<(SharedString, Rc<[u64]>), (Weak<SelectionSource>, EntityId)>,
+    sources: HashMap<SourceKey, (Weak<SelectionSource>, EntityId)>,
     scope: Option<SharedString>,
     whole_source: bool,
     leaves: HashMap<LeafKey, Leaf>,

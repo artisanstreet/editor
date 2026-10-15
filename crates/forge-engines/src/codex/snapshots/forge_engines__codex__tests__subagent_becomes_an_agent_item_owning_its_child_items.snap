@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/codex/tests.rs
-assertion_line: 165
 expression: "replay(\"subagent\")"
 ---
 [
@@ -100,6 +99,26 @@ expression: "replay(\"subagent\")"
     ),
     Event(
         Item {
+            key: "exec-fac7a477-9185-4ff5-988b-3ca2994105ab",
+            parent: None,
+            status: Running,
+            kind: Tool {
+                tool: Agents {
+                    action: Wait,
+                    addresses: [
+                        "01a12bc9-dd9c-7f90-a852-a6e33d450aa9",
+                    ],
+                    targets: [],
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
+            },
+        },
+    ),
+    Event(
+        Item {
             key: "msg_0199c7bee5cc8400016acbb8cded648191b1622d22bbb762b5",
             parent: Some(
                 "exec-5e0ef6fb-716e-4279-aa99-f71ae97d6627",
@@ -182,6 +201,26 @@ expression: "replay(\"subagent\")"
                     ),
                 ),
                 label: None,
+            },
+        },
+    ),
+    Event(
+        Item {
+            key: "exec-fac7a477-9185-4ff5-988b-3ca2994105ab",
+            parent: None,
+            status: Done,
+            kind: Tool {
+                tool: Agents {
+                    action: Wait,
+                    addresses: [
+                        "01a12bc9-dd9c-7f90-a852-a6e33d450aa9",
+                    ],
+                    targets: [],
+                },
+                title: None,
+                output: None,
+                exit_code: None,
+                approval: None,
             },
         },
     ),

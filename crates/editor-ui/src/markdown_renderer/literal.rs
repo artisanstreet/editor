@@ -239,26 +239,31 @@ impl LiteralOwner {
                 })
             });
             drop(fetch_capacity);
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(owner) = weak.upgrade() else {
                     return;
                 };
                 let mut cache = owner.borrow_mut();
-                let Some(entry) = cache.entries.iter_mut().find(|entry| {
+                // Whatever became of this entry, its fetch slot is free now:
+                // the leaves waiting for one try again.
+                let waiters = std::mem::take(&mut cache.waiters);
+                let entry = cache.entries.iter_mut().find(|entry| {
                     entry.key == job_key
                         && entry.identity == job_identity
                         && entry.generation == generation
-                }) else {
-                    return;
-                };
-                entry.task = None;
-                match result {
-                    Ok(leaf) => entry.ready = Some(leaf),
-                    Err(error) => entry.error = Some(error),
+                });
+                let current = entry.is_some();
+                if let Some(entry) = entry {
+                    entry.task = None;
+                    match result {
+                        Ok(leaf) => entry.ready = Some(leaf),
+                        Err(error) => entry.error = Some(error),
+                    }
                 }
-                let waiters = std::mem::take(&mut cache.waiters);
                 drop(cache);
-                notify(cx);
+                if current {
+                    notify(cx);
+                }
                 for waiter in waiters {
                     (waiter.notify)(cx);
                 }

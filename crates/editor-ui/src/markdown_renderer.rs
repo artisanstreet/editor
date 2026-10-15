@@ -148,6 +148,10 @@ impl MarkdownRenderer {
     }
     /// Publishes only admitted native hot glyph windows. The caller supplies
     /// its actual resolved layout width and stable immutable TextRuns identity.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, source, typography, width, runs, window and the callback"
+    )]
     pub fn prepare_native_window(
         &self,
         key: SharedString,
@@ -176,6 +180,10 @@ impl MarkdownRenderer {
     pub fn retry_native_window(&self, key: &SharedString) {
         self.projection.retry(key);
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, reference, format, both fetchers and the callback"
+    )]
     pub fn prepare_stored_source(
         &self,
         key: SharedString,
@@ -377,7 +385,7 @@ impl MarkdownRenderer {
         let bytes = source
             .resident_bytes()
             .saturating_add(std::mem::size_of::<SelectionEntry>())
-            .saturating_add(prefix.len() * std::mem::size_of::<u64>())
+            .saturating_add(std::mem::size_of_val(prefix))
             .saturating_add(scope.len());
         const SELECTION_SOURCE_BYTES: usize = 32 * 1024 * 1024;
         while !sources.is_empty()
@@ -420,6 +428,10 @@ impl MarkdownRenderer {
         self
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one draw of a prepared range with its theme, selector, tone and optional reveal"
+    )]
     fn render_prepared(
         &self,
         prepared: Rc<PreparedMarkdown>,
@@ -480,16 +492,14 @@ impl MarkdownRenderer {
                 .min_w_0()
                 .pl(px(row.indent as f32 * ProseTypography::LIST_INDENT_PX))
                 .child(content);
-            if let (Some(reveal), prepared::FlowKind::Block(block)) = (reveal, &row.kind) {
-                if matches!(
+            if let (Some(reveal), prepared::FlowKind::Block(block)) = (reveal, &row.kind)
+                && matches!(
                     block.kind,
                     PreparedKind::Code(_) | PreparedKind::Html { .. }
-                ) {
-                    if let Some((alpha, rise)) = reveal.block_entrance(block.selector) {
-                        frame =
-                            reveal.block_panel(block.selector, frame.opacity(alpha).top(px(rise)));
-                    }
-                }
+                )
+                && let Some((alpha, rise)) = reveal.block_entrance(block.selector)
+            {
+                frame = reveal.block_panel(block.selector, frame.opacity(alpha).top(px(rise)));
             }
             for (indent, marker, ordered) in &row.markers {
                 let mut label = div()
@@ -1010,26 +1020,26 @@ fn fence_text(
                         let swatches: Rc<[_]> = colors
                             .swatches
                             .iter()
-                            .filter_map(|swatch| {
-                                (swatch.offset >= range.start && swatch.offset < range.end).then(
-                                    || crate::selectable_text::InlineSwatch {
-                                        offset: swatch.offset - range.start,
-                                        color: swatch.color,
-                                        alone: swatch.alone,
-                                    },
-                                )
+                            .filter(|&swatch| {
+                                swatch.offset >= range.start && swatch.offset < range.end
+                            })
+                            .map(|swatch| crate::selectable_text::InlineSwatch {
+                                offset: swatch.offset - range.start,
+                                color: swatch.color,
+                                alone: swatch.alone,
                             })
                             .collect();
                         let copies: Rc<[_]> = colors
                             .copies
                             .iter()
-                            .filter_map(|(copy, text)| {
-                                (copy.start >= range.start && copy.end <= range.end).then(|| {
-                                    (
-                                        copy.start - range.start..copy.end - range.start,
-                                        text.clone(),
-                                    )
-                                })
+                            .filter(|&(copy, _text)| {
+                                copy.start >= range.start && copy.end <= range.end
+                            })
+                            .map(|(copy, text)| {
+                                (
+                                    copy.start - range.start..copy.end - range.start,
+                                    text.clone(),
+                                )
                             })
                             .collect();
                         leaf = leaf

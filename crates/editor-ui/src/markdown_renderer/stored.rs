@@ -138,6 +138,10 @@ impl StoredOwner {
         cache.entries.clear();
         cache.waiters.clear();
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one preparation request: its key, reference, format, fetchers, page and the callback"
+    )]
     pub(super) fn prepare(
         &self,
         key: SharedString,
@@ -255,7 +259,7 @@ impl StoredOwner {
                     page,
                 })
             });
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 let Some(owner) = owner.upgrade() else {
                     return;
                 };

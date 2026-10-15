@@ -136,37 +136,35 @@ impl PreparedMarkdown {
             "the root selector takes the first slot"
         );
         let mut root = prepare_blocks(document.blocks(), BlockScope::Root, &mut slots, &mut parts);
-        if let Some(style) = &style {
-            if let Some(header) = style.table_header {
-                if let Some(block) = root.blocks.first_mut().and_then(Rc::get_mut) {
-                    if let PreparedKind::Table(table) = &mut block.kind {
-                        table.header_rows = usize::from(header);
-                        table.trailing_border = style.table_continues;
-                    }
-                }
-            }
+        if let Some(style) = &style
+            && let Some(header) = style.table_header
+            && let Some(block) = root.blocks.first_mut().and_then(Rc::get_mut)
+            && let PreparedKind::Table(table) = &mut block.kind
+        {
+            table.header_rows = usize::from(header);
+            table.trailing_border = style.table_continues;
         }
         let mut flow = flatten_flow(&root);
-        if let Some(style) = style {
-            if let Some(row) = flow.first_mut() {
-                row.indent = style.context.lists.len();
-                for (indent, level) in style.context.lists.iter().enumerate() {
-                    if level.first {
-                        row.markers.push((
-                            indent,
-                            item_marker(
-                                level.number.is_some(),
-                                level.number.unwrap_or(1),
-                                0,
-                                level.task,
-                            )
-                            .into(),
+        if let Some(style) = style
+            && let Some(row) = flow.first_mut()
+        {
+            row.indent = style.context.lists.len();
+            for (indent, level) in style.context.lists.iter().enumerate() {
+                if level.first {
+                    row.markers.push((
+                        indent,
+                        item_marker(
                             level.number.is_some(),
-                        ));
-                    }
+                            level.number.unwrap_or(1),
+                            0,
+                            level.task,
+                        )
+                        .into(),
+                        level.number.is_some(),
+                    ));
                 }
-                row.gap = style.context.spacing.iter().map(indexed_gap).sum();
             }
+            row.gap = style.context.spacing.iter().map(indexed_gap).sum();
         }
         Self { root, flow }
     }
@@ -207,17 +205,16 @@ impl PreparedMarkdown {
 
     pub(super) fn release_images(&self, cx: &mut gpui::App) {
         for row in &self.flow {
-            if let FlowKind::Block(block) = &row.kind {
-                if let PreparedKind::Code(code) = &block.kind {
-                    if let Some(diagram) = &code.fence.diagram {
-                        let image = diagram.image.clone();
-                        cx.defer(move |cx| {
-                            cx.drop_image(image, None);
-                            // Other owners may still draw this image in cached scenes.
-                            cx.refresh_windows();
-                        });
-                    }
-                }
+            if let FlowKind::Block(block) = &row.kind
+                && let PreparedKind::Code(code) = &block.kind
+                && let Some(diagram) = &code.fence.diagram
+            {
+                let image = diagram.image.clone();
+                cx.defer(move |cx| {
+                    cx.drop_image(image, None);
+                    // Other owners may still draw this image in cached scenes.
+                    cx.refresh_windows();
+                });
             }
         }
     }
@@ -332,13 +329,14 @@ fn collect_selection(
                             .colors
                             .copies
                             .iter()
-                            .filter_map(|(copy, text)| {
-                                (copy.start >= range.start && copy.end <= range.end).then(|| {
-                                    (
-                                        copy.start - range.start..copy.end - range.start,
-                                        text.clone(),
-                                    )
-                                })
+                            .filter(|&(copy, _text)| {
+                                copy.start >= range.start && copy.end <= range.end
+                            })
+                            .map(|(copy, text)| {
+                                (
+                                    copy.start - range.start..copy.end - range.start,
+                                    text.clone(),
+                                )
                             })
                             .collect();
                         output.push(SelectionLeaf {

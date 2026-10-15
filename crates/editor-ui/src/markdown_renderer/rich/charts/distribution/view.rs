@@ -84,13 +84,11 @@ impl RenderOnce for DistributionView {
                 start,
             )
         });
-        if replaced {
-            if let Some(slider) = &slider_state {
-                let (range, step, start) = self.data.slider();
-                slider.update(cx, |state, _| {
-                    state.reset(SliderRange::new(range.lo, range.hi, Some(step)), start)
-                });
-            }
+        if replaced && let Some(slider) = &slider_state {
+            let (range, step, start) = self.data.slider();
+            slider.update(cx, |state, _| {
+                state.reset(SliderRange::new(range.lo, range.hi, Some(step)), start)
+            });
         }
         let (hover, plot_probe) = {
             let current = state.read(cx);

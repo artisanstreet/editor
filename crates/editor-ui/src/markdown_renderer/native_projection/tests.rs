@@ -81,7 +81,7 @@ fn native_unicode_bidi_and_ligature_glyphs_survive_projection_without_reshaping(
             .any(|glyph| glyph.index == lam_alef + 'ل'.len_utf8()),
         "fixture must exercise native lam-alef joining as a multi-character cluster"
     );
-    let index = ParagraphWrapIndex::from_native(&physical, &text).unwrap();
+    let index = ParagraphWrapIndex::from_native(&physical, text).unwrap();
     assert!(index.row_count() > 1);
     let projected = index.project(&physical, 0..index.row_count()).unwrap();
     let mut original = Vec::new();
@@ -158,7 +158,7 @@ fn projected_source_offsets_remain_global_across_unequal_physical_lines() {
     let system = native();
     let text = "first line\nβ\nA much longer third physical line with ffi";
     let physical = shape(&system, text, 120.0);
-    let index = ParagraphWrapIndex::from_native(&physical, &text).unwrap();
+    let index = ParagraphWrapIndex::from_native(&physical, text).unwrap();
     let projected = index.project(&physical, 0..index.row_count()).unwrap();
     let third = text.find("A much").unwrap();
     let rows: Vec<_> = projected

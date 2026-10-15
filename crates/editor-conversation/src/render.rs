@@ -568,60 +568,60 @@ impl Conversation {
                         let revealed = evidence_row
                             .upgrade()
                             .is_some_and(|row| row.read(cx).ready_to_read());
-                        if clip.intersects(&bounds) && bounds.size.height > px(0.0) && revealed {
-                            if let Some(source_row) = source_row {
-                                let owner = this.clone();
-                                cx.defer(move |cx| {
-                                    let _ = owner.update(cx, |this, cx| {
-                                        // Native ListState holds its mutable layout borrow while
-                                        // building rows. Read its scroll state only after paint.
-                                        if let Some((key, start)) =
-                                            this.native_window_prefetch(&source_row)
+                        if clip.intersects(&bounds)
+                            && bounds.size.height > px(0.0)
+                            && revealed
+                            && let Some(source_row) = source_row
+                        {
+                            let owner = this.clone();
+                            cx.defer(move |cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    // Native ListState holds its mutable layout borrow while
+                                    // building rows. Read its scroll state only after paint.
+                                    if let Some((key, start)) =
+                                        this.native_window_prefetch(&source_row)
+                                    {
+                                        let anchor = this
+                                            .rows
+                                            .get(this.list.logical_scroll_top().item_ix)
+                                            .map(|(row, _)| row.key());
+                                        if let Some(anchor) = anchor
+                                            && let Some(state) = this
+                                                .shared
+                                                .native_windows
+                                                .borrow_mut()
+                                                .get_mut(&key)
                                         {
-                                            let anchor = this
-                                                .rows
-                                                .get(this.list.logical_scroll_top().item_ix)
-                                                .map(|(row, _)| row.key());
-                                            if let Some(anchor) = anchor {
-                                                if let Some(state) = this
-                                                    .shared
-                                                    .native_windows
-                                                    .borrow_mut()
-                                                    .get_mut(&key)
-                                                {
-                                                    state.frontier =
-                                                        Some((anchor, start > state.window.start));
-                                                }
-                                            }
-                                            this.native_window_edge(key, start, cx);
-                                        } else if let Some((id, slot, revision, offset)) =
-                                            this.source_window_prefetch(&source_row)
-                                        {
-                                            if let Some(anchor) = this
-                                                .rows
-                                                .get(this.list.logical_scroll_top().item_ix)
-                                                .map(|(row, _)| row.key())
-                                            {
-                                                let (reference, newer) = {
-                                                    let sources =
-                                                        this.shared.stored_sources.borrow();
-                                                    let source =
-                                                        sources.get(&(id.clone(), slot)).unwrap();
-                                                    (
-                                                        source.source_ref().clone(),
-                                                        offset > source.loaded_range().start,
-                                                    )
-                                                };
-                                                this.shared.source_frontiers.borrow_mut().insert(
-                                                    (id.clone(), slot),
-                                                    (reference, anchor, newer),
-                                                );
-                                            }
-                                            this.source_window_edge(id, slot, revision, offset, cx);
+                                            state.frontier =
+                                                Some((anchor, start > state.window.start));
                                         }
-                                    });
+                                        this.native_window_edge(key, start, cx);
+                                    } else if let Some((id, slot, revision, offset)) =
+                                        this.source_window_prefetch(&source_row)
+                                    {
+                                        if let Some(anchor) = this
+                                            .rows
+                                            .get(this.list.logical_scroll_top().item_ix)
+                                            .map(|(row, _)| row.key())
+                                        {
+                                            let (reference, newer) = {
+                                                let sources = this.shared.stored_sources.borrow();
+                                                let source =
+                                                    sources.get(&(id.clone(), slot)).unwrap();
+                                                (
+                                                    source.source_ref().clone(),
+                                                    offset > source.loaded_range().start,
+                                                )
+                                            };
+                                            this.shared.source_frontiers.borrow_mut().insert(
+                                                (id.clone(), slot),
+                                                (reference, anchor, newer),
+                                            );
+                                        }
+                                        this.source_window_edge(id, slot, revision, offset, cx);
+                                    }
                                 });
-                            }
+                            });
                         }
                         // The final line must actually paint inside the transcript's native clip.
                         if !window.is_window_active()
@@ -646,14 +646,13 @@ impl Conversation {
                                         .is_some_and(|(row, _)| {
                                             this.read_evidence(row, cx) == Some(seq)
                                         });
-                                    if valid {
-                                        if let (Some(host), Some((_, thread))) =
+                                    if valid
+                                        && let (Some(host), Some((_, thread))) =
                                             (this.host(cx), target)
-                                        {
-                                            host.update(cx, |host, cx| {
-                                                host.acknowledge_read(thread, seq, cx)
-                                            });
-                                        }
+                                    {
+                                        host.update(cx, |host, cx| {
+                                            host.acknowledge_read(thread, seq, cx)
+                                        });
                                     }
                                 });
                             });
@@ -776,12 +775,11 @@ impl Conversation {
             .0
             .key();
         let frontiers = self.shared.source_frontiers.borrow();
-        if let Some((reference, anchor, newer)) = frontiers.get(&(id.clone(), slot)) {
-            if reference == source.source_ref()
-                && reverses_at_same_anchor(Some((anchor, *newer)), &top, offset > loaded.start)
-            {
-                return None;
-            }
+        if let Some((reference, anchor, newer)) = frontiers.get(&(id.clone(), slot))
+            && reference == source.source_ref()
+            && reverses_at_same_anchor(Some((anchor, *newer)), &top, offset > loaded.start)
+        {
+            return None;
         }
         Some((id.clone(), slot, source.revision(), offset))
     }
@@ -1253,13 +1251,13 @@ impl Conversation {
                                 canvas(
                                     |_, _, _| {},
                                     move |bounds, (), window, cx| {
-                                        if let Some(surface) = probe_surface.get() {
-                                            if probe_hover.borrow_mut().measure(
+                                        if let Some(surface) = probe_surface.get()
+                                            && probe_hover.borrow_mut().measure(
                                                 &probe_id,
                                                 HoverRect::within(bounds, surface),
-                                            ) {
-                                                window.defer(cx, |window, _| window.refresh());
-                                            }
+                                            )
+                                        {
+                                            window.defer(cx, |window, _| window.refresh());
                                         }
                                     },
                                 )
@@ -1362,19 +1360,29 @@ fn navigator_tick_indices(count: usize, slots: usize, active: Option<usize>) -> 
             }
         })
         .collect();
-    if let Some(active) = active.filter(|active| *active < count) {
-        if !indices.contains(&active) {
-            let nearest = indices
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, index)| index.abs_diff(active))
-                .unwrap()
-                .0;
-            indices[nearest] = active;
-            indices.sort_unstable();
-        }
+    if let Some(active) = active.filter(|active| *active < count)
+        && !indices.contains(&active)
+    {
+        let nearest = indices
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, index)| index.abs_diff(active))
+            .unwrap()
+            .0;
+        indices[nearest] = active;
+        indices.sort_unstable();
     }
     indices
+}
+
+/// A page splice is not a reader movement. Keep its opposite edge from undoing
+/// the fetch while the same canonical row remains at the top of the viewport.
+fn reverses_at_same_anchor(
+    previous: Option<(&crate::fold::RowKey, bool)>,
+    anchor: &crate::fold::RowKey,
+    newer: bool,
+) -> bool {
+    previous.is_some_and(|(old_anchor, old_newer)| old_anchor == anchor && old_newer != newer)
 }
 
 #[cfg(test)]
@@ -1397,14 +1405,4 @@ mod navigator_tests {
         assert_eq!(label.chars().count(), 161);
         assert!(label.ends_with('…'));
     }
-}
-
-/// A page splice is not a reader movement. Keep its opposite edge from undoing
-/// the fetch while the same canonical row remains at the top of the viewport.
-fn reverses_at_same_anchor(
-    previous: Option<(&crate::fold::RowKey, bool)>,
-    anchor: &crate::fold::RowKey,
-    newer: bool,
-) -> bool {
-    previous.is_some_and(|(old_anchor, old_newer)| old_anchor == anchor && old_newer != newer)
 }

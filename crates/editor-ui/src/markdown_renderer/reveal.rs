@@ -122,10 +122,10 @@ impl PreparedReveal {
             .flex_col()
             .child(content.flex_shrink_0())
             .on_children_prepainted(move |bounds, window, _| {
-                if let Some(bounds) = bounds.first() {
-                    if measured.replace(bounds.size.height) != bounds.size.height {
-                        window.request_animation_frame();
-                    }
+                if let Some(bounds) = bounds.first()
+                    && measured.replace(bounds.size.height) != bounds.size.height
+                {
+                    window.request_animation_frame();
                 }
             })
     }
@@ -136,7 +136,7 @@ impl PreparedReveal {
             .get(&slot)
             .map_or(text.len(), |leaf| leaf.visible)
     }
-    pub(super) fn frontier_reporter(&self) -> Rc<dyn Fn(Option<Pixels>, &mut Window)> {
+    pub(super) fn frontier_reporter(&self) -> crate::selectable_text::FrontierReport {
         let geometry = self.geometry.clone();
         Rc::new(move |bottom, _| {
             if let Some(bottom) = bottom {

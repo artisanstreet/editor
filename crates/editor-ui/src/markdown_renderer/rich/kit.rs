@@ -156,8 +156,6 @@ pub(super) fn hairline(theme: &ArtisanTheme) -> Hsla {
     theme.colors.foreground.with_alpha(0.1).to_paint()
 }
 
-/// A small pill: status, kind, or tag.
-
 /// A tinted glyph at `size` in `color`.
 pub(super) fn glyph(id: AssetId, size: f32, color: Hsla) -> AnyElement {
     div()

@@ -86,11 +86,23 @@ impl ResidentBytes for ToolKind {
                 target,
                 summary,
                 text,
+                ..
             } => {
                 recipient.capacity()
                     + target.as_ref().map_or(0, |target| target.0.capacity())
                     + optional(summary.as_ref())
                     + text.resident_bytes()
+            }
+            Self::Agents {
+                addresses, targets, ..
+            } => {
+                addresses.capacity() * size_of::<String>()
+                    + addresses.iter().map(String::capacity).sum::<usize>()
+                    + targets.capacity() * size_of::<artisan_api::ItemId>()
+                    + targets
+                        .iter()
+                        .map(|target| target.0.capacity())
+                        .sum::<usize>()
             }
             Self::Other { name, input } => name.capacity() + payload(input.as_ref()),
         }

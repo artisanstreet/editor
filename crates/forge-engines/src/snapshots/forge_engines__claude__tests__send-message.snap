@@ -1,6 +1,5 @@
 ---
 source: crates/forge-engines/src/claude.rs
-assertion_line: 770
 expression: "(events, outcome)"
 ---
 (
@@ -19,6 +18,7 @@ expression: "(events, outcome)"
                     text: Inline(
                         "Check the cancellation path.",
                     ),
+                    direction: Sent,
                 },
                 title: None,
                 output: None,
@@ -40,6 +40,7 @@ expression: "(events, outcome)"
                     text: Inline(
                         "Check the cancellation path.",
                     ),
+                    direction: Sent,
                 },
                 title: None,
                 output: None,
@@ -61,6 +62,7 @@ expression: "(events, outcome)"
                     text: Inline(
                         "Check the cancellation path.",
                     ),
+                    direction: Sent,
                 },
                 title: None,
                 output: None,

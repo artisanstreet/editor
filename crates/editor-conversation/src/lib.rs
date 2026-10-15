@@ -13,6 +13,7 @@ mod disclosure;
 mod fold;
 mod motion;
 mod phase;
+mod preview;
 mod render;
 mod row;
 mod source_actions;
@@ -623,7 +624,7 @@ impl Conversation {
                             .resource(&thread, &request.path, request.from_home)
                             .await
                             .ok()
-                            .map(|bytes| std::sync::Arc::<[u8]>::from(bytes))
+                            .map(std::sync::Arc::<[u8]>::from)
                     })
                 },
             )
@@ -666,7 +667,7 @@ impl Conversation {
             HostEvent::Item(item) => {
                 // A message the root sent the open agent shows in its view.
                 let directed = matches!(&item.kind,
-                    ItemKind::Tool { tool: artisan_api::ToolKind::AgentMessage { target: Some(target), .. }, .. }
+                    ItemKind::Tool { tool: artisan_api::ToolKind::AgentMessage { target: Some(target), direction: artisan_api::MessageDirection::Sent, .. }, .. }
                         if self.agent.as_ref() == Some(target));
                 if item.thread_id != thread
                     || (item.parent_id != self.agent
@@ -699,10 +700,8 @@ impl Conversation {
                         .live_snapshot(&thread, target)
                         .map(|snapshot| snapshot.text);
                     if view.update_live(target, text) {
-                        if watched {
-                            if let artisan_api::LiveTarget::Text { item_id } = target {
-                                self.observe_live_prose_arrival(item_id);
-                            }
+                        if watched && let artisan_api::LiveTarget::Text { item_id } = target {
+                            self.observe_live_prose_arrival(item_id);
                         }
                         self.refresh_live_rows(target, cx);
                     }
@@ -1123,10 +1122,8 @@ impl Conversation {
             .len();
         if changed || registered != desired {
             self.reexpand(cx);
-        } else if newly_painted {
-            if let Row::PlainBlock { id, section, block } = row.semantic() {
-                self.source_leaf_ready(id, section.slot(), *block, cx);
-            }
+        } else if newly_painted && let Row::PlainBlock { id, section, block } = row.semantic() {
+            self.source_leaf_ready(id, section.slot(), *block, cx);
         }
     }
 
@@ -1352,14 +1349,14 @@ impl Conversation {
             .get(id)
             .map_or(0, |(blocks, _)| *blocks);
         let mut arrivals = self.shared.prose_arrivals.borrow_mut();
-        if !arrivals.contains_key(id) && arrivals.len() >= 128 {
-            if let Some(oldest) = arrivals
+        if !arrivals.contains_key(id)
+            && arrivals.len() >= 128
+            && let Some(oldest) = arrivals
                 .iter()
                 .min_by_key(|(_, arrival)| arrival.seen)
                 .map(|(id, _)| id.clone())
-            {
-                arrivals.remove(&oldest);
-            }
+        {
+            arrivals.remove(&oldest);
         }
         arrivals
             .entry(id.clone())
@@ -1764,23 +1761,24 @@ impl Conversation {
             Row::TextBlock { id, section, .. } => Some((id, section.slot(), Some(*section))),
             _ => None,
         };
-        if let Some((id, slot, section)) = formatted {
-            if let Some(index) = self.shared.stored_sources.borrow().get(&(id.clone(), slot)) {
-                let current = self
-                    .view
-                    .as_ref()
-                    .and_then(|view| view.item(id))
-                    .and_then(|item| {
-                        if let Some(section) = section {
-                            section.text(item)
-                        } else {
-                            match &item.kind {
-                                ItemKind::AssistantMessage { text, .. } => Some(text),
-                                _ => None,
-                            }
+        if let Some((id, slot, section)) = formatted
+            && let Some(index) = self.shared.stored_sources.borrow().get(&(id.clone(), slot))
+        {
+            let current = self
+                .view
+                .as_ref()
+                .and_then(|view| view.item(id))
+                .and_then(|item| {
+                    if let Some(section) = section {
+                        section.text(item)
+                    } else {
+                        match &item.kind {
+                            ItemKind::AssistantMessage { text, .. } => Some(text),
+                            _ => None,
                         }
-                    });
-                if !(section.is_none() && self.view.as_ref().is_some_and(|view| view.item(id).is_some_and(|item| item.status == artisan_api::Status::Running) && view.live.contains_key(&artisan_api::LiveTarget::Text { item_id: id.clone() }))) && current.is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(reference) if reference == index.source_ref())) {
+                    }
+                });
+            if !(section.is_none() && self.view.as_ref().is_some_and(|view| view.item(id).is_some_and(|item| item.status == artisan_api::Status::Running) && view.live.contains_key(&artisan_api::LiveTarget::Text { item_id: id.clone() }))) && current.is_some_and(|text| matches!(text, artisan_api::TextContent::Stored(reference) if reference == index.source_ref())) {
                             let mut hasher = DefaultHasher::new();
                             version.hash(&mut hasher);
                             index.revision().hash(&mut hasher);
@@ -1796,7 +1794,6 @@ impl Conversation {
                                 (row, version)
                             }).collect::<Vec<_>>();
                         }
-            }
         }
         let uses_stored = formatted.is_some_and(|(id, _, section)| {
             self.view
@@ -1879,44 +1876,43 @@ impl Conversation {
                     .collect::<Vec<_>>();
             }
         }
-        if let Row::Image(id) = &row {
-            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)).filter(|item| matches!(&item.kind, ItemKind::Image { caption: Some(text), .. } if text.byte_len() > 0)) {
+        if let Row::Image(id) = &row
+            && let Some(item) = self.view.as_ref().and_then(|view| view.item(id)).filter(|item| matches!(&item.kind, ItemKind::Image { caption: Some(text), .. } if text.byte_len() > 0)) {
                         let blocks = self.shared.prepare_plain(item, fold::PlainSection::ImageCaption);
                         let mut rows = vec![(row.clone(), version)];
                         rows.extend((0..blocks).map(|block| (Row::PlainBlock { id: id.clone(), section: fold::PlainSection::ImageCaption, block }, version)));
                         return rows;
                     }
-        }
-        if let Row::Image(id) = &row {
-            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
-                let section = fold::PlainSection::ImageCaption;
-                if let Some(text) = section.text(item) {
-                    let mut result = vec![(row.clone(), version)];
-                    let range = if let artisan_api::TextContent::Stored(reference) = text {
-                        self.shared
-                            .stored_sources
-                            .borrow()
-                            .get(&(id.clone(), section.slot()))
-                            .filter(|source| {
-                                source.source_ref() == reference
-                                    && source.format() == artisan_api::SourceIndexFormat::Literal
-                            })
-                            .map_or(0..1, |source| source.loaded_range())
-                    } else {
-                        0..self.shared.prepare_plain(item, section)
-                    };
-                    result.extend(range.map(|block| {
-                        (
-                            Row::PlainBlock {
-                                id: id.clone(),
-                                section,
-                                block,
-                            },
-                            version,
-                        )
-                    }));
-                    return result;
-                }
+        if let Row::Image(id) = &row
+            && let Some(item) = self.view.as_ref().and_then(|view| view.item(id))
+        {
+            let section = fold::PlainSection::ImageCaption;
+            if let Some(text) = section.text(item) {
+                let mut result = vec![(row.clone(), version)];
+                let range = if let artisan_api::TextContent::Stored(reference) = text {
+                    self.shared
+                        .stored_sources
+                        .borrow()
+                        .get(&(id.clone(), section.slot()))
+                        .filter(|source| {
+                            source.source_ref() == reference
+                                && source.format() == artisan_api::SourceIndexFormat::Literal
+                        })
+                        .map_or(0..1, |source| source.loaded_range())
+                } else {
+                    0..self.shared.prepare_plain(item, section)
+                };
+                result.extend(range.map(|block| {
+                    (
+                        Row::PlainBlock {
+                            id: id.clone(),
+                            section,
+                            block,
+                        },
+                        version,
+                    )
+                }));
+                return result;
             }
         }
         let plain = match &row {
@@ -1940,57 +1936,55 @@ impl Conversation {
             }
             _ => None,
         };
-        if let Some((id, section)) = plain {
-            if let Some(item) = self.view.as_ref().and_then(|view| view.item(id)) {
-                if let Some(artisan_api::TextContent::Stored(reference)) = section.text(item) {
-                    let sources = self.shared.stored_sources.borrow();
-                    if let Some(source) =
-                        sources.get(&(id.clone(), section.slot())).filter(|source| {
-                            source.source_ref() == reference
-                                && source.format() == artisan_api::SourceIndexFormat::Literal
+        if let Some((id, section)) = plain
+            && let Some(item) = self.view.as_ref().and_then(|view| view.item(id))
+        {
+            if let Some(artisan_api::TextContent::Stored(reference)) = section.text(item) {
+                let sources = self.shared.stored_sources.borrow();
+                if let Some(source) = sources.get(&(id.clone(), section.slot())).filter(|source| {
+                    source.source_ref() == reference
+                        && source.format() == artisan_api::SourceIndexFormat::Literal
+                }) {
+                    let mut hasher = DefaultHasher::new();
+                    version.hash(&mut hasher);
+                    source.revision().hash(&mut hasher);
+                    let version = hasher.finish();
+                    return source
+                        .loaded_range()
+                        .map(|block| {
+                            (
+                                Row::PlainBlock {
+                                    id: id.clone(),
+                                    section,
+                                    block,
+                                },
+                                version,
+                            )
                         })
-                    {
-                        let mut hasher = DefaultHasher::new();
-                        version.hash(&mut hasher);
-                        source.revision().hash(&mut hasher);
-                        let version = hasher.finish();
-                        return source
-                            .loaded_range()
-                            .map(|block| {
-                                (
-                                    Row::PlainBlock {
-                                        id: id.clone(),
-                                        section,
-                                        block,
-                                    },
-                                    version,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                    }
-                    return vec![(
+                        .collect::<Vec<_>>();
+                }
+                return vec![(
+                    Row::PlainBlock {
+                        id: id.clone(),
+                        section,
+                        block: 0,
+                    },
+                    version,
+                )];
+            }
+            let blocks = self.shared.prepare_plain(item, section);
+            return (0..blocks)
+                .map(|block| {
+                    (
                         Row::PlainBlock {
                             id: id.clone(),
                             section,
-                            block: 0,
+                            block,
                         },
                         version,
-                    )];
-                }
-                let blocks = self.shared.prepare_plain(item, section);
-                return (0..blocks)
-                    .map(|block| {
-                        (
-                            Row::PlainBlock {
-                                id: id.clone(),
-                                section,
-                                block,
-                            },
-                            version,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-            }
+                    )
+                })
+                .collect::<Vec<_>>();
         }
         vec![(row, version)]
     }
@@ -2239,12 +2233,23 @@ impl Conversation {
     }
 }
 
-/// The thread's agents' names by their item, for "Talked to …".
+/// The thread's agents by their item, named by their task: the name work
+/// rows give them ("Messaged Finish the rework").
 fn agent_names(view: &ThreadView) -> HashMap<ItemId, String> {
     view.items
         .values()
         .chain(view.context.values())
-        .filter_map(|item| Some((item.id.clone(), item.agent_label()?)))
+        .filter_map(|item| {
+            let ItemKind::Agent { description, .. } = &item.kind else {
+                return None;
+            };
+            let task = description
+                .inline()
+                .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+                .map(str::to_owned)
+                .or_else(|| item.agent_label())?;
+            Some((item.id.clone(), task))
+        })
         .collect()
 }
 

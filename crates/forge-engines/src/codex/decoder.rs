@@ -22,8 +22,8 @@ use super::protocol::{
 use crate::{EngineEvent, LiveKind, Outcome};
 use anyhow::Context as _;
 use artisan_api::{
-    ErrorKind, FileChange, FileOp, ItemKind, NoticeKind, Output, Phase, PlanStep, RunStatus,
-    Status, StepStatus, TextContent, ToolKind, Usage,
+    AgentAction, ErrorKind, FileChange, FileOp, ItemKind, MessageDirection, NoticeKind, Output,
+    Phase, PlanStep, RunStatus, Status, StepStatus, TextContent, ToolKind, Usage,
 };
 use requests::{Approvals, Questions};
 use serde_json::Value;
@@ -858,6 +858,22 @@ impl Decoder {
                 (id, settled, kind)
             }
             Item::CollabAgentToolCall(call) => return self.collab(scope, call, completed, out),
+            Item::Sleep { id, duration_ms } => {
+                let seconds = duration_ms.unwrap_or_default().div_ceil(1000);
+                let mut kind = self.tool_kind(
+                    &id,
+                    ToolKind::Other {
+                        name: "sleep".to_owned(),
+                        input: None,
+                    },
+                    None,
+                    None,
+                );
+                if let ItemKind::Tool { title, .. } = &mut kind {
+                    *title = Some(format!("{seconds} s"));
+                }
+                (id, settled, kind)
+            }
             Item::Unknown => return,
         };
         if key.is_empty() {
@@ -910,6 +926,41 @@ impl Decoder {
     ) {
         let key = call.id;
         if call.tool != CollabTool::SpawnAgent {
+            let status = match call.status {
+                CollabStatus::Failed => Status::Failed,
+                CollabStatus::Interrupted => Status::Cancelled,
+                _ if completed => Status::Done,
+                _ => Status::Running,
+            };
+            let mut waited: Vec<String> = call
+                .agents_states
+                .keys()
+                .filter(|thread| !call.receiver_thread_ids.contains(thread))
+                .cloned()
+                .collect();
+            waited.sort();
+            let mut addresses = call.receiver_thread_ids.clone();
+            addresses.extend(waited);
+            let tool = match call.tool {
+                CollabTool::Wait => Some(ToolKind::Agents {
+                    action: AgentAction::Wait,
+                    addresses,
+                    targets: Vec::new(),
+                }),
+                CollabTool::SendInput => addresses.first().map(|to| ToolKind::AgentMessage {
+                    recipient: to.clone(),
+                    target: None,
+                    summary: None,
+                    text: call.prompt.clone().unwrap_or_default().into(),
+                    direction: MessageDirection::Sent,
+                }),
+                CollabTool::SpawnAgent | CollabTool::Other => None,
+            };
+            if let Some(tool) = tool {
+                let kind = self.tool_kind(&key, tool, None, None);
+                self.track(key.clone(), scope.clone(), status, kind);
+                out.push(self.event(&key));
+            }
             // `wait` reports what the agents said; fill results we missed.
             for (thread, state) in call.agents_states {
                 let (Some(agent), Some(message)) = (self.children.get(&thread), state.message)

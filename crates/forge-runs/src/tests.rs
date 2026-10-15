@@ -1963,9 +1963,9 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
     fixture.hub.shutdown();
 }
 
-/// A message to an agent names the agent's item, whatever the engine calls
-/// the agent, so it shows in that agent's view; one to another session
-/// names none.
+/// A message to an agent, or stopping it, names the agent's item, whatever
+/// the engine calls the agent, so it shows in that agent's view; one to
+/// another session names none.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_to_an_agent_names_the_agents_item() {
     let fixture = fixture(Arc::new(|_turn, io| {
@@ -2001,6 +2001,7 @@ async fn a_message_to_an_agent_names_the_agents_item() {
                             target: None,
                             summary: None,
                             text: "Check the parser.".into(),
+                            direction: artisan_api::MessageDirection::Sent,
                         },
                         title: None,
                         output: None,
@@ -2010,6 +2011,23 @@ async fn a_message_to_an_agent_names_the_agents_item() {
                 })
                 .await;
             }
+            io.emit(EngineEvent::Item {
+                key: "stop".into(),
+                parent: None,
+                status: Status::Done,
+                kind: ItemKind::Tool {
+                    tool: ToolKind::Agents {
+                        action: artisan_api::AgentAction::Stop,
+                        addresses: vec!["a935b57d5f0b8fb33".into(), "bnuubwmtm".into()],
+                        targets: Vec::new(),
+                    },
+                    title: None,
+                    output: None,
+                    exit_code: None,
+                    approval: None,
+                },
+            })
+            .await;
             Outcome::done()
         })
     }))
@@ -2031,6 +2049,14 @@ async fn a_message_to_an_agent_names_the_agents_item() {
     let sent = fixture.by_native("to-agent").await;
     assert_eq!(target(&sent), Some(agent.id.clone()));
     assert_eq!(target(&fixture.by_native("to-session").await), None);
+    // Stopping it names it too; the background shell beside it is no agent.
+    match fixture.by_native("stop").await.kind {
+        ItemKind::Tool {
+            tool: ToolKind::Agents { targets, .. },
+            ..
+        } => assert_eq!(targets, vec![agent.id.clone()]),
+        kind => panic!("not an agents call: {kind:?}"),
+    }
     let view = fixture
         .hub
         .store()

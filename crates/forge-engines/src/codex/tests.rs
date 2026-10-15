@@ -372,3 +372,26 @@ fn opaque_web_actions_do_not_invent_execution_errors_or_fail_the_turn() {
             .any(|step| matches!(step, Step::TurnEnd(outcome) if outcome.status == artisan_api::RunStatus::Done && outcome.error.is_none()))
     );
 }
+
+/// Codex waiting on its agents and sleeping read as their own rows: the wait
+/// names the agents' threads for Forge to resolve, the sleep its length.
+#[test]
+fn waits_and_sleeps_become_rows() {
+    use artisan_api::{AgentAction, ItemKind, ToolKind};
+    use serde_json::json;
+    let mut decoder = super::decoder::Decoder::default();
+    let request = decoder.request("thread/start", json!({}));
+    decoder
+        .feed(&json!({ "id": request, "result": { "thread": { "id": "root" } } }).to_string())
+        .unwrap();
+    let wait = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "wait-1", "type": "collabAgentToolCall", "tool": "wait", "status": "completed", "receiverThreadIds": [], "agentsStates": { "child-b": { "message": null }, "child-a": { "message": null } } } } }).to_string()).unwrap();
+    assert!(wait.iter().any(|event| matches!(event,
+        crate::EngineEvent::Item { key, status: artisan_api::Status::Done, kind: ItemKind::Tool {
+            tool: ToolKind::Agents { action: AgentAction::Wait, addresses, .. }, ..
+        }, .. } if key == "wait-1" && addresses == &["child-a", "child-b"])));
+    let sleep = decoder.feed(&json!({ "method": "item/completed", "params": { "threadId": "root", "item": { "id": "sleep-1", "type": "sleep", "durationMs": 30000 } } }).to_string()).unwrap();
+    assert!(sleep.iter().any(|event| matches!(event,
+        crate::EngineEvent::Item { kind: ItemKind::Tool {
+            tool: ToolKind::Other { name, .. }, title: Some(title), ..
+        }, .. } if name == "sleep" && title == "30 s")));
+}

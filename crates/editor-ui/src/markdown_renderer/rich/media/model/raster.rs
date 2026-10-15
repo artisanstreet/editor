@@ -432,7 +432,7 @@ fn resolve(winner: &[u32], color: &[Vec3], grid: Grid, samples: u32) -> Vec<u8> 
             let start = sample_row * grid.width + column * step;
             for at in start..start + step {
                 if winner[at] != EMPTY {
-                    sum = sum + color[at];
+                    sum += color[at];
                     covered += 1;
                 }
             }

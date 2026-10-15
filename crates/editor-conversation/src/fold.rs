@@ -90,6 +90,8 @@ pub(crate) enum Slot {
     /// A tool's shown output and a question's answer: inline text only.
     Output,
     Answer,
+    /// An opened activity's preview: markdown built from the item.
+    Preview,
 }
 impl Slot {
     /// The body's text in `item`, if the item has it.
@@ -101,7 +103,7 @@ impl Slot {
             },
             Self::Plain(section) => section.text(item),
             Self::Text(section) => section.text(item),
-            Self::Output | Self::Answer => None,
+            Self::Output | Self::Answer | Self::Preview => None,
         }
     }
 }
@@ -120,6 +122,7 @@ impl std::fmt::Display for Slot {
             Self::Text(TextSection::Message) => "message",
             Self::Output => "output",
             Self::Answer => "answer",
+            Self::Preview => "preview",
         })
     }
 }
@@ -147,8 +150,8 @@ impl PlainSection {
         }
     }
     pub(crate) fn inline_text(self, item: &Item) -> Option<&str> {
-        if self == Self::AgentMessage {
-            if let ItemKind::Tool {
+        if self == Self::AgentMessage
+            && let ItemKind::Tool {
                 tool:
                     artisan_api::ToolKind::AgentMessage {
                         text: artisan_api::TextContent::Inline(text),
@@ -157,11 +160,9 @@ impl PlainSection {
                     },
                 ..
             } = &item.kind
-            {
-                if text.is_empty() {
-                    return Some(summary);
-                }
-            }
+            && text.is_empty()
+        {
+            return Some(summary);
         }
         self.text(item)?.inline()
     }
@@ -357,6 +358,44 @@ impl Row {
         }
     }
 
+    /// The row's name on screen for tests (`row:<selector>`): what it
+    /// shows, never where it sits in the list.
+    pub(crate) fn selector(&self) -> String {
+        match self {
+            Self::Projected { row, visual } => format!("{}:{visual}", row.selector()),
+            Self::Work {
+                run: Some(run),
+                segment,
+                ..
+            } => format!("work:{run}:{segment}"),
+            Self::Work {
+                run: None, entries, ..
+            } => format!("work:{}", entries.first().cloned().unwrap_or_default()),
+            Self::WorkEntry { id, .. } => format!("entry:{id}"),
+            Self::Chain { ids, .. } => {
+                format!("chain:{}", ids.first().cloned().unwrap_or_default())
+            }
+            Self::PlanStep { id, step, .. } => format!("plan-step:{id}:{step}"),
+            Self::TextBlock {
+                id, section, block, ..
+            } => format!("{}:{id}:{block}", section.slot()),
+            Self::PlainBlock { id, section, block } => format!("{}:{id}:{block}", section.slot()),
+            Self::ProseBlock { id, block } => format!("prose:{id}:{block}"),
+            Self::Prompt(id) => format!("prompt:{id}"),
+            Self::Compaction(id) => format!("compaction:{id}"),
+            Self::Image(id) => format!("image:{id}"),
+            Self::Gap => "gap".to_owned(),
+            Self::Status(run) => format!("status:{run}"),
+            Self::AgentResult(id) => format!("result-view:{id}:0"),
+            Self::AgentStatus(id, working) => {
+                format!(
+                    "agent-status:{id}:{}",
+                    if *working { "working" } else { "thinking" }
+                )
+            }
+        }
+    }
+
     /// The run this row reports on (work sections and the status line).
     pub(crate) fn run(&self) -> Option<&RunId> {
         match self {
@@ -404,10 +443,14 @@ pub(crate) struct Folded {
     reason = "one pass over the items, in transcript order, deciding each one's row"
 )]
 pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemId>) -> Folded {
-    // Messages the root sent the open agent show in its view.
+    // Messages the root sent the open agent show in its view; its own
+    // replies are already there as its own calls.
     let to_scope = |item: &Item| {
         scope.is_some_and(|agent| {
-            activity::agent_message(item).is_some_and(|message| message.to.as_ref() == Some(agent))
+            activity::agent_message(item).is_some_and(|message| {
+                message.direction == artisan_api::MessageDirection::Sent
+                    && message.to.as_ref() == Some(agent)
+            })
         })
     };
     let shown: Vec<&Item> = view
@@ -503,21 +546,19 @@ pub(crate) fn fold(view: &ThreadView, latest: Option<&Run>, scope: Option<&ItemI
         };
         if let Some(row) = own_row {
             flush(&mut work, &mut rows);
-            if let Row::Compaction(id) = &row {
-                if let Some(Row::Work {
+            if let Row::Compaction(id) = &row
+                && let Some(Row::Work {
                     run: Some(run),
                     segment: 0,
                     compaction,
                     ..
                 }) = rows.last_mut()
-                {
-                    if compaction.is_none() && item.run_id.as_ref().is_none_or(|owner| owner == run)
-                    {
-                        *compaction = Some(id.clone());
-                        context.clone_from(&item.run_id);
-                        continue;
-                    }
-                }
+                && compaction.is_none()
+                && item.run_id.as_ref().is_none_or(|owner| owner == run)
+            {
+                *compaction = Some(id.clone());
+                context.clone_from(&item.run_id);
+                continue;
             }
             rows.push(row);
             context.clone_from(&item.run_id);
@@ -650,8 +691,8 @@ pub(crate) fn expanded(
                                     id: id.clone(),
                                     run: run.clone(),
                                 });
-                                if view.ui.get(&id).and_then(|ui| ui.expanded).unwrap_or(false) {
-                                    if view.item(&id).is_some_and(|item| {
+                                if view.ui.get(&id).and_then(|ui| ui.expanded).unwrap_or(false)
+                                    && view.item(&id).is_some_and(|item| {
                                         matches!(
                                             item.kind,
                                             ItemKind::Tool {
@@ -659,14 +700,14 @@ pub(crate) fn expanded(
                                                 ..
                                             }
                                         )
-                                    }) {
-                                        emit(Row::TextBlock {
-                                            id,
-                                            section: TextSection::Message,
-                                            block: 0,
-                                            run: run.clone(),
-                                        });
-                                    }
+                                    })
+                                {
+                                    emit(Row::TextBlock {
+                                        id,
+                                        section: TextSection::Message,
+                                        block: 0,
+                                        run: run.clone(),
+                                    });
                                 }
                             }
                         }
@@ -934,6 +975,29 @@ pub(crate) fn gaps(view: &ThreadView, rows: &[(Row, u64)]) -> Vec<f32> {
                 (Row::Work { .. }, Row::ProseBlock { .. }) => REPLY_SEAM,
                 (Row::Work { .. }, Row::Status(_)) => STATUS_AFTER_WORK,
                 (_, Row::Status(_)) => STATUS_GAP,
+                // A user message starts a turn; a steer stays inside its
+                // run's turn.
+                (
+                    _,
+                    Row::PlainBlock {
+                        section: PlainSection::User,
+                        ..
+                    },
+                ) if run.is_some() && run == previous_run => BLOCK_GAP,
+                (
+                    _,
+                    Row::PlainBlock {
+                        section: PlainSection::User,
+                        ..
+                    },
+                ) => TURN_GAP,
+                (
+                    Row::PlainBlock {
+                        section: PlainSection::User,
+                        ..
+                    },
+                    _,
+                ) => BLOCK_GAP,
                 _ if run.is_some() && previous_run.is_some() && run != previous_run => TURN_GAP,
                 _ => BLOCK_GAP,
             }
@@ -958,13 +1022,13 @@ fn version(
                 .get(&LiveTarget::Reasoning {
                     run_id: run.clone(),
                 })
-                .map(|text| std::sync::Arc::as_ptr(text))
+                .map(std::sync::Arc::as_ptr)
                 .hash(&mut hasher);
             view.live
                 .get(&LiveTarget::Status {
                     run_id: run.clone(),
                 })
-                .map(|text| std::sync::Arc::as_ptr(text))
+                .map(std::sync::Arc::as_ptr)
                 .hash(&mut hasher);
             Vec::new()
         }
@@ -992,7 +1056,7 @@ fn version(
         ] {
             view.live
                 .get(&target)
-                .map(|text| std::sync::Arc::as_ptr(text))
+                .map(std::sync::Arc::as_ptr)
                 .hash(&mut hasher);
         }
         if !matches!(
@@ -1001,10 +1065,9 @@ fn version(
                 | Row::WorkEntry { .. }
                 | Row::PlanStep { .. }
                 | Row::TextBlock { .. }
-        ) {
-            if let Some(nested) = children.get(id) {
-                stack.extend(nested.iter().map(|item| &item.id));
-            }
+        ) && let Some(nested) = children.get(id)
+        {
+            stack.extend(nested.iter().map(|item| &item.id));
         }
     }
     hasher.finish()

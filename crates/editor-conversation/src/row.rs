@@ -117,17 +117,16 @@ impl Shared {
         };
         let mut sources = self.plain_sources.borrow_mut();
         let key = (item.id.clone(), section.slot());
-        if let Some(body) = sources.get_mut(&key) {
-            if body.seq == item.seq
+        if let Some(body) = sources.get_mut(&key)
+            && (body.seq == item.seq
                 || body
                     .chunks
                     .iter()
                     .flat_map(|chunk| chunk.as_bytes().iter().copied())
-                    .eq(text.bytes())
-            {
-                body.seq = item.seq;
-                return body.chunks.len();
-            }
+                    .eq(text.bytes()))
+        {
+            body.seq = item.seq;
+            return body.chunks.len();
         }
         {
             let text: SharedString = text.to_owned().into();
@@ -215,7 +214,7 @@ struct PreparedText {
     source: Arc<str>,
     key: SharedString,
     order: Vec<u64>,
-    block: usize,
+    blocks: std::ops::Range<usize>,
     tone: MarkdownBodyTone,
 }
 impl RenderOnce for PreparedText {
@@ -245,14 +244,18 @@ impl RenderOnce for PreparedText {
             }
         };
         let Some(prepared) = prepared else {
-            return div().child("Loading content…").into_any_element();
+            return div()
+                .debug_selector(|| "text-loading".to_owned())
+                .child("Loading content…")
+                .into_any_element();
         };
         self.shared.markdown.set_selection_prefix(self.order);
-        let preview = prepared.is_preview() && self.block + 1 >= prepared.block_count();
+        let end = self.blocks.end.min(prepared.block_count());
+        let preview = prepared.is_preview() && end >= prepared.block_count();
         let copy_key = format!("copy-full-{}", self.key);
         let content = self.shared.markdown.render_prepared_range(
             &prepared,
-            self.block..(self.block + 1).min(prepared.block_count()),
+            self.blocks.start.min(end)..end,
             self.shared.theme,
             self.key,
             self.tone,
@@ -355,7 +358,10 @@ impl RenderOnce for StoredPreparedText {
         let index = match indexed {
             editor_ui::markdown_renderer::StoredPreparation::Ready(source) => source,
             editor_ui::markdown_renderer::StoredPreparation::Pending => {
-                return div().child("Loading formatted content…").into_any_element();
+                return div()
+                    .debug_selector(|| "text-loading".to_owned())
+                    .child("Loading formatted content…")
+                    .into_any_element();
             }
             editor_ui::markdown_renderer::StoredPreparation::Failed(error) => {
                 if let Some(reveal) = &self.reveal {
@@ -411,7 +417,10 @@ impl RenderOnce for StoredPreparedText {
             let leaf = match prepared {
                 editor_ui::markdown_renderer::LiteralPreparation::Ready(leaf) => leaf,
                 editor_ui::markdown_renderer::LiteralPreparation::Pending => {
-                    return div().child("Loading content…").into_any_element();
+                    return div()
+                        .debug_selector(|| "text-loading".to_owned())
+                        .child("Loading content…")
+                        .into_any_element();
                 }
                 editor_ui::markdown_renderer::LiteralPreparation::Failed(error) => {
                     return div()
@@ -520,21 +529,29 @@ impl RenderOnce for StoredPreparedText {
                     key,
                     visual,
                     window,
-                    Rc::new(move |cx| {
-                        let _ = notify_owner.update(cx, |this, cx| {
-                            this.source_leaf_ready(&self.id, self.slot, self.block, cx)
-                        });
-                    }),
-                    Rc::new(move |ready, cx| {
-                        let _ = layout_owner.update(cx, |this, cx| {
-                            this.native_body_ready(&layout_base, &layout_leaf, ready, false, cx)
-                        });
-                    }),
-                    Rc::new(move |ready, cx| {
-                        let _ = paint_owner.update(cx, |this, cx| {
-                            this.native_body_ready(&paint_base, &paint_leaf, ready, true, cx)
-                        });
-                    }),
+                    editor_ui::selectable_text::NativeWindowEvents {
+                        notify: Rc::new(move |cx| {
+                            let _ = notify_owner.update(cx, |this, cx| {
+                                this.source_leaf_ready(&self.id, self.slot, self.block, cx);
+                            });
+                        }),
+                        layout_ready: Rc::new(move |ready, cx| {
+                            let _ = layout_owner.update(cx, |this, cx| {
+                                this.native_body_ready(
+                                    &layout_base,
+                                    &layout_leaf,
+                                    ready,
+                                    false,
+                                    cx,
+                                );
+                            });
+                        }),
+                        ready: Rc::new(move |ready, cx| {
+                            let _ = paint_owner.update(cx, |this, cx| {
+                                this.native_body_ready(&paint_base, &paint_leaf, ready, true, cx);
+                            });
+                        }),
+                    },
                 )
                 .native_failure_handler(Rc::new(move |error, cx| {
                     let _ = failure_owner.update(cx, |this, cx| {
@@ -555,7 +572,10 @@ impl RenderOnce for StoredPreparedText {
         let prepared = match prepared {
             editor_ui::markdown_renderer::MarkdownPreparation::Ready(prepared) => prepared,
             editor_ui::markdown_renderer::MarkdownPreparation::Pending => {
-                return div().child("Loading content…").into_any_element();
+                return div()
+                    .debug_selector(|| "text-loading".to_owned())
+                    .child("Loading content…")
+                    .into_any_element();
             }
             editor_ui::markdown_renderer::MarkdownPreparation::Failed(error) => {
                 if let Some(reveal) = &self.reveal {
@@ -879,36 +899,36 @@ impl RowView {
                 block,
             }
             .key();
-            if let Some(state) = self.shared.native_windows.borrow().get(&native_key) {
-                if let Some(error) = &state.error {
-                    if visual.unwrap_or(0) != state.window.start {
-                        return div().into_any_element();
-                    }
-                    let renderer = self.shared.markdown.clone();
-                    let owner = self.shared.conversation.clone();
-                    let retry_row = Row::PlainBlock {
-                        id: id.clone(),
-                        section,
-                        block,
-                    };
-                    let source_key: SharedString =
-                        format!("{id}:{}:leaf:{block}", section.slot()).into();
-                    return div()
-                        .child(error.clone())
-                        .child(
-                            Button::text(
-                                format!("retry-native-{id}-{}-{block}", section.slot()),
-                                self.theme(),
-                                "Retry",
-                            )
-                            .on_activate(move |_, _, cx| {
-                                renderer.retry_native_window(&source_key);
-                                let _ = owner
-                                    .update(cx, |this, cx| this.retry_native_body(&retry_row, cx));
-                            }),
-                        )
-                        .into_any_element();
+            if let Some(state) = self.shared.native_windows.borrow().get(&native_key)
+                && let Some(error) = &state.error
+            {
+                if visual.unwrap_or(0) != state.window.start {
+                    return div().into_any_element();
                 }
+                let renderer = self.shared.markdown.clone();
+                let owner = self.shared.conversation.clone();
+                let retry_row = Row::PlainBlock {
+                    id: id.clone(),
+                    section,
+                    block,
+                };
+                let source_key: SharedString =
+                    format!("{id}:{}:leaf:{block}", section.slot()).into();
+                return div()
+                    .child(error.clone())
+                    .child(
+                        Button::text(
+                            format!("retry-native-{id}-{}-{block}", section.slot()),
+                            self.theme(),
+                            "Retry",
+                        )
+                        .on_activate(move |_, _, cx| {
+                            renderer.retry_native_window(&source_key);
+                            let _ =
+                                owner.update(cx, |this, cx| this.retry_native_body(&retry_row, cx));
+                        }),
+                    )
+                    .into_any_element();
             }
             let count = self
                 .shared
@@ -1072,12 +1092,12 @@ impl RowView {
             (Arc::ptr_eq(&snapshot.text, rope) && !snapshot.coverage.is_complete(rope.len_bytes()))
                 .then_some((rope.len_bytes(), snapshot.coverage.total))
         });
-        if live.is_none() {
-            if let TextContent::Stored(_) = text {
-                return self
-                    .text()
-                    .stored_reply(&item, block, self.prose_reveal.clone());
-            }
+        if live.is_none()
+            && let TextContent::Stored(_) = text
+        {
+            return self
+                .text()
+                .stored_reply(&item, block, self.prose_reveal.clone());
         }
         let source = if live.is_none() {
             let TextContent::Inline(text) = text else {
@@ -1129,7 +1149,10 @@ impl RowView {
             }
         };
         let Some(prepared) = prepared else {
-            return div().child("Loading reply…").into_any_element();
+            return div()
+                .debug_selector(|| "text-loading".to_owned())
+                .child("Loading reply…")
+                .into_any_element();
         };
         self.shared
             .markdown
@@ -1156,12 +1179,10 @@ impl RowView {
         );
         self.animating |= self.prose_reveal.is_animating();
         let mut root = div().w_full().child(content);
-        if last {
-            if let Some((shown, total)) = live_coverage {
-                root = root.child(editor_ui::page::notice(&theme, format!(
+        if last && let Some((shown, total)) = live_coverage {
+            root = root.child(editor_ui::page::notice(&theme, format!(
                     "Live preview shows {shown} of {total} bytes. Complete content is available after the reply is saved."
-                )));
-            }
+                ))).children(test_mark("live-preview"));
         }
         if last && prepared.is_preview() {
             root = root.child(copy_action(
@@ -1756,7 +1777,9 @@ impl Render for RowView {
             .px(px(GUTTER))
             .min_w_0()
             .text_color(theme.colors.foreground.to_paint());
-        self.animating |= self.motion.end_frame() || clip.is_some();
+        let moving = self.motion.end_frame();
+        self.animating |= moving || clip.is_some();
+        let animating = moving || self.prose_reveal.is_animating() || self.queue_held;
         if self.animating {
             window.request_animation_frame();
         }
@@ -1830,7 +1853,10 @@ impl Render for RowView {
             .min_w_0()
             .flex()
             .flex_col()
+            .debug_selector(|| format!("row:{}", row.selector()))
             .child(column.flex_shrink_0())
+            .children(test_mark("animating").filter(|_| animating))
+            .children(test_mark("disclosing").filter(|_| clip.is_some()))
             .on_children_prepainted(move |bounds, window, _| {
                 if let Some(bounds) = bounds.first() {
                     let changed = shared
@@ -1868,6 +1894,21 @@ impl Render for RowView {
                     }
                 }
             })
+    }
+}
+
+/// A zero-size marker naming a state of what shows, for tests; nothing
+/// outside them.
+pub(crate) fn test_mark(name: impl Into<String>) -> Option<AnyElement> {
+    #[cfg(test)]
+    {
+        let name = name.into();
+        Some(div().absolute().debug_selector(|| name).into_any_element())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = name;
+        None
     }
 }
 

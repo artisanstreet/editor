@@ -166,10 +166,10 @@ impl RenderOnce for ChartView {
             width: snapshot.width,
         };
         let geometry = state.update(cx, |state, _| {
-            if let Some((known, geometry)) = &state.geometry {
-                if *known == key {
-                    return geometry.clone();
-                }
+            if let Some((known, geometry)) = &state.geometry
+                && *known == key
+            {
+                return geometry.clone();
             }
             let stable = Snapshot {
                 hidden: &hidden,

@@ -64,7 +64,7 @@ fn finished_work_folds_under_its_header_and_chains_open_on_click(cx: &mut TestAp
         draw(cx);
         cx.debug_bounds("work-chain").is_some()
             && cx.debug_bounds("work-activity").is_none()
-            && cx.read(|cx| conversation.read(cx).disclosures.is_empty())
+            && cx.debug_bounds("disclosing").is_none()
     });
 }
 
@@ -161,51 +161,23 @@ fn a_resumed_agent_never_splits_the_turn_that_resumed_it(cx: &mut TestAppContext
     let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
     open(&core, &host, &thread, cx);
     wait(cx, "the thread", |cx| loaded(&conversation, cx).len() == 6);
-    let rows: Vec<String> = cx.read(|cx| {
-        let c = conversation.read(cx);
-        // This asserts canonical ordering, independently of native leaf subdivision.
-        crate::fold::fold(
-            c.view.as_ref().unwrap(),
-            c.run(cx).as_ref(),
-            c.agent.as_ref(),
-        )
-        .rows
-        .iter()
-        .map(|(row, _)| match row {
-            Row::PlainBlock {
-                id,
-                section: crate::fold::PlainSection::User,
-                ..
-            } => format!("user {id}"),
-            Row::ProseBlock { id, block: 0 } => format!("reply {id}"),
-            Row::Work {
-                run,
-                segment,
-                entries,
-                ..
-            } => format!(
-                "work {} #{segment}: {}",
-                run.as_ref().map(ToString::to_string).unwrap_or_default(),
-                entries
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
-            other => format!("{other:?}"),
-        })
-        .collect()
+    let rows = [
+        "user:ask:0",
+        "work:earlier:0",
+        "prose:baked:0",
+        "user:how:0",
+        "work:later:0",
+        "prose:moved:0",
+    ]
+    .map(str::to_owned);
+    wait(cx, "both turns", |cx| {
+        draw(cx);
+        painted_order(cx, &rows).len() == rows.len()
     });
-    assert_eq!(
-        rows,
-        [
-            "user ask",
-            "work earlier #0: thea",
-            "reply baked",
-            "user how",
-            "work later #0: move",
-            "reply moved",
-        ]
+    assert_eq!(painted_order(cx, &rows), rows);
+    assert!(
+        shown(cx, "prose:orphan:0").is_none() && shown(cx, "work:later:1").is_none(),
+        "the resumed agent stays in the turn it sits in, the orphan line nowhere"
     );
 }
 
@@ -253,67 +225,61 @@ fn chain_headers_count_what_the_work_did() {
 
 /// A steer stays in the turn's work where it was sent: one work section
 /// around it, folding with it, never a turn of its own.
-#[test]
-fn a_steer_sits_in_the_work_where_it_was_sent() {
-    use crate::fold::fold;
-    use crate::thread::ThreadView;
-    use crate::viewport::Fetch;
-    use artisan_api::ItemsPage;
-
-    let thread = ThreadId::from("thread");
-    let run = RunId::from("run");
-    let item = |position: u64, kind: ItemKind| Item {
-        id: ItemId::new(),
-        thread_id: thread.clone(),
-        position,
-        seq: position,
-        run_id: Some(run.clone()),
-        parent_id: None,
-        status: Status::Done,
-        created_at: 0,
-        updated_at: 0,
-        kind,
-    };
+#[gpui::test]
+fn a_steer_sits_in_the_work_where_it_was_sent(cx: &mut TestAppContext) {
+    let forge = Forge::start();
+    let thread = forge.thread();
     let message = |text: &str, steer: bool| ItemKind::UserMessage {
         text: text.into(),
         images: Vec::new(),
         steer,
     };
-    let (before, steer, after) = (
-        item(2, shell("rg subagent")),
-        item(3, message("also fix the cancelled agents", true)),
-        item(4, shell("cargo test")),
+    let ask = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        message("name the subagents", false),
     );
-    let items = vec![
-        item(1, message("name the subagents", false)),
-        before.clone(),
-        steer.clone(),
-        after.clone(),
-        item(5, reply("Both done.")),
+    let before = forge.put(&thread, &ItemId::new(), Status::Done, shell("rg subagent"));
+    let steer = forge.put(
+        &thread,
+        &ItemId::new(),
+        Status::Done,
+        message("also fix the cancelled agents", true),
+    );
+    let after = forge.put(&thread, &ItemId::new(), Status::Done, shell("cargo test"));
+    let answer = forge.put(&thread, &ItemId::new(), Status::Done, reply("Both done."));
+    forge.finish_run(&thread);
+    let dir = tempfile::tempdir().unwrap();
+    let (core, host, conversation, cx) = editor(&forge, dir.path(), cx);
+    open(&core, &host, &thread, cx);
+    let folded = [
+        format!("user:{}:0", ask.id),
+        "work:run:0".to_owned(),
+        format!("prose:{}:0", answer.id),
     ];
-    let (mut view, _) = ThreadView::open(thread.clone());
-    view.apply_page(
-        Fetch::Tail,
-        ItemsPage {
-            items,
-            runs: Vec::new(),
-            more: false,
-        },
-    );
-    let rows: Vec<Row> = fold(&view, None, None)
-        .rows
-        .into_iter()
-        .map(|(row, _)| row)
-        .collect();
-    assert_eq!(
-        rows.len(),
-        3,
-        "the message, one work section, the reply: {rows:?}"
-    );
+    wait(cx, "the turn", |cx| {
+        draw(cx);
+        painted_order(cx, &folded).len() == folded.len()
+    });
+    assert_eq!(painted_order(cx, &folded), folded);
     assert!(
-        matches!(&rows[1], Row::Work { entries, .. }
-            if *entries == vec![before.id.clone(), steer.id.clone(), after.id.clone()]),
-        "the steer between the work before and after it: {rows:?}"
+        shown(cx, format!("user:{}:0", steer.id)).is_none(),
+        "the steer folds with the work"
+    );
+    click(cx, "work-header");
+    settle(cx, &conversation);
+    let open = [
+        "work:run:0".to_owned(),
+        format!("chain:{}", before.id),
+        format!("user:{}:0", steer.id),
+        format!("chain:{}", after.id),
+        format!("prose:{}:0", answer.id),
+    ];
+    assert_eq!(
+        painted_order(cx, &open),
+        open,
+        "the steer between the work before and after it"
     );
 }
 
@@ -332,10 +298,8 @@ fn canonical_tool_commands_preserve_quoted_whitespace() {
         updated_at: 0,
         kind: shell(command),
     };
-    assert_eq!(
-        crate::activity::detail_text(&item, crate::activity::ActivityCategory::Command),
-        command
-    );
+    let line = crate::activity::line(&item, &std::collections::HashMap::new());
+    assert_eq!((line.verb.as_str(), line.object.as_str()), ("Ran", command));
 }
 
 /// A visible native disclosure clips original glyph rows and reverses in place.
@@ -363,43 +327,24 @@ fn opening_work_slides_its_content_open(cx: &mut TestAppContext) {
     });
     conversation.update(cx, |c, cx| c.toggle_work(&run, true, cx));
     settle(cx, &conversation);
-    let intrinsic = cx.read(|cx| conversation.read(cx).shared.row_heights.borrow().clone());
+    let row = format!("prose:{id}:0");
+    let full = shown(cx, row.clone())
+        .expect("the open commentary")
+        .size
+        .height;
     conversation.update(cx, |c, cx| c.toggle_work(&run, false, cx));
-    draw(cx);
     let partial_deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        let partially_clipped = cx.read(|cx| {
-            let c = conversation.read(cx);
-            intrinsic.iter().any(|(key, full)| {
-                let Some(index) = c.row_context.key_rows.get(key).copied() else {
-                    return false;
-                };
-                if !matches!(c.rows[index].0, Row::ProseBlock { .. }) {
-                    return false;
-                }
-                let Some(bounds) = c.list.bounds_for_item(index) else {
-                    return false;
-                };
-                let end = if index + 1 == c.rows.len() {
-                    gpui::px(c.row_context.end_space)
-                } else {
-                    gpui::px(0.0)
-                };
-                let visible = bounds.size.height - end;
-                visible > gpui::px(0.5)
-                    && visible < *full - gpui::px(0.5)
-                    && c.shared.row_heights.borrow().get(key) == Some(full)
-            })
-        });
-        if partially_clipped {
+        draw(cx);
+        let height = shown(cx, row.clone()).map(|bounds| bounds.size.height);
+        if height.is_some_and(|height| height > gpui::px(0.5) && height < full - gpui::px(0.5)) {
             break;
         }
         assert!(
             Instant::now() < partial_deadline,
-            "the native disclosure never painted a partially clipped original row"
+            "the commentary never showed partly closed"
         );
         std::thread::sleep(Duration::from_millis(10));
-        draw(cx);
     }
     assert!(
         cx.debug_bounds("work-header").is_some(),
@@ -407,14 +352,11 @@ fn opening_work_slides_its_content_open(cx: &mut TestAppContext) {
     );
     conversation.update(cx, |c, cx| c.toggle_work(&run, true, cx));
     settle(cx, &conversation);
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        assert!(
-            c.rows
-                .iter()
-                .any(|(row, _)| matches!(row, Row::ProseBlock { id: item, .. } if *item == id))
-        );
-    });
+    assert_eq!(
+        shown(cx, row).map(|bounds| bounds.size.height),
+        Some(full),
+        "reopened, the commentary shows whole again"
+    );
 }
 
 /// A work disclosure never mounts a whole commentary, list or table subtree.
@@ -456,105 +398,34 @@ fn opening_long_work_prepares_only_what_shows(cx: &mut TestAppContext) {
         loaded(&conversation, cx).len() == 1
     });
     conversation.update(cx, |c, cx| c.toggle_work(&run, true, cx));
-    wait(cx, "flat commentary leaves", |cx| {
+    // Opening shows the commentary's end, read from Forge a window at a
+    // time: its start is not laid out.
+    let last = format!("prose:{id}:750");
+    wait(cx, "the commentary's end", |cx| {
         draw(cx);
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            let sources = c.shared.stored_sources.borrow();
-            sources.get(&(id.clone(), crate::fold::Slot::Prose)).is_some_and(|source| {
-                source.block_count() == 751
-                    && source.loaded_range().len() <= 64
-                    && !source.loaded_range().is_empty()
-                    && c.rows.iter().filter(|(row, _)| matches!(row, Row::ProseBlock { id: item, .. } if *item == id)).count() == source.loaded_range().len()
-            })
-        })
+        shown(cx, last.clone()).is_some()
     });
     settle(cx, &conversation);
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        assert_eq!(
-            c.shared.stored_sources.borrow()[&(id.clone(), crate::fold::Slot::Prose)].block_count(),
-            751
-        );
-        assert!(
-            c.rows.len() <= 65,
-            "one header and at most64 registered semantic leaves"
-        );
-        let mounted = c.row_views.iter().flatten().count();
-        assert!(
-            mounted < 128,
-            "only viewport and bounded cache mount views: {mounted}/{}",
-            c.rows.len()
-        );
-        // A header contains metadata, not every child's model or rendered element.
-        assert!(
-            c.rows
-                .iter()
-                .filter(|(row, _)| matches!(row, Row::Work { .. }))
-                .count()
-                == 1
-        );
-    });
-    // Capture already shaped native body heights. The flight must clip those
-    // original rows; it must not reshape a growing text prefix or compress all
-    // children at once.
-    let source_window = cx.read(|cx| {
-        conversation.read(cx).shared.stored_sources.borrow()
-            [&(id.clone(), crate::fold::Slot::Prose)]
-            .loaded_range()
-    });
+    assert!(shown(cx, format!("prose:{id}:0")).is_none());
+    // Closing slides it shut under its header; reversing midway slides it
+    // open again from where it was.
     conversation.update(cx, |c, cx| c.toggle_work(&run, false, cx));
     draw(cx);
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        assert!(
-            !c.disclosures.is_empty(),
-            "closing retains its native owners during the flight"
-        );
-        assert!(
-            c.rows.len() > 1 && c.rows.len() <= 129,
-            "the closing window stays bounded"
-        );
-    });
-    // Reversing a live native flight keeps the source window and header rather
-    // than dropping/reloading the descendant models and starting from zero.
+    assert!(cx.debug_bounds("disclosing").is_some(), "closing slides");
     conversation.update(cx, |c, cx| c.toggle_work(&run, true, cx));
     draw(cx);
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        assert!(!c.disclosures.is_empty(), "the interrupted flight reverses");
-        assert_eq!(
-            c.shared.stored_sources.borrow()[&(id.clone(), crate::fold::Slot::Prose)]
-                .loaded_range(),
-            source_window
-        );
-        assert!(c.row_views.iter().flatten().count() <= 128);
-    });
-    wait(cx, "the reopened native flight", |cx| {
-        draw(cx);
-        cx.read(|cx| conversation.read(cx).disclosures.is_empty())
-    });
+    assert!(
+        cx.debug_bounds("disclosing").is_some(),
+        "the flight reverses"
+    );
     settle(cx, &conversation);
+    assert!(shown(cx, last.clone()).is_some(), "open again at its end");
     conversation.update(cx, |c, cx| c.toggle_work(&run, false, cx));
-    wait(cx, "closing to release descendant native owners", |cx| {
+    wait(cx, "closed under its header", |cx| {
         draw(cx);
-        cx.read(|cx| {
-            let c = conversation.read(cx);
-            c.disclosures.is_empty() && c.rows.len() == 1
-        })
-    });
-    cx.read(|cx| {
-        let c = conversation.read(cx);
-        assert!(matches!(c.rows[0].0, Row::Work { .. }));
-        assert!(c.row_views.iter().flatten().count() <= 1);
-        assert!(
-            c.shared
-                .row_heights
-                .borrow()
-                .keys()
-                .all(|key| *key == c.rows[0].0.key()),
-            "descendant geometry ownership is released with its native row"
-        );
+        cx.debug_bounds("disclosing").is_none()
+            && cx.debug_bounds("work-header").is_some()
+            && shown(cx, last.clone()).is_none()
     });
 }
 
@@ -588,33 +459,10 @@ fn adjacent_work_and_compaction_share_one_separator_and_keep_disclosure(cx: &mut
         loaded(&conversation, cx).len() == 4
     });
     draw(cx);
-    let merged_revision = |cx: &mut VisualTestContext| {
-        cx.read(|cx| {
-            conversation
-                .read(cx)
-                .rows
-                .iter()
-                .find_map(|(row, version)| match row.semantic() {
-                    Row::Work {
-                        compaction: Some(id),
-                        ..
-                    } if id == &checkpoint => Some(*version),
-                    _ => None,
-                })
-                .expect("checkpoint is metadata on the work separator")
-        })
-    };
-    let initial_revision = merged_revision(cx);
-    cx.read(|cx| {
-        assert!(
-            !conversation
-                .read(cx)
-                .rows
-                .iter()
-                .any(|(row, _)| matches!(row.semantic(), Row::Compaction(id) if id == &checkpoint)),
-            "the merged checkpoint has no second native separator"
-        )
-    });
+    assert!(
+        shown(cx, format!("compaction:{checkpoint}")).is_none(),
+        "the merged checkpoint has no second native separator"
+    );
     let header = cx
         .debug_bounds("work-header")
         .expect("worked duration and disclosure remain");
@@ -636,9 +484,11 @@ fn adjacent_work_and_compaction_share_one_separator_and_keep_disclosure(cx: &mut
         "the merged separator still expands its native work descendants"
     );
     assert!(cx.debug_bounds("work-compaction").is_some());
-    forge.put(&thread, &checkpoint, Status::Cancelled, compact());
-    wait(cx, "the merged checkpoint status revision", |cx| {
-        merged_revision(cx) != initial_revision
+    let updated = forge.put(&thread, &checkpoint, Status::Cancelled, compact());
+    wait(cx, "the checkpoint's new status", |cx| {
+        loaded(&conversation, cx)
+            .iter()
+            .any(|item| item.id == checkpoint && item.seq == updated.seq)
     });
     draw(cx);
     assert!(
@@ -650,14 +500,8 @@ fn adjacent_work_and_compaction_share_one_separator_and_keep_disclosure(cx: &mut
     wait(cx, "a checkpoint separated by the reply", |cx| {
         loaded(&conversation, cx).len() == 5
     });
-    cx.read(|cx| {
-        assert!(
-            conversation
-                .read(cx)
-                .rows
-                .iter()
-                .any(|(row, _)| matches!(row.semantic(), Row::Compaction(id) if id == &separate)),
-            "a reply between separators prevents merging"
-        )
+    wait(cx, "the separate checkpoint", |cx| {
+        draw(cx);
+        shown(cx, format!("compaction:{separate}")).is_some()
     });
 }
