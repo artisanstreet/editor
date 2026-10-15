@@ -958,6 +958,50 @@ fn thread_rows_open_and_offer_actions_from_the_keyboard(cx: &mut TestAppContext)
 }
 
 /// An empty pagination state must not reserve a flex gap below the account.
+/// The profile menu floats over thread rows; a click on the menu must stay
+/// on the menu instead of opening the thread beneath it.
+#[gpui::test]
+fn clicks_on_the_profile_menu_never_open_the_thread_beneath(cx: &mut TestAppContext) {
+    let setup = Setup::new(cx);
+    let threads: Vec<_> = (0..12).map(|_| setup.thread(None)).collect();
+    setup.wait(cx, "threads in the inbox", |setup, cx| {
+        threads.iter().all(|thread| setup.lists(cx).0.contains(thread))
+    });
+    let mut visual = VisualTestContext::from_window(setup.window.into(), cx);
+    visual.simulate_resize(gpui::size(gpui::px(360.0), gpui::px(600.0)));
+    visual.run_until_parked();
+    let trigger = visual
+        .debug_bounds("artisan-desktop-profile-trigger")
+        .expect("profile footer");
+    visual.simulate_click(trigger.center(), Modifiers::none());
+    visual.run_until_parked();
+    // Let the opening scale finish so the menu has its full bounds.
+    std::thread::sleep(Duration::from_millis(400));
+    for _ in 0..3 {
+        visual.simulate_frame(setup.window.into());
+        visual.run_until_parked();
+    }
+    let menu = visual
+        .debug_bounds("artisan-desktop-profile-menu")
+        .expect("profile menu is open");
+    let (thread, point) = threads
+        .iter()
+        .find_map(|thread| {
+            let selector: &'static str = format!("sidebar-thread-{thread}").leak();
+            let row = visual.debug_bounds(selector)?;
+            let overlap = row.intersect(&menu);
+            (overlap.size.width > gpui::px(0.0) && overlap.size.height > gpui::px(0.0))
+                .then(|| (thread.clone(), overlap.center()))
+        })
+        .expect("a thread row lies beneath the profile menu");
+    visual.simulate_click(point, Modifiers::none());
+    visual.run_until_parked();
+    let opened = setup.core.read_with(&visual, |core, _| {
+        matches!(core.screen(), Screen::Thread { thread: open, .. } if *open == thread)
+    });
+    assert!(!opened, "the click went through the profile menu to {thread}");
+}
+
 #[gpui::test]
 fn profile_footer_keeps_only_the_sidebar_bottom_inset(cx: &mut TestAppContext) {
     let setup = Setup::new(cx);

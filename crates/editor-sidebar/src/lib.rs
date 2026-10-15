@@ -1373,6 +1373,9 @@ impl Render for Sidebar {
                         div()
                             .id("profile-menu-motion")
                             .relative()
+                            // The menu floats over thread rows: clicks on it
+                            // must not reach the rows beneath.
+                            .occlude()
                             .child(editor_ui::hover_card::glass_hover_card(&theme, content)),
                         &self.profile_motion,
                         "profile",

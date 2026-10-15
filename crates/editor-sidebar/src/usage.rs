@@ -364,19 +364,23 @@ impl Account {
             anchored()
                 .position(point(left, bounds.top()))
                 .snap_to_window_with_margin(px(8.0))
-                .child(editor_ui::hover_card::glass_hover_card(
-                    &theme,
+                .child(
                     div()
-                        .id("machine-dropdown")
-                        .relative()
-                        .child(submenu_bounds.record())
-                        .debug_selector(|| "machine-dropdown".into())
-                        .w(width)
-                        .max_h(px(400.0))
-                        .overflow_y_scroll()
-                        .p(px(4.0))
-                        .child(rows),
-                )),
+                        .occlude()
+                        .child(editor_ui::hover_card::glass_hover_card(
+                            &theme,
+                            div()
+                                .id("machine-dropdown")
+                                .relative()
+                                .child(submenu_bounds.record())
+                                .debug_selector(|| "machine-dropdown".into())
+                                .w(width)
+                                .max_h(px(400.0))
+                                .overflow_y_scroll()
+                                .p(px(4.0))
+                                .child(rows),
+                        )),
+                ),
         )
         .with_priority(2)
         .into_any_element()
