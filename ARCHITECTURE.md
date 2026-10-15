@@ -177,7 +177,8 @@ reasoning are not carried over.
 `nix run .#dev` builds `ae` and the Editor with Cargo, runs a dev Forge from
 `~/.local/share/artisan-dev` on port 47901, and launches the Editor (in WSL,
 the Windows build). `nix run .#dev -- import` imports the old dev Forge.
-See `nix/dev.nix`. Releases: `nix build .#release`, signed by
+`nix run .#release` is the same loop built with Cargo's release profile.
+See `nix/dev.nix`. Release archives: `nix build .#release`, signed by
 `scripts/release`.
 
 ## Tests

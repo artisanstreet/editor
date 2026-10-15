@@ -350,6 +350,12 @@ let
     );
   };
   dev = import ./dev.nix { inherit pkgs graphicsLibraryPath; };
+  # `nix run .#release`: the dev loop with Cargo's release profile. The
+  # signed release archives stay `nix build .#release` (packages, not apps).
+  devRelease = import ./dev.nix {
+    inherit pkgs graphicsLibraryPath;
+    profile = "release";
+  };
 in
 {
   inherit checks;
@@ -387,5 +393,6 @@ in
   apps = {
     default = dev;
     inherit dev;
+    release = devRelease;
   };
 }

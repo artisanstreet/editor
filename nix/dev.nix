@@ -44,13 +44,18 @@
 #   ARTISAN_DEV_PROFILE   debug (default: dependencies optimised, workspace at
 #                         opt-level 1) or release (what ships; slow to build)
 #   CARGO_BUILD_JOBS      respected; the dev shell defaults to two jobs
+#
+#   nix run .#release [-- <command>] is the same loop with the release profile
+#   (Cargo's `release`, what ships), built into target/dev/<platform>/release.
+#   It replaces the same dev install; ARTISAN_DEV_PROFILE still overrides it.
 {
   pkgs,
   graphicsLibraryPath,
+  profile ? "debug",
 }:
 let
   runner = pkgs.writeShellApplication {
-    name = "dev";
+    name = if profile == "debug" then "dev" else "dev-${profile}";
     runtimeInputs = with pkgs; [
       git
       coreutils
@@ -61,12 +66,13 @@ let
     ];
     text = ''
       ARTISAN_DEV_GRAPHICS_LIBRARY_PATH=${pkgs.lib.escapeShellArg graphicsLibraryPath}
+      : "''${ARTISAN_DEV_PROFILE:=${profile}}"
     ''
     + builtins.readFile ./dev.sh;
   };
 in
 {
   type = "app";
-  program = "${runner}/bin/dev";
-  meta.description = "Build, install and relaunch the dev Forge and Editor";
+  program = "${runner}/bin/${runner.name}";
+  meta.description = "Build (${profile} profile), install and relaunch the dev Forge and Editor";
 }
