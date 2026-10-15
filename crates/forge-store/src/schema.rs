@@ -1,10 +1,17 @@
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension};
 
+/// One step of a migration: SQL, or a data translation SQL cannot express.
+enum Step {
+    Sql(&'static str),
+    Rust(fn(&Connection) -> Result<()>),
+}
+
 /// Applied in order; `PRAGMA user_version` counts how many have run.
 /// Never edit a released entry, append a new one.
-const MIGRATIONS: &[&str] = &[
-    r"
+const MIGRATIONS: &[&[Step]] = &[
+    &[Step::Sql(
+        r"
 CREATE TABLE projects (
     id   TEXT PRIMARY KEY,
     seq  INTEGER NOT NULL,
@@ -70,7 +77,9 @@ CREATE TABLE pair_codes (
     expires_at  INTEGER NOT NULL
 );
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 -- Values only Forge reads: never in /state or the event stream.
 CREATE TABLE secrets (
     key   TEXT PRIMARY KEY,
@@ -79,7 +88,9 @@ CREATE TABLE secrets (
 INSERT INTO secrets (key, value) SELECT key, value FROM kv WHERE key = 'forge_identity';
 DELETE FROM kv WHERE key = 'forge_identity';
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 -- Every saved version of the global prompt; the latest is also the
 -- `global_prompt` setting.
 CREATE TABLE prompt_versions (
@@ -88,7 +99,9 @@ CREATE TABLE prompt_versions (
     saved_at INTEGER NOT NULL
 );
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 -- Access and approvals became one choice: Auto or Full. What never asked
 -- (or bypassed Claude's permissions) stays Full; everything else is Auto.
 UPDATE threads SET body = json_remove(
@@ -106,18 +119,24 @@ UPDATE kv SET value = json_remove(
     '$.access', '$.approvals', '$.options.permission_mode', '$.options.mode')
 WHERE key = 'default_engine_config' AND json_valid(value);
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 CREATE INDEX items_awaiting_position ON items(position) WHERE status = 'awaiting_user';
 CREATE INDEX items_pending_input ON items(thread_id, position)
     WHERE status = 'running' AND json_extract(body, '$.kind.type') = 'user_message';
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 ALTER TABLE drafts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 CREATE INDEX threads_activity ON threads(COALESCE(json_extract(body,'$.archived'),0),json_extract(body,'$.activity_seq') DESC,id DESC);
 CREATE INDEX items_thread_seq ON items(thread_id,seq);
 CREATE INDEX items_thread_kind_position ON items(thread_id,json_extract(body,'$.kind.type'),position);
 ",
-    r"
+    )],
+    &[Step::Sql(
+        r"
 CREATE VIEW thread_search_content AS
  SELECT t.rowid AS rowid, COALESCE(json_extract(t.body,'$.title'),'') || ' ' || COALESCE(json_extract(p.body,'$.name'),'') AS content
  FROM threads t LEFT JOIN projects p ON p.id=json_extract(t.body,'$.project_id');
@@ -148,10 +167,15 @@ CREATE TRIGGER project_search_after_update AFTER UPDATE ON projects
  WHERE rowid IN (SELECT rowid FROM threads WHERE json_extract(body,'$.project_id')=NEW.id);
 END;
 ",
-    r"CREATE INDEX items_thread_parent_position ON items(thread_id,json_extract(body,'$.parent_id'),position);
+    )],
+    &[Step::Sql(
+        r"CREATE INDEX items_thread_parent_position ON items(thread_id,json_extract(body,'$.parent_id'),position);
 CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
  WHERE json_extract(body,'$.parent_id') IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
-    r"ALTER TABLE items ADD COLUMN edit_added INTEGER;
+    )],
+    &[
+        Step::Sql(
+            r"ALTER TABLE items ADD COLUMN edit_added INTEGER;
        ALTER TABLE items ADD COLUMN edit_removed INTEGER;
        CREATE TABLE thread_edit_totals(thread_id TEXT PRIMARY KEY, added INTEGER NOT NULL, removed INTEGER NOT NULL, operations INTEGER NOT NULL);
        CREATE TRIGGER item_edit_insert AFTER INSERT ON items WHEN NEW.edit_added IS NOT NULL BEGIN
@@ -167,13 +191,21 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
        CREATE TRIGGER item_edit_delete AFTER DELETE ON items WHEN OLD.edit_added IS NOT NULL BEGIN
          UPDATE thread_edit_totals SET added=added-OLD.edit_added,removed=removed-OLD.edit_removed,operations=operations-1 WHERE thread_id=OLD.thread_id;
        END;",
-    "SELECT 1; -- Canonical engine settings and question identities are translated in Rust.",
-    r"UPDATE runs SET body=json_set(body,'$.input_cutoff',seq);
+        ),
+        Step::Rust(backfill_edit_totals),
+    ],
+    // Canonical engine settings and question identities. This was an SQL
+    // no-op plus a Rust translation; the translation is the whole step.
+    &[Step::Rust(migrate_payloads)],
+    &[Step::Sql(
+        r"UPDATE runs SET body=json_set(body,'$.input_cutoff',seq);
        CREATE INDEX items_pending_inputs ON items(thread_id,seq)
         WHERE status='running' AND json_extract(body,'$.kind.type')='user_message';",
+    )],
     // Delivered inputs keep their original position while their revision advances.
     // A lost historical revision cannot be recovered from metadata updated_at.
-    r"UPDATE threads SET body=json_set(body,'$.activity_at',COALESCE(
+    &[Step::Sql(
+        r"UPDATE threads SET body=json_set(body,'$.activity_at',COALESCE(
        (SELECT json_extract(i.body,'$.updated_at') FROM items i
         WHERE i.thread_id=threads.id AND i.seq=json_extract(threads.body,'$.activity_seq')),
        (SELECT json_extract(i.body,'$.created_at') FROM items i
@@ -183,7 +215,11 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
         WHERE r.thread_id=threads.id AND r.seq<=json_extract(threads.body,'$.activity_seq')
         ORDER BY r.seq DESC LIMIT 1),
        json_extract(body,'$.created_at'),0));",
-    r"CREATE TABLE content(id TEXT PRIMARY KEY, bytes INTEGER NOT NULL, lines INTEGER NOT NULL,
+    )],
+    // `item_content_delete` and `content_delete` are defined once, below.
+    &[
+        Step::Sql(
+            r"CREATE TABLE content(id TEXT PRIMARY KEY, bytes INTEGER NOT NULL, lines INTEGER NOT NULL,
        diff_added INTEGER NOT NULL, diff_removed INTEGER NOT NULL, unreferenced_at INTEGER);
        CREATE INDEX content_orphans ON content(unreferenced_at) WHERE unreferenced_at IS NOT NULL;
        CREATE TABLE content_chunks(content_id TEXT NOT NULL,start INTEGER NOT NULL,data BLOB NOT NULL,PRIMARY KEY(content_id,start)) WITHOUT ROWID;
@@ -192,21 +228,87 @@ CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body
        CREATE TRIGGER item_content_insert AFTER INSERT ON item_content BEGIN
          UPDATE content SET unreferenced_at=NULL WHERE id=NEW.content_id;
        END;
-       CREATE TRIGGER item_content_delete AFTER DELETE ON item_content BEGIN
-         UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.content_id
-           AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.content_id);
-       END;
        CREATE TRIGGER item_content_owner_delete AFTER DELETE ON items BEGIN
          DELETE FROM item_content WHERE item_id=OLD.id;
-       END;
-       CREATE TRIGGER content_delete AFTER DELETE ON content BEGIN
-         DELETE FROM content_chunks WHERE content_id=OLD.id;
        END;",
-    crate::collection::SCHEMA,
-    crate::source_index::SCHEMA,
+        ),
+        Step::Rust(migrate_sources),
+    ],
+    &[Step::Sql(COLLECTIONS), Step::Rust(migrate_collections)],
+    &[Step::Sql(SOURCE_INDEXES)],
+    // Kind and parent are columns, so indexes and queries no longer have to
+    // repeat the same `json_extract` text to match.
+    &[Step::Sql(
+        r"ALTER TABLE items ADD COLUMN kind_type TEXT;
+       ALTER TABLE items ADD COLUMN parent_id TEXT;
+       UPDATE items SET kind_type=json_extract(body,'$.kind.type'),parent_id=json_extract(body,'$.parent_id');
+       DROP INDEX IF EXISTS items_pending_input;
+       DROP INDEX IF EXISTS items_pending_inputs;
+       DROP INDEX IF EXISTS items_thread_kind_position;
+       DROP INDEX IF EXISTS items_thread_parent_position;
+       DROP INDEX IF EXISTS items_agent_recipient_position;
+       CREATE INDEX items_pending_input ON items(thread_id,position) WHERE status='running' AND kind_type='user_message';
+       CREATE INDEX items_pending_inputs ON items(thread_id,seq) WHERE status='running' AND kind_type='user_message';
+       CREATE INDEX items_thread_kind_position ON items(thread_id,kind_type,position);
+       CREATE INDEX items_thread_parent_position ON items(thread_id,parent_id,position);
+       CREATE INDEX items_agent_recipient_position ON items(thread_id,json_extract(body,'$.kind.tool.recipient'),position)
+        WHERE parent_id IS NULL AND json_extract(body,'$.kind.tool.kind')='agent_message';",
+    )],
 ];
 
+/// Collection records with their dependency graph. A source stays while an
+/// item or a parent source references it; `content_delete` cascades.
+const COLLECTIONS: &str = r"
+CREATE TABLE content_collections(content_id TEXT PRIMARY KEY, count INTEGER NOT NULL, authored_bytes INTEGER NOT NULL, structural_bytes INTEGER NOT NULL);
+CREATE TABLE content_records(content_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
+  start INTEGER NOT NULL, end INTEGER NOT NULL, record_key TEXT, record_label TEXT, PRIMARY KEY(content_id,ordinal)) WITHOUT ROWID;
+CREATE UNIQUE INDEX content_records_key ON content_records(content_id,record_key) WHERE record_key IS NOT NULL;
+CREATE INDEX content_records_label ON content_records(content_id,record_label) WHERE record_label IS NOT NULL;
+CREATE TABLE content_dependencies(parent_id TEXT NOT NULL,child_id TEXT NOT NULL,
+  PRIMARY KEY(parent_id,child_id), CHECK(parent_id<>child_id)) WITHOUT ROWID;
+CREATE INDEX content_dependencies_child ON content_dependencies(child_id);
+CREATE TRIGGER content_dependency_insert AFTER INSERT ON content_dependencies BEGIN
+  UPDATE content SET unreferenced_at=NULL WHERE id=NEW.child_id;
+END;
+CREATE TRIGGER content_dependency_delete AFTER DELETE ON content_dependencies BEGIN
+  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.child_id
+    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.child_id)
+    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.child_id);
+END;
+-- Databases that applied an earlier migration 13 have item-only versions.
+DROP TRIGGER IF EXISTS item_content_delete;
+CREATE TRIGGER item_content_delete AFTER DELETE ON item_content BEGIN
+  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.content_id
+    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.content_id)
+    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.content_id);
+END;
+DROP TRIGGER IF EXISTS content_delete;
+CREATE TRIGGER content_delete AFTER DELETE ON content BEGIN
+  DELETE FROM content_chunks WHERE content_id=OLD.id;
+  DELETE FROM content_records WHERE content_id=OLD.id;
+  DELETE FROM content_collections WHERE content_id=OLD.id;
+  DELETE FROM content_dependencies WHERE parent_id=OLD.id;
+END;
+";
+
+/// Persisted Markdown leaf indexes, removed with their source.
+const SOURCE_INDEXES: &str = r"
+CREATE TABLE source_indexes(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL,
+ metadata_id TEXT NOT NULL, leaf_count INTEGER NOT NULL, PRIMARY KEY(source_id,format,version)) WITHOUT ROWID;
+CREATE TABLE source_index_leaves(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+ source_start INTEGER NOT NULL, source_end INTEGER NOT NULL, metadata_start INTEGER NOT NULL, metadata_end INTEGER NOT NULL,
+ PRIMARY KEY(source_id,format,version,ordinal)) WITHOUT ROWID;
+CREATE TRIGGER source_index_delete AFTER DELETE ON content BEGIN
+ DELETE FROM source_index_leaves WHERE source_id=OLD.id;
+ DELETE FROM source_indexes WHERE source_id=OLD.id;
+END;
+";
+
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
+    migrate_to(conn, MIGRATIONS.len())
+}
+
+fn migrate_to(conn: &mut Connection, target: usize) -> Result<()> {
     let version: usize = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .context("read schema version")?;
@@ -216,43 +318,50 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
             MIGRATIONS.len()
         );
     }
-    for (index, sql) in MIGRATIONS.iter().enumerate().skip(version) {
+    for (index, steps) in MIGRATIONS.iter().enumerate().take(target).skip(version) {
         let next = index + 1;
         let tx = conn.transaction()?;
-        tx.execute_batch(sql)
-            .with_context(|| format!("apply schema migration {next}"))?;
-        if next == 9 {
-            // One row at a time; existing history is indexed once, without
-            // manufacturing Item revisions or stream events.
-            let mut select = tx.prepare("SELECT id,body FROM items WHERE status='done' AND json_extract(body,'$.kind.tool.kind')='edit'")?;
-            let mut rows = select.query([])?;
-            let mut update =
-                tx.prepare("UPDATE items SET edit_added=?2,edit_removed=?3 WHERE id=?1")?;
-            while let Some(row) = rows.next()? {
-                let id: String = row.get(0)?;
-                let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
-                if let Some(tool) = body.pointer("/kind/tool") {
-                    let tool: artisan_api::ToolKind = serde_json::from_value(tool.clone())?;
-                    if let Some(stats) = tool.edit_totals() {
-                        update.execute(rusqlite::params![id, stats.added, stats.removed])?;
-                    }
-                }
+        for step in *steps {
+            match step {
+                Step::Sql(sql) => tx.execute_batch(sql).map_err(Into::into),
+                Step::Rust(translate) => translate(&tx),
             }
-        }
-        if next == 10 {
-            migrate_payloads(&tx)?;
-        }
-        if next == 13 {
-            crate::content::migrate(&tx, false)?;
-        }
-        if next == 14 {
-            crate::content::migrate(&tx, true)?;
+            .with_context(|| format!("apply schema migration {next}"))?;
         }
         tx.pragma_update(None, "user_version", next)?;
         tx.commit()
             .with_context(|| format!("commit schema migration {next}"))?;
     }
     Ok(())
+}
+
+/// Existing edit history is counted once, one row at a time, without
+/// manufacturing Item revisions or stream events.
+fn backfill_edit_totals(conn: &Connection) -> Result<()> {
+    let mut select = conn.prepare(
+        "SELECT id,body FROM items WHERE status='done' AND json_extract(body,'$.kind.tool.kind')='edit'",
+    )?;
+    let mut rows = select.query([])?;
+    let mut update = conn.prepare("UPDATE items SET edit_added=?2,edit_removed=?3 WHERE id=?1")?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let body: serde_json::Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
+        if let Some(tool) = body.pointer("/kind/tool") {
+            let tool: artisan_api::ToolKind = serde_json::from_value(tool.clone())?;
+            if let Some(stats) = tool.edit_totals() {
+                update.execute(rusqlite::params![id, stats.added, stats.removed])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn migrate_sources(conn: &Connection) -> Result<()> {
+    crate::content::migrate(conn, false)
+}
+
+fn migrate_collections(conn: &Connection) -> Result<()> {
+    crate::content::migrate(conn, true)
 }
 
 /// One-time persisted-data translation, never a runtime provider fallback.
@@ -275,12 +384,11 @@ fn canonical_config(config: &mut serde_json::Value) {
                 .get_mut("options")
                 .and_then(Value::as_object_mut)
                 .and_then(|options| options.remove("service_tier"));
-            if !has(config, "speed") {
-                if let Some(Value::String(speed)) = old {
-                    if !speed.is_empty() {
-                        config["speed"] = Value::String(speed);
-                    }
-                }
+            if !has(config, "speed")
+                && let Some(Value::String(speed)) = old
+                && !speed.is_empty()
+            {
+                config["speed"] = Value::String(speed);
             }
         }
         "cursor" => {
@@ -296,12 +404,11 @@ fn canonical_config(config: &mut serde_json::Value) {
             let old = config
                 .as_object_mut()
                 .and_then(|config| config.remove("effort"));
-            if !has(config, "variant") {
-                if let Some(Value::String(variant)) = old {
-                    if !variant.is_empty() {
-                        config["variant"] = Value::String(variant);
-                    }
-                }
+            if !has(config, "variant")
+                && let Some(Value::String(variant)) = old
+                && !variant.is_empty()
+            {
+                config["variant"] = Value::String(variant);
             }
         }
         _ => {}
@@ -420,10 +527,7 @@ mod canonical_migration_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.sqlite");
         let mut conn = Connection::open(&path).unwrap();
-        for sql in &MIGRATIONS[..9] {
-            conn.execute_batch(sql).unwrap();
-        }
-        conn.pragma_update(None, "user_version", 9).unwrap();
+        migrate_to(&mut conn, 9).unwrap();
         let codex = json!({"engine":"codex","model":null,"effort":null,"options":{"service_tier":"priority","unrelated":42}});
         let cursor = json!({"engine":"cursor","model":null,"effort":null,"options":{"fast":true}});
         let opencode = json!({"engine":"opencode","model":null,"effort":"high","variant":"custom","options":{}});
@@ -513,10 +617,7 @@ mod activity_time_migration_tests {
     #[test]
     fn activity_backfill_uses_source_events_and_preserves_revisions() {
         let mut conn = Connection::open_in_memory().unwrap();
-        for sql in &MIGRATIONS[..11] {
-            conn.execute_batch(sql).unwrap();
-        }
-        conn.pragma_update(None, "user_version", 11).unwrap();
+        migrate_to(&mut conn, 11).unwrap();
         for (id, activity) in [
             ("edited-input", 20),
             ("delivered-input", 30),
@@ -570,6 +671,104 @@ mod activity_time_migration_tests {
             conn.pragma_query_value::<usize, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
             MIGRATIONS.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_column_migration_tests {
+    use super::*;
+    use artisan_api::{Item, ItemId, ItemKind, ItemsQuery, Status, ThreadId};
+
+    const WHOLE: ItemsQuery = ItemsQuery {
+        before: None,
+        after: None,
+        limit: None,
+    };
+
+    fn item(id: &str, parent: Option<&str>, status: Status, kind: ItemKind) -> Item {
+        Item {
+            id: ItemId(id.into()),
+            thread_id: ThreadId("t".into()),
+            position: 0,
+            seq: 0,
+            run_id: None,
+            parent_id: parent.map(|parent| ItemId(parent.into())),
+            native_id: None,
+            status,
+            created_at: 1,
+            updated_at: 1,
+            kind,
+        }
+    }
+
+    /// Items stored before kind and parent became columns still start runs
+    /// and still show in their agent's transcript.
+    #[test]
+    fn existing_items_keep_their_queue_and_transcript_after_the_column_migration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_to(&mut conn, 15).unwrap();
+        let rows = [
+            item(
+                "input",
+                None,
+                Status::Running,
+                ItemKind::UserMessage {
+                    text: "pending".into(),
+                    images: Vec::new(),
+                    steer: false,
+                },
+            ),
+            item(
+                "child",
+                Some("agent"),
+                Status::Done,
+                ItemKind::Notice {
+                    kind: artisan_api::NoticeKind::Info,
+                    text: "subagent work".into(),
+                },
+            ),
+        ];
+        for (seq, row) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO items(id,thread_id,position,seq,status,body) VALUES(?1,'t',?2,?2,?3,?4)",
+                rusqlite::params![
+                    row.id.as_str(),
+                    seq + 1,
+                    crate::read::tag(&row.status).unwrap(),
+                    serde_json::to_string(row).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        migrate(&mut conn).unwrap();
+        assert_eq!(
+            crate::read::pending_threads(&conn, 8, &[]).unwrap(),
+            [ThreadId("t".into())]
+        );
+        let agent = ItemId("agent".into());
+        let page = crate::read::scoped_items_page(
+            &conn,
+            &ThreadId("t".into()),
+            &WHOLE,
+            Some(Some(&agent)),
+        )
+        .unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["child"]
+        );
+        let root = crate::read::scoped_items_page(&conn, &ThreadId("t".into()), &WHOLE, Some(None))
+            .unwrap();
+        assert_eq!(
+            root.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["input"]
         );
     }
 }

@@ -290,23 +290,19 @@ impl Tx<'_> {
         Ok(thread)
     }
 
-    /// Saves only this item. A new item's position is its creation seq.
-    /// Thread activity belongs to accepted input and run boundaries.
-    pub(crate) fn save_item(&mut self, mut item: Item, new: bool) -> Result<Item> {
-        let old = if new {
-            None
-        } else {
-            read::item(self, &item.id)?
-        };
+    /// Saves only this item: `old` is its stored version, `None` for a new
+    /// item, whose position is its creation seq. Thread activity belongs to
+    /// accepted input and run boundaries.
+    pub(crate) fn save_item(&mut self, mut item: Item, old: Option<Item>) -> Result<Item> {
         crate::content::normalize(self, &mut item, old.as_ref())?;
+        let new = old.is_none();
         if let Some(old) = old {
             item.seq = old.seq;
             item.updated_at = old.updated_at;
             if item == old {
                 return Ok(old);
             }
-        }
-        if new {
+        } else {
             let exists: bool = self.sql.query_row(
                 "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)",
                 [item.thread_id.as_str()],
@@ -325,13 +321,16 @@ impl Tx<'_> {
             }
             _ => None,
         };
+        // The kind's serde tag, read from the body so it cannot drift from it.
         self.sql
             .prepare_cached(
-                "INSERT INTO items (id, thread_id, position, seq, run_id, native_id, status, body, edit_added, edit_removed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO items (id, thread_id, position, seq, run_id, native_id, status, body,
+                     edit_added, edit_removed, kind_type, parent_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, json_extract(?8, '$.kind.type'), ?11)
                  ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, run_id = excluded.run_id,
                      native_id = excluded.native_id, status = excluded.status, body = excluded.body,
-                     edit_added = excluded.edit_added, edit_removed = excluded.edit_removed",
+                     edit_added = excluded.edit_added, edit_removed = excluded.edit_removed,
+                     kind_type = excluded.kind_type, parent_id = excluded.parent_id",
             )?
             .execute(params![
                 item.id.as_str(),
@@ -344,6 +343,7 @@ impl Tx<'_> {
                 to_body(&item)?,
                 edits.as_ref().map(|stats| stats.added),
                 edits.as_ref().map(|stats| stats.removed),
+                item.parent_id.as_ref().map(artisan_api::ItemId::as_str),
             ])
             .with_context(|| format!("save item {} in thread {}", item.id, item.thread_id))?;
         crate::content::own(self, &item)?;
@@ -377,8 +377,36 @@ impl Tx<'_> {
             }
             crate::blobs::input_images(blob_dir, images)?;
         }
-        let item = self.save_item(crate::fresh_item(new, self.created_at()), true)?;
+        let item = self.save_item(crate::fresh_item(new, self.created_at()), None)?;
         Ok((item, true))
+    }
+
+    /// What an accepted command does to its thread in the command's commit:
+    /// activity, optionally the default config, and the draft it consumed.
+    pub(crate) fn accept_command(
+        &mut self,
+        mut thread: Thread,
+        seq: Seq,
+        remember_config: bool,
+        draft: Option<artisan_api::DraftRevision>,
+    ) -> Result<()> {
+        thread.activity_seq = seq;
+        if remember_config {
+            self.save_setting(
+                "default_engine_config".into(),
+                serde_json::to_value(&thread.config)?,
+            )?;
+        }
+        self.save_thread(thread)?;
+        if let Some(draft) = draft {
+            // Keep the tombstone and revision so an older write cannot
+            // resurrect the draft.
+            self.sql.execute(
+                "UPDATE drafts SET body='null', revision=revision+1 WHERE scope=?1 AND revision=?2",
+                params![draft.scope, draft.revision],
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn mark_activity(&mut self, id: &artisan_api::ThreadId, seq: Seq) -> Result<()> {
@@ -452,7 +480,7 @@ impl Tx<'_> {
         let items: Vec<Item> = read::items(
             self,
             "SELECT body,native_id FROM items WHERE status IN ('running', 'awaiting_user')
-             AND json_extract(body, '$.kind.type') != 'user_message' ORDER BY position",
+             AND kind_type != 'user_message' ORDER BY position",
             [],
         )?;
         let cancelled = items.len();
@@ -467,8 +495,9 @@ impl Tx<'_> {
             {
                 continue;
             }
+            let old = item.clone();
             item.status = item.status.advance(Status::Cancelled);
-            self.save_item(item, false)?;
+            self.save_item(item, Some(old))?;
         }
         if interrupted + cancelled > 0 {
             tracing::info!(

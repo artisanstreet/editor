@@ -1,10 +1,10 @@
 //! Bounded, coalesced observations of project repositories and owner avatars.
-use artisan_api::ProjectRepository;
+use artisan_api::{BlobRef, ProjectRepository};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{Arc, PoisonError},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::{Mutex, Semaphore};
 const ENTRIES: usize = 64;
@@ -105,6 +105,57 @@ impl Repositories {
         };
         entry.avatar = Some((Instant::now(), avatar.clone()));
         avatar
+    }
+}
+
+/// Project icons as stored blobs, by source, so a request decodes and
+/// encodes an image only when its source changed.
+#[derive(Default)]
+pub(crate) struct Icons {
+    encoded: std::sync::Mutex<HashMap<IconSource, Icon>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) enum IconSource {
+    File {
+        path: PathBuf,
+        modified: SystemTime,
+        len: u64,
+    },
+    /// An avatar by the SHA-256 of its bytes.
+    Avatar([u8; 32]),
+}
+
+/// What a source was found to be.
+#[derive(Clone)]
+pub(crate) enum Icon {
+    Blob(BlobRef),
+    /// Not an image Forge can store.
+    Unusable,
+}
+
+impl Icons {
+    /// `None` when the source is new, or its blob was collected since.
+    pub(crate) fn get(&self, source: &IconSource, store: &forge_store::Store) -> Option<Icon> {
+        let known = self
+            .encoded
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(source)
+            .cloned()?;
+        match &known {
+            Icon::Blob(blob) => store.blob_path(&blob.hash).map(|_| known),
+            Icon::Unusable => Some(known),
+        }
+    }
+
+    pub(crate) fn insert(&self, source: IconSource, icon: Icon) {
+        let mut encoded = self.encoded.lock().unwrap_or_else(PoisonError::into_inner);
+        // Changed files leave stale keys behind; starting over bounds them.
+        if encoded.len() >= ENTRIES * 4 {
+            encoded.clear();
+        }
+        encoded.insert(source, icon);
     }
 }
 

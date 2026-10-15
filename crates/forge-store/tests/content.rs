@@ -184,6 +184,13 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
     .unwrap();
     conn.execute_batch(
         "DROP TRIGGER item_content_owner_delete;
+         DROP INDEX items_pending_input;
+         DROP INDEX items_pending_inputs;
+         DROP INDEX items_thread_kind_position;
+         DROP INDEX items_thread_parent_position;
+         DROP INDEX items_agent_recipient_position;
+         ALTER TABLE items DROP COLUMN kind_type;
+         ALTER TABLE items DROP COLUMN parent_id;
          DROP TABLE source_index_leaves;
          DROP TABLE source_indexes;
          DROP TABLE content_records;
@@ -193,7 +200,8 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
          DROP TABLE content_chunks;
          DROP TABLE content;
          PRAGMA user_version=12;",
-    ).unwrap();
+    )
+    .unwrap();
     drop(conn);
     let migrated = Store::open(dir.path()).unwrap();
     let actual = migrated.item(&item.id).await.unwrap().unwrap();
@@ -234,31 +242,65 @@ async fn version_twelve_migration_preserves_revisions_native_identity_and_comple
 async fn goal_summary_reads_a_bounded_prefix_and_preserves_full_source_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let project = store.create_project(CreateProject {
-        id: ProjectId::new(), path: "/work/goal".into(), name: None,
-    }).await.unwrap();
-    let thread = store.create_thread(CreateThread {
-        id: ThreadId::new(), project_id: project.id,
-        config: EngineConfig::new(EngineId::Codex), title: None, parent_thread_id: None,
-    }).await.unwrap();
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/work/goal".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            config: EngineConfig::new(EngineId::Codex),
+            title: None,
+            parent_thread_id: None,
+        })
+        .await
+        .unwrap();
     let objective = "🙂α finish the full objective\n".repeat(100_000);
-    let item = store.upsert_item(NewItem {
-        id: ItemId::new(), thread_id: thread.id.clone(), run_id: None,
-        parent_id: None, native_id: None, status: Status::Done,
-        kind: ItemKind::Notice {
-            kind: artisan_api::NoticeKind::Goal { state: "active".into() },
-            text: objective.clone().into(),
-        },
-    }).await.unwrap();
-    let ItemKind::Notice { text: TextContent::Stored(source), .. } = &item.kind else {
+    let item = store
+        .upsert_item(NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id.clone(),
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: Status::Done,
+            kind: ItemKind::Notice {
+                kind: artisan_api::NoticeKind::Goal {
+                    state: "active".into(),
+                },
+                text: objective.clone().into(),
+            },
+        })
+        .await
+        .unwrap();
+    let ItemKind::Notice {
+        text: TextContent::Stored(source),
+        ..
+    } = &item.kind
+    else {
         panic!("large objective must be a source descriptor")
     };
     let conn = rusqlite::Connection::open(dir.path().join("forge.sqlite3")).unwrap();
-    conn.execute("DELETE FROM content_chunks WHERE content_id=?1 AND start>1024", [source.id.as_str()]).unwrap();
+    conn.execute(
+        "DELETE FROM content_chunks WHERE content_id=?1 AND start>1024",
+        [source.id.as_str()],
+    )
+    .unwrap();
     let summary = store.inspector(&thread.id).await.unwrap();
     let goal = summary.goal.unwrap();
     assert_eq!(goal.objective, TextContent::Stored(source.clone()));
-    assert_eq!(goal.summary, objective.chars().take(160).collect::<String>() + "…");
+    assert_eq!(
+        goal.summary,
+        objective.chars().take(160).collect::<String>() + "…"
+    );
     assert!(goal.summary.chars().count() <= 161);
-    assert!(store.resolve_text(&goal.objective).await.is_err(), "fixture must prevent accidental full-source reads");
+    assert!(
+        store.resolve_text(&goal.objective).await.is_err(),
+        "fixture must prevent accidental full-source reads"
+    );
 }

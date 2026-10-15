@@ -85,7 +85,7 @@ pub(crate) async fn stream(
         let store = app.hub.store();
         // Subscribe before rechecking to cover revoke between middleware and stream.
         let revocations = store.subscribe_revocations();
-        if store.is_authorized(&client.certificate).await.ok().flatten().is_none() {
+        if store.is_authorized(&client.certificate).ok().flatten().is_none() {
             stop.cancel();
             return;
         }
@@ -249,27 +249,26 @@ impl Cursor {
     }
 }
 
+/// Returns when the device is revoked. The store announces revocations
+/// made here at once, and one made by another process (`ae forge devices
+/// revoke`) when the next request reaches Forge.
 async fn watch_authorization(
     store: &forge_store::Store,
     device: &DeviceId,
     certificate: &str,
     mut revocations: tokio::sync::broadcast::Receiver<DeviceId>,
 ) {
-    let mut tick = tokio::time::interval(Duration::from_secs(30));
-    tick.tick().await;
     loop {
-        tokio::select! {
-            received = revocations.recv() => match received {
-                Ok(revoked) if &revoked == device => return,
-                Ok(_) => {},
-                Err(RecvError::Closed) => return,
-                Err(RecvError::Lagged(_)) => {
-                    if store.is_authorized(certificate).await.ok().flatten().is_none() { return; }
+        match revocations.recv().await {
+            Ok(revoked) if &revoked == device => return,
+            Ok(_) => {}
+            Err(RecvError::Closed) => return,
+            // Missed announcements: ask directly.
+            Err(RecvError::Lagged(_)) => {
+                if store.is_authorized(certificate).ok().flatten().is_none() {
+                    return;
                 }
-            },
-            _ = tick.tick() => {
-                if store.is_authorized(certificate).await.ok().flatten().is_none() { return; }
-            },
+            }
         }
     }
 }

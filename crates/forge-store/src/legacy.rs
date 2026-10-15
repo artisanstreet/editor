@@ -183,7 +183,7 @@ impl Store {
                 }
                 tx.with_stamp(stamp, |tx| {
                     let input = matches!(&new.kind, ItemKind::UserMessage { .. });
-                    let item = tx.save_item(crate::fresh_item(new, stamp.created_at), true)?;
+                    let item = tx.save_item(crate::fresh_item(new, stamp.created_at), None)?;
                     if input {
                         tx.mark_activity(&item.thread_id, item.seq)?;
                     }

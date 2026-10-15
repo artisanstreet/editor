@@ -50,20 +50,39 @@ pub(crate) fn normalize(conn: &Connection, item: &mut Item, previous: Option<&It
         structural = structural.saturating_add(metrics.structural);
         Ok::<_, anyhow::Error>(())
     })?;
-    let body = serde_json::to_value(&item.kind)?;
-    validate_metadata(&body, "")?;
+    // One typed serialization serves both the metadata and the size checks.
+    let encoded = serde_json::to_value(&*item)?;
+    validate_metadata(&encoded["kind"], "")?;
+    let encoded_bytes = json_len(&encoded)?;
     ensure!(
-        serde_json::to_vec(item)?.len() <= MAX_ITEM_BYTES,
+        encoded_bytes <= MAX_ITEM_BYTES as u64,
         "item metadata exceeds 512 KiB"
     );
     ensure!(
         bytes
             .saturating_add(structural)
-            .saturating_add(serde_json::to_vec(item)?.len() as u64)
+            .saturating_add(encoded_bytes)
             <= MAX_SOURCE_BYTES,
         "item authored and structural data exceeds 64 MiB"
     );
     Ok(())
+}
+
+/// The length of `value` as JSON, without keeping the text.
+fn json_len(value: &serde_json::Value) -> Result<u64> {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    Ok(count.0)
 }
 
 pub(crate) fn validate_metadata(value: &serde_json::Value, key: &str) -> Result<()> {
@@ -423,6 +442,38 @@ pub(crate) fn migrate(conn: &Connection, collections: bool) -> Result<()> {
     Ok(())
 }
 
+/// The one immutable source insertion path, also used for derived parser metadata.
+pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
+    ensure!(
+        value.len() as u64 <= MAX_SOURCE_BYTES,
+        "source exceeds 64 MiB"
+    );
+    let source = ContentRef::from_text(value);
+    let totals = EditTotals::from_diff(value);
+    let inserted = conn.execute(
+        "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO NOTHING",
+        params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()],
+    )?;
+    if inserted != 0 {
+        let mut insert = conn
+            .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
+        let mut start = 0;
+        while start < value.len() {
+            let mut end = (start + artisan_api::CONTENT_CHUNK_BYTES).min(value.len());
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            insert.execute(params![
+                source.id.as_str(),
+                start as u64,
+                &value.as_bytes()[start..end]
+            ])?;
+            start = end;
+        }
+    }
+    Ok(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,36 +658,4 @@ mod tests {
         assert_eq!(collect(&conn, i64::MAX).unwrap(), 1);
         assert_eq!(collect(&conn, i64::MAX).unwrap(), 0);
     }
-}
-
-/// The one immutable source insertion path, also used for derived parser metadata.
-pub(crate) fn store_source(conn: &Connection, value: &str) -> Result<ContentRef> {
-    ensure!(
-        value.len() as u64 <= MAX_SOURCE_BYTES,
-        "source exceeds 64 MiB"
-    );
-    let source = ContentRef::from_text(value);
-    let totals = EditTotals::from_diff(value);
-    let inserted = conn.execute(
-        "INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO NOTHING",
-        params![source.id.as_str(),source.bytes,source.lines,totals.added,totals.removed,artisan_api::now()],
-    )?;
-    if inserted != 0 {
-        let mut insert = conn
-            .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
-        let mut start = 0;
-        while start < value.len() {
-            let mut end = (start + artisan_api::CONTENT_CHUNK_BYTES).min(value.len());
-            while !value.is_char_boundary(end) {
-                end -= 1;
-            }
-            insert.execute(params![
-                source.id.as_str(),
-                start as u64,
-                &value.as_bytes()[start..end]
-            ])?;
-            start = end;
-        }
-    }
-    Ok(source)
 }

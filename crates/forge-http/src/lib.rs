@@ -105,6 +105,7 @@ pub async fn start_with_harness(
             shutdown: shutdown.clone(),
             tasks: tasks.clone(),
             repositories: Arc::new(repository::Repositories::new()?),
+            icons: Arc::default(),
         });
         // A bound socket is the detached launcher's readiness boundary.
         // Mandatory setup must succeed before another process can observe it.
@@ -114,9 +115,7 @@ pub async fn start_with_harness(
         let address = listener.local_addr()?;
         // Failed binds must leave durable inputs untouched, without launching
         // a controller that will never accept its paired clients.
-        hub.resume_pending()
-            .await
-            .context("resume undelivered messages")?;
+        hub.resume_pending();
         anyhow::Ok((listener, address, app))
     }
     .await;
@@ -199,7 +198,10 @@ impl Server {
             let (socket, peer) = match self.listener.accept().await {
                 Ok(accepted) => accepted,
                 Err(error) => {
-                    tracing::warn!("accept failed: {error}");
+                    // Out of descriptors or memory fails every accept until
+                    // a connection closes; pause instead of spinning.
+                    tracing::warn!("accept a connection: {error}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 }
             };

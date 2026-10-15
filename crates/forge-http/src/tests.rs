@@ -397,6 +397,99 @@ async fn rich_resources_use_the_paired_forge_project_and_reject_non_regular_file
     }
 }
 
+/// What an Editor shows for a refused request comes from these messages
+/// and codes: a missing thing is 404 and named once, a stale answer is a
+/// conflict, and settings with their own route cannot be written raw.
+#[tokio::test(flavor = "multi_thread")]
+async fn refusals_name_what_is_missing_or_stale_and_raw_settings_are_rejected() {
+    let (_dir, address, store) = forge().await;
+    let invite = invite(&store).await.unwrap();
+    let editor = device(&invite.forge_certificate, address);
+    let pair = PairRequest {
+        code: invite.code,
+        device_name: "refusals".into(),
+    };
+    let paired = editor.http.post(editor.url("/pair")).json(&pair);
+    assert!(paired.send().await.unwrap().status().is_success());
+
+    let missing = editor
+        .http
+        .get(editor.url("/threads/no-such-thread"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    let error: artisan_api::ApiError = missing.json().await.unwrap();
+    assert_eq!(error.message, "thread no-such-thread not found");
+
+    let answer = artisan_api::Answer::Approval {
+        decision: artisan_api::Decision::AllowOnce,
+    };
+    let unknown = editor
+        .http
+        .post(editor.url("/items/no-such-item/answer"))
+        .json(&answer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+
+    let project = store
+        .create_project(CreateProject {
+            id: ProjectId::new(),
+            path: "/refusals".into(),
+            name: None,
+        })
+        .await
+        .unwrap();
+    let thread = store
+        .create_thread(CreateThread {
+            id: ThreadId::new(),
+            project_id: project.id,
+            title: None,
+            config: EngineConfig::new(EngineId::Claude),
+            parent_thread_id: None,
+        })
+        .await
+        .unwrap();
+    let said = store
+        .upsert_item(forge_store::NewItem {
+            id: ItemId::new(),
+            thread_id: thread.id,
+            run_id: None,
+            parent_id: None,
+            native_id: None,
+            status: artisan_api::Status::Done,
+            kind: artisan_api::ItemKind::AssistantMessage {
+                text: "done".into(),
+                phase: artisan_api::Phase::Final,
+            },
+        })
+        .await
+        .unwrap();
+    let stale = editor
+        .http
+        .post(editor.url(&format!("/items/{}/answer", said.id)))
+        .json(&answer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+
+    let raw = editor
+        .http
+        .put(editor.url("/settings/global_prompt"))
+        .json(&serde_json::json!("unversioned"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw.status(), 400);
+    assert_ne!(
+        store.setting("global_prompt").await.unwrap(),
+        Some(serde_json::json!("unversioned"))
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     use std::sync::Arc;
@@ -430,7 +523,12 @@ async fn failed_late_bind_leaves_pending_inputs_and_releases_startup_owners() {
     };
     let input_id = input.id.clone();
     store
-        .send_message(thread.id.clone(), input, false)
+        .send_message(
+            thread.id.clone(),
+            input,
+            false,
+            forge_store::Acceptance::default(),
+        )
         .await
         .unwrap();
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -484,7 +582,9 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
         std::fs::create_dir_all(&version).unwrap();
         let binary = version.join(if engine == "codex" {
             "vendor/x86_64-unknown-linux-musl/bin/codex"
-        } else { engine });
+        } else {
+            engine
+        });
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, script).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -493,8 +593,14 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
     };
     // These are this fixture's own CLI processes under its temporary engine
     // homes. Claude cannot finish its sign-in probe until the test releases it.
-    let claude = install("claude", "#!/bin/sh\n: > \"$0.started\"\nwhile [ ! -e \"$0.release\" ]; do sleep 0.02; done\nprintf '{\"loggedIn\":false}'\n");
-    let codex = install("codex", "#!/bin/sh\n: > \"$0.started\"\nprintf 'not logged in\\n'\n");
+    let claude = install(
+        "claude",
+        "#!/bin/sh\n: > \"$0.started\"\nwhile [ ! -e \"$0.release\" ]; do sleep 0.02; done\nprintf '{\"loggedIn\":false}'\n",
+    );
+    let codex = install(
+        "codex",
+        "#!/bin/sh\n: > \"$0.started\"\nprintf 'not logged in\\n'\n",
+    );
     let marker = |binary: &std::path::Path, suffix: &str| {
         let mut path = binary.as_os_str().to_os_string();
         path.push(suffix);
@@ -503,7 +609,9 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
     let server = start(ServeConfig {
         data_dir: data,
         listen: "127.0.0.1:0".parse().unwrap(),
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if marker(&claude, ".started").exists() && marker(&codex, ".started").exists() {
@@ -511,7 +619,8 @@ async fn startup_refresh_starts_codex_while_claude_probe_is_still_waiting() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await;
+    })
+    .await;
     // Release even on a failed assertion so teardown cannot leave this
     // fixture's blocked probe alive. No active Forge is involved.
     std::fs::write(marker(&claude, ".release"), "").unwrap();

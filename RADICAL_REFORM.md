@@ -1,5 +1,9 @@
 # Radical reform
 
+> Historical record of the 2026-10-11 audit and the decisions behind the
+> first reform pass. It is not kept in sync with the code: `statig` and some
+> other choices below were later dropped. `ARCHITECTURE.md` is the current shape.
+
 Findings and decisions from the codebase audit of 2026-10-11. The current
 codebase (~440k hand-written production lines, ~209k test lines, ~100k
 generated Cap'n Proto) does a job that fits in roughly a quarter of that. This

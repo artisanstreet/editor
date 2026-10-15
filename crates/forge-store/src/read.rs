@@ -114,7 +114,7 @@ pub(crate) fn item_by_native(
 pub(crate) fn agent_labels(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<String>> {
     let mut statement = conn.prepare_cached(
         "SELECT json_extract(body, '$.kind.label') FROM items
-         WHERE thread_id = ?1 AND json_extract(body, '$.kind.type') = 'agent'
+         WHERE thread_id = ?1 AND kind_type = 'agent'
            AND json_extract(body, '$.kind.label') IS NOT NULL",
     )?;
     let labels = statement
@@ -146,7 +146,7 @@ pub(crate) fn pending_threads(
 ) -> Result<Vec<ThreadId>> {
     let mut query = conn.prepare_cached(
         "SELECT pending.thread_id FROM items pending
-         WHERE pending.status = 'running' AND json_extract(pending.body, '$.kind.type') = 'user_message'
+         WHERE pending.status = 'running' AND pending.kind_type = 'user_message'
            AND pending.thread_id NOT IN (SELECT value FROM json_each(?1))
            AND NOT EXISTS (
              SELECT 1 FROM runs latest WHERE latest.rowid = (
@@ -172,8 +172,8 @@ pub(crate) fn pending_inputs(
     const BATCH_ROWS: usize = 32;
     const BATCH_BYTES: usize = 4 * 1024 * 1024;
     let tx = conn.unchecked_transaction()?;
-    let cutoff = tx.query_row("SELECT coalesce(max(seq),0) FROM items WHERE thread_id=?1 AND status='running' AND json_extract(body,'$.kind.type')='user_message'", [thread_id.as_str()], |row| row.get(0))?;
-    let mut query = tx.prepare_cached("SELECT body,native_id FROM items WHERE thread_id=?1 AND status='running' AND json_extract(body,'$.kind.type')='user_message' ORDER BY position LIMIT 32")?;
+    let cutoff = tx.query_row("SELECT coalesce(max(seq),0) FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message'", [thread_id.as_str()], |row| row.get(0))?;
+    let mut query = tx.prepare_cached("SELECT body,native_id FROM items WHERE thread_id=?1 AND status='running' AND kind_type='user_message' ORDER BY position LIMIT 32")?;
     let mut rows = query.query([thread_id.as_str()])?;
     let mut items = Vec::with_capacity(BATCH_ROWS);
     let mut bytes = 0usize;
@@ -214,18 +214,6 @@ pub(crate) fn pending_inputs(
         }
     }
     Ok(crate::PendingInputs { items, cutoff })
-}
-
-/// User messages not yet delivered to an engine, oldest first.
-pub(crate) fn undelivered_messages(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<Item>> {
-    items(
-        conn,
-        "SELECT body,native_id FROM items
-         WHERE thread_id = ?1 AND status = 'running'
-           AND json_extract(body, '$.kind.type') = 'user_message'
-         ORDER BY position",
-        [thread_id.as_str()],
-    )
 }
 
 pub(crate) fn run(conn: &Connection, id: &RunId) -> Result<Option<Run>> {
@@ -315,12 +303,12 @@ pub(crate) fn scoped_items_page(
     };
     let sql = match parent {
         Some(Some(_)) => format!("SELECT body,native_id FROM (
-            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND json_extract(body,'$.parent_id')=?5 AND position>?2 AND position<?3
+            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND parent_id=?5 AND position>?2 AND position<?3
             UNION ALL
-            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND json_extract(body,'$.parent_id') IS NULL
+            SELECT body,native_id,position FROM items WHERE thread_id=?1 AND parent_id IS NULL
                 AND json_extract(body,'$.kind.tool.kind')='agent_message' AND json_extract(body,'$.kind.tool.recipient')=?6 AND position>?2 AND position<?3
             ) ORDER BY position {order} LIMIT ?4"),
-        Some(None) => format!("SELECT body,native_id FROM items WHERE thread_id=?1 AND json_extract(body,'$.parent_id') IS NULL AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
+        Some(None) => format!("SELECT body,native_id FROM items WHERE thread_id=?1 AND parent_id IS NULL AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
         None => format!("SELECT body,native_id FROM items WHERE thread_id=?1 AND position>?2 AND position<?3 ORDER BY position {order} LIMIT ?4"),
     };
     let mut statement = conn.prepare_cached(&sql)?;
@@ -468,13 +456,11 @@ pub(crate) fn changes_since(
     Ok(Some(envelopes))
 }
 
-/// Compact current controls, independent of any transcript page.
+/// Compact current controls, independent of any transcript page. Every
+/// query is indexed by thread and kind, so it is computed per request.
 pub(crate) fn inspector(
     conn: &Connection,
     thread: &ThreadId,
-    cache: &std::sync::Mutex<
-        std::collections::HashMap<ThreadId, (artisan_api::InspectorSummary, usize)>,
-    >,
 ) -> Result<artisan_api::InspectorSummary> {
     use artisan_api::{InspectorAgent, InspectorSummary, InspectorTerminal};
     let snapshot =
@@ -484,16 +470,6 @@ pub(crate) fn inspector(
         [thread.as_str()],
         |row| row.get(0),
     )?;
-    if let Some((summary, _)) = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(thread)
-        .filter(|(summary, _)| summary.revision == revision)
-        .cloned()
-    {
-        snapshot.commit()?;
-        return Ok(summary);
-    }
     let latest: Option<String> = conn
         .query_row(
             "SELECT id FROM runs WHERE thread_id=?1 ORDER BY seq DESC LIMIT 1",
@@ -510,7 +486,7 @@ pub(crate) fn inspector(
         conn,
         "SELECT json_object('id',id,'label',COALESCE(json_extract(body,'$.kind.label'),''),
             'description',json_extract(body,'$.kind.description'),'status',status) FROM items
-         WHERE thread_id=?1 AND json_extract(body,'$.kind.type')='agent'
+         WHERE thread_id=?1 AND kind_type='agent'
             AND (status IN ('running','awaiting_user') OR run_id=?2) ORDER BY position DESC",
         params![thread.as_str(), latest],
     )?;
@@ -522,8 +498,8 @@ pub(crate) fn inspector(
     let plan = conn
         .query_row(
             "SELECT json_extract(body,'$.kind.steps') FROM items
-        WHERE thread_id=?1 AND json_extract(body,'$.kind.type')='plan'
-            AND json_extract(body,'$.parent_id') IS NULL ORDER BY position DESC LIMIT 1",
+        WHERE thread_id=?1 AND kind_type='plan'
+            AND parent_id IS NULL ORDER BY position DESC LIMIT 1",
             [thread.as_str()],
             |row| row.get::<_, String>(0),
         )
@@ -533,8 +509,8 @@ pub(crate) fn inspector(
         .unwrap_or_default();
     let goal = conn.query_row(
         "SELECT json_extract(body,'$.kind.kind.state'),json_quote(json_extract(body,'$.kind.text')) FROM items
-            WHERE thread_id=?1 AND json_extract(body,'$.parent_id') IS NULL
-            AND json_extract(body,'$.kind.type')='notice' AND json_extract(body,'$.kind.kind.type')='goal'
+            WHERE thread_id=?1 AND parent_id IS NULL
+            AND kind_type='notice' AND json_extract(body,'$.kind.kind.type')='goal'
             ORDER BY position DESC LIMIT 1",
         [thread.as_str()],|row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))
     ).optional()?.and_then(|(state,objective)| {
@@ -557,7 +533,7 @@ pub(crate) fn inspector(
     }).transpose()?;
     let questions = many(conn,
         "SELECT json_object('id',id,'questions',json(json_extract(body,'$.kind.questions'))) FROM items
-            WHERE thread_id=?1 AND status='awaiting_user' AND json_extract(body,'$.kind.type')='question'
+            WHERE thread_id=?1 AND status='awaiting_user' AND kind_type='question'
             AND json_extract(body,'$.kind.answers') IS NULL ORDER BY position ASC",[thread.as_str()])?;
     let edits = conn
         .query_row(
@@ -572,7 +548,7 @@ pub(crate) fn inspector(
         )
         .optional()?;
     snapshot.commit()?;
-    let summary = InspectorSummary {
+    Ok(InspectorSummary {
         goal,
         questions,
         revision,
@@ -580,27 +556,7 @@ pub(crate) fn inspector(
         agents,
         plan,
         edits,
-    };
-    let bytes = serde_json::to_vec(&summary)?.len();
-    if bytes <= 2 * 1024 * 1024 {
-        let mut cache = cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cache.insert(thread.clone(), (summary.clone(), bytes));
-        while cache.len() > 64
-            || cache.values().map(|(_, bytes)| bytes).sum::<usize>() > 16 * 1024 * 1024
-        {
-            let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (summary, _))| summary.revision)
-                .map(|(id, _)| id.clone())
-            else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
-    }
-    Ok(summary)
+    })
 }
 
 pub(crate) fn threads_page(

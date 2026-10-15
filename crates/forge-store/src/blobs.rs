@@ -1,5 +1,6 @@
 //! Content-addressed WebP files under `blobs/ab/<sha256>`.
 
+use crate::{Inner, Store};
 use anyhow::{Context, Result, anyhow};
 use artisan_api::{BlobHash, BlobRef};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::fmt;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
@@ -16,7 +18,7 @@ pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 /// before the message that references it.
 const GC_MIN_AGE: Duration = Duration::from_hours(1);
 
-/// Why [`crate::Store::put_blob`] refused the bytes (the client's fault, not
+/// Why [`Store::put_blob`] refused the bytes (the client's fault, not
 /// Forge's). Find it with `error.downcast_ref::<BlobRejected>()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlobRejected {
@@ -129,6 +131,92 @@ pub(crate) fn put(dir: &Path, bytes: &[u8]) -> Result<BlobRef> {
     Ok(blob_ref)
 }
 
+impl Store {
+    /// Stores WebP bytes by content. Rejected input fails with a
+    /// [`BlobRejected`] inside the error.
+    pub async fn put_blob(&self, bytes: Vec<u8>) -> Result<BlobRef> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = inner
+                .blob_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            put(&inner.blob_dir, &bytes)
+        })
+        .await
+        .context("blob write task")?
+    }
+
+    /// Stores any common image format, converted to WebP first.
+    pub async fn put_image(&self, bytes: Vec<u8>) -> Result<BlobRef> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let bytes = to_webp(bytes)?;
+            let _guard = inner
+                .blob_lock
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            put(&inner.blob_dir, &bytes)
+        })
+        .await
+        .context("image write task")?
+    }
+
+    pub async fn input_image_paths(&self, images: Vec<BlobHash>) -> Result<Vec<PathBuf>> {
+        let dir = self.inner.blob_dir.clone();
+        tokio::task::spawn_blocking(move || input_images(&dir, &images).map(|(paths, _)| paths))
+            .await
+            .context("read input image metadata task")?
+    }
+
+    /// Where a stored blob lives; `None` if the hash is malformed or unknown.
+    #[must_use]
+    pub fn blob_path(&self, hash: &BlobHash) -> Option<PathBuf> {
+        path(&self.inner.blob_dir, hash).filter(|path| path.is_file())
+    }
+
+    /// Deletes blob files no item or draft references. Returns how many.
+    pub async fn gc_blobs(&self) -> Result<usize> {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.gc_blobs())
+            .await
+            .context("blob collection task")?
+    }
+}
+
+impl Inner {
+    fn gc_blobs(&self) -> Result<usize> {
+        // A plain snapshot suffices: a new reference names a blob uploaded
+        // within GC_MIN_AGE (an upload refreshes an existing file's age) or
+        // one already referenced, so it cannot name a file deleted here.
+        let referenced = self.with_reader(|conn| {
+            let mut hashes = HashSet::new();
+            // Only typed image ownership fields; prose and arbitrary 64-hex strings
+            // are never decoded or mistaken for references.
+            let mut statement = conn.prepare_cached(
+                "SELECT image.value FROM items i, json_each(i.body, '$.kind.images') image
+                    WHERE i.kind_type = 'user_message'
+                 UNION SELECT json_extract(body, '$.kind.blob') FROM items WHERE kind_type = 'image'
+                 UNION SELECT image.value FROM drafts d, json_each(d.body, '$.images') image",
+            )?;
+            for hash in statement.query_map([], |row| row.get::<_, Option<String>>(0))? {
+                if let Some(hash) = hash?
+                    && BlobHash(hash.clone()).is_valid()
+                {
+                    hashes.insert(hash);
+                }
+            }
+            Ok(hashes)
+        })?;
+        // Uploads wait, so a reused file cannot be deleted after its age was read.
+        let _guard = self
+            .blob_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        gc(&self.blob_dir, &referenced)
+    }
+}
+
 /// Deletes blob files (and stale temp files) that nothing references.
 pub(crate) fn gc(dir: &Path, referenced: &HashSet<String>) -> Result<usize> {
     let cutoff = SystemTime::now() - GC_MIN_AGE;
@@ -201,4 +289,88 @@ pub(crate) fn to_webp(bytes: Vec<u8>) -> Result<Vec<u8>> {
             .map(|memory| memory.to_vec())
     };
     encoded.map_err(|error| anyhow!("encode {width}x{height} WebP: {error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{NewItem, Store};
+    use artisan_api::{
+        CreateProject, CreateThread, EngineConfig, EngineId, ItemId, ItemKind, ProjectId, Status,
+        ThreadId,
+    };
+    use std::path::Path;
+
+    fn image_bytes() -> Vec<u8> {
+        webp::Encoder::from_rgb(&[21, 72, 131], 1, 1)
+            .encode_lossless()
+            .to_vec()
+    }
+    fn age(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_hours(2))
+            .unwrap();
+    }
+    async fn thread(store: &Store) -> ThreadId {
+        let project = store
+            .create_project(CreateProject {
+                id: ProjectId::new(),
+                path: "/temporary-blob-race".into(),
+                name: None,
+            })
+            .await
+            .unwrap();
+        store
+            .create_thread(CreateThread {
+                id: ThreadId::new(),
+                project_id: project.id,
+                config: EngineConfig::new(EngineId::Claude),
+                title: None,
+                parent_thread_id: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[tokio::test]
+    async fn reusing_an_old_blob_refreshes_grace_until_the_new_reference_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let thread = thread(&store).await;
+        let bytes = image_bytes();
+        let blob = store.put_blob(bytes.clone()).await.unwrap();
+        let path = store.blob_path(&blob.hash).unwrap();
+        age(&path);
+        assert_eq!(store.put_blob(bytes).await.unwrap(), blob);
+        assert_eq!(
+            store.gc_blobs().await.unwrap(),
+            0,
+            "reuse must protect an old blob before its new Item is persisted"
+        );
+        store
+            .upsert_item(NewItem {
+                id: ItemId::new(),
+                thread_id: thread,
+                run_id: None,
+                parent_id: None,
+                native_id: None,
+                status: Status::Done,
+                kind: ItemKind::Image {
+                    blob: blob.hash.clone(),
+                    caption: None,
+                },
+            })
+            .await
+            .unwrap();
+        age(&path);
+        assert_eq!(
+            store.gc_blobs().await.unwrap(),
+            0,
+            "committed typed reference protects the blob after grace ends"
+        );
+        assert_eq!(std::fs::read(path).unwrap(), image_bytes());
+    }
 }

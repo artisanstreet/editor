@@ -524,20 +524,36 @@ async fn a_pairing_code_works_once_and_not_after_it_expires() {
         .unwrap();
     store.add_pair_code("stale".into(), now - 1).await.unwrap();
 
-    assert!(store.take_pair_code("fresh".into(), now).await.unwrap());
-    assert!(!store.take_pair_code("fresh".into(), now).await.unwrap());
-    assert!(!store.take_pair_code("stale".into(), now).await.unwrap());
+    let pair =
+        |code: &str, key: &str| store.pair_device(code.to_owned(), "Laptop".into(), key.to_owned());
+    let device = pair("fresh", "key-a").await.unwrap().unwrap();
+    assert_eq!(pair("fresh", "key-b").await.unwrap(), None);
+    assert_eq!(pair("stale", "key-c").await.unwrap(), None);
+    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
+    assert_eq!(store.is_authorized("key-b").unwrap(), None);
 
+    let mut revocations = store.subscribe_revocations();
+    assert!(store.revoke_device(&device).await.unwrap());
+    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(revocations.recv().await.unwrap(), device);
+}
+
+/// `ae forge devices revoke` writes from another process while Forge runs;
+/// the device's next request is refused and its open streams are told.
+#[tokio::test]
+async fn a_device_revoked_by_another_process_is_refused_next() {
+    let dir = TempDir::new();
+    let store = Store::open(&dir.0).unwrap();
     let device = store
         .add_device("Laptop".into(), "key-a".into())
         .await
         .unwrap();
-    assert_eq!(
-        store.is_authorized("key-a").await.unwrap(),
-        Some(device.clone())
-    );
-    assert!(store.revoke_device(&device).await.unwrap());
-    assert_eq!(store.is_authorized("key-a").await.unwrap(), None);
+    assert_eq!(store.is_authorized("key-a").unwrap(), Some(device.clone()));
+    let mut revocations = store.subscribe_revocations();
+    let admin = forge_store::admin::Admin::open(&dir.0).unwrap();
+    assert!(admin.revoke_device(device.as_str()).unwrap().is_some());
+    assert_eq!(store.is_authorized("key-a").unwrap(), None);
+    assert_eq!(revocations.try_recv().unwrap(), device);
 }
 
 /// Threads saved with the old access and approvals keep running the way
@@ -675,7 +691,7 @@ async fn restart_preserves_accepted_input_for_delivery() {
         store.insert_user_message(input).await.unwrap();
     }
     let reopened = Store::open(&dir.0).unwrap();
-    let pending = reopened.undelivered_messages(&thread).await.unwrap();
+    let pending = reopened.pending_inputs(&thread).await.unwrap().items;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id.as_str(), "pending");
     assert_eq!(pending[0].status, Status::Running);
@@ -734,7 +750,7 @@ async fn pairing_failure_does_not_consume_the_invitation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(store.is_authorized("certificate").await.unwrap(), Some(id));
+    assert_eq!(store.is_authorized("certificate").unwrap(), Some(id));
     assert!(
         store
             .pair_device("invite".into(), "Laptop".into(), "certificate".into())
@@ -756,7 +772,15 @@ async fn replaying_a_send_cannot_change_config_or_title() {
         config: Some(EngineConfig::new(EngineId::Codex)),
     };
     let (input, created, _) = store
-        .send_message(thread.clone(), command.clone(), false)
+        .send_message(
+            thread.clone(),
+            command.clone(),
+            false,
+            forge_store::Acceptance {
+                title: Some("First title".into()),
+                remember_config: true,
+            },
+        )
         .await
         .unwrap();
     assert!(created);
@@ -764,7 +788,15 @@ async fn replaying_a_send_cannot_change_config_or_title() {
     let mut replay = command;
     replay.config = Some(EngineConfig::new(EngineId::OpenCode));
     let (again, created, _) = store
-        .send_message(thread.clone(), replay, true)
+        .send_message(
+            thread.clone(),
+            replay,
+            true,
+            forge_store::Acceptance {
+                title: Some("Replayed title".into()),
+                remember_config: true,
+            },
+        )
         .await
         .unwrap();
     assert!(!created);
@@ -878,14 +910,17 @@ async fn draft_compare_and_swap_and_acceptance_preserve_newer_input() {
         }),
     };
     store
-        .send_message(thread.clone(), command.clone(), false)
+        .send_message(thread.clone(), command.clone(), false, Default::default())
         .await
         .unwrap();
     assert_eq!(store.draft("scope").await.unwrap(), newer.current);
     let mut accepted = command;
     accepted.id = ItemId::new();
     accepted.draft.as_mut().unwrap().revision = newer.current.revision;
-    store.send_message(thread, accepted, false).await.unwrap();
+    store
+        .send_message(thread, accepted, false, Default::default())
+        .await
+        .unwrap();
     let cleared = store.draft("scope").await.unwrap();
     assert!(cleared.body.is_null());
     assert!(cleared.revision > newer.current.revision);

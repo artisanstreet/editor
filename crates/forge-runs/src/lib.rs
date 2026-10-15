@@ -11,7 +11,8 @@
 mod extensions;
 mod run;
 
-pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY, Refused};
+pub use extensions::{DISABLED_SKILLS_KEY, GLOBAL_PROMPT_KEY};
+pub use forge_store::Refused;
 
 use anyhow::{Context, Result, bail};
 use artisan_api::{
@@ -118,10 +119,10 @@ impl Hub {
         &self.inner.data_dir
     }
 
-    /// Starts runs for messages left undelivered by a previous Forge.
-    pub async fn resume_pending(&self) -> Result<()> {
+    /// Starts runs for threads with undelivered messages, including ones a
+    /// previous Forge left.
+    pub fn resume_pending(&self) {
         self.inner.dispatch.notify_one();
-        Ok(())
     }
 
     /// Stores the message, then starts a run or steers the live one.
@@ -161,20 +162,53 @@ impl Hub {
                         "{label} setting commands cannot include attachments"
                     ))
                 );
+                let prefix = format!("{}\n\n{label} ", message.text);
+                let notice = prefix.clone();
                 return store
-                    .thread_option_command(
-                        thread_id.clone(),
-                        message,
-                        option.to_owned(),
-                        label.to_owned(),
-                        enabled,
-                        steer,
-                    )
+                    .configure_thread(thread_id.clone(), message, prefix, true, move |config| {
+                        let current = config
+                            .session_options
+                            .get(option)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let enabled = enabled.unwrap_or(!current);
+                        config
+                            .session_options
+                            .insert(option.to_owned(), serde_json::json!(enabled));
+                        let state = if enabled {
+                            "requested on"
+                        } else {
+                            "requested off"
+                        };
+                        let when = if steer {
+                            "Applies to the next run; the current run is unchanged."
+                        } else {
+                            "Applies to the next message."
+                        };
+                        format!("{notice}{state}. {when} Effort is unchanged.")
+                    })
                     .await;
             }
         }
+        // The first line names an untitled thread; the config a message
+        // runs with becomes the default for new threads.
+        let acceptance = forge_store::Acceptance {
+            title: Some(
+                message
+                    .text
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(80)
+                    .collect::<String>(),
+            )
+            .filter(|title| !title.is_empty()),
+            remember_config: true,
+        };
         let (item, created, saved_engine) = store
-            .send_message(thread_id.clone(), message, steer)
+            .send_message(thread_id.clone(), message, steer, acceptance)
             .await?;
         if !created {
             return Ok(item);
@@ -190,19 +224,21 @@ impl Hub {
                 let input = self.user_input(&item, engine).await?;
                 let _ = inbox.send(Input::Steer(input)).await;
             }
-            None => self.start_if_idle(thread_id),
+            None => self.resume_pending(),
         }
         Ok(item)
     }
 
-    /// Answers the approval or question on an item of a live run.
+    /// Answers the approval or question on an item of a live run. What the
+    /// item's state turns down is [`Refused`]; anything else is Forge's fault.
     pub async fn answer(&self, item_id: &ItemId, answer: Answer) -> Result<()> {
+        let refused = |message: String| anyhow::Error::new(Refused(message));
         let item = self
             .inner
             .store
             .item(item_id)
             .await?
-            .with_context(|| format!("no item {item_id}"))?;
+            .ok_or_else(|| forge_store::ItemNotFound(item_id.clone()))?;
         if let Answer::Question { answers } = &answer {
             self.inner
                 .store
@@ -217,9 +253,11 @@ impl Hub {
                 }
                 _ => None,
             }
-            .with_context(|| format!("item {item_id} is not an approval request"))?;
+            .ok_or_else(|| refused(format!("Item {item_id} is not an approval request.")))?;
             if !approval.options.contains(decision) {
-                bail!("approval decision is not offered by this request");
+                return Err(refused(
+                    "This request does not offer that decision.".to_owned(),
+                ));
             }
         }
         let inbox = self
@@ -239,22 +277,24 @@ impl Hub {
             self.store()
                 .answer_question(item_id.clone(), answers.clone())
                 .await?;
-            self.start_if_idle(&item.thread_id);
+            self.resume_pending();
             return Ok(());
         }
         if item.status != Status::AwaitingUser {
-            bail!("item {item_id} is not waiting for an answer");
+            return Err(refused(format!(
+                "Item {item_id} is not waiting for an answer."
+            )));
         }
         let key = item
             .native_id
             .clone()
             .with_context(|| format!("item {item_id} has no engine id"))?;
-        let inbox = inbox.with_context(|| format!("the run of item {item_id} has ended"))?;
+        let ended = || refused(format!("The run of item {item_id} has ended."));
+        let inbox = inbox.ok_or_else(ended)?;
         inbox
             .send(Input::Answer { key, answer })
             .await
-            .ok()
-            .context("the run has ended")?;
+            .map_err(|_| ended())?;
         Ok(())
     }
 
@@ -269,7 +309,7 @@ impl Hub {
         self.store()
             .cancel_pending_inputs(thread_id.clone(), cutoff)
             .await?;
-        self.inner.dispatch.notify_one();
+        self.resume_pending();
         Ok(())
     }
 
@@ -315,10 +355,6 @@ impl Hub {
             .live
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn start_if_idle(&self, _thread_id: &ThreadId) {
-        self.inner.dispatch.notify_one();
     }
 
     /// One dispatcher claims only threads that can start immediately.
@@ -390,7 +426,7 @@ impl Hub {
             hub.lock().remove(&thread_id);
             drop(_permit);
             if outcome.is_ok() && !hub.inner.shutdown.is_cancelled() {
-                hub.inner.dispatch.notify_one();
+                hub.resume_pending();
             }
         });
     }
@@ -553,10 +589,10 @@ impl Hub {
 
     /// Drops memory-only text for a target that ended.
     fn forget_live(&self, thread_id: &ThreadId, target: &LiveTarget) {
-        if let Some(run) = self.lock().get_mut(thread_id) {
-            if let Some(text) = run.live.remove(target) {
-                run.live_bytes = run.live_bytes.saturating_sub(text.text.len());
-            }
+        if let Some(run) = self.lock().get_mut(thread_id)
+            && let Some(text) = run.live.remove(target)
+        {
+            run.live_bytes = run.live_bytes.saturating_sub(text.text.len());
         }
     }
 

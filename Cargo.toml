@@ -169,8 +169,8 @@ must_use_candidate = "allow"
 
 [workspace.metadata.gpui-fork]
 repository = "https://github.com/artisanstreet/gpui-ce"
-branch = "artisan/editor"
-purpose = "wgpu renderer, backdrop blur materials, Oklab gradients, native color emoji"
+branch = "main"
+purpose = "native D3D11 renderer on Windows (WGPU elsewhere), backdrop blur materials, Oklab gradients, native color emoji"
 
 # Bounded Oniguruma search with the original fancy engine as the limit fallback.
 [patch.crates-io]

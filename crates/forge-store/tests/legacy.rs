@@ -392,7 +392,7 @@ async fn explicit_agent_message_repair_preserves_identity_and_is_idempotent() {
         .unwrap();
     let original = store.upsert_item(forge_store::NewItem {
         id: ItemId::new(), thread_id: thread.id, run_id: None, parent_id: None, native_id: Some("native-send".into()), status: Status::Done,
-        kind: ItemKind::Tool { tool: ToolKind::Other { name: "SendMessage".into(), input: (Some(serde_json::json!({"to":"uds:/tmp/session","summary":"Update","message":"Hello"}).to_string())).map(Into::into) }, title: Some("message".into()), output: None, exit_code: Some(0), approval: None }
+        kind: ItemKind::Tool { tool: ToolKind::Other { name: "SendMessage".into(), input: Some(serde_json::json!({"to":"uds:/tmp/session","summary":"Update","message":"Hello"}).to_string().into()) }, title: Some("message".into()), output: None, exit_code: Some(0), approval: None }
     }).await.unwrap();
     let inspected_head = store.head();
     assert_eq!(legacy::inspect_agent_messages(dir.path()).unwrap(), 1);

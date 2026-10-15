@@ -7,17 +7,6 @@ use artisan_api::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 const MAX_METADATA_BYTES: usize = 32 * 1024 * 1024;
-pub(crate) const SCHEMA: &str = r"
-CREATE TABLE source_indexes(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL,
- metadata_id TEXT NOT NULL, leaf_count INTEGER NOT NULL, PRIMARY KEY(source_id,format,version)) WITHOUT ROWID;
-CREATE TABLE source_index_leaves(source_id TEXT NOT NULL, format TEXT NOT NULL CHECK(format IN ('literal','markdown')), version INTEGER NOT NULL, ordinal INTEGER NOT NULL,
- source_start INTEGER NOT NULL, source_end INTEGER NOT NULL, metadata_start INTEGER NOT NULL, metadata_end INTEGER NOT NULL,
- PRIMARY KEY(source_id,format,version,ordinal)) WITHOUT ROWID;
-CREATE TRIGGER source_index_delete AFTER DELETE ON content BEGIN
- DELETE FROM source_index_leaves WHERE source_id=OLD.id;
- DELETE FROM source_indexes WHERE source_id=OLD.id;
-END;
-";
 
 pub(crate) fn header(
     conn: &Connection,
@@ -37,11 +26,23 @@ pub(crate) struct PreparedIndex {
     metadata: String,
     leaves: Vec<SourceLeafDescriptor>,
 }
+
+pub(crate) enum Prepared {
+    /// The source does not exist.
+    Missing,
+    /// Another request built the index meanwhile.
+    Indexed,
+    Built(PreparedIndex),
+}
+
 pub(crate) fn prepare(
     conn: &Connection,
     id: &ContentId,
     format: SourceIndexFormat,
-) -> Result<Option<PreparedIndex>> {
+) -> Result<Prepared> {
+    if header(conn, id, format)?.is_some() {
+        return Ok(Prepared::Indexed);
+    }
     let Some(source) = conn
         .query_row(
             "SELECT bytes,lines FROM content WHERE id=?1",
@@ -56,7 +57,7 @@ pub(crate) fn prepare(
         )
         .optional()?
     else {
-        return Ok(None);
+        return Ok(Prepared::Missing);
     };
     let text = crate::content::resolve(conn, &TextContent::Stored(source.clone()))?;
     ensure!(
@@ -110,7 +111,7 @@ pub(crate) fn prepare(
             metadata_end: end,
         });
     }
-    Ok(Some(PreparedIndex {
+    Ok(Prepared::Built(PreparedIndex {
         source,
         format,
         metadata,

@@ -40,6 +40,8 @@ mesh rendering.
 | `artisan/editor` | integration branch for editor patches before merging into `main` |
 | topic branches | short-lived; integrated and validated before merging into `main` |
 
+The local checkout is `../gpui-ce` next to this repository, on `main`.
+
 The editor pins immutable revisions published on `main`. Never pin a revision
 that is not pushed to the fork: the pin must resolve for every clone and for CI.
 Existing pins remain valid when their commits are merged into `main`.

@@ -243,30 +243,19 @@ pub fn retire_editors(sys: Sys, root: &Root) -> Result<()> {
                 );
                 continue;
             }
-            let query = format!(
-                "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process -Filter 'ProcessId = {}' | Where-Object {{ $_.ExecutablePath }} | ForEach-Object {{ [pscustomobject]@{{ pid=$_.ProcessId; executable=$_.ExecutablePath; created=$_.CreationDate.ToString('o') }} }})",
-                process.pid
-            );
-            let output = super::sys::powershell(&query)
-                .output()
-                .context("recheck Editor identity")?;
-            anyhow::ensure!(output.status.success(), "cannot recheck Editor identity");
-            let current: Vec<WindowsProcess> = serde_json::from_slice(&output.stdout)?;
-            if !current
-                .first()
-                .is_some_and(|current| process.same_identity(current))
-            {
-                continue;
-            }
+            // One identity check, right before acting. The open handle pins
+            // the pid, so taskkill and the forced stop reach that process.
             let executable = ps_quote(Path::new(&process.executable));
             let created = format!("'{}'", process.created.replace('\'', "''"));
             sys.powershell(&format!(
-                "$x = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; \
-                 if ($x -and $x.ExecutablePath -ieq {executable} -and $x.CreationDate.ToString('o') -eq {created}) {{ \
-                   taskkill.exe /PID {pid} | Out-Null; \
-                   Wait-Process -Id {pid} -Timeout 10 -ErrorAction SilentlyContinue; \
-                   $current = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; \
-                   if ($current -and $current.ExecutablePath -ieq {executable} -and $current.CreationDate.ToString('o') -eq {created}) {{ Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue }} \
+                "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
+                 if ($p) {{ \
+                   $null = $p.Handle; \
+                   $x = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; \
+                   if ($x -and $x.ExecutablePath -ieq {executable} -and $x.CreationDate.ToString('o') -eq {created}) {{ \
+                     taskkill.exe /PID {pid} | Out-Null; \
+                     if (-not $p.WaitForExit(10000)) {{ try {{ $p.Kill() }} catch {{}} }} \
+                   }} \
                  }}", pid=process.pid
             ))?;
         }
@@ -390,12 +379,6 @@ impl WindowsProcess {
         executable.starts_with(&prefix)
             && executable.rsplit('/').next() == Some("artisan-editor.exe")
     }
-
-    fn same_identity(&self, current: &Self) -> bool {
-        self.pid == current.pid
-            && self.created == current.created
-            && self.executable.eq_ignore_ascii_case(&current.executable)
-    }
 }
 
 #[cfg(test)]
@@ -415,16 +398,5 @@ mod process_selection_tests {
         assert!(!process(r"C:\Artisan\versions\v1\ae.exe", "a").is_editor(root));
         assert!(!process(r"C:\Artisan\versions-other\v1\artisan-editor.exe", "a").is_editor(root));
         assert!(!process(r"C:\Other\versions\v1\artisan-editor.exe", "a").is_editor(root));
-    }
-    #[test]
-    fn recycled_windows_pid_fails_the_identity_recheck() {
-        let original = process(r"C:\Artisan\versions\v1\artisan-editor.exe", "a");
-        assert!(
-            original.same_identity(&process(r"C:\ARTISAN\versions\v1\artisan-editor.exe", "a"))
-        );
-        assert!(
-            !original.same_identity(&process(r"C:\Artisan\versions\v1\artisan-editor.exe", "b"))
-        );
-        assert!(!original.same_identity(&process(r"C:\Artisan\versions\v1\ae.exe", "a")));
     }
 }

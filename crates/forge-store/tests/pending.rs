@@ -42,7 +42,12 @@ async fn bounded_input_snapshot_retains_the_unloaded_observed_boundary() {
     let mut last = 0;
     for _ in 0..40 {
         last = store
-            .send_message(thread.clone(), message("queued".into(), Vec::new()), false)
+            .send_message(
+                thread.clone(),
+                message("queued".into(), Vec::new()),
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0
@@ -68,12 +73,22 @@ async fn byte_budget_preserves_one_oversized_message_without_truncation() {
     let thread = thread(&store).await;
     let text = "x".repeat(5 * 1024 * 1024);
     let first = store
-        .send_message(thread.clone(), message(text.clone(), Vec::new()), false)
+        .send_message(
+            thread.clone(),
+            message(text.clone(), Vec::new()),
+            false,
+            Default::default(),
+        )
         .await
         .unwrap()
         .0;
     let later = store
-        .send_message(thread.clone(), message("tail".into(), Vec::new()), false)
+        .send_message(
+            thread.clone(),
+            message("tail".into(), Vec::new()),
+            false,
+            Default::default(),
+        )
         .await
         .unwrap()
         .0;
@@ -98,6 +113,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("x".repeat(32 * 1024 * 1024 + 1), Vec::new()),
             false,
+            Default::default(),
         )
         .await
         .unwrap_err();
@@ -112,6 +128,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("missing".into(), vec![hash.clone()]),
             false,
+            Default::default(),
         )
         .await
         .unwrap_err();
@@ -125,6 +142,7 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
             thread.clone(),
             message("too many".into(), vec![hash; 129]),
             false,
+            Default::default(),
         )
         .await
         .unwrap_err();
@@ -149,7 +167,12 @@ async fn input_admission_rejects_resource_excess_before_any_write() {
         hashes.push(hash);
     }
     let total = store
-        .send_message(thread, message("too much image data".into(), hashes), false)
+        .send_message(
+            thread,
+            message("too much image data".into(), hashes),
+            false,
+            Default::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -182,6 +205,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
                 thread.clone(),
                 message(format!("image-{n}"), vec![hash]),
                 false,
+                Default::default(),
             )
             .await
             .unwrap()
@@ -212,6 +236,7 @@ async fn initial_batch_image_metadata_budget_applies_across_messages() {
             thread,
             message("invalid oversized blob".into(), vec![hash]),
             false,
+            Default::default(),
         )
         .await
         .unwrap_err();

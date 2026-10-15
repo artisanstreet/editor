@@ -10,6 +10,7 @@ use artisan_api::{
     ResolvePrompt, SavePrompt, SkillOrigin,
 };
 use forge_engines::{Customisation, PromptApplied};
+use forge_store::Refused;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -19,18 +20,6 @@ pub const DISABLED_SKILLS_KEY: &str = "disabled_skills";
 pub const GLOBAL_PROMPT_KEY: &str = "global_prompt";
 /// The longest global prompt Forge keeps.
 const PROMPT_MAX_BYTES: usize = 64 * 1024;
-
-/// A request Forge turns down; the message is for the user.
-#[derive(Debug)]
-pub struct Refused(pub String);
-
-impl std::fmt::Display for Refused {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Refused {}
 
 fn refused(message: impl Into<String>) -> anyhow::Error {
     anyhow::Error::new(Refused(message.into()))

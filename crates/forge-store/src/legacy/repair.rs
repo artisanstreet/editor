@@ -59,17 +59,18 @@ pub async fn normalize_agent_messages(store: &Store) -> Result<usize> {
             .write(move |tx| {
                 let mut changed = 0;
                 for id in ids {
-                    let Some(mut item) = crate::read::item(tx, &id)? else {
+                    let Some(old) = crate::read::item(tx, &id)? else {
                         continue;
                     };
-                    let Some(tool) = legacy_agent_message(tx, &item.kind)? else {
+                    let Some(tool) = legacy_agent_message(tx, &old.kind)? else {
                         continue;
                     };
+                    let mut item = old.clone();
                     if let ItemKind::Tool { tool: slot, .. } = &mut item.kind {
                         *slot = tool;
                     }
                     let stamp = stamp(item.created_at, item.updated_at);
-                    tx.with_stamp(stamp, |tx| tx.save_item(item, false))?;
+                    tx.with_stamp(stamp, |tx| tx.save_item(item, Some(old)))?;
                     changed += 1;
                 }
                 Ok(changed)

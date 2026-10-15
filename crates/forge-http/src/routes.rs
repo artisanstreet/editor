@@ -1,6 +1,7 @@
 //! JSON routes. See `artisan_api::request` for the list.
 
 use crate::events;
+use crate::repository::{Icon, IconSource};
 use anyhow::Context as _;
 use artisan_api::{
     Answer, ApiError, BlobHash, BlobRef, CreateProject, CreateThread, DirEntry, DirListing,
@@ -16,6 +17,8 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use forge_runs::Hub;
 use serde::Deserialize;
+use sha2::Digest as _;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(crate) struct App {
@@ -24,6 +27,7 @@ pub(crate) struct App {
     pub shutdown: tokio_util::sync::CancellationToken,
     pub tasks: tokio_util::task::TaskTracker,
     pub repositories: std::sync::Arc<crate::repository::Repositories>,
+    pub icons: std::sync::Arc<crate::repository::Icons>,
 }
 
 /// The connection's client certificate (base64 DER).
@@ -80,6 +84,7 @@ pub(crate) fn router(app: App) -> Router {
         .route("/pair", post(pair))
         .merge(authorized)
         .layer(DefaultBodyLimit::max(forge_store::MAX_BLOB_BYTES + 1024))
+        .layer(middleware::from_fn(log_internal))
         .with_state(app)
 }
 
@@ -90,8 +95,7 @@ async fn authorize(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let store = app.hub.store();
-    match store.is_authorized(&client.certificate).await {
+    match app.hub.store().is_authorized(&client.certificate) {
         Ok(Some(device)) => {
             request.extensions_mut().insert(device);
             next.run(request).await
@@ -101,7 +105,7 @@ async fn authorize(
             ErrorCode::Unauthorized,
             "this device is not paired with Forge",
         ),
-        Err(failure) => internal(&failure),
+        Err(failure) => internal(failure.context("authorize the client certificate")),
     }
 }
 
@@ -112,6 +116,7 @@ impl From<anyhow::Error> for Failure {
         let (status, code) = if error
             .downcast_ref::<forge_store::ProjectNotFound>()
             .is_some()
+            || error.downcast_ref::<forge_store::ItemNotFound>().is_some()
         {
             (StatusCode::NOT_FOUND, ErrorCode::NotFound)
         } else if error.downcast_ref::<forge_runs::Refused>().is_some() {
@@ -126,7 +131,7 @@ impl From<anyhow::Error> for Failure {
 impl IntoResponse for Failure {
     fn into_response(self) -> Response {
         if self.1 == StatusCode::INTERNAL_SERVER_ERROR {
-            internal(&self.0)
+            internal(self.0)
         } else {
             error(self.1, self.2, &format!("{:#}", self.0))
         }
@@ -156,13 +161,30 @@ fn error(status: StatusCode, code: ErrorCode, message: &str) -> Response {
         .into_response()
 }
 
-fn internal(failure: &anyhow::Error) -> Response {
-    tracing::error!("request failed: {failure:#}");
-    error(
+/// A 500 carries its error to [`log_internal`], which knows the route.
+fn internal(failure: anyhow::Error) -> Response {
+    let mut response = error(
         StatusCode::INTERNAL_SERVER_ERROR,
         ErrorCode::Internal,
         &format!("{failure:#}"),
-    )
+    );
+    response
+        .extensions_mut()
+        .insert(InternalError(Arc::new(failure)));
+    response
+}
+
+#[derive(Clone)]
+struct InternalError(Arc<anyhow::Error>);
+
+/// Logs every internal failure with the request that met it; ids are in the path.
+async fn log_internal(request: Request, next: Next) -> Response {
+    let (method, path) = (request.method().clone(), request.uri().path().to_owned());
+    let response = next.run(request).await;
+    if let Some(InternalError(failure)) = response.extensions().get::<InternalError>() {
+        tracing::error!(%method, %path, "request failed: {failure:#}");
+    }
+    response
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Failure>;
@@ -260,30 +282,66 @@ async fn project_icon(
         .project(&id)
         .await?
         .ok_or_else(|| not_found(format!("project {id}")))?;
+    let store = app.hub.store();
     for candidate in CANDIDATES {
         let path = std::path::Path::new(&project.path).join(candidate);
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+        let source = metadata.modified().ok().map(|modified| IconSource::File {
+            path: path.clone(),
+            modified,
+            len: metadata.len(),
+        });
+        match source
+            .as_ref()
+            .and_then(|source| app.icons.get(source, store))
+        {
+            Some(Icon::Blob(blob)) => return Ok(Json(Some(blob))),
+            Some(Icon::Unusable) => continue,
+            None => {}
+        }
         let Some(bytes) = crate::repository::icon_file(&path).await else {
             continue;
         };
-        match app.hub.store().put_image(bytes).await {
-            Ok(blob) => return Ok(Json(Some(blob))),
+        let icon = match store.put_image(bytes).await {
+            Ok(blob) => Icon::Blob(blob),
             Err(error) => {
                 tracing::info!(project = %id, path = %path.display(), "unusable project icon: {error:#}");
+                Icon::Unusable
             }
+        };
+        if let Some(source) = source {
+            app.icons.insert(source, icon.clone());
+        }
+        if let Icon::Blob(blob) = icon {
+            return Ok(Json(Some(blob)));
         }
     }
     // Else the repository owner's avatar, as its host shows it.
     let root = std::path::PathBuf::from(&project.path);
-    let avatar = app.repositories.avatar(&root).await;
-    if let Some(bytes) = avatar {
-        match app.hub.store().put_image(bytes).await {
-            Ok(blob) => return Ok(Json(Some(blob))),
-            Err(error) => {
-                tracing::info!(project = %id, "unusable repository avatar: {error:#}");
-            }
+    let Some(bytes) = app.repositories.avatar(&root).await else {
+        return Ok(Json(None));
+    };
+    let source = IconSource::Avatar(sha2::Sha256::digest(&bytes).into());
+    let icon = match app.icons.get(&source, store) {
+        Some(icon) => icon,
+        None => {
+            let icon = match store.put_image(bytes).await {
+                Ok(blob) => Icon::Blob(blob),
+                Err(error) => {
+                    tracing::info!(project = %id, "unusable repository avatar: {error:#}");
+                    Icon::Unusable
+                }
+            };
+            app.icons.insert(source, icon.clone());
+            icon
         }
-    }
-    Ok(Json(None))
+    };
+    Ok(Json(match icon {
+        Icon::Blob(blob) => Some(blob),
+        Icon::Unusable => None,
+    }))
 }
 
 /// The project's git branch and remote page; `null` outside a repository.
@@ -329,7 +387,7 @@ async fn thread(AppState(app): AppState<App>, Path(id): Path<ThreadId>) -> Resul
         .thread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found("thread not found"))
+        .ok_or_else(|| not_found(format!("thread {id}")))
 }
 
 async fn update_thread(
@@ -354,7 +412,7 @@ async fn settle_thread(
         .settle_thread(&id, request.observed_seq)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found("thread not found"))
+        .ok_or_else(|| not_found(format!("thread {id}")))
 }
 
 async fn mark_unread(
@@ -366,7 +424,7 @@ async fn mark_unread(
         .mark_unread(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found("thread not found"))
+        .ok_or_else(|| not_found(format!("thread {id}")))
 }
 
 async fn items(
@@ -392,9 +450,9 @@ async fn agent_items(
         .store()
         .item(&agent)
         .await?
-        .ok_or_else(|| not_found("agent not found"))?;
+        .ok_or_else(|| not_found(format!("agent {agent}")))?;
     if owner.thread_id != thread || !matches!(owner.kind, artisan_api::ItemKind::Agent { .. }) {
-        return Err(not_found("agent not found in this thread"));
+        return Err(not_found(format!("agent {agent} in thread {thread}")));
     }
     Ok(Json(
         app.hub
@@ -477,7 +535,7 @@ async fn item(AppState(app): AppState<App>, Path(id): Path<ItemId>) -> Result<Js
         .item(&id)
         .await?
         .map(Json)
-        .ok_or_else(|| not_found("item not found"))
+        .ok_or_else(|| not_found(format!("item {id}")))
 }
 
 #[derive(Deserialize)]
@@ -598,20 +656,27 @@ async fn answer(
     Path(id): Path<String>,
     Json(answer): Json<Answer>,
 ) -> Result<StatusCode> {
-    app.hub
-        .answer(&ItemId(id), answer)
-        .await
-        .map_err(|error| Failure(error, StatusCode::CONFLICT, ErrorCode::Conflict))?;
+    app.hub.answer(&ItemId(id), answer).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn set_setting(
-    AppState(app): AppState<App>,
-    Path(key): Path<String>,
-    Json(value): Json<serde_json::Value>,
-) -> Result<StatusCode> {
-    app.hub.store().set_setting(key, value).await?;
-    Ok(StatusCode::NO_CONTENT)
+/// Every Forge setting is saved through its own validated route; an
+/// Editor keeps its own preferences on the device.
+async fn set_setting(Path(key): Path<String>) -> Result<StatusCode> {
+    let route = match key.as_str() {
+        "global_prompt" => "PUT /prompt",
+        "mcp_servers" => "PATCH /mcp",
+        "default_engine_config" => "PUT /engines/{engine}/default-model",
+        "disabled_skills" => "POST /skills/{id}/{action}",
+        _ => {
+            return Err(bad_request(anyhow::anyhow!(
+                "setting {key} is not one clients can change"
+            )));
+        }
+    };
+    Err(bad_request(anyhow::anyhow!(
+        "setting {key} is saved through {route}"
+    )))
 }
 
 async fn mutate_mcp(

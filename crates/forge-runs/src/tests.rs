@@ -182,6 +182,22 @@ impl Fixture {
     }
 }
 
+/// User messages the thread shows as sent but not yet taken by an engine.
+async fn undelivered(store: &forge_store::Store, thread: &ThreadId) -> Vec<Item> {
+    let query = ItemsQuery {
+        before: None,
+        after: None,
+        limit: Some(500),
+    };
+    let page = store.items_page(thread, query).await.unwrap();
+    page.items
+        .into_iter()
+        .filter(|item| {
+            item.status == Status::Running && matches!(item.kind, ItemKind::UserMessage { .. })
+        })
+        .collect()
+}
+
 fn texts(items: &[Item]) -> Vec<(String, Status)> {
     items
         .iter()
@@ -497,7 +513,7 @@ async fn an_approval_answer_reaches_the_run() {
                         cwd: None,
                     },
                     reason: None,
-                    options: vec![Decision::AllowOnce, Decision::DenyOnce].into(),
+                    options: vec![Decision::AllowOnce, Decision::DenyOnce],
                     decision,
                 }),
             };
@@ -1079,7 +1095,12 @@ async fn a_claimed_initial_input_is_not_delivered_again_as_a_steer() {
     let (item, _, _) = fixture
         .hub
         .store()
-        .send_message(fixture.thread_id.clone(), command, false)
+        .send_message(
+            fixture.thread_id.clone(),
+            command,
+            false,
+            forge_store::Acceptance::default(),
+        )
         .await
         .unwrap();
     let (sender, receiver) = mpsc::channel(64);
@@ -1249,12 +1270,8 @@ async fn controller_shutdown_preserves_undelivered_input() {
         .unwrap();
     assert_eq!(run.status, RunStatus::Cancelled);
     assert_eq!(
-        fixture
-            .hub
-            .store()
-            .undelivered_messages(&fixture.thread_id)
+        undelivered(fixture.hub.store(), &fixture.thread_id)
             .await
-            .unwrap()
             .iter()
             .map(|item| &item.id)
             .collect::<Vec<_>>(),
@@ -1298,7 +1315,7 @@ async fn canceling_a_queued_run_cancels_earlier_inputs_and_runs_later_inputs() {
         .await
         .unwrap();
     drop(slots);
-    fixture.hub.resume_pending().await.unwrap();
+    fixture.hub.resume_pending();
     fixture.settled().await;
     assert_eq!(*seen.lock().unwrap(), ["after cancel"]);
     assert_eq!(
@@ -1567,15 +1584,7 @@ async fn durable_queued_threads_do_not_allocate_live_owners_until_a_slot_is_free
     let last = queued.last().unwrap();
     assert!(!fixture.hub.is_live(last));
     fixture.hub.cancel(last).await.unwrap();
-    assert!(
-        fixture
-            .hub
-            .store()
-            .undelivered_messages(last)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(undelivered(fixture.hub.store(), last).await.is_empty());
     finish.add_permits(32);
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -1669,10 +1678,10 @@ async fn new_input_during_failed_preparation_allows_one_new_attempt() {
     assert!(latest.input_cutoff > earlier.seq);
     let mut attempts = std::collections::HashSet::new();
     while let Ok(event) = events.try_recv() {
-        if let Event::Run { run } = event.event {
-            if run.status == RunStatus::Running {
-                attempts.insert(run.id);
-            }
+        if let Event::Run { run } = event.event
+            && run.status == RunStatus::Running
+        {
+            attempts.insert(run.id);
         }
     }
     assert_eq!(attempts.len(), 2);
@@ -1716,7 +1725,7 @@ async fn one_thread_drains_multiple_bounded_initial_batches_in_order() {
     }
     assert!(fixture.hub.lock().is_empty());
     drop(slots);
-    fixture.hub.resume_pending().await.unwrap();
+    fixture.hub.resume_pending();
     fixture.settled().await;
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
@@ -1751,7 +1760,7 @@ async fn a_failed_bounded_batch_does_not_retry_its_already_observed_tail() {
             .seq;
     }
     drop(slots);
-    fixture.hub.resume_pending().await.unwrap();
+    fixture.hub.resume_pending();
     fixture.settled().await;
     let run = fixture
         .hub
@@ -1763,12 +1772,8 @@ async fn a_failed_bounded_batch_does_not_retry_its_already_observed_tail() {
     assert_eq!(run.status, RunStatus::Failed);
     assert_eq!(run.input_cutoff, latest);
     assert_eq!(
-        fixture
-            .hub
-            .store()
-            .undelivered_messages(&fixture.thread_id)
+        undelivered(fixture.hub.store(), &fixture.thread_id)
             .await
-            .unwrap()
             .len(),
         40
     );
@@ -1849,7 +1854,7 @@ async fn shutdown_leaves_unclaimed_durable_threads_for_the_next_dispatcher() {
         fixture._dir.path().to_path_buf(),
         Arc::new(move |_| Arc::clone(&harness)),
     );
-    resumed.resume_pending().await.unwrap();
+    resumed.resume_pending();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if resumed.lock().is_empty()
@@ -1910,7 +1915,7 @@ async fn missing_historical_image_fails_a_created_run_without_dropping_or_retryi
         .unwrap();
     std::fs::remove_file(path).unwrap();
     drop(slots);
-    fixture.hub.resume_pending().await.unwrap();
+    fixture.hub.resume_pending();
     fixture.settled().await;
     let run = fixture
         .hub
@@ -1961,7 +1966,7 @@ async fn separate_approval_callbacks_reserve_one_execution_identity() {
                     cwd: None,
                 },
                 reason: None,
-                options: vec![Decision::AllowOnce, Decision::DenyOnce].into(),
+                options: vec![Decision::AllowOnce, Decision::DenyOnce],
                 decision,
             };
             for key in ["callback-a", "callback-b"] {
@@ -2238,7 +2243,7 @@ async fn normal_process_exit_cancels_unanswered_interactions_and_completes_runni
                     description: "Continue?".into(),
                 },
                 reason: None,
-                options: vec![Decision::AllowOnce].into(),
+                options: vec![Decision::AllowOnce],
                 decision: None,
             };
             let kinds = [

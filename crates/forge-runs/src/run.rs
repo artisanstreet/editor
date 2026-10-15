@@ -79,16 +79,16 @@ pub(crate) async fn drive(
                 .load(std::sync::atomic::Ordering::Acquire)
         })
         .unwrap_or(0);
-    if cancel.is_cancelled() && cancel_cutoff > 0 {
-        if let Err(error) = store
+    if cancel.is_cancelled()
+        && cancel_cutoff > 0
+        && let Err(error) = store
             .cancel_pending_inputs(thread_id.clone(), cancel_cutoff)
             .await
-        {
-            // Settle once as Failed, and do not retry the inputs whose durable
-            // cancellation could not be saved. Newer inputs remain eligible.
-            run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
-            outcome = Outcome::failed(format!("persist cancellation: {error:#}"));
-        }
+    {
+        // Settle once as Failed, and do not retry the inputs whose durable
+        // cancellation could not be saved. Newer inputs remain eligible.
+        run.input_cutoff = run.input_cutoff.max(cancel_cutoff);
+        outcome = Outcome::failed(format!("persist cancellation: {error:#}"));
     }
     let status = outcome.status;
     finish(hub, &mut run, &mut items, outcome).await?;
@@ -519,10 +519,10 @@ async fn apply(hub: &Hub, run: &mut Run, items: &mut Work, event: EngineEvent) -
         EngineEvent::Status { key, status } => {
             let id = items.id(&key);
             let tracked = items.by_key.get_mut(&key).expect("tracked above");
-            if tracked.persisted {
-                if let Some(item) = store.set_item_status(id, status).await? {
-                    tracked.status = item.status;
-                }
+            if tracked.persisted
+                && let Some(item) = store.set_item_status(id, status).await?
+            {
+                tracked.status = item.status;
             }
         }
         EngineEvent::Live {

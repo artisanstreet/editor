@@ -1,5 +1,4 @@
 //! Indexed canonical collections in the existing immutable content owner.
-//! Call normalize_record before this function, inside the existing Item Tx.
 use anyhow::{Context, Result, ensure};
 use artisan_api::{CollectionQuery, CollectionRange, CollectionRef, ContentId, ContentRef};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -7,38 +6,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
 const MAX_COLLECTION_BYTES: u64 = 64 * 1024 * 1024;
-
-pub(crate) const SCHEMA: &str = r"
-CREATE TABLE content_collections(content_id TEXT PRIMARY KEY, count INTEGER NOT NULL, authored_bytes INTEGER NOT NULL, structural_bytes INTEGER NOT NULL);
-CREATE TABLE content_records(content_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
-  start INTEGER NOT NULL, end INTEGER NOT NULL, record_key TEXT, record_label TEXT, PRIMARY KEY(content_id,ordinal)) WITHOUT ROWID;
-CREATE UNIQUE INDEX content_records_key ON content_records(content_id,record_key) WHERE record_key IS NOT NULL;
-CREATE INDEX content_records_label ON content_records(content_id,record_label) WHERE record_label IS NOT NULL;
-CREATE TABLE content_dependencies(parent_id TEXT NOT NULL,child_id TEXT NOT NULL,
-  PRIMARY KEY(parent_id,child_id), CHECK(parent_id<>child_id)) WITHOUT ROWID;
-CREATE INDEX content_dependencies_child ON content_dependencies(child_id);
-CREATE TRIGGER content_dependency_insert AFTER INSERT ON content_dependencies BEGIN
-  UPDATE content SET unreferenced_at=NULL WHERE id=NEW.child_id;
-END;
-CREATE TRIGGER content_dependency_delete AFTER DELETE ON content_dependencies BEGIN
-  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.child_id
-    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.child_id)
-    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.child_id);
-END;
-DROP TRIGGER item_content_delete;
-CREATE TRIGGER item_content_delete AFTER DELETE ON item_content BEGIN
-  UPDATE content SET unreferenced_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE id=OLD.content_id
-    AND NOT EXISTS(SELECT 1 FROM item_content WHERE content_id=OLD.content_id)
-    AND NOT EXISTS(SELECT 1 FROM content_dependencies WHERE child_id=OLD.content_id);
-END;
-DROP TRIGGER content_delete;
-CREATE TRIGGER content_delete AFTER DELETE ON content BEGIN
-  DELETE FROM content_chunks WHERE content_id=OLD.id;
-  DELETE FROM content_records WHERE content_id=OLD.id;
-  DELETE FROM content_collections WHERE content_id=OLD.id;
-  DELETE FROM content_dependencies WHERE parent_id=OLD.id;
-END;
-";
 
 fn encode<T: Serialize>(record: &T) -> Result<String> {
     let json = serde_json::to_string(record)?;
@@ -100,31 +67,42 @@ pub(crate) fn store<T: Serialize>(
         ensure!(exists, "collection source dependency is missing");
     }
     let inserted = conn.execute("INSERT INTO content(id,bytes,lines,diff_added,diff_removed,unreferenced_at) VALUES(?1,?2,?3,0,0,?4) ON CONFLICT(id) DO NOTHING",
-        params![source.id.as_str(), source.bytes, source.lines, artisan_api::now()])?;
-    if inserted != 0 {
+        params![source.id.as_str(), source.bytes, source.lines, artisan_api::now()])? != 0;
+    // A pre-existing ordinary text source with identical NDJSON bytes can become
+    // an indexed collection. It still has one content identity and one lifecycle.
+    let indexed = conn.execute("INSERT INTO content_collections(content_id,count,authored_bytes,structural_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(content_id) DO NOTHING",
+        params![source.id.as_str(), records.len() as u64,authored_bytes,source.bytes.saturating_add(nested_structural_bytes)])? != 0;
+    if inserted || indexed {
         let mut insert_record = conn.prepare_cached(
             "INSERT INTO content_records(content_id,ordinal,start,end,record_key,record_label) VALUES(?1,?2,?3,?4,?5,?6)",
         )?;
         let mut insert_chunk = conn
             .prepare_cached("INSERT INTO content_chunks(content_id,start,data) VALUES(?1,?2,?3)")?;
-        let mut buffer = String::with_capacity(
-            artisan_api::CONTENT_CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES,
-        );
+        let mut buffer = String::with_capacity(if inserted {
+            artisan_api::CONTENT_CHUNK_BYTES + artisan_api::COLLECTION_RANGE_BYTES
+        } else {
+            0
+        });
         let mut chunk_start = 0u64;
         let mut position = 0u64;
         for (ordinal, record) in records.iter().enumerate() {
             let encoded = encode(record)?;
             let end = position + encoded.len() as u64;
-            let (key, label) = record_key(&encoded)?;
-            insert_record.execute(params![
-                source.id.as_str(),
-                ordinal as u64,
-                position,
-                end,
-                key,
-                label
-            ])?;
+            if indexed {
+                let (key, label) = record_key(&encoded)?;
+                insert_record.execute(params![
+                    source.id.as_str(),
+                    ordinal as u64,
+                    position,
+                    end,
+                    key,
+                    label
+                ])?;
+            }
             position = end + 1;
+            if !inserted {
+                continue;
+            }
             buffer.push_str(&encoded);
             buffer.push('\n');
             while buffer.len() >= artisan_api::CONTENT_CHUNK_BYTES {
@@ -143,30 +121,6 @@ pub(crate) fn store<T: Serialize>(
         }
         if !buffer.is_empty() {
             insert_chunk.execute(params![source.id.as_str(), chunk_start, buffer.as_bytes()])?;
-        }
-    }
-    let inserted_collection = conn.execute("INSERT INTO content_collections(content_id,count,authored_bytes,structural_bytes) VALUES(?1,?2,?3,?4) ON CONFLICT(content_id) DO NOTHING",
-        params![source.id.as_str(), records.len() as u64,authored_bytes,source.bytes.saturating_add(nested_structural_bytes)])?;
-    // A pre-existing ordinary text source with identical NDJSON bytes can become
-    // an indexed collection. It still has one content identity and one lifecycle.
-    if inserted == 0 && inserted_collection != 0 {
-        let mut insert = conn.prepare_cached(
-            "INSERT INTO content_records(content_id,ordinal,start,end,record_key,record_label) VALUES(?1,?2,?3,?4,?5,?6)",
-        )?;
-        let mut position = 0u64;
-        for (ordinal, record) in records.iter().enumerate() {
-            let encoded = encode(record)?;
-            let end = position + encoded.len() as u64;
-            let (key, label) = record_key(&encoded)?;
-            insert.execute(params![
-                source.id.as_str(),
-                ordinal as u64,
-                position,
-                end,
-                key,
-                label
-            ])?;
-            position = end + 1;
         }
     }
     let known: u64 = conn.query_row(
@@ -272,22 +226,25 @@ pub(crate) fn validate_answer(
     question: &artisan_api::Question,
     answer: &Option<artisan_api::QuestionAnswer>,
 ) -> Result<()> {
+    let refused = |message: &str| crate::Refused(message.to_owned());
     question
         .validate_answer_structure(answer)
-        .map_err(anyhow::Error::msg)?;
+        .map_err(refused)?;
     if let Some(artisan_api::QuestionAnswer::Choices { ids }) = answer {
-        let ids = ids.inline().context("submitted choices must be inline")?;
+        let ids = ids
+            .inline()
+            .ok_or_else(|| refused("submitted choices must be inline"))?;
         match &question.options {
-            artisan_api::Collection::Inline(_) => question
-                .validate_answer(answer)
-                .map_err(anyhow::Error::msg)?,
+            artisan_api::Collection::Inline(_) => {
+                question.validate_answer(answer).map_err(refused)?
+            }
             artisan_api::Collection::Stored(reference) => {
                 metrics(conn, reference)?;
                 let mut exists=conn.prepare_cached("SELECT EXISTS(SELECT 1 FROM content_records WHERE content_id=?1 AND record_key=?2)")?;
                 for id in ids {
                     let known: bool = exists
                         .query_row(params![reference.source.id.as_str(), id], |row| row.get(0))?;
-                    ensure!(known, "unknown question choice");
+                    ensure!(known, refused("unknown question choice"));
                 }
             }
         }
@@ -382,11 +339,11 @@ pub(crate) fn derive_answer_text(
         answer_text: Some(text),
         ..
     }) = old
+        && *questions == *old_questions
+        && *answers == *old_answers
     {
-        if *questions == *old_questions && *answers == *old_answers {
-            *display = Some(text.clone());
-            return Ok(());
-        }
+        *display = Some(text.clone());
+        return Ok(());
     }
     ensure!(
         answers.len() == questions.len(),
@@ -685,7 +642,7 @@ pub(crate) fn validate_answers(
 ) -> Result<()> {
     ensure!(
         questions.len() == answers.len() as u64,
-        "answer count does not match questions"
+        crate::Refused("answer count does not match questions".into())
     );
     visit_questions(conn, questions, |index, question| {
         validate_answer(conn, question, &answers[index])
@@ -705,10 +662,10 @@ pub(crate) fn answers_equal(
         artisan_api::Collection::Stored(_) => resolve(conn, saved)?,
     };
     for answer in decoded.iter_mut().flatten() {
-        if let artisan_api::QuestionAnswer::Choices { ids } = answer {
-            if ids.stored().is_some() {
-                *ids = resolve(conn, ids)?.into();
-            }
+        if let artisan_api::QuestionAnswer::Choices { ids } = answer
+            && ids.stored().is_some()
+        {
+            *ids = resolve(conn, ids)?.into();
         }
     }
     Ok(decoded == answers)

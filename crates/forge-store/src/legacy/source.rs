@@ -123,7 +123,7 @@ impl<'a> ViewedImages<'a> {
                    AND json_type(j.value,'$.id') = 'text' AND json_type(j.value,'$.path') = 'text'
                    AND (?2 IS NULL OR (o.committed_at_ms,o.delivery_sequence,o.rowid,CAST(j.key AS INTEGER)) > (?2,?3,?4,?5))
                  ORDER BY o.committed_at_ms,o.delivery_sequence,o.rowid,CAST(j.key AS INTEGER) LIMIT 256")?;
-            let mut rows = query.query_map(
+            let rows = query.query_map(
                 rusqlite::params![
                     self.thread_id.as_str(),
                     self.cursor.map(|v| v.0),
@@ -149,7 +149,7 @@ impl<'a> ViewedImages<'a> {
                 },
             )?;
             let mut bytes = 0;
-            while let Some(row) = rows.next() {
+            for row in rows {
                 let (cursor, image) = row?;
                 bytes += image.file_name.len() + image.caption.as_ref().map_or(0, String::len);
                 self.cursor = Some(cursor);
