@@ -5,12 +5,11 @@
 use std::{ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, HighlightStyle, Hsla,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, SharedString, Styled,
-    StyledText, Window, div, hsla_to_rgba, rgb_to_hsla,
+    AnyElement, App, ElementId, HighlightStyle, Hsla, IntoElement, ParentElement, SharedString,
+    Styled, StyledText, Window, div, hsla_to_rgba, rgb_to_hsla,
 };
 
-use crate::motion::{MotionPolicy, SHIMMER_CYCLE, SHIMMER_DELAY};
+use crate::motion::{AnimatedPaint, MotionPolicy, RepeatingPhase, SHIMMER_CYCLE, SHIMMER_DELAY};
 use crate::text_runs::{TextRunOverride, compile_text_runs};
 use crate::theme::ArtisanTheme;
 
@@ -122,13 +121,8 @@ impl gpui::RenderOnce for ShimmerText {
         }
         let (duration, delay) = self.timing.durations();
         let phase = crate::motion::repeating_phase(self.id, duration, delay, window, cx);
-        let text = GradientText {
-            child: text,
-            phase: phase.unwrap_or(0.0),
-            spread: 50.0,
-            animating: phase.is_some(),
-        };
-        root.child(text).into_any_element()
+        root.child(gradient_text(text, phase, 50.0))
+            .into_any_element()
     }
 }
 
@@ -160,83 +154,26 @@ fn shimmer_color(base: Hsla, strength: f32) -> Hsla {
     rgb_to_hsla(color)
 }
 
-/// Paint wrapper that preserves the child layout.
-struct GradientText {
-    child: AnyElement,
-    phase: f32,
-    spread: f32,
-    animating: bool,
-}
-
-impl IntoElement for GradientText {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for GradientText {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        (): &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        self.child.prepaint(window, cx);
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        (): &mut (),
-        (): &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if self.animating {
-            window.request_animation_frame();
-        }
-        let (phase, spread) = (self.phase, self.spread);
+/// Paints the text once, then recolours that paint under the band on every
+/// frame of a pass without rendering or laying it out again.
+fn gradient_text(text: AnyElement, phase: RepeatingPhase, spread: f32) -> AnimatedPaint {
+    AnimatedPaint::new(text, move |bounds, recording, window, cx| {
+        let sampled = phase.sample(cx);
         let width = f32::from(bounds.size.width);
         if width <= 0.0 || spread <= 0.0 {
-            self.child.paint(window, cx);
-            return;
+            window.paint_recording(recording);
+            return false;
         }
+        let phase = sampled.unwrap_or(0.0);
         window.with_text_color_map(
             Some(Rc::new(move |x, color| {
                 let position = f32::from(x - bounds.left()) / width;
                 shimmer_color(color, gradient_strength(position, phase, spread))
             })),
-            |window| self.child.paint(window, cx),
+            |window| window.paint_recording(recording),
         );
-    }
+        sampled.is_some() && !cx.reduce_motion()
+    })
 }
 
 fn normalize_phase(phase: f32) -> f32 {

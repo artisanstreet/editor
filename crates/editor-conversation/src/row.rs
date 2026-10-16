@@ -102,6 +102,8 @@ pub(crate) struct RowView {
     queue_held: bool,
     prose_fresh: bool,
     reported_height: Rc<Cell<Option<gpui::Pixels>>>,
+    /// What it shows changed since `reported_height` was measured.
+    remeasure: Rc<Cell<bool>>,
     /// The body height last told to the conversation.
     reported_body: Rc<Cell<Option<gpui::Pixels>>>,
     stored: SourceOwners,
@@ -199,6 +201,7 @@ impl RowView {
             queue_held: false,
             prose_fresh,
             reported_height: Rc::default(),
+            remeasure: Rc::default(),
             reported_body: Rc::default(),
             stored: Rc::new(RefCell::new(HashMap::new())),
             collections: crate::collections::CollectionOwners::default(),
@@ -225,14 +228,17 @@ impl RowView {
 
     /// What it shows changed: draw it fresh, and measure it again.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
-        self.reported_height.set(None);
+        // The last height stays, so a new one reaches the conversation.
+        self.remeasure.set(true);
         cx.notify();
     }
 
     /// The height to draw this row from cache at: known, and no motion
     /// running.
     pub(crate) fn cached_height(&self) -> Option<gpui::Pixels> {
-        self.reported_height.get().filter(|_| !self.animating)
+        self.reported_height
+            .get()
+            .filter(|_| !self.animating && !self.remeasure.get())
     }
 
     pub(crate) fn ready_to_read(&self) -> bool {
@@ -1146,6 +1152,7 @@ impl Render for RowView {
         if self.animating {
             window.request_animation_frame();
         }
+        let frontier = self.env.reveal.borrow().frontier_key();
         self.env.reveal.borrow_mut().finish(
             &key,
             !bypass
@@ -1153,6 +1160,14 @@ impl Render for RowView {
                     || self.motion.is_settling()
                     || self.prose_reveal.is_settling()),
         );
+        if self.env.reveal.borrow().frontier_key() != frontier {
+            // The conversation reveals up to the frontier, and this row may
+            // render without it.
+            let owner = self.env.conversation.clone();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |_, cx| cx.notify());
+            });
+        }
         self.animating |= self.queue_held;
         if self.queue_held {
             window.request_animation_frame();
@@ -1207,6 +1222,7 @@ impl Render for RowView {
             None => column,
         };
         let measured = self.reported_height.clone();
+        let remeasure = self.remeasure.clone();
         let reported_body = self.reported_body.clone();
         let clipped = clip.is_some();
         let owner = self.env.conversation.clone();
@@ -1251,6 +1267,7 @@ impl Render for RowView {
             .on_children_prepainted(move |bounds, _, cx| {
                 if let Some(bounds) = bounds.first() {
                     let height = bounds.size.height + end;
+                    remeasure.set(false);
                     if measured
                         .replace(Some(height))
                         .is_some_and(|previous| previous != height)

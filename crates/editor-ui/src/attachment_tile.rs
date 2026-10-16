@@ -4,12 +4,12 @@ use crate::{
     AssetId,
     button::{Button, ButtonVariant},
     media_frame::MediaFrame,
-    motion::{MotionDuration, MotionPolicy, smooth_out},
+    motion::{AnimatedPaint, MotionDuration, MotionPolicy, smooth_out},
     theme::ArtisanTheme,
 };
 use gpui::{
-    AnyElement, App, IntoElement, ObjectFit, ParentElement as _, RenderImage, RenderOnce,
-    SharedString, Styled as _, StyledImage as _, Window, canvas, div, img, px,
+    AnyElement, App, Corners, Filter, IntoElement, ObjectFit, ParentElement as _, RenderImage,
+    RenderOnce, SharedString, Styled as _, StyledImage as _, Window, canvas, div, img, px,
 };
 use std::{
     sync::Arc,
@@ -84,6 +84,9 @@ impl AttachmentTile {
     }
 }
 const SHAKE: Duration = Duration::from_millis(280);
+fn reveal_progress(since: Instant) -> f32 {
+    since.elapsed().as_secs_f32() / MotionDuration::Medium.as_duration().as_secs_f32()
+}
 fn shake_offset(elapsed: Duration) -> f32 {
     const STOPS: [(f32, f32); 5] = [
         (0., 0.),
@@ -107,11 +110,7 @@ impl RenderOnce for AttachmentTile {
         let reduced = MotionPolicy::current(cx) == MotionPolicy::Reduced;
         let reveal = self
             .revealed
-            .filter(|_| !reduced)
-            .map(|since| {
-                since.elapsed().as_secs_f32() / MotionDuration::Medium.as_duration().as_secs_f32()
-            })
-            .filter(|progress| *progress < 1.);
+            .filter(|since| !reduced && reveal_progress(*since) < 1.);
         let shake = self
             .shaking
             .filter(|_| !reduced)
@@ -129,13 +128,24 @@ impl RenderOnce for AttachmentTile {
                 .into_any_element()
         } else if let Some(image) = self.image {
             let picture = img(image).size_full().object_fit(ObjectFit::Cover);
-            if let Some(progress) = reveal {
-                div()
-                    .absolute()
-                    .inset_0()
-                    .blur(px(10. * (1. - smooth_out(progress))))
-                    .child(picture)
-                    .into_any_element()
+            if let Some(since) = reveal {
+                // The unblur is paint-only: it repaints without rendering again.
+                AnimatedPaint::new(
+                    div().absolute().inset_0().child(picture),
+                    move |bounds, recording, window, cx| {
+                        let progress = reveal_progress(since);
+                        if progress >= 1. || cx.reduce_motion() {
+                            window.paint_recording(recording);
+                            return false;
+                        }
+                        let blur = Filter::Blur(px(10. * (1. - smooth_out(progress))));
+                        window.with_filter_layer(bounds, Corners::default(), &[blur], |window| {
+                            window.paint_recording(recording);
+                        });
+                        true
+                    },
+                )
+                .into_any_element()
             } else {
                 picture.into_any_element()
             }
@@ -182,7 +192,7 @@ impl RenderOnce for AttachmentTile {
                 ),
             );
         }
-        if reveal.is_some() || shake.is_some() {
+        if shake.is_some() {
             content = content.child(
                 canvas(
                     |_, _, _| {},

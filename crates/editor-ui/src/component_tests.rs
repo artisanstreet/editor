@@ -704,3 +704,80 @@ fn tree_disclosure_keys_and_activation_keep_row_pitch(cx: &mut TestAppContext) {
     press_key(cx, "enter");
     gallery.read_with(cx, |this, _| assert_eq!(this.opens, 2));
 }
+
+/// Every paint-only loading motion at once: a shimmering status, the
+/// spinner, the wordmark and an image unblurring into view.
+struct LoadingGallery {
+    renders: usize,
+    revealed: std::time::Instant,
+}
+impl Render for LoadingGallery {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
+        let theme = ArtisanTheme::resolved();
+        let image = std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::from_pixel(120, 80, image::Rgba([255, 0, 0, 255])),
+        )]));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                crate::shimmer_text::ShimmerText::new("loading-status", "Working", theme)
+                    .timing(crate::shimmer_text::ShimmerTiming::Progress),
+            )
+            .child(crate::fade_arc::FadeArc::new("loading-arc", theme))
+            .child(crate::wordmark_loader::WordmarkLoader::new(
+                "loading-mark",
+                theme,
+            ))
+            .child(
+                crate::attachment_tile::AttachmentTile::new("loading-image", theme, "image")
+                    .preview(Some(image), Some(self.revealed)),
+            )
+    }
+}
+/// Delivers one display frame and reports whether the window drew it.
+fn deliver_frame(cx: &mut gpui::VisualTestContext) -> bool {
+    // Frames run on the wall clock and the display's rate.
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    let delivered = std::rc::Rc::new(std::cell::Cell::new(false));
+    let window = cx.update(|window, _| {
+        let delivered = delivered.clone();
+        window.on_next_frame(move |_, _| delivered.set(true));
+        window.window_handle()
+    });
+    cx.simulate_frame(window);
+    cx.run_until_parked();
+    delivered.get()
+}
+#[gpui::test]
+fn loading_motion_keeps_moving_without_rendering_its_view_again(cx: &mut TestAppContext) {
+    let (gallery, cx) = cx.add_window_view(|_, _| LoadingGallery {
+        renders: 0,
+        revealed: std::time::Instant::now(),
+    });
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let renders = gallery.read_with(cx, |gallery, _| gallery.renders);
+    for _ in 0..3 {
+        assert!(deliver_frame(cx), "the display delivers the frame");
+        assert!(
+            cx.update(|window, _| window.awaits_next_frame()),
+            "the motion keeps asking for frames"
+        );
+    }
+    assert_eq!(
+        gallery.read_with(cx, |gallery, _| gallery.renders),
+        renders,
+        "paint-only motion repaints without rendering its view again"
+    );
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.run_until_parked();
+    deliver_frame(cx);
+    assert!(
+        !cx.update(|window, _| window.awaits_next_frame()),
+        "reduced motion holds every loading mark still"
+    );
+}
